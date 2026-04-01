@@ -1,0 +1,11 @@
+[Unit]
+Description=Claude Usage Tracker Daemon
+
+[Service]
+Type=simple
+ExecStart=DAEMON_PATH
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
