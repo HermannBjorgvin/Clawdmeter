@@ -1,20 +1,12 @@
 /*******************************************************************************
  * Size: 28 px
  * Bpp: 4
- * Opts: --font /home/hermann/Documents/Code/Personal/claude-usage-monitor-sc01-plus/assets/StyreneB-Regular.otf -r 0x20-0x7E --size 28 --format lvgl --bpp 4 --no-compress -o /home/hermann/Documents/Code/Personal/claude-usage-monitor-sc01-plus/firmware/src/font_styrene_28.c --lv-include lvgl.h
+ * Opts: --font /home/hermann/Documents/Code/Personal/claude-usage-monitor-sc01-plus/.claude/worktrees/waveshare-esp32-s3-touch-amoled-2.16/assets/StyreneB-Regular.otf -r 0x20-0x7E --size 28 --format lvgl --bpp 4 --no-compress -o /home/hermann/Documents/Code/Personal/claude-usage-monitor-sc01-plus/.claude/worktrees/waveshare-esp32-s3-touch-amoled-2.16/firmware/src/font_styrene_28.c --lv-include lvgl.h
  ******************************************************************************/
 
-#ifdef LV_LVGL_H_INCLUDE_SIMPLE
 #include "lvgl.h"
-#else
-#include "lvgl.h"
-#endif
 
-#ifndef FONT_STYRENE_28
-#define FONT_STYRENE_28 1
-#endif
 
-#if FONT_STYRENE_28
 
 /*-----------------
  *    BITMAPS
@@ -2795,9 +2787,6 @@ static const lv_font_fmt_txt_kern_pair_t kern_pairs =
  *  ALL CUSTOM DATA
  *--------------------*/
 
-#if LVGL_VERSION_MAJOR == 8
-/*Store all the custom data of the font*/
-#endif
 
 static const lv_font_fmt_txt_dsc_t font_dsc = {
     .glyph_bitmap = glyph_bitmap,
@@ -2808,7 +2797,7 @@ static const lv_font_fmt_txt_dsc_t font_dsc = {
     .cmap_num = 1,
     .bpp = 4,
     .kern_classes = 0,
-    .bitmap_format = 0
+    .bitmap_format = 0,
 };
 
 
@@ -2819,22 +2808,21 @@ static const lv_font_fmt_txt_dsc_t font_dsc = {
 
 /*Initialize a public general font descriptor*/
 const lv_font_t font_styrene_28 = {
-    .get_glyph_dsc = lv_font_get_glyph_dsc_fmt_txt,
-    .get_glyph_bitmap = lv_font_get_bitmap_fmt_txt,
-    .release_glyph = NULL,
-    .line_height = 30,
-    .base_line = 6,
+    .get_glyph_dsc = lv_font_get_glyph_dsc_fmt_txt,    /*Function pointer to get glyph's data*/
+    .get_glyph_bitmap = lv_font_get_bitmap_fmt_txt,    /*Function pointer to get glyph's bitmap*/
+    .line_height = 30,          /*The maximum line height required by the font*/
+    .base_line = 6,             /*Baseline measured from the bottom of the line*/
     .subpx = LV_FONT_SUBPX_NONE,
+    .release_glyph = NULL,
     .kerning = 0,
     .static_bitmap = 0,
     .underline_position = -1,
     .underline_thickness = 2,
-    .dsc = &font_dsc,
+    .dsc = &font_dsc,          /*The custom font data. Will be accessed by `get_glyph_bitmap/dsc` */
     .fallback = NULL,
     .user_data = NULL,
 };
 
 
 
-#endif /*#if FONT_STYRENE_28*/
 

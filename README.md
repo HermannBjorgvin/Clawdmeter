@@ -1,21 +1,28 @@
-# Claude Usage Tracker - Panlee SC01 Plus
+# Claude Usage Tracker - Waveshare ESP32-S3-Touch-AMOLED-2.16
 
-Bluetooth-connected Claude Code usage monitor and touch controller on a Panlee SC01 Plus (ESP32-S3) 3.5" touchscreen.
+Bluetooth-connected Claude Code usage monitor and touch controller on a
+[Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16)
+2.16" square AMOLED touchscreen with battery, IMU-driven auto-rotation, and a
+splash screen of pixel-art creatures.
 
 ![Demo](assets/demo.gif)
 
 ## Features
 
+- **Splash screen** — 13 looping 20×20 pixel-art creature animations scaled 24× to fill the display. Default boot screen.
 - **Usage dashboard** — Live 5-hour session and 7-day weekly utilization bars with color-coded thresholds
 - **Touch controller** — Gesture-based Claude Code navigation (swipe, tap, hold) sent as BLE HID keyboard input
 - **Bluetooth screen** — Connection status, device name, MAC address, bond management
-- **Wireless** — All communication over Bluetooth Low Energy (USB only for charging and flashing)
-- **Auto-reconnect** — Daemon discovers and reconnects automatically with exponential backoff
+- **Auto-rotation** — QMI8658 accelerometer drives 90° rotation snaps with a quick AMOLED brightness flash transition
+- **Battery indicator** — Lucide battery icons in the upper-right corner, AXP2101-driven
+- **USB-aware screen switching** — Plug in USB → usage screen, unplug → controller screen (suppressed while on splash)
+- **Wireless** — All data communication over Bluetooth Low Energy (USB only for flashing and charging)
 
 ## Hardware
 
-- [Panlee SC01 Plus](http://en.smartpanle.com/product-item-15.html) (WT32-SC01 Plus) — ESP32-S3, 3.5" 480x320 IPS, capacitive touch
+- [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16) — ESP32-S3R8, 2.16" 480×480 AMOLED (CO5300 QSPI), CST9220 cap touch, AXP2101 PMU + Li-Po battery, QMI8658 IMU
 - USB-C cable for flashing firmware and charging
+- 3.7V Li-Po battery (MX1.25 2-pin connector, optional)
 
 ## Prerequisites
 
@@ -70,12 +77,27 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 
 ## Screens
 
-Tap the Claude logo (top-left) to cycle between screens:
+Press the **middle physical button (PWR)** to cycle through screens. The order is:
+Splash → Usage → Controller → Bluetooth → Splash. Tapping the Claude logo also cycles screens (legacy gesture, still works on the non-splash screens).
 
-|              Usage              |                Controller                 |                Bluetooth                |
-| :-----------------------------: | :---------------------------------------: | :-------------------------------------: |
-| ![Usage](screenshots/usage.png) | ![Controller](screenshots/controller.png) | ![Bluetooth](screenshots/bluetooth.png) |
-| Session and weekly utilization  |      Touch zones and swipe gestures       |       Connection status and reset       |
+|             Splash              |              Usage              |                Controller                 |                Bluetooth                |
+| :-----------------------------: | :-----------------------------: | :---------------------------------------: | :-------------------------------------: |
+| Pixel-art creature animations   | ![Usage](screenshots/usage.png) | ![Controller](screenshots/controller.png) | ![Bluetooth](screenshots/bluetooth.png) |
+| Looping 20×20 creature loop     | Session and weekly utilization  |      Touch zones and swipe gestures       |       Connection status and reset       |
+
+The splash screen is also shown automatically on boot. It overrides the USB-state-based default screen until you press the middle button to navigate elsewhere.
+
+## Physical buttons
+
+The board has three physical buttons in a row. Functions:
+
+| Button                   | GPIO         | Function                              |
+| ------------------------ | ------------ | ------------------------------------- |
+| **Left** (back)          | GPIO 0       | Previous splash animation             |
+| **Middle** (PWR)         | AXP2101 PKEY | Cycle screens                         |
+| **Right** (forward)      | GPIO 18      | Next splash animation                 |
+
+The left/right animation buttons only have effect on the splash screen. The middle button works from any screen.
 
 ## Gesture controls
 
@@ -119,30 +141,33 @@ Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = 
 
 ## Recompiling fonts
 
-The `firmware/src/font_*.c` files are pre-compiled LVGL bitmap fonts. If you need to regenerate them (e.g. to change sizes or add characters):
+The `firmware/src/font_*.c` files are pre-compiled LVGL bitmap fonts. Sizes are
+scaled for the 314 PPI 2.16" display (~1.9× the original 165 PPI 3.5" panel).
 
 ```bash
 npm install -g lv_font_conv
 ```
 
-Generate with `--no-compress` (required for LVGL 9):
+Generate each one (one at a time — `lv_font_conv` doesn't like loop-driven invocations) with `--no-compress` (required for LVGL 9):
 
 ```bash
-# Tiempos Text (title)
+# Tiempos Text (titles, 56px)
 lv_font_conv --font assets/TiemposText-400-Regular.otf -r 0x20-0x7E \
-  --size 34 --format lvgl --bpp 4 --no-compress \
-  -o firmware/src/font_tiempos_34.c --lv-include "lvgl.h"
+  --size 56 --format lvgl --bpp 4 --no-compress \
+  -o firmware/src/font_tiempos_56.c --lv-include "lvgl.h"
 
-# Styrene B (UI text)
-lv_font_conv --font assets/StyreneB-Regular.otf -r 0x20-0x7E \
-  --size 28 --format lvgl --bpp 4 --no-compress \
-  -o firmware/src/font_styrene_28.c --lv-include "lvgl.h"
+# Styrene B (large numbers 48, panel labels 28, small text 24, minimal 20)
+for size in 48 28 24 20; do
+  lv_font_conv --font assets/StyreneB-Regular.otf -r 0x20-0x7E \
+    --size $size --format lvgl --bpp 4 --no-compress \
+    -o firmware/src/font_styrene_${size}.c --lv-include "lvgl.h"
+done
 
-# DejaVu Sans Mono (animation, with spinner Unicode chars)
+# DejaVu Sans Mono (32px, with spinner Unicode chars)
 lv_font_conv --font assets/DejaVuSansMono.ttf \
   -r 0x20-0x7E,0xB7,0x2026,0x2722,0x2733,0x2736,0x273B,0x273D \
-  --size 18 --format lvgl --bpp 4 --no-compress \
-  -o firmware/src/font_mono_18.c --lv-include "lvgl.h"
+  --size 32 --format lvgl --bpp 4 --no-compress \
+  -o firmware/src/font_mono_32.c --lv-include "lvgl.h"
 ```
 
 **Important:** `lv_font_conv` v1.5.3 outputs LVGL 8 format. Each generated file must be patched for LVGL 9 compatibility:
@@ -160,11 +185,11 @@ The controller screen uses [Lucide](https://lucide.dev) icons (the same icon set
 
 1. Get Lucide SVGs from [github.com/lucide-icons/lucide](https://github.com/lucide-icons/lucide) (`icons/` directory)
 
-2. Convert SVG to PNG at desired size:
+2. Convert SVG to PNG at desired size (icons are 48×48 to match the high-DPI display, hand icon is 40×40, logo is 80×80):
 
 ```bash
-inkscape icons/delete.svg --export-width=32 --export-height=32 \
-  --export-filename=assets/icon_delete.png --export-background-opacity=0
+inkscape icons/delete.svg --export-width=48 --export-height=48 \
+  --export-filename=assets/icon_delete_48.png --export-background-opacity=0
 ```
 
 3. Convert PNG to RGB565 C array:
@@ -191,6 +216,25 @@ for y in range(img.height):
 ```
 
 Current icons: `delete`, `arrow-left`, `arrow-right`, `circle-arrow-out-up-left` (escape), `hand` (gestures), `bluetooth`.
+
+## Splash animations
+
+The splash screen plays 20×20 pixel-art creature animations sourced from
+[claudepix.vercel.app](https://claudepix.vercel.app), a public library of
+creature animations. Frame data and palettes are extracted by
+`tools/scrape_claudepix.js` (which evaluates the source's JavaScript in a Node
+VM context to resolve frames) and converted to RGB565 C arrays by
+`tools/convert_to_c.js`. The output lives in `firmware/src/splash_animations.h`.
+
+To re-pull (e.g. when the source library updates):
+
+```bash
+node tools/scrape_claudepix.js
+node tools/convert_to_c.js
+pio run -d firmware -t upload
+```
+
+See `tools/README.md` for details.
 
 ## Licensing gray area warning
 

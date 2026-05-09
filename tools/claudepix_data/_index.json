@@ -1,0 +1,93 @@
+[
+  {
+    "filename": "idle_breathe.html",
+    "name": "idle breathe",
+    "category": "Idle",
+    "frame_count": 16,
+    "palette_size": 3
+  },
+  {
+    "filename": "idle_blink.html",
+    "name": "idle blink",
+    "category": "Idle",
+    "frame_count": 16,
+    "palette_size": 3
+  },
+  {
+    "filename": "idle_look_around.html",
+    "name": "idle look around",
+    "category": "Idle",
+    "frame_count": 17,
+    "palette_size": 3
+  },
+  {
+    "filename": "expression_wink.html",
+    "name": "expression wink",
+    "category": "Expressions",
+    "frame_count": 12,
+    "palette_size": 3
+  },
+  {
+    "filename": "expression_surprise.html",
+    "name": "expression surprise",
+    "category": "Expressions",
+    "frame_count": 12,
+    "palette_size": 3
+  },
+  {
+    "filename": "expression_sleep.html",
+    "name": "expression sleep",
+    "category": "Expressions",
+    "frame_count": 24,
+    "palette_size": 3
+  },
+  {
+    "filename": "dance_bounce.html",
+    "name": "dance bounce",
+    "category": "Dance",
+    "frame_count": 16,
+    "palette_size": 3
+  },
+  {
+    "filename": "dance_sway.html",
+    "name": "dance sway",
+    "category": "Dance",
+    "frame_count": 12,
+    "palette_size": 3
+  },
+  {
+    "filename": "work_coding.html",
+    "name": "work coding",
+    "category": "Work",
+    "frame_count": 23,
+    "palette_size": 10
+  },
+  {
+    "filename": "work_think.html",
+    "name": "work think",
+    "category": "Work",
+    "frame_count": 24,
+    "palette_size": 3
+  },
+  {
+    "filename": "dance_bounce_dj.html",
+    "name": "dance bounce dj",
+    "category": "Dance",
+    "frame_count": 16,
+    "palette_size": 10
+  },
+  {
+    "filename": "dance_sway_dj.html",
+    "name": "dance sway dj",
+    "category": "Dance",
+    "frame_count": 12,
+    "palette_size": 10
+  },
+  {
+    "filename": "dance_djmix.html",
+    "name": "dance djmix",
+    "category": "Dance",
+    "frame_count": 16,
+    "palette_size": 10
+  }
+]

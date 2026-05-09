@@ -7,3 +7,7 @@ firmware/.vscode/
 
 # Claude Code
 .claude/
+
+# Node tooling deps (npm install --no-save)
+tools/node_modules/
+tools/package-lock.json

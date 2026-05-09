@@ -8,25 +8,38 @@
 #define SWIPE_MIN_PX       50
 #define SWIPE_MAX_CROSS_PX 30
 #define HOLD_TIME_MS       500
-#define LOGO_HOLD_TIME_MS  800  // longer hold to toggle screens
+#define LOGO_HOLD_TIME_MS  800
 #define TAP_MAX_MOVE_PX    15
-#define LOGO_X_MAX         60
-#define LOGO_Y_MAX         60
-
-extern LGFX lcd;
+#define LOGO_X_MAX         100
+#define LOGO_Y_MAX         100
+#define MARGIN             20
 
 enum touch_state_t {
     TS_IDLE,
     TS_DOWN,
     TS_HOLDING,
     TS_SWIPING,
-    TS_LOGO_HOLD,  // holding the logo to toggle screens
+    TS_LOGO_HOLD,
 };
 
 static touch_state_t state = TS_IDLE;
 static uint16_t start_x, start_y;
 static uint16_t last_x, last_y;
 static uint32_t down_time;
+
+// Shared touch state (read once per loop in main.cpp)
+extern volatile bool     touch_pressed;
+extern volatile uint16_t touch_x;
+extern volatile uint16_t touch_y;
+
+static bool get_touch(uint16_t* x, uint16_t* y) {
+    if (touch_pressed) {
+        *x = touch_x;
+        *y = touch_y;
+        return true;
+    }
+    return false;
+}
 
 static gesture_t classify_swipe(int dx, int dy) {
     int ax = abs(dx);
@@ -42,30 +55,37 @@ static bool in_logo(uint16_t x, uint16_t y) {
     return x < LOGO_X_MAX && y < LOGO_Y_MAX;
 }
 
-// Detect which controller zone was tapped
+// Controller zone coordinates for 480x480 layout (scaled, MARGIN=20, CONTENT_Y=100)
+// Side zones: 110x138, starting at y=100
+#define ZONE_LEFT_X_MAX    130
+#define ZONE_RIGHT_X_MIN   350
+#define ZONE_TOP_Y_MIN     100
+#define ZONE_TOP_Y_MAX     238
+#define ZONE_BOT_Y_MIN     248
+#define ZONE_BOT_Y_MAX     386
+
 static gesture_t classify_zone_tap(uint16_t x, uint16_t y) {
-    // Logo tap = ESC
-    // Left column: ESC top (y 56-156), < bottom (y 166-266)
-    if (x < 108) {
-        if (y >= 56 && y < 156) return GESTURE_TAP_ESCAPE;
-        if (y >= 166 && y < 266) return GESTURE_TAP_ARROW_LEFT;
+    if (x < ZONE_LEFT_X_MAX) {
+        if (y >= ZONE_TOP_Y_MIN && y < ZONE_TOP_Y_MAX) return GESTURE_TAP_ESCAPE;
+        if (y >= ZONE_BOT_Y_MIN && y < ZONE_BOT_Y_MAX) return GESTURE_TAP_ARROW_LEFT;
     }
-    // Right column: DEL top, > bottom
-    if (x > 372) {
-        if (y >= 56 && y < 156) return GESTURE_TAP_BACKSPACE;
-        if (y >= 166 && y < 266) return GESTURE_TAP_ARROW_RIGHT;
+    if (x > ZONE_RIGHT_X_MIN) {
+        if (y >= ZONE_TOP_Y_MIN && y < ZONE_TOP_Y_MAX) return GESTURE_TAP_BACKSPACE;
+        if (y >= ZONE_BOT_Y_MIN && y < ZONE_BOT_Y_MAX) return GESTURE_TAP_ARROW_RIGHT;
     }
     return GESTURE_NONE;
 }
 
-// Check if point is in a tap-only zone (should not trigger hold-for-space)
 static bool is_in_tap_zone(uint16_t x, uint16_t y) {
     return classify_zone_tap(x, y) != GESTURE_NONE;
 }
 
-// Check if tap is in the "Clear Bonds" zone on the Bluetooth screen
+// BLE clear zone on Bluetooth screen (scaled layout)
+#define BLE_CLEAR_Y_MIN  276
+#define BLE_CLEAR_Y_MAX  346
+
 static bool in_ble_clear_zone(uint16_t x, uint16_t y) {
-    return x >= 8 && x <= 472 && y >= 190 && y < 250;
+    return x >= MARGIN && x <= (480 - MARGIN) && y >= BLE_CLEAR_Y_MIN && y < BLE_CLEAR_Y_MAX;
 }
 
 void touch_init(void) {
@@ -74,7 +94,7 @@ void touch_init(void) {
 
 void touch_tick(void) {
     uint16_t x, y;
-    bool touching = lcd.getTouch(&x, &y);
+    bool touching = get_touch(&x, &y);
     uint32_t now = millis();
 
     switch (state) {
@@ -95,16 +115,13 @@ void touch_tick(void) {
                           abs((int)last_y - (int)start_y) < TAP_MAX_MOVE_PX;
 
             if (is_tap && in_logo(start_x, start_y)) {
-                // Logo tap cycles screens: Usage -> Controller -> Bluetooth -> ...
                 ui_cycle_screen();
             } else if (is_tap && ui_get_current_screen() == SCREEN_CONTROLLER) {
-                // Zone taps only on controller screen
                 gesture_t zone = classify_zone_tap(start_x, start_y);
                 if (zone != GESTURE_NONE) {
                     hid_on_gesture(zone);
                 }
             } else if (is_tap && ui_get_current_screen() == SCREEN_BLUETOOTH) {
-                // "Clear Bonds" tap zone on Bluetooth screen
                 if (in_ble_clear_zone(start_x, start_y)) {
                     ble_clear_bonds();
                 }
@@ -116,12 +133,10 @@ void touch_tick(void) {
             int dx = (int)x - (int)start_x;
             int dy = (int)y - (int)start_y;
 
-            // Logo hold = Ctrl+Space (controller screen only)
             if (in_logo(start_x, start_y) && ui_get_current_screen() == SCREEN_CONTROLLER && (now - down_time) >= LOGO_HOLD_TIME_MS) {
                 hid_on_gesture(GESTURE_TAP_CTRL_SPACE);
                 state = TS_LOGO_HOLD;
             }
-            // Everything below only on controller screen
             else if (ui_get_current_screen() == SCREEN_CONTROLLER) {
                 if (abs(dx) >= SWIPE_MIN_PX || abs(dy) >= SWIPE_MIN_PX) {
                     state = TS_SWIPING;
@@ -156,7 +171,6 @@ void touch_tick(void) {
         break;
 
     case TS_LOGO_HOLD:
-        // Wait for finger to lift after screen toggle
         if (!touching) {
             state = TS_IDLE;
         }
