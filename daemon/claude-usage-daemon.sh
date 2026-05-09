@@ -8,9 +8,13 @@ DEVICE_NAME="Claude Controller"
 DEVICE_MAC="${DEVICE_MAC:-}"  # auto-discovered if empty
 SERVICE_UUID="4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID="4c41555a-4465-7669-6365-000000000002"
-POLL_INTERVAL=30
+REQ_CHAR_UUID="4c41555a-4465-7669-6365-000000000004"
+POLL_INTERVAL=60
+TICK=5
 SAVED_MAC_FILE="$HOME/.config/claude-usage-monitor/ble-address"
+REFRESH_FLAG="/tmp/claude-usage-refresh-$$"
 DBUS_DEST="org.bluez"
+NOTIFY_PID=""
 
 log() {
     echo "[$(date '+%H:%M:%S')] $1"
@@ -39,8 +43,13 @@ is_connected() {
 load_mac() {
     if [ -n "$DEVICE_MAC" ]; then return 0; fi
     if [ -f "$SAVED_MAC_FILE" ]; then
-        DEVICE_MAC=$(cat "$SAVED_MAC_FILE")
-        [ -n "$DEVICE_MAC" ] && return 0
+        DEVICE_MAC=$(head -1 "$SAVED_MAC_FILE" | tr -d '\r\n ')
+        if [[ "$DEVICE_MAC" =~ ^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$ ]]; then
+            return 0
+        fi
+        log "Cached MAC is malformed, discarding"
+        rm -f "$SAVED_MAC_FILE"
+        DEVICE_MAC=""
     fi
     return 1
 }
@@ -61,9 +70,12 @@ scan_for_device() {
     kill "$scan_pid" 2>/dev/null
     wait "$scan_pid" 2>/dev/null
 
-    # Find the device
+    # Pick the first matching device. Multiple matches happen when bluez
+    # remembers old hardware (e.g. after swapping ESP boards). Stale entries
+    # are removed on connect failure (see connect_device), so a few retry
+    # cycles will converge on the live device.
     local found
-    found=$(bluetoothctl devices 2>/dev/null | grep "$DEVICE_NAME" | awk '{print $2}')
+    found=$(bluetoothctl devices 2>/dev/null | grep "$DEVICE_NAME" | head -1 | awk '{print $2}')
     if [ -n "$found" ]; then
         DEVICE_MAC="$found"
         save_mac
@@ -89,23 +101,76 @@ connect_device() {
         return 0
     fi
     log "Connection failed"
+    if [ -f "$SAVED_MAC_FILE" ] && [ "$(cat "$SAVED_MAC_FILE")" = "$DEVICE_MAC" ]; then
+        log "Invalidating cached MAC, will rescan by name"
+        rm -f "$SAVED_MAC_FILE"
+    fi
+    # Remove from bluez so the next scan won't re-pick this dead MAC.
+    # If the device comes back online it'll re-advertise and be re-discovered.
+    bluetoothctl remove "$DEVICE_MAC" &>/dev/null
+    DEVICE_MAC=""
     return 1
 }
 
-# Find the GATT characteristic handle via D-Bus
-find_rx_char_path() {
+# Find a GATT characteristic path by UUID via D-Bus
+find_char_path_by_uuid() {
+    local target_uuid="$1"
     local dev_path
     dev_path=$(mac_to_dbus_path "$DEVICE_MAC")
 
-    # Search for our RX characteristic UUID in the device's GATT tree
     busctl tree "$DBUS_DEST" 2>/dev/null | grep -o "${dev_path}/service[0-9a-f]*/char[0-9a-f]*" | while read -r char_path; do
         local uuid
         uuid=$(busctl get-property "$DBUS_DEST" "$char_path" org.bluez.GattCharacteristic1 UUID 2>/dev/null | tr -d '"' | awk '{print $2}')
-        if [ "$uuid" = "$RX_CHAR_UUID" ]; then
+        if [ "$uuid" = "$target_uuid" ]; then
             echo "$char_path"
             return 0
         fi
     done
+}
+
+# Subscribe to refresh-request notifications. The ESP fires this when it
+# has no usage data yet (e.g. after a fresh boot). Daemon awk drops a flag
+# file that the inner loop picks up on its next 5s tick.
+#
+# Implementation notes:
+# - dbus-monitor must be running BEFORE we call StartNotify, because busctl
+#   exits immediately, the subscription tears down within milliseconds, and
+#   the ESP's notify fires inside that brief window.
+# - stdbuf -oL forces line-buffered stdout on dbus-monitor; without it,
+#   glibc switches to block buffering when stdout is a pipe and signals
+#   never reach awk until ~4KB accumulates.
+# - The pipeline runs in a setsid'd child so we can kill the whole process
+#   group (dbus-monitor + awk) atomically. Killing only awk leaves
+#   dbus-monitor orphaned, and `wait $!` in bash waits on the whole job
+#   until every pipeline member exits, hanging the daemon.
+start_notify_subscriber() {
+    local req_path
+    req_path=$(find_char_path_by_uuid "$REQ_CHAR_UUID")
+    if [ -z "$req_path" ]; then
+        log "Refresh char not found, skipping notify subscriber"
+        return 1
+    fi
+
+    setsid bash -c "stdbuf -oL dbus-monitor --system \"type='signal',interface='org.freedesktop.DBus.Properties',path='$req_path',member='PropertiesChanged'\" 2>/dev/null | awk -v flag='$REFRESH_FLAG' '/Value/ { system(\"touch \" flag); fflush() }'" &
+    NOTIFY_PID=$!
+
+    # Give dbus-monitor a moment to register its match rule, then trigger
+    # the GATT subscription that causes the ESP to fire its notify.
+    sleep 0.3
+    busctl call "$DBUS_DEST" "$req_path" org.bluez.GattCharacteristic1 StartNotify >/dev/null 2>&1
+
+    log "Refresh subscriber started (pgid=$NOTIFY_PID)"
+}
+
+stop_notify_subscriber() {
+    if [ -n "$NOTIFY_PID" ]; then
+        # Kill the whole process group (setsid made NOTIFY_PID the leader).
+        # Don't wait — we don't care about exit status and waiting can hang
+        # if any group member is slow to exit.
+        kill -TERM -"$NOTIFY_PID" 2>/dev/null
+        NOTIFY_PID=""
+    fi
+    rm -f "$REFRESH_FLAG"
 }
 
 # Write data to the RX characteristic via D-Bus
@@ -172,6 +237,7 @@ poll() {
 }
 
 cleanup() {
+    stop_notify_subscriber
     log "Daemon stopped"
     exit 0
 }
@@ -205,7 +271,7 @@ while true; do
     fi
 
     # Find the GATT characteristic
-    RX_CHAR_PATH=$(find_rx_char_path)
+    RX_CHAR_PATH=$(find_char_path_by_uuid "$RX_CHAR_UUID")
     if [ -z "$RX_CHAR_PATH" ]; then
         log "Error: RX characteristic not found, retrying..."
         sleep 5
@@ -215,12 +281,24 @@ while true; do
 
     BACKOFF=1  # reset backoff on successful connection
 
-    # Poll loop
+    start_notify_subscriber
+
+    # Poll loop: tick every $TICK seconds. Poll Anthropic when the
+    # interval has elapsed OR when the ESP requested a refresh.
+    LAST_POLL=0
     while is_connected; do
-        poll || log "Poll failed, will retry"
-        sleep "$POLL_INTERVAL"
+        NOW=$(date +%s)
+        if [ -f "$REFRESH_FLAG" ] || (( NOW - LAST_POLL >= POLL_INTERVAL )); then
+            if [ -f "$REFRESH_FLAG" ]; then
+                log "Refresh requested by device"
+                rm -f "$REFRESH_FLAG"
+            fi
+            poll && LAST_POLL=$NOW
+        fi
+        sleep "$TICK"
     done
 
+    stop_notify_subscriber
     log "Device disconnected, reconnecting..."
     sleep 2
 done

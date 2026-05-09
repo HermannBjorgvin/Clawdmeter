@@ -8,7 +8,8 @@
 // Custom GATT UUIDs for data channel
 #define SERVICE_UUID        "4c41555a-4465-7669-6365-000000000001"
 #define RX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000002"  // host writes here
-#define TX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000003"  // device notifies here
+#define TX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000003"  // device ack/nack notifies
+#define REQ_CHAR_UUID       "4c41555a-4465-7669-6365-000000000004"  // device-initiated refresh request
 
 #define BLE_BUF_SIZE 512
 
@@ -45,11 +46,13 @@ static NimBLEHIDDevice* hid_dev = nullptr;
 static NimBLECharacteristic* input_kbd = nullptr;
 static NimBLECharacteristic* tx_char = nullptr;
 static NimBLECharacteristic* rx_char = nullptr;
+static NimBLECharacteristic* req_char = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
 static char rx_buf[BLE_BUF_SIZE];
 static volatile bool data_ready = false;
+static volatile bool has_received_data = false;
 static char mac_str[18];
 
 static void start_advertising() {
@@ -86,6 +89,19 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
         memcpy(rx_buf, val.c_str(), len);
         rx_buf[len] = '\0';
         data_ready = true;
+        has_received_data = true;
+    }
+};
+
+// When the daemon enables notifications on the refresh char, ask for data
+// if we have none yet. Firing on subscribe (not on connect) ensures the
+// notification isn't dropped before the daemon's CCCD write completes.
+class ReqCallbacks : public NimBLECharacteristicCallbacks {
+    void onSubscribe(NimBLECharacteristic* chr, NimBLEConnInfo& info, uint16_t subValue) override {
+        Serial.printf("BLE: req_char onSubscribe subValue=%u has_data=%d\n", subValue, has_received_data ? 1 : 0);
+        if (subValue != 0 && !has_received_data) {
+            ble_request_refresh();
+        }
     }
 };
 
@@ -127,6 +143,13 @@ void ble_init(void) {
         TX_CHAR_UUID,
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
     );
+
+    req_char = svc->createCharacteristic(
+        REQ_CHAR_UUID,
+        NIMBLE_PROPERTY::NOTIFY
+    );
+    static ReqCallbacks reqCb;
+    req_char->setCallbacks(&reqCb);
 
     svc->start();
     server->start();
@@ -183,6 +206,15 @@ void ble_send_nack(void) {
     if (state == BLE_STATE_CONNECTED && tx_char) {
         tx_char->setValue("{\"err\":true}");
         tx_char->notify();
+    }
+}
+
+void ble_request_refresh(void) {
+    if (state == BLE_STATE_CONNECTED && req_char) {
+        uint8_t v = 0x01;
+        req_char->setValue(&v, 1);
+        req_char->notify();
+        Serial.println("BLE: refresh requested");
     }
 }
 
