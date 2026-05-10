@@ -1,5 +1,5 @@
 #!/bin/bash
-# Take a screenshot from the SC01 Plus display via LVGL snapshot.
+# Take a screenshot from the Waveshare AMOLED display via LVGL snapshot.
 # Usage: ./screenshot.sh [output.png] [port]
 
 OUTPUT="${1:-screenshot.png}"
@@ -55,8 +55,9 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-ffmpeg -y -f rawvideo -pixel_format rgb565le -video_size 480x320 \
+ffmpeg -y -f rawvideo -pixel_format rgb565le -video_size 480x480 \
     -i "$TMPRAW" -update 1 -frames:v 1 "$OUTPUT" 2>/dev/null || true
+
 
 if [ -f "$OUTPUT" ]; then
     echo "Saved: $OUTPUT"

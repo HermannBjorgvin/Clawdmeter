@@ -71,9 +71,9 @@ static screen_t current_screen = SCREEN_USAGE;
 // Animation state
 static uint32_t anim_last_ms = 0;
 static uint8_t anim_spinner_idx = 0;
+static uint8_t anim_phase = 0;
 static uint8_t anim_msg_idx = 0;
 static uint32_t anim_msg_start = 0;
-#define ANIM_SPIN_MS    120
 #define ANIM_MSG_MS     4000
 
 static const char* const spinner_frames[] = {
@@ -81,6 +81,14 @@ static const char* const spinner_frames[] = {
     "\xE2\x9C\xB6", "\xE2\x9C\xB3", "\xE2\x9C\xA2",
 };
 #define SPINNER_COUNT 6
+#define SPINNER_PHASES (2 * (SPINNER_COUNT - 1))  // 10: ping-pong 0..5..0
+
+// Per-frame hold time. Modeled on Claude Code's spinner (Cavalry triangle
+// oscillator, range 0..5, period 5s) — turn-around frames (0 and 5) appear
+// once per cycle, middle frames twice, so 0/5 read as held longer.
+static const uint16_t spinner_ms[SPINNER_COUNT] = {
+    260, 130, 130, 130, 130, 260,
+};
 
 static const char* const anim_messages[] = {
     "Accomplishing", "Elucidating", "Perusing",
@@ -237,6 +245,21 @@ static lv_obj_t* make_hint(lv_obj_t* parent, int x, int y, const char* text) {
     return lbl;
 }
 
+static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
+    lv_obj_t* lbl = lv_label_create(parent);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_font(lbl, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
+    lv_obj_set_style_bg_color(lbl, COL_BAR_BG, 0);
+    lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(lbl, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_left(lbl, 18, 0);
+    lv_obj_set_style_pad_right(lbl, 18, 0);
+    lv_obj_set_style_pad_top(lbl, 6, 0);
+    lv_obj_set_style_pad_bottom(lbl, 6, 0);
+    return lbl;
+}
+
 // ---- Battery icon initialization ----
 static void init_battery_icons(void) {
     init_icon_dsc_rgb565a8(&battery_dscs[0], ICON_BATTERY_W, ICON_BATTERY_H, icon_battery_data);
@@ -262,10 +285,10 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     // Title
     lbl_title = lv_label_create(usage_container);
-    lv_label_set_text(lbl_title, "Claude Usage");
+    lv_label_set_text(lbl_title, "Usage");
     lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_set_pos(lbl_title, 106, TITLE_Y);
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, TITLE_Y);
 
     // Session panel
     lv_obj_t* p_session = make_panel(usage_container, MARGIN, CONTENT_Y, CONTENT_W, PANEL_H);
@@ -276,19 +299,18 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_color(lbl_session_pct, COL_TEXT, 0);
     lv_obj_set_pos(lbl_session_pct, 0, 0);
 
-    bar_session = make_bar(p_session, 0, 56, CONTENT_W - 40, 24);
+    lbl_session_label = make_pill(p_session, "Current");
+    // Symmetric: panel-outer-top → pill-top equals pill-bottom → bar-top.
+    // Pill height = font line_height(30) + pad_top(6) + pad_bottom(6) = 42; panel pad_top = 12; bar at y=56 → y_inner=1.
+    lv_obj_align(lbl_session_label, LV_ALIGN_TOP_RIGHT, 0, 1);
 
-    lbl_session_label = lv_label_create(p_session);
-    lv_label_set_text(lbl_session_label, "Current Session");
-    lv_obj_set_style_text_font(lbl_session_label, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_session_label, COL_DIM, 0);
-    lv_obj_set_pos(lbl_session_label, 0, 94);
+    bar_session = make_bar(p_session, 0, 56, CONTENT_W - 32, 24);
 
     lbl_session_reset = lv_label_create(p_session);
     lv_label_set_text(lbl_session_reset, "---");
     lv_obj_set_style_text_font(lbl_session_reset, &font_styrene_28, 0);
     lv_obj_set_style_text_color(lbl_session_reset, COL_DIM, 0);
-    lv_obj_align(lbl_session_reset, LV_ALIGN_TOP_RIGHT, 0, 94);
+    lv_obj_set_pos(lbl_session_reset, 0, 94);
 
     // Weekly panel
     int weekly_y = CONTENT_Y + PANEL_H + PANEL_GAP;
@@ -300,26 +322,23 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_color(lbl_weekly_pct, COL_TEXT, 0);
     lv_obj_set_pos(lbl_weekly_pct, 0, 0);
 
-    bar_weekly = make_bar(p_weekly, 0, 56, CONTENT_W - 40, 24);
+    lbl_weekly_label = make_pill(p_weekly, "Weekly");
+    lv_obj_align(lbl_weekly_label, LV_ALIGN_TOP_RIGHT, 0, 1);
 
-    lbl_weekly_label = lv_label_create(p_weekly);
-    lv_label_set_text(lbl_weekly_label, "Current Week");
-    lv_obj_set_style_text_font(lbl_weekly_label, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_weekly_label, COL_DIM, 0);
-    lv_obj_set_pos(lbl_weekly_label, 0, 94);
+    bar_weekly = make_bar(p_weekly, 0, 56, CONTENT_W - 32, 24);
 
     lbl_weekly_reset = lv_label_create(p_weekly);
     lv_label_set_text(lbl_weekly_reset, "---");
     lv_obj_set_style_text_font(lbl_weekly_reset, &font_styrene_28, 0);
     lv_obj_set_style_text_color(lbl_weekly_reset, COL_DIM, 0);
-    lv_obj_align(lbl_weekly_reset, LV_ALIGN_TOP_RIGHT, 0, 94);
+    lv_obj_set_pos(lbl_weekly_reset, 0, 94);
 
     // Animation
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
     lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
-    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -24);
+    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
 }
 
 // ======== Controller Screen (480x480) ========
@@ -340,10 +359,10 @@ static void init_controller_screen(lv_obj_t* scr) {
 
     // Title
     lv_obj_t* lbl_ctrl_title = lv_label_create(ctrl_container);
-    lv_label_set_text(lbl_ctrl_title, "Claude Controller");
+    lv_label_set_text(lbl_ctrl_title, "Controller");
     lv_obj_set_style_text_font(lbl_ctrl_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_ctrl_title, COL_TEXT, 0);
-    lv_obj_set_pos(lbl_ctrl_title, 66, TITLE_Y);
+    lv_obj_align(lbl_ctrl_title, LV_ALIGN_TOP_MID, 0, TITLE_Y);
 
     // Initialize icon descriptors
     init_icon_dsc(&icon_escape_dsc, ICON_ESCAPE_W, ICON_ESCAPE_H, icon_escape_data);
@@ -445,7 +464,7 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_ble_title, "Bluetooth");
     lv_obj_set_style_text_font(lbl_ble_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_ble_title, COL_TEXT, 0);
-    lv_obj_set_pos(lbl_ble_title, 66, TITLE_Y);
+    lv_obj_align(lbl_ble_title, LV_ALIGN_TOP_MID, 0, TITLE_Y);
 
     // Info panel (taller for 480x480)
     lv_obj_t* p_info = make_panel(ble_container, MARGIN, CONTENT_Y, CONTENT_W, 160);
@@ -587,9 +606,11 @@ void ui_tick_anim(void) {
         anim_msg_start = now;
     }
 
-    if (now - anim_last_ms >= ANIM_SPIN_MS) {
+    if (now - anim_last_ms >= spinner_ms[anim_spinner_idx]) {
         anim_last_ms = now;
-        anim_spinner_idx = (anim_spinner_idx + 1) % SPINNER_COUNT;
+        anim_phase = (anim_phase + 1) % SPINNER_PHASES;
+        anim_spinner_idx = (anim_phase < SPINNER_COUNT) ? anim_phase
+                                                        : (SPINNER_PHASES - anim_phase);
 
         static char buf[80];
         snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6",
