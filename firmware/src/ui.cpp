@@ -237,11 +237,14 @@ static lv_obj_t* make_zone_icon(lv_obj_t* parent, int x, int y, int w, int h, lv
 }
 
 static lv_obj_t* make_hint(lv_obj_t* parent, int x, int y, const char* text) {
+    (void)x; (void)y;
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_font(lbl, &font_styrene_24, 0);
+    lv_obj_set_style_text_font(lbl, &font_styrene_20, 0);
     lv_obj_set_style_text_color(lbl, COL_DIM, 0);
-    lv_obj_set_pos(lbl, x, y);
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(lbl, lv_pct(100));
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
     return lbl;
 }
 
@@ -430,7 +433,7 @@ static void init_controller_screen(lv_obj_t* scr) {
     int info_y = CONTENT_Y + CTRL_CONTENT_H + CTRL_GAP + 4;
 
     ctrl_session_lbl = lv_label_create(ctrl_container);
-    lv_label_set_text(ctrl_session_lbl, "---% of current session");
+    lv_label_set_text(ctrl_session_lbl, "---%");
     lv_obj_set_style_text_font(ctrl_session_lbl, &font_styrene_24, 0);
     lv_obj_set_style_text_color(ctrl_session_lbl, COL_DIM, 0);
     lv_obj_set_pos(ctrl_session_lbl, MARGIN, info_y);
@@ -589,7 +592,7 @@ void ui_update(const UsageData* data) {
     // Controller screen session info
     lv_bar_set_value(ctrl_session_bar, s_pct, LV_ANIM_ON);
     lv_obj_set_style_bg_color(ctrl_session_bar, pct_color(data->session_pct), LV_PART_INDICATOR);
-    lv_label_set_text_fmt(ctrl_session_lbl, "%d%% of current session", s_pct);
+    lv_label_set_text_fmt(ctrl_session_lbl, "%d%%", s_pct);
 
     char rbuf[48];
     format_reset_time(data->session_reset_mins, rbuf, sizeof(rbuf));
