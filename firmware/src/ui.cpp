@@ -236,16 +236,33 @@ static lv_obj_t* make_zone_icon(lv_obj_t* parent, int x, int y, int w, int h, lv
     return zone;
 }
 
-static lv_obj_t* make_hint(lv_obj_t* parent, int x, int y, const char* text) {
-    (void)x; (void)y;
-    lv_obj_t* lbl = lv_label_create(parent);
-    lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_font(lbl, &font_styrene_20, 0);
-    lv_obj_set_style_text_color(lbl, COL_DIM, 0);
-    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_width(lbl, lv_pct(100));
-    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
-    return lbl;
+static void make_hint_pair(lv_obj_t* parent, const char* gesture, const char* action) {
+    lv_obj_t* pair = lv_obj_create(parent);
+    lv_obj_set_width(pair, lv_pct(100));
+    lv_obj_set_height(pair, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(pair, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(pair, 0, 0);
+    lv_obj_set_style_pad_all(pair, 0, 0);
+    lv_obj_set_style_pad_row(pair, 0, 0);
+    lv_obj_set_flex_flow(pair, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(pair, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(pair, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* g = lv_label_create(pair);
+    lv_label_set_text(g, gesture);
+    lv_obj_set_style_text_font(g, &font_styrene_20, 0);
+    lv_obj_set_style_text_color(g, COL_TEXT, 0);
+    lv_obj_set_style_text_align(g, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(g, lv_pct(100));
+    lv_label_set_long_mode(g, LV_LABEL_LONG_WRAP);
+
+    lv_obj_t* a = lv_label_create(pair);
+    lv_label_set_text(a, action);
+    lv_obj_set_style_text_font(a, &font_styrene_20, 0);
+    lv_obj_set_style_text_color(a, COL_DIM, 0);
+    lv_obj_set_style_text_align(a, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(a, lv_pct(100));
+    lv_label_set_long_mode(a, LV_LABEL_LONG_WRAP);
 }
 
 static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
@@ -423,11 +440,12 @@ static void init_controller_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_font(gestures_lbl, &font_styrene_28, 0);
     lv_obj_set_style_text_color(gestures_lbl, COL_TEXT, 0);
 
-    // Hint entries
-    make_hint(hint_list, 0, 0, "Swipe up/down: Arrow keys");
-    make_hint(hint_list, 0, 0, "Swipe left: Toggle mode");
-    make_hint(hint_list, 0, 0, "Swipe right: Enter key");
-    make_hint(hint_list, 0, 0, "Hold: Voice dictation");
+    // Hint entries: gesture (white) + action (dim) on separate lines
+    lv_obj_set_style_pad_row(hint_list, 12, 0);
+    make_hint_pair(hint_list, "Swipe up/down", "Arrow keys");
+    make_hint_pair(hint_list, "Swipe left", "Toggle mode");
+    make_hint_pair(hint_list, "Swipe right", "Enter key");
+    make_hint_pair(hint_list, "Hold", "Voice dictation");
 
     // Usage info below content area
     int info_y = CONTENT_Y + CTRL_CONTENT_H + CTRL_GAP + 4;
