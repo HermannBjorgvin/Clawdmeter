@@ -288,7 +288,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_title, "Usage");
     lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, TITLE_Y);
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
 
     // Session panel
     lv_obj_t* p_session = make_panel(usage_container, MARGIN, CONTENT_Y, CONTENT_W, PANEL_H);
@@ -362,7 +362,7 @@ static void init_controller_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_ctrl_title, "Controller");
     lv_obj_set_style_text_font(lbl_ctrl_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_ctrl_title, COL_TEXT, 0);
-    lv_obj_align(lbl_ctrl_title, LV_ALIGN_TOP_MID, 0, TITLE_Y);
+    lv_obj_align(lbl_ctrl_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
 
     // Initialize icon descriptors
     init_icon_dsc(&icon_escape_dsc, ICON_ESCAPE_W, ICON_ESCAPE_H, icon_escape_data);
@@ -464,7 +464,7 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_ble_title, "Bluetooth");
     lv_obj_set_style_text_font(lbl_ble_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_ble_title, COL_TEXT, 0);
-    lv_obj_align(lbl_ble_title, LV_ALIGN_TOP_MID, 0, TITLE_Y);
+    lv_obj_align(lbl_ble_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
 
     // Info panel (taller for 480x480)
     lv_obj_t* p_info = make_panel(ble_container, MARGIN, CONTENT_Y, CONTENT_W, 160);
@@ -499,12 +499,12 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     int reset_y = CONTENT_Y + 160 + 16;
     lv_obj_t* reset_zone = lv_obj_create(ble_container);
     lv_obj_set_pos(reset_zone, MARGIN, reset_y);
-    lv_obj_set_size(reset_zone, CONTENT_W, 70);
+    lv_obj_set_size(reset_zone, CONTENT_W, 110);
     lv_obj_set_style_bg_color(reset_zone, COL_PANEL, 0);
     lv_obj_set_style_bg_opa(reset_zone, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(reset_zone, 8, 0);
     lv_obj_set_style_border_width(reset_zone, 0, 0);
-    lv_obj_set_style_pad_column(reset_zone, 10, 0);
+    lv_obj_set_style_pad_column(reset_zone, 14, 0);
     lv_obj_set_flex_flow(reset_zone, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(reset_zone, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(reset_zone, LV_OBJ_FLAG_SCROLLABLE);
@@ -518,13 +518,6 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_label_set_text(reset_lbl, "Reset Bluetooth");
     lv_obj_set_style_text_font(reset_lbl, &font_styrene_28, 0);
     lv_obj_set_style_text_color(reset_lbl, COL_DIM, 0);
-
-    // Footer
-    lv_obj_t* lbl_footer = lv_label_create(ble_container);
-    lv_label_set_text(lbl_footer, "Bluetooth Low Energy");
-    lv_obj_set_style_text_font(lbl_footer, &font_styrene_24, 0);
-    lv_obj_set_style_text_color(lbl_footer, COL_DIM, 0);
-    lv_obj_align(lbl_footer, LV_ALIGN_BOTTOM_MID, 0, -24);
 
     // Start hidden
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
