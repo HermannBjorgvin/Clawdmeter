@@ -519,6 +519,13 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_font(reset_lbl, &font_styrene_28, 0);
     lv_obj_set_style_text_color(reset_lbl, COL_DIM, 0);
 
+    // Attribution
+    lv_obj_t* lbl_credit = lv_label_create(ble_container);
+    lv_label_set_text(lbl_credit, "Built by @hermannbjorgvin");
+    lv_obj_set_style_text_font(lbl_credit, &font_styrene_24, 0);
+    lv_obj_set_style_text_color(lbl_credit, COL_DIM, 0);
+    lv_obj_align(lbl_credit, LV_ALIGN_BOTTOM_MID, 0, -24);
+
     // Start hidden
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
 }
