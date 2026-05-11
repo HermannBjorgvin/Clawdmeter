@@ -11,7 +11,7 @@ Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
 
 |              On the desk              |                       In action                        |
 | :-----------------------------------: | :----------------------------------------------------: |
-| ![Clawdmeter on a desk](assets/demo.jpeg) | <video src="assets/demo.mp4" controls width="100%"></video> |
+| ![Clawdmeter on a desk](assets/demo.jpeg) | [![Demo video](https://raw.githubusercontent.com/HermannBjorgvin/Clawdmeter/main/assets/demo_thumb.jpg)](https://raw.githubusercontent.com/HermannBjorgvin/Clawdmeter/main/assets/demo.mp4) |
 
 ## Screens
 
