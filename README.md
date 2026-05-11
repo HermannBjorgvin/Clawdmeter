@@ -1,10 +1,9 @@
-# Claude Usage Tracker - Waveshare ESP32-S3-Touch-AMOLED-2.16
+# clawdmeter
+
+Desk Clawd that watches your Claude usage.
 
 A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
-It runs on a
-[Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16)
-(2.16" square AMOLED, battery, IMU auto-rotation), pairs with my laptop over
-Bluetooth, and the splash screen plays pixel-art Clawd animations that get
+It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16) and pairs with my laptop over Bluetooth, and the splash screen plays pixel-art Clawd animations that get
 busier when your usage rate climbs. The two side buttons send Space and
 Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
 
@@ -12,20 +11,14 @@ Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
 
 The device boots into the splash and stays there until you press the middle (PWR) button, which cycles between Usage and Bluetooth. Tap the screen anywhere (except the Reset zone on the Bluetooth screen) to flip back to the splash; tap again to dismiss it.
 
-|               Splash                |              Usage              |                Bluetooth                |
-| :---------------------------------: | :-----------------------------: | :-------------------------------------: |
-| ![Splash](screenshots/splash.png)   | ![Usage](screenshots/usage.png) | ![Bluetooth](screenshots/bluetooth.png) |
-|  Boot screen; touch-toggle anytime  | Session and weekly utilization  |     Connection status and bond reset    |
+|              Splash               |              Usage              |                Bluetooth                |
+| :-------------------------------: | :-----------------------------: | :-------------------------------------: |
+| ![Splash](screenshots/splash.png) | ![Usage](screenshots/usage.png) | ![Bluetooth](screenshots/bluetooth.png) |
+| Splash; touch-toggle anytime      | Session and weekly utilization  |    Connection status and bond reset     |
 
 While the splash is up, the middle button cycles animations instead of screens. The firmware also auto-rotates every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
 
-## A few things worth knowing
-
-The panel auto-rotates via a QMI8658 accelerometer. The CO5300 can't rotate in hardware, so the firmware rotates pixels in software on every flush — a brief brightness flash hides the transition.
-
-Battery and charging status sit in the upper-right corner, driven by the AXP2101 PMU. The device runs untethered once flashed; USB only comes back into play for re-flashing or topping up the battery.
-
-The splash plays 13 looping 20×20 pixel-art Clawd animations scaled 24× to fill the display, picked from one of four "mood" groups (idle, normal, active, heavy) based on your current usage rate.
+The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaanbuilds](https://x.com/amaanbuilds)'s open library of pixel-art Clawd sprites — go play with it, it's lovely.
 
 ## Hardware
 
@@ -39,6 +32,12 @@ The splash plays 13 looping 20×20 pixel-art Clawd animations scaled 24× to fil
 - [PlatformIO CLI](https://docs.platformio.org/en/latest/core/installation/index.html)
 - `curl`, `bluetoothctl`, `busctl` (BlueZ Bluetooth stack)
 - Claude Code with an active subscription
+
+## MacOS support
+
+MacOS is fully supported, that is as soon as you prompt it and create a pull request for it!
+
+I run Linux myself so it's harder for me to test this but anyone who wants MacOS support is welcome to contribute.
 
 ## Flash the firmware
 
@@ -89,11 +88,11 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 
 The board has three side buttons. Left and right do the same thing on every screen; the middle button is screen-aware.
 
-| Button              | GPIO         | Function                                                                      |
-| ------------------- | ------------ | ----------------------------------------------------------------------------- |
-| **Left**            | GPIO 0       | Hold to send Space (Claude Code voice-mode push-to-talk)                      |
-| **Middle** (PWR)    | AXP2101 PKEY | Cycle screens (Usage ↔ Bluetooth); on splash, cycle animations                |
-| **Right**           | GPIO 18      | Press to send Shift+Tab (Claude Code mode toggle)                             |
+| Button           | GPIO         | Function                                                       |
+| ---------------- | ------------ | -------------------------------------------------------------- |
+| **Left**         | GPIO 0       | Hold to send Space (Claude Code voice-mode push-to-talk)       |
+| **Middle** (PWR) | AXP2101 PKEY | Cycle screens (Usage ↔ Bluetooth); on splash, cycle animations |
+| **Right**        | GPIO 18      | Press to send Shift+Tab (Claude Code mode toggle)              |
 
 Space and Shift+Tab go out as standard BLE HID keyboard reports, so they trigger in whatever window has focus on the paired host — not just Claude Code.
 
@@ -187,7 +186,6 @@ See `tools/README.md` for details.
 
 ## Credits
 
-- Built by [@hermannbjorgvin](https://github.com/hermannbjorgvin) (Hermann Haraldsson).
 - Pixel-art Clawd animation by [@amaanbuilds](https://x.com/amaanbuilds), sourced from [claudepix.vercel.app](https://claudepix.vercel.app). Frame data and palettes scraped + converted by the tooling in `tools/`.
 - Lucide icon set ([lucide.dev](https://lucide.dev), MIT) for bluetooth and battery UI glyphs.
 - Anthropic brand fonts (Tiempos Text, Styrene B) — see licensing warning below.
