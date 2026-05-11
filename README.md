@@ -18,7 +18,7 @@ The device boots into the splash and stays there until you press the middle (PWR
 
 While the splash is up, the middle button cycles animations instead of screens. The firmware also auto-rotates every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
 
-The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaanbuilds](https://x.com/amaanbuilds)'s open library of pixel-art Clawd sprites — go play with it, it's lovely.
+The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaanbuilds](https://x.com/amaanbuilds)'s library of pixel-art Clawd sprites — go play with it, it's lovely.
 
 ## Hardware
 
@@ -169,7 +169,7 @@ Default tint is white (`0xFFFFFF`); Lucide PNGs ship as black-on-transparent and
 ## Splash animations
 
 The animations come from [claudepix.vercel.app](https://claudepix.vercel.app),
-a public library of Clawd sprites. `tools/scrape_claudepix.js` evaluates the
+a library of Clawd sprites. `tools/scrape_claudepix.js` evaluates the
 site's JavaScript in a Node VM to pull out frame data and palettes, then
 `tools/convert_to_c.js` turns everything into RGB565 C arrays and writes
 `firmware/src/splash_animations.h`.
