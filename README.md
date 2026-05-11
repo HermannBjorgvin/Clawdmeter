@@ -1,6 +1,6 @@
-# clawdmeter
+# Clawdmeter
 
-Desk Clawd that watches your Claude usage.
+Desk Clawd that watches your Claude usage and gets more excite the more tokens you use.
 
 A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
 It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16) and pairs with my laptop over Bluetooth, and the splash screen plays pixel-art Clawd animations that get
@@ -14,7 +14,7 @@ The device boots into the splash and stays there until you press the middle (PWR
 |              Splash               |              Usage              |                Bluetooth                |
 | :-------------------------------: | :-----------------------------: | :-------------------------------------: |
 | ![Splash](screenshots/splash.png) | ![Usage](screenshots/usage.png) | ![Bluetooth](screenshots/bluetooth.png) |
-| Splash; touch-toggle anytime      | Session and weekly utilization  |    Connection status and bond reset     |
+|   Splash; touch-toggle anytime    | Session and weekly utilization  |    Connection status and bond reset     |
 
 While the splash is up, the middle button cycles animations instead of screens. The firmware also auto-rotates every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
 
