@@ -463,15 +463,12 @@ void ui_tick_anim(void) {
 }
 
 static screen_t prev_non_splash_screen = SCREEN_USAGE;
-static int last_battery_idx = 0;
-
-// Hide the battery indicator on the splash screen when it's in the low state —
-// the small icon is visually noisy over the pixel-art creature animations.
+// Hide the battery indicator on the splash screen — the icon is visually
+// noisy over the pixel-art creature animations.
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
-    bool hide = (current_screen == SCREEN_SPLASH && last_battery_idx == 1);
-    if (hide) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-    else      lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
 // LVGL handles click debouncing internally. Screen-level handler fires when
@@ -574,6 +571,5 @@ void ui_update_battery(int percent, bool charging) {
         idx = 3;  // full
     }
     lv_image_set_src(battery_img, &battery_dscs[idx]);
-    last_battery_idx = idx;
     apply_battery_visibility();
 }
