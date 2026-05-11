@@ -6,6 +6,17 @@ Bluetooth-connected Claude Code usage monitor on a
 buttons mapped to Claude Code shortcuts over BLE HID, and a splash screen
 of pixel-art creatures whose mood tracks your usage rate.
 
+## Screens
+
+Two persistent screens, **Usage** and **Bluetooth**, are cycled by the **middle physical button (PWR)**. The **splash** is a touch-toggled welcome animation: tap anywhere on the display (outside the Reset zone on the Bluetooth screen) to show it; tap again to dismiss. Splash is the default boot screen.
+
+|               Splash                |              Usage              |                Bluetooth                |
+| :---------------------------------: | :-----------------------------: | :-------------------------------------: |
+| ![Splash](screenshots/splash.png)   | ![Usage](screenshots/usage.png) | ![Bluetooth](screenshots/bluetooth.png) |
+|  Boot screen; touch-toggle anytime  | Session and weekly utilization  |     Connection status and bond reset    |
+
+On splash, the **middle (PWR) button** cycles to the next animation manually; otherwise the firmware auto-rotates every 20 s within the usage-rate group.
+
 ## Features
 
 - **Splash screen** — 13 looping 20×20 pixel-art creature animations scaled 24× to fill the display. The active animation reacts to your current Claude usage *rate* (idle / normal / active / heavy), auto-rotating within the matching group every 20 s.
@@ -73,17 +84,6 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 5. The ESP32 parses it and updates the LVGL dashboard
 6. The firmware tracks the *rate of change* of session % over a 5-minute window and picks splash animations from the matching mood group (idle / normal / active / heavy)
 7. The left/right physical buttons send Space and Shift+Tab as BLE HID keyboard input to the paired host (no host-side daemon involvement)
-
-## Screens
-
-Two persistent screens, **Usage** and **Bluetooth**, are cycled by the **middle physical button (PWR)**. The **splash** is a touch-toggled welcome animation: tap anywhere on the display (outside the Reset zone on the Bluetooth screen) to show it; tap again to dismiss. Splash is the default boot screen.
-
-|               Splash                |              Usage              |                Bluetooth                |
-| :---------------------------------: | :-----------------------------: | :-------------------------------------: |
-| ![Splash](screenshots/splash.png)   | ![Usage](screenshots/usage.png) | ![Bluetooth](screenshots/bluetooth.png) |
-|  Boot screen; touch-toggle anytime  | Session and weekly utilization  |     Connection status and bond reset    |
-
-On splash, the **middle (PWR) button** cycles to the next animation manually; otherwise the firmware auto-rotates every 20 s within the usage-rate group.
 
 ## Physical buttons
 
