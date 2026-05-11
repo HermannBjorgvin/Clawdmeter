@@ -1,21 +1,24 @@
 # Claude Usage Tracker - Waveshare ESP32-S3-Touch-AMOLED-2.16
 
-Bluetooth-connected Claude Code usage monitor and touch controller on a
+Bluetooth-connected Claude Code usage monitor on a
 [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16)
-2.16" square AMOLED touchscreen with battery, IMU-driven auto-rotation, and a
-splash screen of pixel-art creatures.
+2.16" square AMOLED with battery, IMU-driven auto-rotation, two physical
+buttons mapped to Claude Code shortcuts over BLE HID, and a splash screen
+of pixel-art creatures whose mood tracks your usage rate.
 
 ![Demo](assets/demo.gif)
 
+> **Note:** The demo GIF was recorded on the previous 480×320 Panlee panel and shows older UX (gesture-driven Controller screen). Captures need redoing for the current Waveshare build.
+
 ## Features
 
-- **Splash screen** — 13 looping 20×20 pixel-art creature animations scaled 24× to fill the display. Default boot screen.
-- **Usage dashboard** — Live 5-hour session and 7-day weekly utilization bars with color-coded thresholds
-- **Physical button shortcuts** — Left button → Space (voice mode), right button → Shift+Tab (mode toggle); both sent over BLE HID
-- **Bluetooth screen** — Connection status, device name, MAC address, bond management
-- **Auto-rotation** — QMI8658 accelerometer drives 90° rotation snaps with a quick AMOLED brightness flash transition
-- **Battery indicator** — Lucide battery icons in the upper-right corner, AXP2101-driven
-- **Wireless** — All data communication over Bluetooth Low Energy (USB only for flashing and charging)
+- **Splash screen** — 13 looping 20×20 pixel-art creature animations scaled 24× to fill the display. The active animation reacts to your current Claude usage *rate* (idle / normal / active / heavy), auto-rotating within the matching group every 20 s.
+- **Usage dashboard** — Live 5-hour session and 7-day weekly utilization bars with reset countdowns.
+- **Physical button shortcuts** — Left button → Space (voice mode), right button → Shift+Tab (mode toggle); both sent over BLE HID.
+- **Bluetooth screen** — Connection status, device name, MAC address, bond reset zone.
+- **Auto-rotation** — QMI8658 accelerometer drives 90° rotation snaps with a quick AMOLED brightness-flash transition.
+- **Battery indicator** — Lucide battery icons in the upper-right corner, AXP2101-driven.
+- **Wireless** — All data communication over Bluetooth Low Energy (USB only for flashing and charging).
 
 ## Hardware
 
@@ -50,11 +53,11 @@ bluetoothctl pair F4:12:FA:C0:8F:E5    # use your device's MAC
 bluetoothctl trust F4:12:FA:C0:8F:E5
 ```
 
-The MAC address is shown on the Bluetooth screen (third screen, tap the logo to cycle).
+The MAC address is shown on the Bluetooth screen — press the middle (PWR) button to cycle to it.
 
 ## Install the daemon
 
-The daemon polls your Claude usage every 30 seconds and sends it to the display over BLE.
+The daemon polls your Claude usage every 60 seconds and sends it to the display over BLE.
 
 ```bash
 ./install.sh
@@ -72,18 +75,19 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 3. Extracts usage data from the response headers (`anthropic-ratelimit-unified-5h-utilization`, etc.)
 4. Connects to the ESP32 over BLE and writes a JSON payload to the GATT RX characteristic
 5. The ESP32 parses it and updates the LVGL dashboard
-6. The left/right physical buttons send Space and Shift+Tab as BLE HID keyboard input to the paired host (no host-side daemon involvement)
+6. The firmware tracks the *rate of change* of session % over a 5-minute window and picks splash animations from the matching mood group (idle / normal / active / heavy)
+7. The left/right physical buttons send Space and Shift+Tab as BLE HID keyboard input to the paired host (no host-side daemon involvement)
 
 ## Screens
 
-Two persistent screens, **Usage** and **Bluetooth**, are cycled by the **middle physical button (PWR)**. The **splash** is a touch-toggled welcome animation: tap anywhere on the display (outside the Reset zone on the Bluetooth screen) to show it; tap again to dismiss.
+Two persistent screens, **Usage** and **Bluetooth**, are cycled by the **middle physical button (PWR)**. The **splash** is a touch-toggled welcome animation: tap anywhere on the display (outside the Reset zone on the Bluetooth screen) to show it; tap again to dismiss. Splash is the default boot screen.
 
-|              Usage              |                Bluetooth                |               Splash                |
-| :-----------------------------: | :-------------------------------------: | :---------------------------------: |
-| ![Usage](screenshots/usage.png) | ![Bluetooth](screenshots/bluetooth.png) | Looping 20×20 pixel-art creatures   |
-| Session and weekly utilization  |       Connection status and reset       | Boot screen; touch-toggle anytime   |
+|               Splash                |              Usage              |                Bluetooth                |
+| :---------------------------------: | :-----------------------------: | :-------------------------------------: |
+| ![Splash](screenshots/splash.png)   | ![Usage](screenshots/usage.png) | ![Bluetooth](screenshots/bluetooth.png) |
+|  Boot screen; touch-toggle anytime  | Session and weekly utilization  |     Connection status and bond reset    |
 
-The splash screen is also the default boot screen.
+On splash, the **middle (PWR) button** cycles to the next animation manually; otherwise the firmware auto-rotates every 20 s within the usage-rate group.
 
 ## Physical buttons
 
@@ -158,41 +162,13 @@ Without these patches, fonts compile but render as invisible.
 
 ## Converting Lucide icons
 
-The controller screen uses [Lucide](https://lucide.dev) icons (the same icon set Anthropic uses). Icons are SVGs converted to RGB565 C arrays for LVGL.
-
-1. Get Lucide SVGs from [github.com/lucide-icons/lucide](https://github.com/lucide-icons/lucide) (`icons/` directory)
-
-2. Convert SVG to PNG at desired size (icons are 48×48 to match the high-DPI display, hand icon is 40×40, logo is 80×80):
+The UI uses a small set of [Lucide](https://lucide.dev) icons (bluetooth + battery states) converted to RGB565 / RGB565A8 C arrays for LVGL.
 
 ```bash
-inkscape icons/delete.svg --export-width=48 --export-height=48 \
-  --export-filename=assets/icon_delete_48.png --export-background-opacity=0
+node tools/png_to_lvgl.js assets/icon_bluetooth_48.png icon_bluetooth_data ICON_BLUETOOTH_WIDTH ICON_BLUETOOTH_HEIGHT
 ```
 
-3. Convert PNG to RGB565 C array:
-
-```python
-from PIL import Image
-
-img = Image.open("assets/icon_delete.png").convert("RGBA")
-bg = (0x1f, 0x1f, 0x1e)  # panel background color
-fg = (0xb0, 0xae, 0xa5)  # icon stroke color
-
-pixels = []
-for y in range(img.height):
-    for x in range(img.width):
-        r, g, b, a = img.getpixel((x, y))
-        alpha = a / 255.0
-        out_r = int(fg[0] * alpha + bg[0] * (1 - alpha))
-        out_g = int(fg[1] * alpha + bg[1] * (1 - alpha))
-        out_b = int(fg[2] * alpha + bg[2] * (1 - alpha))
-        rgb565 = ((out_r >> 3) << 11) | ((out_g >> 2) << 5) | (out_b >> 3)
-        pixels.append(rgb565)
-
-# Write as C array to firmware/src/icons.h
-```
-
-Current icons: `delete`, `arrow-left`, `arrow-right`, `circle-arrow-out-up-left` (escape), `hand` (gestures), `bluetooth`.
+Default tint is white (`0xFFFFFF`), required because Lucide PNGs ship as black-on-transparent and would render invisible against the dark UI without it. Pass `--no-tint` for pre-coloured artwork (e.g. the logo). Battery icons live as RGB565A8 (alpha plane) so they blend cleanly over the splash background; the rest of the icons are baked RGB565 over the panel colour. Splice the converter output into `firmware/src/icons.h`.
 
 ## Splash animations
 
@@ -217,7 +193,7 @@ See `tools/README.md` for details.
 
 - Built by [@hermannbjorgvin](https://github.com/hermannbjorgvin) (Hermann Björgvin Haraldsson).
 - Pixel-art "Clawd" creature animations by [@amaanbuilds](https://github.com/amaanbuilds), sourced from [claudepix.vercel.app](https://claudepix.vercel.app). Frame data and palettes scraped + converted by the tooling in `tools/`.
-- Lucide icon set ([lucide.dev](https://lucide.dev), MIT) for controller and bluetooth UI glyphs.
+- Lucide icon set ([lucide.dev](https://lucide.dev), MIT) for bluetooth and battery UI glyphs.
 - Anthropic brand fonts (Tiempos Text, Styrene B) — see licensing warning below.
 
 ## Licensing gray area warning
