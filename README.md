@@ -4,7 +4,7 @@ Bluetooth-connected Claude Code usage monitor on a
 [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16)
 2.16" square AMOLED with battery, IMU-driven auto-rotation, two physical
 buttons mapped to Claude Code shortcuts over BLE HID, and a splash screen
-of pixel-art creatures whose mood tracks your usage rate.
+of pixel-art Clawd animations whose mood tracks your usage rate.
 
 ## Screens
 
@@ -19,7 +19,7 @@ On splash, the **middle (PWR) button** cycles to the next animation manually; ot
 
 ## Features
 
-- **Splash screen** — 13 looping 20×20 pixel-art creature animations scaled 24× to fill the display. The active animation reacts to your current Claude usage *rate* (idle / normal / active / heavy), auto-rotating within the matching group every 20 s.
+- **Splash screen** — 13 looping 20×20 pixel-art Clawd animations scaled 24× to fill the display. The active animation reacts to your current Claude usage *rate* (idle / normal / active / heavy), auto-rotating within the matching group every 20 s.
 - **Usage dashboard** — Live 5-hour session and 7-day weekly utilization bars with reset countdowns.
 - **Physical button shortcuts** — Left button → Space (voice mode), right button → Shift+Tab (mode toggle); both sent over BLE HID.
 - **Bluetooth screen** — Connection status, device name, MAC address, bond reset zone.
@@ -168,9 +168,9 @@ Default tint is white (`0xFFFFFF`), required because Lucide PNGs ship as black-o
 
 ## Splash animations
 
-The splash screen plays 20×20 pixel-art creature animations sourced from
+The splash screen plays 20×20 pixel-art Clawd animations sourced from
 [claudepix.vercel.app](https://claudepix.vercel.app), a public library of
-creature animations. Frame data and palettes are extracted by
+Clawd animations. Frame data and palettes are extracted by
 `tools/scrape_claudepix.js` (which evaluates the source's JavaScript in a Node
 VM context to resolve frames) and converted to RGB565 C arrays by
 `tools/convert_to_c.js`. The output lives in `firmware/src/splash_animations.h`.
@@ -187,7 +187,7 @@ See `tools/README.md` for details.
 
 ## Credits
 
-- Built by [@hermannbjorgvin](https://github.com/hermannbjorgvin) (Hermann Björgvin Haraldsson).
+- Built by [@hermannbjorgvin](https://github.com/hermannbjorgvin) (Hermann Haraldsson).
 - Pixel-art Clawd animation by [@amaanbuilds](https://x.com/amaanbuilds), sourced from [claudepix.vercel.app](https://claudepix.vercel.app). Frame data and palettes scraped + converted by the tooling in `tools/`.
 - Lucide icon set ([lucide.dev](https://lucide.dev), MIT) for bluetooth and battery UI glyphs.
 - Anthropic brand fonts (Tiempos Text, Styrene B) — see licensing warning below.
