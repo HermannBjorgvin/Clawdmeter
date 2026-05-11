@@ -13,18 +13,17 @@ LV_FONT_DECLARE(font_styrene_24);
 LV_FONT_DECLARE(font_styrene_20);
 LV_FONT_DECLARE(font_mono_32);
 
-// Anthropic brand palette
-#define COL_BG        lv_color_hex(0x000000)
-#define COL_PANEL     lv_color_hex(0x1f1f1e)
-#define COL_TEXT      lv_color_hex(0xfaf9f5)
-#define COL_DIM       lv_color_hex(0xb0aea5)
-#define COL_ACCENT    lv_color_hex(0xd97757)
-#define COL_GREEN     lv_color_hex(0x788c5d)
-#define COL_AMBER     lv_color_hex(0xd97757)
-#define COL_RED       lv_color_hex(0xc0392b)
-#define COL_BAR_BG    lv_color_hex(0x2a2a28)
-#define COL_ZONE_BG   lv_color_hex(0x252524)
-#define COL_ZONE_BRD  lv_color_hex(0x3a3a38)
+// Anthropic brand palette — design tokens live in theme.h
+#include "theme.h"
+#define COL_BG        THEME_BG
+#define COL_PANEL     THEME_PANEL
+#define COL_TEXT      THEME_TEXT
+#define COL_DIM       THEME_DIM
+#define COL_ACCENT    THEME_ACCENT
+#define COL_GREEN     THEME_GREEN
+#define COL_AMBER     THEME_AMBER
+#define COL_RED       THEME_RED
+#define COL_BAR_BG    THEME_BAR_BG
 
 // ---- Layout constants for 480x480 (scaled for 2.16" high-DPI + rounded corners) ----
 #define SCR_W         480
@@ -389,12 +388,9 @@ void ui_init(void) {
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
     // Logo (shared, always visible, on top of all containers)
-    logo_dsc.header.w = LOGO_WIDTH;
-    logo_dsc.header.h = LOGO_HEIGHT;
-    logo_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-    logo_dsc.header.stride = LOGO_WIDTH * 2;
-    logo_dsc.data = (const uint8_t*)logo_data;
-    logo_dsc.data_size = LOGO_WIDTH * LOGO_HEIGHT * 2;
+    // Logo is RGB565A8 (planar: w*h RGB565 then w*h alpha) so it composites
+    // cleanly against whatever bg is behind it.
+    init_icon_dsc_rgb565a8(&logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data);
 
     // Initialize battery icon descriptors
     init_battery_icons();

@@ -1,5 +1,6 @@
 #include "splash.h"
 #include "splash_animations.h"
+#include "theme.h"
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 
@@ -10,7 +11,7 @@
 #define CANVAS_H     (GRID * CELL)
 
 // Background fallback when palette is missing
-#define COL_EMPTY    0x10A2  // dark bg (#0f0f0f)
+#define COL_EMPTY    0x0000  // true black (matches THEME_BG)
 
 LV_FONT_DECLARE(font_styrene_28);
 
@@ -57,7 +58,7 @@ void splash_init(lv_obj_t *parent) {
     splash_container = lv_obj_create(parent);
     lv_obj_set_size(splash_container, 480, 480);
     lv_obj_set_pos(splash_container, 0, 0);
-    lv_obj_set_style_bg_color(splash_container, lv_color_hex(0x0f0f0f), 0);
+    lv_obj_set_style_bg_color(splash_container, THEME_BG, 0);
     lv_obj_set_style_bg_opa(splash_container, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(splash_container, 0, 0);
     lv_obj_set_style_pad_all(splash_container, 0, 0);

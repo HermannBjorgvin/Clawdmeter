@@ -26,7 +26,7 @@ function safeIdent(s) {
 }
 
 function hexToRgb565(hex) {
-  if (!hex || hex === 'transparent') return 0x10A2;  // dark bg
+  if (!hex || hex === 'transparent') return 0x0000;  // dark bg
   let h = hex.replace('#', '');
   if (h.length === 3) h = h.split('').map(c => c + c).join('');
   const r = parseInt(h.substr(0, 2), 16);
@@ -36,7 +36,7 @@ function hexToRgb565(hex) {
 }
 
 function paletteToRgb565(palette) {
-  const out = new Array(PALETTE_SIZE).fill(0x10A2);
+  const out = new Array(PALETTE_SIZE).fill(0x0000);
   for (let i = 0; i < palette.length && i < PALETTE_SIZE; i++) {
     out[i] = hexToRgb565(palette[i]);
   }
