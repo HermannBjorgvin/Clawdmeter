@@ -302,7 +302,33 @@ void setup() {
 static ble_state_t last_ble_state = BLE_STATE_INIT;
 
 // Brightness ramp state for rotation transition
-static uint8_t brightness_ramp = 0;  // 0=idle, 1-4=ramping up
+// On rotation change we blank the panel, force a full LVGL redraw at the
+// new orientation, then ramp brightness back up over ~125ms so the
+// transition reads as deliberate instead of as a glitch.
+static void handle_rotation_change(void) {
+    static uint8_t last_rotation = 0;
+    static uint8_t  ramp_step = 0;  // 0=idle, 1-4=ramping
+    static uint32_t ramp_last = 0;
+
+    uint8_t rot = imu_get_rotation();
+    if (rot != last_rotation) {
+        gfx->setBrightness(0);
+        last_rotation = rot;
+        lv_obj_invalidate(lv_screen_active());
+        ramp_step = 1;
+        return;
+    }
+
+    if (ramp_step == 0) return;
+    uint32_t now = millis();
+    if (now - ramp_last < 25) return;
+    ramp_last = now;
+
+    static const uint8_t levels[] = {60, 120, 170, 200};
+    gfx->setBrightness(levels[ramp_step - 1]);
+    if (ramp_step >= 4) ramp_step = 0;
+    else                ramp_step++;
+}
 
 void loop() {
     touch_read();
@@ -339,33 +365,7 @@ void loop() {
         }
     }
 
-    // Detect rotation change — brightness flash + force redraw
-    {
-        static uint8_t last_rotation = 0;
-        uint8_t rot = imu_get_rotation();
-        if (rot != last_rotation) {
-            gfx->setBrightness(0);  // instant black
-            last_rotation = rot;
-            lv_obj_invalidate(lv_screen_active());  // force full redraw at new rotation
-            brightness_ramp = 1;
-        }
-    }
-
-    // Ramp brightness back up after rotation
-    if (brightness_ramp > 0) {
-        static uint32_t ramp_last = 0;
-        uint32_t now = millis();
-        if (now - ramp_last > 25) {
-            ramp_last = now;
-            uint8_t levels[] = {60, 120, 170, 200};
-            gfx->setBrightness(levels[brightness_ramp - 1]);
-            if (brightness_ramp >= 4) {
-                brightness_ramp = 0;
-            } else {
-                brightness_ramp++;
-            }
-        }
-    }
+    handle_rotation_change();
 
     // Update BLE status on screen when state changes
     ble_state_t bs = ble_get_state();
