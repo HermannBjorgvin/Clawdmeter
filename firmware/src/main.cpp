@@ -30,28 +30,17 @@ SensorQMI8658 imu;
 static UsageData usage = {};
 
 // ---- Touch interrupt + shared state ----
-volatile bool     touch_pressed = false;
-volatile uint16_t touch_x = 0;
-volatile uint16_t touch_y = 0;
-static volatile bool touch_data_ready = false;
+static volatile bool     touch_pressed = false;
+static volatile uint16_t touch_x = 0;
+static volatile uint16_t touch_y = 0;
+static volatile bool     touch_data_ready = false;
 
 static void IRAM_ATTR touch_isr(void) {
     touch_data_ready = true;
 }
 
 static void touch_read() {
-    if (!touch_data_ready) {
-        int16_t tx[5], ty[5];
-        uint8_t n = touch.getPoint(tx, ty, touch.getSupportTouchPoint());
-        if (n > 0) {
-            touch_pressed = true;
-            touch_x = (uint16_t)tx[0];
-            touch_y = (uint16_t)ty[0];
-        } else {
-            touch_pressed = false;
-        }
-        return;
-    }
+    if (!touch_data_ready) return;
     touch_data_ready = false;
 
     int16_t tx[5], ty[5];
@@ -305,7 +294,6 @@ void setup() {
     // Show initial battery status
     ui_update_battery(power_battery_pct(), power_is_charging());
 
-    // Default to splash screen (permanent while we work on it)
     ui_show_screen(SCREEN_SPLASH);
 
     Serial.println("Dashboard ready, waiting for data on BLE...");
