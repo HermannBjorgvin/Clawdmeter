@@ -7,6 +7,12 @@ It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/E
 busier when your usage rate climbs. The two side buttons send Space and
 Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
 
+## Demo
+
+|              On the desk              |                       In action                        |
+| :-----------------------------------: | :----------------------------------------------------: |
+| ![Clawdmeter on a desk](assets/demo.jpeg) | <video src="assets/demo.mp4" controls width="100%"></video> |
+
 ## Screens
 
 The device boots into the splash and stays there until you press the middle (PWR) button, which cycles between Usage and Bluetooth. Tap the screen anywhere (except the Reset zone on the Bluetooth screen) to flip back to the splash; tap again to dismiss it.
