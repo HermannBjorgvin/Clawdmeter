@@ -10,6 +10,3 @@ void usage_rate_sample(float session_pct);
 // 0 = idle, 1 = normal, 2 = active, 3 = heavy.
 // Defaults to 0 when the buffer doesn't have enough samples yet.
 int usage_rate_group(void);
-
-// Clear the buffer (e.g. when the 5-hour session window resets).
-void usage_rate_reset(void);

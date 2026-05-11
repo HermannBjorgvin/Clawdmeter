@@ -23,5 +23,3 @@ void ble_request_refresh(void);
 // BLE HID keyboard
 void ble_keyboard_press(uint8_t key, uint8_t modifier);
 void ble_keyboard_release(void);
-bool ble_is_connected(void);
-

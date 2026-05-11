@@ -232,8 +232,3 @@ void ble_keyboard_release(void) {
     input_kbd->setValue(report, sizeof(report));
     input_kbd->notify();
 }
-
-bool ble_is_connected(void) {
-    return state == BLE_STATE_CONNECTED;
-}
-

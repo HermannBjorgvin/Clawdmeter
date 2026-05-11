@@ -166,19 +166,6 @@ void splash_next(void) {
     Serial.printf("splash: -> %s\n", a->name);
 }
 
-void splash_prev(void) {
-    if (SPLASH_ANIM_COUNT == 0) return;
-    cur_anim = (cur_anim + SPLASH_ANIM_COUNT - 1) % SPLASH_ANIM_COUNT;
-    cur_frame = 0;
-    frame_started_ms = millis();
-    last_pick_ms = frame_started_ms;
-    const splash_anim_def_t *a = &splash_anims[cur_anim];
-    render_frame(a->frames[0], a->palette);
-    Serial.printf("splash: <- %s\n", a->name);
-}
-
-void splash_set_active(bool a) { active = a; }
-
 void splash_pick_for_current_rate(void) {
     if (SPLASH_ANIM_COUNT == 0) return;
     int g = usage_rate_group();
@@ -214,10 +201,3 @@ void splash_hide(void) {
 lv_obj_t* splash_get_root(void) {
     return splash_container;
 }
-
-const char *splash_current_name(void) {
-    if (SPLASH_ANIM_COUNT == 0) return "(none)";
-    return splash_anims[cur_anim].name;
-}
-
-uint16_t splash_count(void) { return SPLASH_ANIM_COUNT; }

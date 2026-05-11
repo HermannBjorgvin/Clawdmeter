@@ -33,7 +33,7 @@ static inline uint8_t oldest_idx(void) {
     return (head + RING_SIZE - count) % RING_SIZE;
 }
 
-void usage_rate_reset(void) {
+static void usage_rate_reset(void) {
     count = 0;
     head  = 0;
 }

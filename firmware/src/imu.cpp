@@ -74,8 +74,3 @@ void imu_tick(void) {
 uint8_t imu_get_rotation(void) {
     return current_rotation;
 }
-
-void imu_set_rotation(uint8_t r) {
-    current_rotation = r % 4;
-    Serial.printf("Rotation: %d (manual)\n", current_rotation);
-}
