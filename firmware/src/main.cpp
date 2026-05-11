@@ -4,17 +4,15 @@
 #include "display_cfg.h"
 #include "data.h"
 #include "ui.h"
-#include "hid.h"
-#include "touch.h"
 #include "ble.h"
 #include "power.h"
 #include "imu.h"
 #include "splash.h"
 
-// Physical buttons:
-//   BTN_BACK   (GPIO 0)  — left,  previous animation on splash
-//   BTN_FWD    (GPIO 18) — right, next animation on splash
-//   AXP PWR    (PMU)     — middle, cycle screens
+// Physical buttons (global, screen-independent):
+//   BTN_BACK   (GPIO 0)  — left,  send Space (Claude Code voice mode push-to-talk)
+//   BTN_FWD    (GPIO 18) — right, send Shift+Tab (Claude Code mode toggle)
+//   AXP PWR    (PMU)     — middle, cycle screens; on splash, cycle animations
 #define BTN_BACK 0
 #define BTN_FWD  18
 
@@ -290,14 +288,8 @@ void setup() {
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, my_touch_cb);
 
-    // Init USB HID keyboard (BLE-based)
-    hid_init();
-
     // Init BLE data channel
     ble_init();
-
-    // Init touch gesture detection
-    touch_init();
 
     // Physical buttons: back (GPIO 0) and forward (GPIO 18)
     pinMode(BTN_BACK, INPUT_PULLUP);
@@ -327,32 +319,34 @@ void loop() {
     touch_read();
     lv_timer_handler();
     ui_tick_anim();
-    touch_tick();
     ble_tick();
     power_tick();
     imu_tick();
     splash_tick();
 
-    // Three-button input (edge-detected on press):
-    //   BACK (GPIO 0)  → previous animation on splash screen
-    //   FWD  (GPIO 18) → next animation on splash screen
-    //   PWR  (AXP)     → cycle screens
+    // Three-button input (global, screen-independent):
+    //   LEFT  (GPIO 0)  → Space (voice-mode push-to-talk; press & release tracked)
+    //   RIGHT (GPIO 18) → Shift+Tab (Claude Code mode toggle)
+    //   PWR   (AXP)     → cycle screens; on splash, cycle animations
     {
         static bool back_was = false, fwd_was = false;
         bool back_now = (digitalRead(BTN_BACK) == LOW);
         bool fwd_now  = (digitalRead(BTN_FWD)  == LOW);
 
-        if (back_now && !back_was && ui_get_current_screen() == SCREEN_SPLASH) {
-            splash_prev();
+        if (back_now != back_was) {
+            if (back_now) ble_keyboard_press(0x2C, 0);  // HID Space, no mods
+            else          ble_keyboard_release();
+            back_was = back_now;
         }
-        if (fwd_now && !fwd_was && ui_get_current_screen() == SCREEN_SPLASH) {
-            splash_next();
+        if (fwd_now != fwd_was) {
+            if (fwd_now) ble_keyboard_press(0x2B, 0x02);  // HID Tab + LEFT_SHIFT
+            else         ble_keyboard_release();
+            fwd_was = fwd_now;
         }
-        back_was = back_now;
-        fwd_was  = fwd_now;
 
         if (power_pwr_pressed()) {
-            ui_cycle_screen();
+            if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
+            else                                          ui_cycle_screen();
         }
     }
 
@@ -389,15 +383,6 @@ void loop() {
     if (bs != last_ble_state) {
         last_ble_state = bs;
         ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());
-    }
-
-    // Auto-switch screen on USB cable connect/disconnect — but never away from splash
-    if (power_usb_changed() && ui_get_current_screen() != SCREEN_SPLASH) {
-        if (power_is_usb_connected()) {
-            ui_show_screen(SCREEN_USAGE);
-        } else {
-            ui_show_screen(SCREEN_CONTROLLER);
-        }
     }
 
     // Update battery indicator

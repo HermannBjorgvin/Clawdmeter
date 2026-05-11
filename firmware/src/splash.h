@@ -22,6 +22,9 @@ void splash_set_active(bool active);
 void splash_show(void);
 void splash_hide(void);
 
+// Root container (so ui.cpp can attach a click event).
+lv_obj_t* splash_get_root(void);
+
 // Current animation name (for debug/UI).
 const char *splash_current_name(void);
 

@@ -47,12 +47,6 @@ static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 static lv_obj_t* lbl_anim;
 
-// ---- Controller screen widgets ----
-static lv_obj_t* ctrl_container;
-static lv_obj_t* ctrl_session_bar;
-static lv_obj_t* ctrl_session_lbl;
-static lv_obj_t* ctrl_reset_lbl;
-
 // ---- Bluetooth screen widgets ----
 static lv_obj_t* ble_container;
 static lv_obj_t* lbl_ble_status;
@@ -143,6 +137,10 @@ static void format_reset_time(int mins, char* buf, size_t len) {
     }
 }
 
+// Forward decls — callbacks defined near ui_show_screen below
+static void global_click_cb(lv_event_t* e);
+static void ble_reset_click_cb(lv_event_t* e);
+
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
     lv_obj_set_pos(panel, x, y);
@@ -156,6 +154,9 @@ static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_set_style_pad_top(panel, 12, 0);
     lv_obj_set_style_pad_bottom(panel, 12, 0);
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    // Bubble click events up to the screen / usage_container so a tap anywhere
+    // on the panel fires the global click handler.
+    lv_obj_add_flag(panel, LV_OBJ_FLAG_EVENT_BUBBLE);
     return panel;
 }
 
@@ -173,31 +174,6 @@ static lv_obj_t* make_bar(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_set_style_radius(bar, 6, LV_PART_INDICATOR);
     return bar;
 }
-
-static lv_obj_t* make_zone(lv_obj_t* parent, int x, int y, int w, int h, const char* text) {
-    lv_obj_t* zone = lv_obj_create(parent);
-    lv_obj_set_pos(zone, x, y);
-    lv_obj_set_size(zone, w, h);
-    lv_obj_set_style_bg_color(zone, COL_PANEL, 0);
-    lv_obj_set_style_bg_opa(zone, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(zone, 8, 0);
-    lv_obj_set_style_border_width(zone, 0, 0);
-    lv_obj_clear_flag(zone, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* lbl = lv_label_create(zone);
-    lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_font(lbl, &font_styrene_24, 0);
-    lv_obj_set_style_text_color(lbl, COL_DIM, 0);
-    lv_obj_center(lbl);
-
-    return zone;
-}
-
-// Icon image descriptors
-static lv_image_dsc_t icon_escape_dsc;
-static lv_image_dsc_t icon_delete_dsc;
-static lv_image_dsc_t icon_arrow_left_dsc;
-static lv_image_dsc_t icon_arrow_right_dsc;
 
 static void init_icon_dsc(lv_image_dsc_t* dsc, int w, int h, const uint16_t* data) {
     dsc->header.w = w;
@@ -217,52 +193,6 @@ static void init_icon_dsc_rgb565a8(lv_image_dsc_t* dsc, int w, int h, const uint
     dsc->header.stride = w * 2;
     dsc->data = data;
     dsc->data_size = w * h * 3;
-}
-
-static lv_obj_t* make_zone_icon(lv_obj_t* parent, int x, int y, int w, int h, lv_image_dsc_t* icon) {
-    lv_obj_t* zone = lv_obj_create(parent);
-    lv_obj_set_pos(zone, x, y);
-    lv_obj_set_size(zone, w, h);
-    lv_obj_set_style_bg_color(zone, COL_PANEL, 0);
-    lv_obj_set_style_bg_opa(zone, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(zone, 8, 0);
-    lv_obj_set_style_border_width(zone, 0, 0);
-    lv_obj_clear_flag(zone, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* img = lv_image_create(zone);
-    lv_image_set_src(img, icon);
-    lv_obj_center(img);
-
-    return zone;
-}
-
-static void make_hint_pair(lv_obj_t* parent, const char* gesture, const char* action) {
-    lv_obj_t* pair = lv_obj_create(parent);
-    lv_obj_set_width(pair, lv_pct(100));
-    lv_obj_set_height(pair, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(pair, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(pair, 0, 0);
-    lv_obj_set_style_pad_all(pair, 0, 0);
-    lv_obj_set_style_pad_row(pair, 0, 0);
-    lv_obj_set_flex_flow(pair, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(pair, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_clear_flag(pair, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* g = lv_label_create(pair);
-    lv_label_set_text(g, gesture);
-    lv_obj_set_style_text_font(g, &font_styrene_20, 0);
-    lv_obj_set_style_text_color(g, COL_TEXT, 0);
-    lv_obj_set_style_text_align(g, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_width(g, lv_pct(100));
-    lv_label_set_long_mode(g, LV_LABEL_LONG_WRAP);
-
-    lv_obj_t* a = lv_label_create(pair);
-    lv_label_set_text(a, action);
-    lv_obj_set_style_text_font(a, &font_styrene_20, 0);
-    lv_obj_set_style_text_color(a, COL_DIM, 0);
-    lv_obj_set_style_text_align(a, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_width(a, lv_pct(100));
-    lv_label_set_long_mode(a, LV_LABEL_LONG_WRAP);
 }
 
 static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
@@ -302,6 +232,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_border_width(usage_container, 0, 0);
     lv_obj_set_style_pad_all(usage_container, 0, 0);
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
 
     // Title
     lbl_title = lv_label_create(usage_container);
@@ -359,114 +290,6 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
-}
-
-// ======== Controller Screen (480x480) ========
-
-#define CTRL_SIDE_W   110
-#define CTRL_SIDE_H   138
-#define CTRL_GAP      10
-#define CTRL_CONTENT_H  (2 * CTRL_SIDE_H + CTRL_GAP)  // 306
-
-static void init_controller_screen(lv_obj_t* scr) {
-    ctrl_container = lv_obj_create(scr);
-    lv_obj_set_size(ctrl_container, SCR_W, SCR_H);
-    lv_obj_set_pos(ctrl_container, 0, 0);
-    lv_obj_set_style_bg_opa(ctrl_container, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(ctrl_container, 0, 0);
-    lv_obj_set_style_pad_all(ctrl_container, 0, 0);
-    lv_obj_clear_flag(ctrl_container, LV_OBJ_FLAG_SCROLLABLE);
-
-    // Title
-    lv_obj_t* lbl_ctrl_title = lv_label_create(ctrl_container);
-    lv_label_set_text(lbl_ctrl_title, "Controller");
-    lv_obj_set_style_text_font(lbl_ctrl_title, &font_tiempos_56, 0);
-    lv_obj_set_style_text_color(lbl_ctrl_title, COL_TEXT, 0);
-    lv_obj_align(lbl_ctrl_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
-
-    // Initialize icon descriptors
-    init_icon_dsc(&icon_escape_dsc, ICON_ESCAPE_W, ICON_ESCAPE_H, icon_escape_data);
-    init_icon_dsc(&icon_delete_dsc, ICON_DELETE_W, ICON_DELETE_H, icon_delete_data);
-    init_icon_dsc(&icon_arrow_left_dsc, ICON_ARROW_LEFT_W, ICON_ARROW_LEFT_H, icon_arrow_left_data);
-    init_icon_dsc(&icon_arrow_right_dsc, ICON_ARROW_RIGHT_W, ICON_ARROW_RIGHT_H, icon_arrow_right_data);
-
-    // Left column: ESC (top), < (bottom)
-    make_zone_icon(ctrl_container, MARGIN, CONTENT_Y, CTRL_SIDE_W, CTRL_SIDE_H, &icon_escape_dsc);
-    make_zone_icon(ctrl_container, MARGIN, CONTENT_Y + CTRL_SIDE_H + CTRL_GAP, CTRL_SIDE_W, CTRL_SIDE_H, &icon_arrow_left_dsc);
-
-    // Right column: DEL (top), > (bottom)
-    int right_x = SCR_W - MARGIN - CTRL_SIDE_W;
-    make_zone_icon(ctrl_container, right_x, CONTENT_Y, CTRL_SIDE_W, CTRL_SIDE_H, &icon_delete_dsc);
-    make_zone_icon(ctrl_container, right_x, CONTENT_Y + CTRL_SIDE_H + CTRL_GAP, CTRL_SIDE_W, CTRL_SIDE_H, &icon_arrow_right_dsc);
-
-    // Center hints box
-    int cx = MARGIN + CTRL_SIDE_W + CTRL_GAP;
-    int cw = CONTENT_W - 2 * (CTRL_SIDE_W + CTRL_GAP);
-    lv_obj_t* center = make_zone(ctrl_container, cx, CONTENT_Y, cw, CTRL_CONTENT_H, "");
-
-    // Vertically centered hint list
-    lv_obj_t* hint_list = lv_obj_create(center);
-    lv_obj_set_size(hint_list, cw - 24, LV_SIZE_CONTENT);
-    lv_obj_center(hint_list);
-    lv_obj_set_style_bg_opa(hint_list, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(hint_list, 0, 0);
-    lv_obj_set_style_pad_all(hint_list, 0, 0);
-    lv_obj_set_style_pad_row(hint_list, 6, 0);
-    lv_obj_set_flex_flow(hint_list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(hint_list, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_clear_flag(hint_list, LV_OBJ_FLAG_SCROLLABLE);
-
-    // Hand icon + "Gestures" header row
-    static lv_image_dsc_t icon_hand_dsc;
-    init_icon_dsc(&icon_hand_dsc, ICON_HAND_W, ICON_HAND_H, icon_hand_data);
-
-    lv_obj_t* header_row = lv_obj_create(hint_list);
-    lv_obj_set_width(header_row, lv_pct(100));
-    lv_obj_set_height(header_row, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(header_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(header_row, 0, 0);
-    lv_obj_set_style_pad_all(header_row, 0, 0);
-    lv_obj_set_style_pad_column(header_row, 8, 0);
-    lv_obj_set_flex_flow(header_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(header_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_bottom(header_row, 8, 0);
-    lv_obj_clear_flag(header_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* hand_img = lv_image_create(header_row);
-    lv_image_set_src(hand_img, &icon_hand_dsc);
-
-    lv_obj_t* gestures_lbl = lv_label_create(header_row);
-    lv_label_set_text(gestures_lbl, "Gestures");
-    lv_obj_set_style_text_font(gestures_lbl, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(gestures_lbl, COL_TEXT, 0);
-
-    // Hint entries: gesture (white) + action (dim) on separate lines
-    lv_obj_set_style_pad_row(hint_list, 12, 0);
-    make_hint_pair(hint_list, "Swipe up/down", "Arrow keys");
-    make_hint_pair(hint_list, "Swipe left", "Toggle mode");
-    make_hint_pair(hint_list, "Swipe right", "Enter key");
-    make_hint_pair(hint_list, "Hold", "Voice dictation");
-
-    // Usage info below content area
-    int info_y = CONTENT_Y + CTRL_CONTENT_H + CTRL_GAP + 4;
-
-    ctrl_session_lbl = lv_label_create(ctrl_container);
-    lv_label_set_text(ctrl_session_lbl, "---%");
-    lv_obj_set_style_text_font(ctrl_session_lbl, &font_styrene_24, 0);
-    lv_obj_set_style_text_color(ctrl_session_lbl, COL_DIM, 0);
-    lv_obj_set_pos(ctrl_session_lbl, MARGIN, info_y);
-
-    ctrl_reset_lbl = lv_label_create(ctrl_container);
-    lv_label_set_text(ctrl_reset_lbl, "---");
-    lv_obj_set_style_text_font(ctrl_reset_lbl, &font_styrene_24, 0);
-    lv_obj_set_style_text_color(ctrl_reset_lbl, COL_DIM, 0);
-    lv_obj_align(ctrl_reset_lbl, LV_ALIGN_TOP_RIGHT, -MARGIN, info_y);
-
-    int bar_y = info_y + 28;
-    ctrl_session_bar = make_bar(ctrl_container, MARGIN, bar_y, CONTENT_W, 16);
-
-    // Start hidden
-    lv_obj_add_flag(ctrl_container, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ======== Bluetooth Screen (480x480) ========
@@ -529,6 +352,7 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_set_flex_flow(reset_zone, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(reset_zone, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(reset_zone, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(reset_zone, ble_reset_click_cb, LV_EVENT_CLICKED, NULL);
 
     static lv_image_dsc_t icon_trash_dsc;
     init_icon_dsc(&icon_trash_dsc, ICON_TRASH2_W, ICON_TRASH2_H, icon_trash2_data);
@@ -576,9 +400,13 @@ void ui_init(void) {
     init_battery_icons();
 
     init_usage_screen(scr);
-    init_controller_screen(scr);
     init_bluetooth_screen(scr);
     splash_init(scr);
+
+    // Splash is touch-toggled — tap anywhere on the splash dismisses it
+    if (splash_get_root()) {
+        lv_obj_add_event_cb(splash_get_root(), global_click_cb, LV_EVENT_CLICKED, NULL);
+    }
 
     // Logo on top of all containers (inset for rounded corners)
     logo_img = lv_image_create(scr);
@@ -612,15 +440,6 @@ void ui_update(const UsageData* data) {
 
     format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
     lv_label_set_text(lbl_weekly_reset, buf);
-
-    // Controller screen session info
-    lv_bar_set_value(ctrl_session_bar, s_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(ctrl_session_bar, pct_color(data->session_pct), LV_PART_INDICATOR);
-    lv_label_set_text_fmt(ctrl_session_lbl, "%d%%", s_pct);
-
-    char rbuf[48];
-    format_reset_time(data->session_reset_mins, rbuf, sizeof(rbuf));
-    lv_label_set_text(ctrl_reset_lbl, rbuf);
 }
 
 void ui_tick_anim(void) {
@@ -647,16 +466,41 @@ void ui_tick_anim(void) {
     }
 }
 
+static screen_t prev_non_splash_screen = SCREEN_USAGE;
+static int last_battery_idx = 0;
+
+// Hide the battery indicator on the splash screen when it's in the low state —
+// the small icon is visually noisy over the pixel-art creature animations.
+static void apply_battery_visibility(void) {
+    if (!battery_img) return;
+    bool hide = (current_screen == SCREEN_SPLASH && last_battery_idx == 1);
+    if (hide) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    else      lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+}
+
+// LVGL handles click debouncing internally. Screen-level handler fires when
+// no child consumed the event (children only consume if they have their own
+// event callback, e.g. the Reset Bluetooth zone). On BT screen we skip the
+// splash toggle so only the reset zone is interactive there.
+static void global_click_cb(lv_event_t* e) {
+    (void)e;
+    if (ui_get_current_screen() == SCREEN_BLUETOOTH) return;
+    ui_toggle_splash();
+}
+
+static void ble_reset_click_cb(lv_event_t* e) {
+    (void)e;
+    ble_clear_bonds();
+}
+
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(ctrl_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
     case SCREEN_SPLASH:     splash_show(); break;
     case SCREEN_USAGE:      lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
-    case SCREEN_CONTROLLER: lv_obj_clear_flag(ctrl_container, LV_OBJ_FLAG_HIDDEN); break;
     case SCREEN_BLUETOOTH:  lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
     }
@@ -667,11 +511,19 @@ void ui_show_screen(screen_t screen) {
         else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
     }
 
+    if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
     current_screen = screen;
+    apply_battery_visibility();
 }
 
 void ui_cycle_screen(void) {
-    ui_show_screen((screen_t)((current_screen + 1) % SCREEN_COUNT));
+    screen_t next = (current_screen == SCREEN_USAGE) ? SCREEN_BLUETOOTH : SCREEN_USAGE;
+    ui_show_screen(next);
+}
+
+void ui_toggle_splash(void) {
+    if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
+    else                                  ui_show_screen(SCREEN_SPLASH);
 }
 
 screen_t ui_get_current_screen(void) {
@@ -726,4 +578,6 @@ void ui_update_battery(int percent, bool charging) {
         idx = 3;  // full
     }
     lv_image_set_src(battery_img, &battery_dscs[idx]);
+    last_battery_idx = idx;
+    apply_battery_visibility();
 }

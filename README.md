@@ -11,11 +11,10 @@ splash screen of pixel-art creatures.
 
 - **Splash screen** — 13 looping 20×20 pixel-art creature animations scaled 24× to fill the display. Default boot screen.
 - **Usage dashboard** — Live 5-hour session and 7-day weekly utilization bars with color-coded thresholds
-- **Touch controller** — Gesture-based Claude Code navigation (swipe, tap, hold) sent as BLE HID keyboard input
+- **Physical button shortcuts** — Left button → Space (voice mode), right button → Shift+Tab (mode toggle); both sent over BLE HID
 - **Bluetooth screen** — Connection status, device name, MAC address, bond management
 - **Auto-rotation** — QMI8658 accelerometer drives 90° rotation snaps with a quick AMOLED brightness flash transition
 - **Battery indicator** — Lucide battery icons in the upper-right corner, AXP2101-driven
-- **USB-aware screen switching** — Plug in USB → usage screen, unplug → controller screen (suppressed while on splash)
 - **Wireless** — All data communication over Bluetooth Low Energy (USB only for flashing and charging)
 
 ## Hardware
@@ -73,52 +72,30 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 3. Extracts usage data from the response headers (`anthropic-ratelimit-unified-5h-utilization`, etc.)
 4. Connects to the ESP32 over BLE and writes a JSON payload to the GATT RX characteristic
 5. The ESP32 parses it and updates the LVGL dashboard
-6. Touch gestures on the Controller screen are sent as BLE HID keyboard input to the host
+6. The left/right physical buttons send Space and Shift+Tab as BLE HID keyboard input to the paired host (no host-side daemon involvement)
 
 ## Screens
 
-Press the **middle physical button (PWR)** to cycle through screens. The order is:
-Splash → Usage → Controller → Bluetooth → Splash. Tapping the Claude logo also cycles screens (legacy gesture, still works on the non-splash screens).
+Two persistent screens, **Usage** and **Bluetooth**, are cycled by the **middle physical button (PWR)**. The **splash** is a touch-toggled welcome animation: tap anywhere on the display (outside the Reset zone on the Bluetooth screen) to show it; tap again to dismiss.
 
-|             Splash              |              Usage              |                Controller                 |                Bluetooth                |
-| :-----------------------------: | :-----------------------------: | :---------------------------------------: | :-------------------------------------: |
-| Pixel-art creature animations   | ![Usage](screenshots/usage.png) | ![Controller](screenshots/controller.png) | ![Bluetooth](screenshots/bluetooth.png) |
-| Looping 20×20 creature loop     | Session and weekly utilization  |      Touch zones and swipe gestures       |       Connection status and reset       |
+|              Usage              |                Bluetooth                |               Splash                |
+| :-----------------------------: | :-------------------------------------: | :---------------------------------: |
+| ![Usage](screenshots/usage.png) | ![Bluetooth](screenshots/bluetooth.png) | Looping 20×20 pixel-art creatures   |
+| Session and weekly utilization  |       Connection status and reset       | Boot screen; touch-toggle anytime   |
 
-The splash screen is also shown automatically on boot. It overrides the USB-state-based default screen until you press the middle button to navigate elsewhere.
+The splash screen is also the default boot screen.
 
 ## Physical buttons
 
-The board has three physical buttons in a row. Functions:
+The board has three physical buttons in a row. Functions are global (screen-independent) for the left and right buttons; the middle button is screen-aware.
 
-| Button                   | GPIO         | Function                              |
-| ------------------------ | ------------ | ------------------------------------- |
-| **Left** (back)          | GPIO 0       | Previous splash animation             |
-| **Middle** (PWR)         | AXP2101 PKEY | Cycle screens                         |
-| **Right** (forward)      | GPIO 18      | Next splash animation                 |
+| Button              | GPIO         | Function                                                                      |
+| ------------------- | ------------ | ----------------------------------------------------------------------------- |
+| **Left**            | GPIO 0       | Hold to send Space (Claude Code voice-mode push-to-talk)                      |
+| **Middle** (PWR)    | AXP2101 PKEY | Cycle screens (Usage ↔ Bluetooth); on splash, cycle animations                |
+| **Right**           | GPIO 18      | Press to send Shift+Tab (Claude Code mode toggle)                             |
 
-The left/right animation buttons only have effect on the splash screen. The middle button works from any screen.
-
-## Gesture controls
-
-On the **Controller** screen:
-
-| Gesture       | Action                  |
-| ------------- | ----------------------- |
-| Swipe up      | Arrow Up                |
-| Swipe down    | Arrow Down              |
-| Swipe left    | Shift+Tab (toggle mode) |
-| Swipe right   | Enter                   |
-| Hold (center) | Space (voice dictation) |
-
-Touch zones (tap):
-
-| Zone         | Action      |
-| ------------ | ----------- |
-| Top-left     | Escape      |
-| Bottom-left  | Arrow Left  |
-| Top-right    | Delete      |
-| Bottom-right | Arrow Right |
+Space and Shift+Tab are delivered as standard BLE HID keyboard reports — they work in any focused window on the paired host, not just Claude Code.
 
 ## BLE protocol
 

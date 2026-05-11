@@ -135,6 +135,10 @@ void splash_hide(void) {
     active = false;
 }
 
+lv_obj_t* splash_get_root(void) {
+    return splash_container;
+}
+
 const char *splash_current_name(void) {
     if (SPLASH_ANIM_COUNT == 0) return "(none)";
     return splash_anims[cur_anim].name;
