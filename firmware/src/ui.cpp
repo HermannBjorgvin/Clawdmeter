@@ -14,7 +14,7 @@ LV_FONT_DECLARE(font_styrene_20);
 LV_FONT_DECLARE(font_mono_32);
 
 // Anthropic brand palette
-#define COL_BG        lv_color_hex(0x141413)
+#define COL_BG        lv_color_hex(0x000000)
 #define COL_PANEL     lv_color_hex(0x1f1f1e)
 #define COL_TEXT      lv_color_hex(0xfaf9f5)
 #define COL_DIM       lv_color_hex(0xb0aea5)
