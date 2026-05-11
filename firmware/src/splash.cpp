@@ -1,7 +1,9 @@
 #include "splash.h"
 #include "splash_animations.h"
 #include "theme.h"
+#include "usage_rate.h"
 #include <Arduino.h>
+#include <string.h>
 #include <esp_heap_caps.h>
 
 // 20x20 grid scaled 24x to fill 480x480
@@ -23,7 +25,48 @@ static uint16_t *canvas_buf = NULL;        // 480x480 RGB565 (PSRAM)
 static uint16_t cur_anim = 0;
 static uint16_t cur_frame = 0;
 static uint32_t frame_started_ms = 0;
+static uint32_t last_pick_ms = 0;
 static bool active = false;
+
+// While splash is showing, auto-cycle to the next animation in the current
+// rate-driven group every this many ms.
+#define SPLASH_ROTATE_INTERVAL_MS 20000
+
+// Usage-rate animation groups: 4 groups × up to 4 animations each.
+// Filled at init by matching literal names from splash_anims[].
+#define GROUP_COUNT 4
+#define GROUP_MAX   4
+static int8_t  group_lists[GROUP_COUNT][GROUP_MAX];
+static uint8_t group_size[GROUP_COUNT] = {0};
+static uint8_t group_rotation[GROUP_COUNT] = {0};
+
+static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
+    // Group 0 — idle / sleepy
+    { "expression sleep", "idle breathe", "idle blink", "expression wink" },
+    // Group 1 — normal pace
+    { "idle look around", "work think", "work coding", NULL },
+    // Group 2 — active
+    { "dance sway", "expression surprise", "dance bounce", NULL },
+    // Group 3 — heavy
+    { "dance bounce dj", "dance sway dj", "dance djmix", NULL },
+};
+
+static void resolve_group_lists(void) {
+    for (int g = 0; g < GROUP_COUNT; g++) {
+        group_size[g] = 0;
+        for (int s = 0; s < GROUP_MAX; s++) {
+            group_lists[g][s] = -1;
+            const char* want = GROUP_NAMES[g][s];
+            if (!want) continue;
+            for (int i = 0; i < SPLASH_ANIM_COUNT; i++) {
+                if (strcmp(splash_anims[i].name, want) == 0) {
+                    group_lists[g][group_size[g]++] = (int8_t)i;
+                    break;
+                }
+            }
+        }
+    }
+}
 
 static void render_frame(const uint8_t *cells, const uint16_t *palette) {
     for (int gy = 0; gy < GRID; gy++) {
@@ -79,6 +122,8 @@ void splash_init(lv_obj_t *parent) {
     lv_obj_set_style_text_align(label_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(label_status);
 
+    resolve_group_lists();
+
     if (SPLASH_ANIM_COUNT == 0) {
         show_placeholder();
     } else {
@@ -93,6 +138,12 @@ void splash_init(lv_obj_t *parent) {
 
 void splash_tick(void) {
     if (!active || SPLASH_ANIM_COUNT == 0) return;
+
+    // Auto-rotate to the next animation in the current group.
+    if (millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
+        splash_pick_for_current_rate();
+    }
+
     const splash_anim_def_t *a = &splash_anims[cur_anim];
     if (a->frame_count == 0) return;
 
@@ -109,6 +160,7 @@ void splash_next(void) {
     cur_anim = (cur_anim + 1) % SPLASH_ANIM_COUNT;
     cur_frame = 0;
     frame_started_ms = millis();
+    last_pick_ms = frame_started_ms;
     const splash_anim_def_t *a = &splash_anims[cur_anim];
     render_frame(a->frames[0], a->palette);
     Serial.printf("splash: -> %s\n", a->name);
@@ -119,6 +171,7 @@ void splash_prev(void) {
     cur_anim = (cur_anim + SPLASH_ANIM_COUNT - 1) % SPLASH_ANIM_COUNT;
     cur_frame = 0;
     frame_started_ms = millis();
+    last_pick_ms = frame_started_ms;
     const splash_anim_def_t *a = &splash_anims[cur_anim];
     render_frame(a->frames[0], a->palette);
     Serial.printf("splash: <- %s\n", a->name);
@@ -126,7 +179,29 @@ void splash_prev(void) {
 
 void splash_set_active(bool a) { active = a; }
 
+void splash_pick_for_current_rate(void) {
+    if (SPLASH_ANIM_COUNT == 0) return;
+    int g = usage_rate_group();
+    if (g < 0 || g >= GROUP_COUNT) g = 0;
+    if (group_size[g] == 0) return;
+
+    uint8_t slot = group_rotation[g] % group_size[g];
+    group_rotation[g]++;
+    int8_t idx = group_lists[g][slot];
+    if (idx < 0) return;
+
+    cur_anim = (uint16_t)idx;
+    cur_frame = 0;
+    frame_started_ms = millis();
+    last_pick_ms = frame_started_ms;
+    const splash_anim_def_t *a = &splash_anims[cur_anim];
+    render_frame(a->frames[0], a->palette);
+}
+
+bool splash_is_active(void) { return active; }
+
 void splash_show(void) {
+    splash_pick_for_current_rate();
     if (splash_container) lv_obj_clear_flag(splash_container, LV_OBJ_FLAG_HIDDEN);
     active = true;
 }
