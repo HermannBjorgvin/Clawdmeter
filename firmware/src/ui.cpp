@@ -223,6 +223,32 @@ static void init_battery_icons(void) {
 #define PANEL_H     150
 #define PANEL_GAP   16
 
+// One Session/Weekly panel: big % label, pill on the right, bar, reset label.
+// Pill y=1: symmetric inside the panel — panel-outer-top → pill-top equals
+// pill-bottom → bar-top (pill height 42 + panel pad_top 12 + bar y=56).
+static void make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
+                             lv_obj_t** out_pct, lv_obj_t** out_pill,
+                             lv_obj_t** out_bar, lv_obj_t** out_reset) {
+    lv_obj_t* panel = make_panel(parent, MARGIN, y, CONTENT_W, PANEL_H);
+
+    *out_pct = lv_label_create(panel);
+    lv_label_set_text(*out_pct, "---%");
+    lv_obj_set_style_text_font(*out_pct, &font_styrene_48, 0);
+    lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
+    lv_obj_set_pos(*out_pct, 0, 0);
+
+    *out_pill = make_pill(panel, pill_text);
+    lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
+
+    *out_bar = make_bar(panel, 0, 56, CONTENT_W - 32, 24);
+
+    *out_reset = lv_label_create(panel);
+    lv_label_set_text(*out_reset, "---");
+    lv_obj_set_style_text_font(*out_reset, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
+    lv_obj_set_pos(*out_reset, 0, 94);
+}
+
 static void init_usage_screen(lv_obj_t* scr) {
     usage_container = lv_obj_create(scr);
     lv_obj_set_size(usage_container, SCR_W, SCR_H);
@@ -233,57 +259,19 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
 
-    // Title
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
     lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
     lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
 
-    // Session panel
-    lv_obj_t* p_session = make_panel(usage_container, MARGIN, CONTENT_Y, CONTENT_W, PANEL_H);
+    make_usage_panel(usage_container, CONTENT_Y, "Current",
+                     &lbl_session_pct, &lbl_session_label,
+                     &bar_session, &lbl_session_reset);
+    make_usage_panel(usage_container, CONTENT_Y + PANEL_H + PANEL_GAP, "Weekly",
+                     &lbl_weekly_pct, &lbl_weekly_label,
+                     &bar_weekly, &lbl_weekly_reset);
 
-    lbl_session_pct = lv_label_create(p_session);
-    lv_label_set_text(lbl_session_pct, "---%");
-    lv_obj_set_style_text_font(lbl_session_pct, &font_styrene_48, 0);
-    lv_obj_set_style_text_color(lbl_session_pct, COL_TEXT, 0);
-    lv_obj_set_pos(lbl_session_pct, 0, 0);
-
-    lbl_session_label = make_pill(p_session, "Current");
-    // Symmetric: panel-outer-top → pill-top equals pill-bottom → bar-top.
-    // Pill height = font line_height(30) + pad_top(6) + pad_bottom(6) = 42; panel pad_top = 12; bar at y=56 → y_inner=1.
-    lv_obj_align(lbl_session_label, LV_ALIGN_TOP_RIGHT, 0, 1);
-
-    bar_session = make_bar(p_session, 0, 56, CONTENT_W - 32, 24);
-
-    lbl_session_reset = lv_label_create(p_session);
-    lv_label_set_text(lbl_session_reset, "---");
-    lv_obj_set_style_text_font(lbl_session_reset, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_session_reset, COL_DIM, 0);
-    lv_obj_set_pos(lbl_session_reset, 0, 94);
-
-    // Weekly panel
-    int weekly_y = CONTENT_Y + PANEL_H + PANEL_GAP;
-    lv_obj_t* p_weekly = make_panel(usage_container, MARGIN, weekly_y, CONTENT_W, PANEL_H);
-
-    lbl_weekly_pct = lv_label_create(p_weekly);
-    lv_label_set_text(lbl_weekly_pct, "---%");
-    lv_obj_set_style_text_font(lbl_weekly_pct, &font_styrene_48, 0);
-    lv_obj_set_style_text_color(lbl_weekly_pct, COL_TEXT, 0);
-    lv_obj_set_pos(lbl_weekly_pct, 0, 0);
-
-    lbl_weekly_label = make_pill(p_weekly, "Weekly");
-    lv_obj_align(lbl_weekly_label, LV_ALIGN_TOP_RIGHT, 0, 1);
-
-    bar_weekly = make_bar(p_weekly, 0, 56, CONTENT_W - 32, 24);
-
-    lbl_weekly_reset = lv_label_create(p_weekly);
-    lv_label_set_text(lbl_weekly_reset, "---");
-    lv_obj_set_style_text_font(lbl_weekly_reset, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_weekly_reset, COL_DIM, 0);
-    lv_obj_set_pos(lbl_weekly_reset, 0, 94);
-
-    // Animation
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
     lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
