@@ -10,24 +10,22 @@ Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
 
 ## Screens
 
-Two persistent screens, **Usage** and **Bluetooth**, are cycled by the **middle physical button (PWR)**. The **splash** is a touch-toggled welcome animation: tap anywhere on the display (outside the Reset zone on the Bluetooth screen) to show it; tap again to dismiss. Splash is the default boot screen.
+The device boots into the splash and stays there until you press the middle (PWR) button, which cycles between Usage and Bluetooth. Tap the screen anywhere (except the Reset zone on the Bluetooth screen) to flip back to the splash; tap again to dismiss it.
 
 |               Splash                |              Usage              |                Bluetooth                |
 | :---------------------------------: | :-----------------------------: | :-------------------------------------: |
 | ![Splash](screenshots/splash.png)   | ![Usage](screenshots/usage.png) | ![Bluetooth](screenshots/bluetooth.png) |
 |  Boot screen; touch-toggle anytime  | Session and weekly utilization  |     Connection status and bond reset    |
 
-On splash, the **middle (PWR) button** cycles to the next animation manually; otherwise the firmware auto-rotates every 20 s within the usage-rate group.
+While the splash is up, the middle button cycles animations instead of screens. The firmware also auto-rotates every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
 
-## Features
+## A few things worth knowing
 
-- **Splash screen** — 13 looping 20×20 pixel-art Clawd animations scaled 24× to fill the display. The active animation reacts to your current Claude usage *rate* (idle / normal / active / heavy), auto-rotating within the matching group every 20 s.
-- **Usage dashboard** — Live 5-hour session and 7-day weekly utilization bars with reset countdowns.
-- **Physical button shortcuts** — Left button → Space (voice mode), right button → Shift+Tab (mode toggle); both sent over BLE HID.
-- **Bluetooth screen** — Connection status, device name, MAC address, bond reset zone.
-- **Auto-rotation** — QMI8658 accelerometer drives 90° rotation snaps with a quick AMOLED brightness-flash transition.
-- **Battery indicator** — Lucide battery icons in the upper-right corner, AXP2101-driven.
-- **Wireless** — All data communication over Bluetooth Low Energy (USB only for flashing and charging).
+The panel auto-rotates via a QMI8658 accelerometer. The CO5300 can't rotate in hardware, so the firmware rotates pixels in software on every flush — a brief brightness flash hides the transition.
+
+Battery and charging status sit in the upper-right corner, driven by the AXP2101 PMU. The device runs untethered once flashed; USB only comes back into play for re-flashing or topping up the battery.
+
+The splash plays 13 looping 20×20 pixel-art Clawd animations scaled 24× to fill the display, picked from one of four "mood" groups (idle, normal, active, heavy) based on your current usage rate.
 
 ## Hardware
 
@@ -51,7 +49,7 @@ pio run -t upload --upload-port /dev/ttyACM0
 
 ## Bluetooth pairing
 
-After flashing, the device advertises as **"Claude Controller"**. Pair it once:
+After flashing, the device advertises as "Claude Controller". Pair it once:
 
 ```bash
 # Scan for the device
@@ -79,17 +77,17 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 
 ## How it works
 
-1. The daemon reads your Claude Code OAuth token from `~/.claude/.credentials.json`
-2. Makes a minimal API call to `api.anthropic.com/v1/messages` (1 token of Haiku, essentially free)
-3. Extracts usage data from the response headers (`anthropic-ratelimit-unified-5h-utilization`, etc.)
-4. Connects to the ESP32 over BLE and writes a JSON payload to the GATT RX characteristic
-5. The ESP32 parses it and updates the LVGL dashboard
-6. The firmware tracks the *rate of change* of session % over a 5-minute window and picks splash animations from the matching mood group (idle / normal / active / heavy)
-7. The left/right physical buttons send Space and Shift+Tab as BLE HID keyboard input to the paired host (no host-side daemon involvement)
+1. The daemon reads your Claude Code OAuth token from `~/.claude/.credentials.json`.
+2. It makes a minimal API call to `api.anthropic.com/v1/messages` — one token of Haiku, basically free.
+3. The usage numbers come straight out of the response headers (`anthropic-ratelimit-unified-5h-utilization` and friends).
+4. The daemon connects to the ESP32 over BLE and writes a JSON payload to the GATT RX characteristic.
+5. The firmware parses it and updates the LVGL dashboard.
+6. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.
+7. The two side buttons are independent of all of this — they send Space and Shift+Tab as BLE HID keyboard input to the paired host directly.
 
 ## Physical buttons
 
-The board has three physical buttons in a row. Functions are global (screen-independent) for the left and right buttons; the middle button is screen-aware.
+The board has three side buttons. Left and right do the same thing on every screen; the middle button is screen-aware.
 
 | Button              | GPIO         | Function                                                                      |
 | ------------------- | ------------ | ----------------------------------------------------------------------------- |
@@ -97,7 +95,7 @@ The board has three physical buttons in a row. Functions are global (screen-inde
 | **Middle** (PWR)    | AXP2101 PKEY | Cycle screens (Usage ↔ Bluetooth); on splash, cycle animations                |
 | **Right**           | GPIO 18      | Press to send Shift+Tab (Claude Code mode toggle)                             |
 
-Space and Shift+Tab are delivered as standard BLE HID keyboard reports — they work in any focused window on the paired host, not just Claude Code.
+Space and Shift+Tab go out as standard BLE HID keyboard reports, so they trigger in whatever window has focus on the paired host — not just Claude Code.
 
 ## BLE protocol
 
@@ -120,8 +118,9 @@ Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = 
 
 ## Recompiling fonts
 
-The `firmware/src/font_*.c` files are pre-compiled LVGL bitmap fonts. Sizes are
-scaled for the 314 PPI 2.16" display (~1.9× the original 165 PPI 3.5" panel).
+The `firmware/src/font_*.c` files are pre-compiled LVGL bitmap fonts. Sizes
+are roughly 1.9× larger than the Panlee 165 PPI panel this project started on,
+to match the 314 PPI of the 2.16" AMOLED.
 
 ```bash
 npm install -g lv_font_conv
@@ -166,16 +165,15 @@ The UI uses a small set of [Lucide](https://lucide.dev) icons (bluetooth + batte
 node tools/png_to_lvgl.js assets/icon_bluetooth_48.png icon_bluetooth_data ICON_BLUETOOTH_WIDTH ICON_BLUETOOTH_HEIGHT
 ```
 
-Default tint is white (`0xFFFFFF`), required because Lucide PNGs ship as black-on-transparent and would render invisible against the dark UI without it. Pass `--no-tint` for pre-coloured artwork (e.g. the logo). Battery icons live as RGB565A8 (alpha plane) so they blend cleanly over the splash background; the rest of the icons are baked RGB565 over the panel colour. Splice the converter output into `firmware/src/icons.h`.
+Default tint is white (`0xFFFFFF`); Lucide PNGs ship as black-on-transparent and would render invisible against the dark UI without it. Pass `--no-tint` for pre-coloured artwork like the logo. Battery icons use RGB565A8 (alpha plane) so they blend cleanly over the splash; the rest are baked RGB565 over the panel colour. Paste the converter output into `firmware/src/icons.h`.
 
 ## Splash animations
 
-The splash screen plays 20×20 pixel-art Clawd animations sourced from
-[claudepix.vercel.app](https://claudepix.vercel.app), a public library of
-Clawd animations. Frame data and palettes are extracted by
-`tools/scrape_claudepix.js` (which evaluates the source's JavaScript in a Node
-VM context to resolve frames) and converted to RGB565 C arrays by
-`tools/convert_to_c.js`. The output lives in `firmware/src/splash_animations.h`.
+The animations come from [claudepix.vercel.app](https://claudepix.vercel.app),
+a public library of Clawd sprites. `tools/scrape_claudepix.js` evaluates the
+site's JavaScript in a Node VM to pull out frame data and palettes, then
+`tools/convert_to_c.js` turns everything into RGB565 C arrays and writes
+`firmware/src/splash_animations.h`.
 
 To re-pull (e.g. when the source library updates):
 
