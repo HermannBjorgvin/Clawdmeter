@@ -6,10 +6,6 @@ Bluetooth-connected Claude Code usage monitor on a
 buttons mapped to Claude Code shortcuts over BLE HID, and a splash screen
 of pixel-art creatures whose mood tracks your usage rate.
 
-![Demo](assets/demo.gif)
-
-> **Note:** The demo GIF was recorded on the previous 480×320 Panlee panel and shows older UX (gesture-driven Controller screen). Captures need redoing for the current Waveshare build.
-
 ## Features
 
 - **Splash screen** — 13 looping 20×20 pixel-art creature animations scaled 24× to fill the display. The active animation reacts to your current Claude usage *rate* (idle / normal / active / heavy), auto-rotating within the matching group every 20 s.
