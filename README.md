@@ -1,10 +1,12 @@
 # Claude Usage Tracker - Waveshare ESP32-S3-Touch-AMOLED-2.16
 
-Bluetooth-connected Claude Code usage monitor on a
+A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
+It runs on a
 [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16)
-2.16" square AMOLED with battery, IMU-driven auto-rotation, two physical
-buttons mapped to Claude Code shortcuts over BLE HID, and a splash screen
-of pixel-art Clawd animations whose mood tracks your usage rate.
+(2.16" square AMOLED, battery, IMU auto-rotation), pairs with my laptop over
+Bluetooth, and the splash screen plays pixel-art Clawd animations that get
+busier when your usage rate climbs. The two side buttons send Space and
+Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
 
 ## Screens
 
