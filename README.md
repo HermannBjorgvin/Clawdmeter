@@ -1,8 +1,7 @@
 # Clawdmeter
 
-Desk Clawd that watches your Claude usage and gets more excite the more tokens you use.
-
 A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
+
 It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16) and pairs with my laptop over Bluetooth, and the splash screen plays pixel-art Clawd animations that get
 busier when your usage rate climbs. The two side buttons send Space and
 Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
