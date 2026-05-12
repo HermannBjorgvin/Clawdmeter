@@ -36,11 +36,40 @@ While the splash is up, the middle button cycles animations instead of screens. 
 - `curl`, `bluetoothctl`, `busctl` (BlueZ Bluetooth stack)
 - Claude Code with an active subscription
 
-## MacOS support
+## macOS support
 
-MacOS is fully supported, that is as soon as you prompt it and create a pull request for it!
+The bash daemon depends on Linux-only tools (`bluetoothctl`, `busctl`, `dbus-monitor`), so the macOS path uses a parallel Python + [`bleak`](https://github.com/hbldh/bleak) daemon. The firmware doesn't care which host it talks to.
 
-I run Linux myself so it's harder for me to test this but anyone who wants MacOS support is welcome to contribute.
+### Prerequisites (macOS)
+
+- macOS 12 (Monterey) or newer
+- Python 3.9 or newer (`python3 --version`)
+- [PlatformIO CLI](https://docs.platformio.org/en/latest/core/installation/index.html) for flashing
+
+### Pair the device
+
+After flashing, the device advertises as "Claude Controller". Open **System Settings → Bluetooth**, find it in the list, and pair it. (No `bluetoothctl` equivalent is needed — macOS handles bonding through the system UI.)
+
+### Install the daemon (macOS)
+
+```bash
+./install-macos.sh
+```
+
+This creates a Python virtualenv at `daemon/.venv/`, installs `bleak`, and registers a LaunchAgent that auto-starts the daemon at login.
+
+On first BLE access, macOS will prompt you to allow Python to access Bluetooth. Accept it. If the prompt gets dismissed, grant it later in **System Settings → Privacy & Security → Bluetooth**.
+
+Useful commands:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.clawdmeter.usage-daemon   # restart
+launchctl print gui/$(id -u)/com.clawdmeter.usage-daemon          # status
+tail -f ~/Library/Logs/claude-usage-daemon.log                     # logs
+launchctl bootout gui/$(id -u)/com.clawdmeter.usage-daemon        # uninstall
+```
+
+The macOS path was contributed by a Mac user but the maintainer's primary setup is Linux, so it's lightly tested in practice. File an issue if you hit problems.
 
 ## Flash the firmware
 
