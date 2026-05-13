@@ -14,6 +14,9 @@ ble_state_t ble_get_state(void);
 const char* ble_get_device_name(void);
 const char* ble_get_mac_address(void);
 void ble_clear_bonds(void);
+// Disconnect the currently connected host (if any) so another laptop can
+// claim the device. Advertising resumes automatically after disconnect.
+void ble_release_host(void);
 bool ble_has_data(void);
 const char* ble_get_data(void);
 void ble_send_ack(void);

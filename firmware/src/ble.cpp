@@ -195,6 +195,16 @@ void ble_clear_bonds(void) {
     need_advertise = true;
 }
 
+void ble_release_host(void) {
+    if (state == BLE_STATE_CONNECTED) {
+        Serial.println("BLE: releasing current host");
+        server->disconnect(server->getPeerInfo(0).getConnHandle());
+        // need_advertise is set in onDisconnect; advertising restarts in ble_tick.
+    } else {
+        Serial.println("BLE: release requested but no host connected");
+    }
+}
+
 bool ble_has_data(void) {
     return data_ready;
 }

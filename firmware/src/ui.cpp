@@ -406,7 +406,10 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_set_style_bg_color(mute_switch, COL_ACCENT, LV_PART_INDICATOR | LV_STATE_CHECKED);
     lv_obj_add_event_cb(mute_switch, mute_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-    // ---- Reset Bluetooth row (compact) ----
+    // ---- Switch Computer row (compact) ----
+    // Disconnects the currently-connected host so another laptop can pick
+    // up the device. There is no separate "pairing" — once disconnected,
+    // the device immediately re-advertises.
     int reset_y = mute_y + 60 + 12;
     lv_obj_t* reset_zone = lv_obj_create(ble_container);
     lv_obj_set_pos(reset_zone, MARGIN, reset_y);
@@ -427,7 +430,7 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_image_set_src(trash_img, &icon_trash_dsc);
 
     lv_obj_t* reset_lbl = lv_label_create(reset_zone);
-    lv_label_set_text(reset_lbl, "Reset Bluetooth");
+    lv_label_set_text(reset_lbl, "Switch Computer");
     lv_obj_set_style_text_font(reset_lbl, &font_styrene_24, 0);
     lv_obj_set_style_text_color(reset_lbl, COL_DIM, 0);
 
@@ -785,7 +788,10 @@ static void global_long_press_cb(lv_event_t* e) {
 
 static void ble_reset_click_cb(lv_event_t* e) {
     (void)e;
-    ble_clear_bonds();
+    // Button is labelled "Switch Computer" — drop the current peer so
+    // another laptop's daemon can connect. With bonding disabled there
+    // are no bonds to clear, so we just release.
+    ble_release_host();
 }
 
 void ui_show_screen(screen_t screen) {
