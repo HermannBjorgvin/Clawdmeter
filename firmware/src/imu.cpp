@@ -47,28 +47,12 @@ void imu_init(void) {
 }
 
 void imu_tick(void) {
-    if (!imu_ok) return;
-
-    uint32_t now = millis();
-    if (now - last_poll_ms < IMU_POLL_MS) return;
-    last_poll_ms = now;
-
-    float ax, ay, az;
-    if (!imu.getAccelerometer(ax, ay, az)) return;
-
-    uint8_t target = accel_to_rotation(ax, ay);
-    if (target == 255 || target == current_rotation) {
-        candidate_rotation = current_rotation;
-        return;
-    }
-
-    if (target != candidate_rotation) {
-        candidate_rotation = target;
-        candidate_since = now;
-    } else if (now - candidate_since >= STABLE_TIME_MS) {
-        current_rotation = target;
-        Serial.printf("Rotation: %d\n", current_rotation);
-    }
+    // Rotation locked to 0 on the 1.8" panel: 368x448 isn't square, so
+    // 90/270° rotation would crop. IMU still initialized for future use.
+    (void)imu_ok;
+    (void)last_poll_ms;
+    (void)candidate_rotation;
+    (void)candidate_since;
 }
 
 uint8_t imu_get_rotation(void) {

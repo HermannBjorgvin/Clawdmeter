@@ -107,7 +107,16 @@ class ReqCallbacks : public NimBLECharacteristicCallbacks {
 
 void ble_init(void) {
     NimBLEDevice::init(DEVICE_NAME);
-    NimBLEDevice::setSecurityAuth(true, false, true);  // bonding, no MITM, SC
+    // Bump preferred MTU so the sessions payload fits in a single write.
+    // Default 23 only allows 20 data bytes; we need ~400.
+    NimBLEDevice::setMTU(517);
+    // No bonding / no encryption: data channel is unauthenticated. Trade-off
+    // is that any nearby BLE device could write a fake usage payload, but
+    // bonding caused "Peer removed pairing information" mismatches whenever
+    // ESP32 NVS got wiped (e.g. firmware re-flash) while the host kept its
+    // half of the bond. HID keyboard feature still needs bonding on most
+    // hosts — revisit if/when that gets used.
+    NimBLEDevice::setSecurityAuth(false, false, false);
 
     // Format MAC address
     NimBLEAddress addr = NimBLEDevice::getAddress();

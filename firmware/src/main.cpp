@@ -9,6 +9,7 @@
 #include "imu.h"
 #include "splash.h"
 #include "usage_rate.h"
+#include "audio.h"
 
 // Physical buttons (global, screen-independent):
 //   BTN_BACK   (GPIO 0)  — left,  send Space (Claude Code voice mode push-to-talk)
@@ -20,35 +21,64 @@
 // ---- Hardware objects ----
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
     LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
-Arduino_CO5300 *gfx = new Arduino_CO5300(
-    bus, LCD_RESET, 0 /* rotation */,
-    LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
-TouchDrvCST92xx touch;
+Arduino_SH8601 *gfx = new Arduino_SH8601(
+    bus, GFX_NOT_DEFINED /* RST via XCA9554 */, 0 /* rotation */,
+    LCD_WIDTH, LCD_HEIGHT);
 XPowersPMU pmu;
 SensorQMI8658 imu;
+Adafruit_XCA9554 io_expander;
+
+// FT3168 touch — Arduino_DriveBus uses a shared I2C bus object
+static std::shared_ptr<Arduino_IIC_DriveBus> _ft_bus;
+static void IRAM_ATTR touch_isr(void);
+std::unique_ptr<Arduino_IIC> touch_ft;
 
 static UsageData usage = {};
 
-// ---- Touch interrupt + shared state ----
+// ---- Display sleep state ----
+// AMOLED draws power per lit pixel, so brightness=0 is effectively off.
+// On wake we restore the last brightness (default 200).
+static bool     display_asleep = false;
+static uint8_t  display_brightness = 200;
+
+static bool display_is_asleep(void) { return display_asleep; }
+
+static void display_set_asleep(bool sleep) {
+    if (sleep == display_asleep) return;
+    display_asleep = sleep;
+    if (sleep) {
+        gfx->setBrightness(0);
+        Serial.println("display: sleeping");
+    } else {
+        gfx->setBrightness(display_brightness);
+        Serial.println("display: awake");
+    }
+}
+
+// ---- Touch shared state ----
 static volatile bool     touch_pressed = false;
 static volatile uint16_t touch_x = 0;
 static volatile uint16_t touch_y = 0;
-static volatile bool     touch_data_ready = false;
 
 static void IRAM_ATTR touch_isr(void) {
-    touch_data_ready = true;
+    if (touch_ft) touch_ft->IIC_Interrupt_Flag = true;
 }
 
 static void touch_read() {
-    if (!touch_data_ready) return;
-    touch_data_ready = false;
+    if (!touch_ft || !touch_ft->IIC_Interrupt_Flag) return;
+    touch_ft->IIC_Interrupt_Flag = false;
 
-    int16_t tx[5], ty[5];
-    uint8_t n = touch.getPoint(tx, ty, touch.getSupportTouchPoint());
-    if (n > 0) {
+    int32_t tx = touch_ft->IIC_Read_Device_Value(
+        Arduino_IIC_Touch::Value_Information::TOUCH_COORDINATE_X);
+    int32_t ty = touch_ft->IIC_Read_Device_Value(
+        Arduino_IIC_Touch::Value_Information::TOUCH_COORDINATE_Y);
+    int32_t n  = touch_ft->IIC_Read_Device_Value(
+        Arduino_IIC_Touch::Value_Information::TOUCH_FINGER_NUMBER);
+
+    if (n > 0 && tx >= 0 && ty >= 0) {
         touch_pressed = true;
-        touch_x = (uint16_t)tx[0];
-        touch_y = (uint16_t)ty[0];
+        touch_x = (uint16_t)tx;
+        touch_y = (uint16_t)ty;
     } else {
         touch_pressed = false;
     }
@@ -169,6 +199,22 @@ static bool parse_json(const char* json, UsageData* out) {
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
+    strlcpy(out->attn_msg, doc["at"] | "", sizeof(out->attn_msg));
+
+    // Sessions array: { p: project, s: state-letter, m?: message }
+    out->sessions_count = 0;
+    JsonArrayConst arr = doc["sess"].as<JsonArrayConst>();
+    for (JsonObjectConst s : arr) {
+        if (out->sessions_count >= MAX_SESSIONS) break;
+        SessionInfo* si = &out->sessions[out->sessions_count++];
+        strlcpy(si->proj, s["p"] | "session", sizeof(si->proj));
+        const char* sc = s["s"] | "i";
+        si->state = (sc[0] == 'w') ? SESS_WAITING
+                  : (sc[0] == 'k') ? SESS_WORKING
+                  : SESS_IDLE;
+        strlcpy(si->msg, s["m"] | "", sizeof(si->msg));
+    }
+
     out->valid = true;
     return true;
 }
@@ -228,8 +274,27 @@ void setup() {
     delay(300);
     Serial.println("{\"ready\":true}");
 
-    // Init I2C (shared by touch + PMU)
+    // Init I2C (shared by touch + PMU + IMU + I/O expander)
     Wire.begin(IIC_SDA, IIC_SCL);
+
+    // Init I/O expander — pulses LCD_RST / TP_RST / one more reset line.
+    // The hardware reset must happen before the display and touch begin().
+    if (!io_expander.begin(XCA9554_ADDR)) {
+        Serial.println("XCA9554 init failed");
+    } else {
+        io_expander.pinMode(0, OUTPUT);
+        io_expander.pinMode(1, OUTPUT);
+        io_expander.pinMode(2, OUTPUT);
+        io_expander.digitalWrite(0, LOW);
+        io_expander.digitalWrite(1, LOW);
+        io_expander.digitalWrite(2, LOW);
+        delay(20);
+        io_expander.digitalWrite(0, HIGH);
+        io_expander.digitalWrite(1, HIGH);
+        io_expander.digitalWrite(2, HIGH);
+        delay(20);
+        Serial.println("XCA9554 init OK");
+    }
 
     // Init display
     gfx->begin();
@@ -239,19 +304,21 @@ void setup() {
     // Init PMU
     power_init();
 
-    // Init IMU (accelerometer for auto-rotation)
+    // Audio (ES8311 + I2S). Beep on Notification attn rising edge.
+    audio_init();
+
+    // Init IMU (accelerometer; rotation is locked to 0 on this non-square panel)
     imu_init();
 
-    // Init touch
-    touch.setPins(TP_RST, TP_INT);
-    if (!touch.begin(Wire, CST9220_ADDR, IIC_SDA, IIC_SCL)) {
-        Serial.println("Touch init failed");
+    // Init touch (FT3168 via Arduino_DriveBus)
+    _ft_bus = std::make_shared<Arduino_HWIIC>(IIC_SDA, IIC_SCL, &Wire);
+    touch_ft.reset(new Arduino_FT3x68(
+        _ft_bus, FT3168_DEVICE_ADDRESS,
+        DRIVEBUS_DEFAULT_VALUE /* RST: via expander */, TP_INT, touch_isr));
+    if (!touch_ft->begin()) {
+        Serial.println("FT3168 init failed");
     } else {
-        touch.setMaxCoordinates(LCD_WIDTH, LCD_HEIGHT);
-        touch.setSwapXY(true);
-        touch.setMirrorXY(true, false);
-        attachInterrupt(TP_INT, touch_isr, FALLING);
-        Serial.println("Touch init OK");
+        Serial.println("FT3168 init OK");
     }
 
     // Init LVGL
@@ -339,29 +406,41 @@ void loop() {
     imu_tick();
     splash_tick();
 
-    // Three-button input (global, screen-independent):
-    //   LEFT  (GPIO 0)  → Space (voice-mode push-to-talk; press & release tracked)
-    //   RIGHT (GPIO 18) → Shift+Tab (Claude Code mode toggle)
-    //   PWR   (AXP)     → cycle screens; on splash, cycle animations
+    // Inputs:
+    //   BOOT (GPIO 0)         → toggle display sleep (off/on)
+    //   PWR  (AXP2101 PKEY)   → short: cycle screens / splash animations
+    //                         → long:  shut the device down via PMU
+    //
+    // While the display is asleep, ANY touch wakes it; same for an incoming
+    // attention event (handled where we parse BLE payloads).
     {
-        static bool back_was = false, fwd_was = false;
+        static bool back_was = false;
         bool back_now = (digitalRead(BTN_BACK) == LOW);
-        bool fwd_now  = (digitalRead(BTN_FWD)  == LOW);
 
-        if (back_now != back_was) {
-            if (back_now) ble_keyboard_press(0x2C, 0);  // HID Space, no mods
-            else          ble_keyboard_release();
-            back_was = back_now;
+        if (back_now && !back_was) {
+            display_set_asleep(!display_is_asleep());
         }
-        if (fwd_now != fwd_was) {
-            if (fwd_now) ble_keyboard_press(0x2B, 0x02);  // HID Tab + LEFT_SHIFT
-            else         ble_keyboard_release();
-            fwd_was = fwd_now;
+        back_was = back_now;
+
+        if (display_is_asleep() && touch_pressed) {
+            display_set_asleep(false);
+        }
+
+        if (power_pwr_long_pressed()) {
+            Serial.println("PWR long press → shutdown");
+            gfx->setBrightness(0);
+            delay(80);
+            power_shutdown();
+            // pmu.shutdown() cuts power; control never returns. If for any
+            // reason it does (e.g. AXP isn't actually wired to enable rails
+            // for this dev variant), fall through to a reboot.
+            esp_restart();
         }
 
         if (power_pwr_pressed()) {
-            if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
-            else                                          ui_cycle_screen();
+            if (display_is_asleep()) display_set_asleep(false);
+            else if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
+            else                                               ui_cycle_screen();
         }
     }
 
@@ -400,6 +479,18 @@ void loop() {
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
             ui_update(&usage);
+            // Detect attention rising edge to beep exactly once per
+            // "Claude needs you" event, not on every payload refresh.
+            // Also wakes the display if it was asleep.
+            static char last_attn[96] = {0};
+            bool prev_attn = last_attn[0] != '\0';
+            bool now_attn  = usage.attn_msg[0] != '\0';
+            if (!prev_attn && now_attn) {
+                audio_attn_chime();
+                display_set_asleep(false);
+            }
+            strlcpy(last_attn, usage.attn_msg, sizeof(last_attn));
+            ui_set_attn(usage.attn_msg);
             ble_send_ack();
         } else {
             ble_send_nack();
