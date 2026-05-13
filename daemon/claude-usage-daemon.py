@@ -46,10 +46,36 @@ RECONNECT_BACKOFF_MAX = 60
 # ---- Paths ----
 CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 MAC_CACHE_PATH   = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
+LOG_FILE_PATH    = Path.home() / ".config" / "claude-usage-monitor" / "daemon.log"
+LOG_MAX_BYTES    = 1_000_000  # rotate at ~1 MB so the log can't grow forever
+
+
+def _rotate_log_if_needed() -> None:
+    try:
+        if LOG_FILE_PATH.exists() and LOG_FILE_PATH.stat().st_size > LOG_MAX_BYTES:
+            backup = LOG_FILE_PATH.with_suffix(".log.1")
+            if backup.exists():
+                backup.unlink()
+            LOG_FILE_PATH.rename(backup)
+    except OSError:
+        pass
 
 
 def log(msg: str) -> None:
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    # pythonw.exe (used by the scheduled task) has no real stdout — guard so
+    # a closed/missing handle doesn't kill us.
+    try:
+        print(line, flush=True)
+    except (OSError, ValueError):
+        pass
+    try:
+        LOG_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _rotate_log_if_needed()
+        with LOG_FILE_PATH.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 
 def read_token() -> str:
