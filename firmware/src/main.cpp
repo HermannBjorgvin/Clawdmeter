@@ -479,13 +479,17 @@ void loop() {
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
             ui_update(&usage);
-            // Detect attention rising edge to beep exactly once per
-            // "Claude needs you" event, not on every payload refresh.
-            // Also wakes the display if it was asleep.
+            // Beep whenever the attention MESSAGE changes to a non-empty
+            // value. Empty-to-something handles the boot-from-idle case;
+            // something-to-something covers the multi-session case where
+            // the aggregate text changes ("permission..." → "2 sessions
+            // waiting — ...") without ever passing through empty.
+            // The daemon already dedups identical payloads, so repeats of
+            // the same message won't reach this code.
             static char last_attn[96] = {0};
-            bool prev_attn = last_attn[0] != '\0';
-            bool now_attn  = usage.attn_msg[0] != '\0';
-            if (!prev_attn && now_attn) {
+            bool now_nonempty = usage.attn_msg[0] != '\0';
+            bool changed = strcmp(last_attn, usage.attn_msg) != 0;
+            if (now_nonempty && changed) {
                 audio_attn_chime();
                 display_set_asleep(false);
             }
