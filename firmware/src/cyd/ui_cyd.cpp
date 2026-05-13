@@ -2,6 +2,7 @@
 #include "../theme.h"
 #include "../splash.h"
 #include "../logo.h"
+#include "../codex_logo.h"
 #include <lvgl.h>
 
 LV_FONT_DECLARE(font_styrene_28);
@@ -42,6 +43,8 @@ static lv_obj_t *lbl_anim;
 
 // ---- Codex screen widgets ----
 static lv_obj_t *codex_root;
+static lv_obj_t *codex_logo_img;
+static lv_image_dsc_t codex_logo_dsc;
 static lv_obj_t *bar_cx_session,  *lbl_cx_session_pct,  *lbl_cx_session_reset;
 static lv_obj_t *bar_cx_weekly,   *lbl_cx_weekly_pct,   *lbl_cx_weekly_reset;
 
@@ -231,6 +234,20 @@ static void init_codex_screen(lv_obj_t *scr) {
     lv_obj_set_style_text_font(title, &font_styrene_20, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0x10A37F), 0);
     lv_obj_set_pos(title, MARGIN, 1);
+
+    codex_logo_dsc.header.w      = OPENAI_LOGO_WIDTH;
+    codex_logo_dsc.header.h      = OPENAI_LOGO_HEIGHT;
+    codex_logo_dsc.header.cf     = LV_COLOR_FORMAT_RGB565A8;
+    codex_logo_dsc.header.stride = OPENAI_LOGO_WIDTH * 2;
+    codex_logo_dsc.data          = openai_logo;
+    codex_logo_dsc.data_size     = OPENAI_LOGO_WIDTH * OPENAI_LOGO_HEIGHT * 3;
+
+    codex_logo_img = lv_image_create(codex_root);
+    lv_image_set_src(codex_logo_img, &codex_logo_dsc);
+    lv_image_set_antialias(codex_logo_img, false);
+    lv_image_set_scale(codex_logo_img, 115);
+    lv_obj_set_pos(codex_logo_img, SCR_W - MARGIN - 36 - 22, -22);
+    lv_obj_add_flag(codex_logo_img, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     int y0 = TOP_BAR_H;
     make_usage_panel(codex_root, y0,                       "Session 5h",
