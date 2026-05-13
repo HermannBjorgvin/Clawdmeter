@@ -40,6 +40,11 @@ static lv_obj_t *bar_session,  *lbl_session_pct,  *lbl_session_reset;
 static lv_obj_t *bar_weekly,   *lbl_weekly_pct,   *lbl_weekly_reset;
 static lv_obj_t *lbl_anim;
 
+// ---- Codex screen widgets ----
+static lv_obj_t *codex_root;
+static lv_obj_t *bar_cx_session,  *lbl_cx_session_pct,  *lbl_cx_session_reset;
+static lv_obj_t *bar_cx_weekly,   *lbl_cx_weekly_pct,   *lbl_cx_weekly_reset;
+
 // ---- Bluetooth screen widgets ----
 static lv_obj_t *ble_root;
 static lv_obj_t *lbl_ble_status;
@@ -211,6 +216,31 @@ static void init_usage_screen(lv_obj_t *scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_LEFT, MARGIN, -1);
 }
 
+static void init_codex_screen(lv_obj_t *scr) {
+    codex_root = lv_obj_create(scr);
+    lv_obj_set_size(codex_root, SCR_W, SCR_H);
+    lv_obj_set_pos(codex_root, 0, 0);
+    lv_obj_set_style_bg_opa(codex_root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(codex_root, 0, 0);
+    lv_obj_set_style_pad_all(codex_root, 0, 0);
+    lv_obj_clear_flag(codex_root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(codex_root, cycle_click_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(codex_root);
+    lv_label_set_text(title, "Codex");
+    lv_obj_set_style_text_font(title, &font_styrene_20, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x10A37F), 0);
+    lv_obj_set_pos(title, MARGIN, 1);
+
+    int y0 = TOP_BAR_H;
+    make_usage_panel(codex_root, y0,                       "Session 5h",
+                     &lbl_cx_session_pct, &bar_cx_session, &lbl_cx_session_reset);
+    make_usage_panel(codex_root, y0 + PANEL_H + PANEL_GAP, "Weekly 7d",
+                     &lbl_cx_weekly_pct,  &bar_cx_weekly,  &lbl_cx_weekly_reset);
+
+    lv_obj_add_flag(codex_root, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void init_bluetooth_screen(lv_obj_t *scr) {
     ble_root = lv_obj_create(scr);
     lv_obj_set_size(ble_root, SCR_W, SCR_H);
@@ -290,6 +320,7 @@ void ui_init(void) {
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
     init_usage_screen(scr);
+    init_codex_screen(scr);
     init_bluetooth_screen(scr);
 
     // Splash creates its own container; we attach the cycle tap handler so a
@@ -321,6 +352,27 @@ void ui_update(const UsageData *data) {
     lv_label_set_text(lbl_weekly_reset, buf);
 }
 
+void ui_update_codex(const CodexData *data) {
+    if (!data->valid) return;
+
+    int sp = (int)(data->session_pct + 0.5f);
+    lv_label_set_text_fmt(lbl_cx_session_pct, "%d%%", sp);
+    lv_bar_set_value(bar_cx_session, sp, LV_ANIM_ON);
+    lv_obj_set_style_bg_color(bar_cx_session, pct_color(data->session_pct), LV_PART_INDICATOR);
+
+    char buf[48];
+    format_reset_time(data->session_reset_mins, buf, sizeof(buf));
+    lv_label_set_text(lbl_cx_session_reset, buf);
+
+    int wp = (int)(data->weekly_pct + 0.5f);
+    lv_label_set_text_fmt(lbl_cx_weekly_pct, "%d%%", wp);
+    lv_bar_set_value(bar_cx_weekly, wp, LV_ANIM_ON);
+    lv_obj_set_style_bg_color(bar_cx_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
+
+    format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
+    lv_label_set_text(lbl_cx_weekly_reset, buf);
+}
+
 void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
 
@@ -347,23 +399,26 @@ void ui_tick_anim(void) {
 
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_root, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(codex_root, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ble_root,   LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
     case SCREEN_SPLASH:    splash_show(); break;
     case SCREEN_USAGE:     lv_obj_clear_flag(usage_root, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_CODEX:     lv_obj_clear_flag(codex_root, LV_OBJ_FLAG_HIDDEN); break;
     case SCREEN_BLUETOOTH: lv_obj_clear_flag(ble_root,   LV_OBJ_FLAG_HIDDEN); break;
     default:               lv_obj_clear_flag(usage_root, LV_OBJ_FLAG_HIDDEN); screen = SCREEN_USAGE; break;
     }
     current_screen = screen;
 }
 
-// Tap cycles: Usage -> Splash -> Bluetooth -> Usage
+// Tap cycles: Usage -> Codex -> Splash -> Bluetooth -> Usage
 void ui_cycle_screen(void) {
     screen_t next;
     switch (current_screen) {
-    case SCREEN_USAGE:     next = SCREEN_SPLASH;    break;
+    case SCREEN_USAGE:     next = SCREEN_CODEX;     break;
+    case SCREEN_CODEX:     next = SCREEN_SPLASH;    break;
     case SCREEN_SPLASH:    next = SCREEN_BLUETOOTH; break;
     case SCREEN_BLUETOOTH: next = SCREEN_USAGE;     break;
     default:               next = SCREEN_USAGE;     break;

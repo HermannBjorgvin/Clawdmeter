@@ -36,6 +36,55 @@ While the splash is up, the middle button cycles animations instead of screens. 
 - `curl`, `bluetoothctl`, `busctl` (BlueZ Bluetooth stack)
 - Claude Code with an active subscription
 
+## Windows support
+
+Windows is supported for the BLE usage daemon through the Python port in
+`daemon/claude-usage-daemon.py`. This is the right path for the
+ESP32-2432S028R "Cheap Yellow Display" build.
+
+Requirements:
+
+- Python 3 with the `py` launcher
+- `py -3 -m pip install bleak`
+- Claude Code and Codex already logged in on the same Windows user profile
+
+Install the scheduled task:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\daemon\install-windows-daemon.ps1
+```
+
+This creates a per-user Task Scheduler entry named `Clawdmeter Claude Usage Daemon`
+and a config file at `%USERPROFILE%\.config\claude-usage-monitor\windows-daemon.json`.
+
+Example config:
+
+```json
+{
+  "device_mac": "A4:F0:0F:60:98:16",
+  "poll_interval": 60,
+  "forget_device_on_scan_fail": false
+}
+```
+
+Set `"forget_device_on_scan_fail": true` only if you want the daemon to call
+the Windows Bluetooth removal API and retry discovery after a failed scan.
+That is a recovery path, not the preferred steady state.
+
+Useful commands:
+
+```powershell
+Get-ScheduledTask -TaskName "Clawdmeter Claude Usage Daemon"
+Start-ScheduledTask -TaskName "Clawdmeter Claude Usage Daemon"
+Stop-ScheduledTask -TaskName "Clawdmeter Claude Usage Daemon"
+powershell -ExecutionPolicy Bypass -File .\daemon\uninstall-windows-daemon.ps1
+```
+
+Logs:
+
+- Daemon log: `%USERPROFILE%\.config\claude-usage-monitor\daemon.log`
+- Launcher log: `%USERPROFILE%\.config\claude-usage-monitor\daemon-launcher.log`
+
 ## MacOS support
 
 MacOS is fully supported, that is as soon as you prompt it and create a pull request for it!
@@ -64,6 +113,13 @@ bluetoothctl trust F4:12:FA:C0:8F:E5
 
 The MAC address is shown on the Bluetooth screen — press the middle (PWR) button to cycle to it.
 
+### CYD note
+
+The CYD build does not need BLE HID keyboard support. It now advertises only
+the custom data GATT service, without HID bonding, specifically to avoid
+Windows auto-pairing the device and hiding it from BLE discovery after reboot.
+The HID keyboard path remains enabled on the original Waveshare AMOLED build.
+
 ## Install the daemon
 
 The daemon polls your Claude usage every 60 seconds and sends it to the display over BLE.
@@ -76,6 +132,8 @@ systemctl --user start claude-usage-daemon
 Check status: `systemctl --user status claude-usage-daemon`
 
 View logs: `journalctl --user -u claude-usage-daemon -f`
+
+On Windows, use `daemon/install-windows-daemon.ps1` instead of `install.sh`.
 
 ## How it works
 

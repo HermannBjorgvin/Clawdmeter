@@ -104,6 +104,12 @@ static bool parse_json(const char *json, UsageData *out) {
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok    = doc["ok"] | false;
     out->valid = true;
+
+    out->codex.session_pct        = doc["cx_s"]  | 0.0f;
+    out->codex.session_reset_mins = doc["cx_sr"] | -1;
+    out->codex.weekly_pct         = doc["cx_w"]  | 0.0f;
+    out->codex.weekly_reset_mins  = doc["cx_wr"] | -1;
+    out->codex.valid = doc.containsKey("cx_s");
     return true;
 }
 
@@ -181,6 +187,7 @@ void loop() {
                 splash_pick_for_current_rate();
             }
             ui_update(&usage);
+            ui_update_codex(&usage.codex);
             ble_send_ack();
         } else {
             ble_send_nack();

@@ -96,6 +96,14 @@ Bash daemon (`daemon/claude-usage-daemon.sh`) reads OAuth token, polls Anthropic
 - On connect failure: cache is dropped AND device is removed from bluez (`bluetoothctl remove`) so the next scan won't re-pick a dead MAC. Multi-candidate scans pick `head -1` and let the failure cycle converge.
 - `POLL_INTERVAL=60`, `TICK=5`. Inner loop wakes every 5s to detect disconnects fast; polls Anthropic when 60s elapsed OR when ESP fires a refresh request.
 
+**Windows daemon path:**
+- `daemon/claude-usage-daemon.py` is the Windows/bleak port.
+- `daemon/start-claude-usage-daemon.ps1` is the launcher used by Task Scheduler.
+- `daemon/install-windows-daemon.ps1` registers the per-user scheduled task `Clawdmeter Claude Usage Daemon`.
+- Runtime config lives at `%USERPROFILE%\.config\claude-usage-monitor\windows-daemon.json`.
+- Optional recovery knob: `forget_device_on_scan_fail` makes the daemon call the Win32 `BluetoothRemoveDevice` API by cached MAC and retry discovery once.
+- CYD builds compile with `BLE_ENABLE_HID=0` and should not rely on Windows pairing. Waveshare AMOLED builds keep HID enabled.
+
 **GATT characteristics on service `4c41555a-...0001`:**
 - `...0002` RX — daemon writes JSON usage payload here.
 - `...0003` TX — firmware notifies ack/nack (daemon doesn't subscribe).

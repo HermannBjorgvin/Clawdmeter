@@ -1,7 +1,9 @@
 #include "ble.h"
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#if BLE_ENABLE_HID
 #include <NimBLEHIDDevice.h>
+#endif
 
 #define DEVICE_NAME "Claude Controller"
 
@@ -42,8 +44,10 @@ static const uint8_t HID_REPORT_MAP[] = {
 };
 
 static NimBLEServer* server = nullptr;
+#if BLE_ENABLE_HID
 static NimBLEHIDDevice* hid_dev = nullptr;
 static NimBLECharacteristic* input_kbd = nullptr;
+#endif
 static NimBLECharacteristic* tx_char = nullptr;
 static NimBLECharacteristic* rx_char = nullptr;
 static NimBLECharacteristic* req_char = nullptr;
@@ -59,7 +63,9 @@ static void start_advertising() {
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
     adv->reset();
     adv->addServiceUUID(SERVICE_UUID);
+#if BLE_ENABLE_HID
     adv->setAppearance(HID_KEYBOARD);
+#endif
     adv->enableScanResponse(true);
     adv->setName(DEVICE_NAME);
     bool ok = adv->start();
@@ -107,7 +113,11 @@ class ReqCallbacks : public NimBLECharacteristicCallbacks {
 
 void ble_init(void) {
     NimBLEDevice::init(DEVICE_NAME);
+#if BLE_ENABLE_HID
     NimBLEDevice::setSecurityAuth(true, false, true);  // bonding, no MITM, SC
+#else
+    NimBLEDevice::setSecurityAuth(false, false, false);
+#endif
 
     // Format MAC address
     NimBLEAddress addr = NimBLEDevice::getAddress();
@@ -120,6 +130,7 @@ void ble_init(void) {
     static ServerCallbacks serverCb;
     server->setCallbacks(&serverCb);
 
+#if BLE_ENABLE_HID
     // --- HID keyboard service ---
     hid_dev = new NimBLEHIDDevice(server);
     hid_dev->setReportMap((uint8_t*)HID_REPORT_MAP, sizeof(HID_REPORT_MAP));
@@ -128,6 +139,7 @@ void ble_init(void) {
     hid_dev->setHidInfo(0x00, 0x02);  // country=0, flags=normally connectable
     hid_dev->setBatteryLevel(100);
     input_kbd = hid_dev->getInputReport(1);  // report ID 1
+#endif
 
     // --- Custom data service ---
     NimBLEService* svc = server->createService(SERVICE_UUID);
@@ -219,16 +231,23 @@ void ble_request_refresh(void) {
 }
 
 void ble_keyboard_press(uint8_t key, uint8_t modifier) {
+#if BLE_ENABLE_HID
     if (state != BLE_STATE_CONNECTED || !input_kbd) return;
     // HID report: [modifier, reserved, key1, key2, key3, key4, key5, key6]
     uint8_t report[8] = {modifier, 0, key, 0, 0, 0, 0, 0};
     input_kbd->setValue(report, sizeof(report));
     input_kbd->notify();
+#else
+    (void)key;
+    (void)modifier;
+#endif
 }
 
 void ble_keyboard_release(void) {
+#if BLE_ENABLE_HID
     if (state != BLE_STATE_CONNECTED || !input_kbd) return;
     uint8_t report[8] = {0};
     input_kbd->setValue(report, sizeof(report));
     input_kbd->notify();
+#endif
 }
