@@ -27,16 +27,46 @@ ok()   { printf '\033[32m  ok:\033[0m %s\n' "$1"; }
 
 # ---- 1. Sanity ----
 bold "==> Checking prerequisites"
-[ -x /usr/bin/python3 ]    || { echo "macOS python3 missing"; exit 1; }
-[ -x /usr/bin/security ]   || { echo "macOS security CLI missing"; exit 1; }
+[ -x /usr/bin/security ] || { echo "macOS security CLI missing"; exit 1; }
+
+# Pick a Python interpreter. Bleak's dep pyobjc-core fails to build on the
+# system Python 3.9 that ships with macOS — needs >=3.10. Prefer Homebrew's
+# python3 if it's installed; fall back to /usr/bin/python3 only if it's
+# new enough.
+PYTHON_BIN=""
+for candidate in /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 \
+                 /opt/homebrew/bin/python3.11 /opt/homebrew/bin/python3 \
+                 /usr/local/bin/python3 /usr/bin/python3; do
+    [ -x "$candidate" ] || continue
+    ver=$("$candidate" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    major=${ver%.*}; minor=${ver#*.}
+    if [ "$major" -ge 3 ] && [ "$minor" -ge 10 ]; then
+        PYTHON_BIN="$candidate"
+        ok "using python $ver at $candidate"
+        break
+    fi
+done
+if [ -z "$PYTHON_BIN" ]; then
+    echo "Need Python ≥ 3.10. Install via:  brew install python"
+    exit 1
+fi
+
 security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1 \
     || warn "Claude Code-credentials not in Keychain — install Claude Code and log in before running the daemon"
 ok "host looks good"
 
 # ---- 2. Python venv ----
 bold "==> Setting up venv at $VENV"
+# Recreate the venv if it's pointing at a now-incompatible interpreter
+# (e.g. left over from an older install that used /usr/bin/python3).
+if [ -d "$VENV" ]; then
+    if ! "$VENV/bin/python3" -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" 2>/dev/null; then
+        warn "existing venv uses an old Python — recreating"
+        rm -rf "$VENV"
+    fi
+fi
 if [ ! -d "$VENV" ]; then
-    /usr/bin/python3 -m venv "$VENV"
+    "$PYTHON_BIN" -m venv "$VENV"
 fi
 "$PY" -m pip install --quiet --upgrade pip
 "$PY" -m pip install --quiet bleak
