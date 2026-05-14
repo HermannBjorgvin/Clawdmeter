@@ -292,7 +292,7 @@ async def main() -> None:
         except NotImplementedError:
             signal.signal(sig, _stop)
 
-    log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
+    log(f"=== Claude Usage Tracker Daemon (BLE, {sys.platform}) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
 
     backoff = 1
