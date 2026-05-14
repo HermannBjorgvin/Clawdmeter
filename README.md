@@ -31,25 +31,56 @@ While the splash is up, the middle button cycles animations instead of screens. 
 
 ## Prerequisites
 
-- Linux (tested on Ubuntu)
+- Linux (tested on Ubuntu) or macOS
 - [PlatformIO CLI](https://docs.platformio.org/en/latest/core/installation/index.html)
-- `curl`, `bluetoothctl`, `busctl` (BlueZ Bluetooth stack)
+- Linux: `curl`, `bluetoothctl`, `busctl` (BlueZ Bluetooth stack)
+- macOS: `python3` (the installer sets up a venv with `bleak` and `httpx`)
 - Claude Code with an active subscription
 
-## MacOS support
+## macOS installation
 
-MacOS is fully supported, that is as soon as you prompt it and create a pull request for it!
+The macOS host pieces — Python daemon, LaunchAgent, and flash helper — were ported by [Chris Davidson (@lorddavidson)](https://github.com/lorddavidson). Thanks Chris!
 
-I run Linux myself so it's harder for me to test this but anyone who wants MacOS support is welcome to contribute.
+### Flash the firmware
 
-## Flash the firmware
+```bash
+./flash-mac.sh                       # auto-detects /dev/cu.usbmodem*
+./flash-mac.sh /dev/cu.usbmodem1101  # or pass an explicit USB serial port
+```
+
+### Pair the device
+
+After flashing, open **System Settings → Bluetooth** and click *Connect* next to "Claude Controller". The daemon will discover it on its next scan (~30 s).
+
+### Install the daemon
+
+The daemon reads your Claude OAuth token from the macOS Keychain (service `Claude Code-credentials`), polls usage every 60 s, and pushes it to the display over BLE.
+
+```bash
+./install-mac.sh
+```
+
+The installer creates a Python venv in `daemon/.venv/`, installs `bleak` and `httpx`, renders a LaunchAgent into `~/Library/LaunchAgents/com.user.claude-usage-daemon.plist`, and loads it. The first run is launched interactively so macOS prompts for Bluetooth permission.
+
+Useful commands:
+
+```bash
+launchctl list | grep claude-usage                                          # check it's running
+tail -F ~/Library/Logs/claude-usage-daemon.out.log                          # live logs
+launchctl unload ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist  # stop
+launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # start
+```
+
+## Linux installation
+
+### Flash the firmware
 
 ```bash
 cd firmware
 pio run -t upload --upload-port /dev/ttyACM0
 ```
 
-## Bluetooth pairing
+### Pair the device
 
 After flashing, the device advertises as "Claude Controller". Pair it once:
 
@@ -64,7 +95,7 @@ bluetoothctl trust F4:12:FA:C0:8F:E5
 
 The MAC address is shown on the Bluetooth screen — press the middle (PWR) button to cycle to it.
 
-## Install the daemon
+### Install the daemon
 
 The daemon polls your Claude usage every 60 seconds and sends it to the display over BLE.
 
