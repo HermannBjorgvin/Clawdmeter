@@ -11,3 +11,15 @@ firmware/.vscode/
 # Node tooling deps (npm install --no-save)
 tools/node_modules/
 tools/package-lock.json
+
+# Mac daemon venv + local pio install
+daemon/.venv/
+.pio-venv/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# IDEs
+.idea/
+.vscode/

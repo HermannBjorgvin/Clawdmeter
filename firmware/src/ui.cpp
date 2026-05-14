@@ -4,6 +4,7 @@
 #include "logo.h"
 #include "icons.h"
 #include "display_cfg.h"
+#include "ui_layout.h"
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
@@ -25,13 +26,14 @@ LV_FONT_DECLARE(font_mono_32);
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
 
-// ---- Layout constants for 480x480 (scaled for 2.16" high-DPI + rounded corners) ----
-#define SCR_W         480
-#define SCR_H         480
-#define MARGIN        20    // wider margin for rounded display corners
-#define TITLE_Y       30
-#define CONTENT_Y     100
-#define CONTENT_W     (SCR_W - 2 * MARGIN)   // 440
+// Layout constants come from ui_layout.h (board-conditional). Map the
+// board-prefixed names to the short names this file already uses.
+#define SCR_W         UI_SCR_W
+#define SCR_H         UI_SCR_H
+#define MARGIN        UI_MARGIN
+#define TITLE_Y       UI_TITLE_Y
+#define CONTENT_Y     UI_CONTENT_Y
+#define CONTENT_W     UI_CONTENT_W
 
 // ---- Usage screen widgets ----
 static lv_obj_t* usage_container;
@@ -218,10 +220,10 @@ static void init_battery_icons(void) {
     init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_W, ICON_BATTERY_CHARGING_H, icon_battery_charging_data);
 }
 
-// ======== Usage Screen (480x480) ========
+// ======== Usage Screen ========
 
-#define PANEL_H     150
-#define PANEL_GAP   16
+#define PANEL_H     UI_PANEL_H
+#define PANEL_GAP   UI_PANEL_GAP
 
 // One Session/Weekly panel: big % label, pill on the right, bar, reset label.
 // Pill y=1: symmetric inside the panel — panel-outer-top → pill-top equals
@@ -240,13 +242,13 @@ static void make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
     *out_pill = make_pill(panel, pill_text);
     lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
 
-    *out_bar = make_bar(panel, 0, 56, CONTENT_W - 32, 24);
+    *out_bar = make_bar(panel, 0, UI_BAR_Y_IN_PANEL, CONTENT_W - 32, UI_BAR_H);
 
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
     lv_obj_set_style_text_font(*out_reset, &font_styrene_28, 0);
     lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
-    lv_obj_set_pos(*out_reset, 0, 94);
+    lv_obj_set_pos(*out_reset, 0, UI_RESET_Y_IN_PANEL);
 }
 
 static void init_usage_screen(lv_obj_t* scr) {
@@ -276,7 +278,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_anim, "");
     lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
-    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, UI_ANIM_OFFSET_Y);
 }
 
 // ======== Bluetooth Screen (480x480) ========
@@ -395,12 +397,12 @@ void ui_init(void) {
     // Logo on top of all containers (inset for rounded corners)
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
-    lv_obj_set_pos(logo_img, MARGIN, TITLE_Y - 10);
+    lv_obj_set_pos(logo_img, MARGIN, TITLE_Y + UI_LOGO_Y_OFFSET);
 
     // Battery indicator on top of all containers (upper-right, inset)
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
-    lv_obj_set_pos(battery_img, SCR_W - 48 - MARGIN, TITLE_Y);
+    lv_obj_set_pos(battery_img, SCR_W - UI_BATTERY_RIGHT - MARGIN, TITLE_Y);
 }
 
 void ui_update(const UsageData* data) {
