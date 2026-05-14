@@ -50,7 +50,7 @@ The macOS host pieces — Python daemon, LaunchAgent, and flash helper — were 
 
 ### Pair the device
 
-After flashing, open **System Settings → Bluetooth** and click *Connect* next to "Claude Controller". The daemon will discover it on its next scan (~30 s).
+After flashing, open **System Settings → Bluetooth** and click *Connect* next to "Clawdmeter". The daemon will discover it on its next scan (~30 s).
 
 ### Install the daemon
 
@@ -82,7 +82,7 @@ pio run -t upload --upload-port /dev/ttyACM0
 
 ### Pair the device
 
-After flashing, the device advertises as "Claude Controller". Pair it once:
+After flashing, the device advertises as "Claudemeter". Pair it once:
 
 ```bash
 # Scan for the device
@@ -151,9 +151,7 @@ Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = 
 
 ## Recompiling fonts
 
-The `firmware/src/font_*.c` files are pre-compiled LVGL bitmap fonts. Sizes
-are roughly 1.9× larger than the Panlee 165 PPI panel this project started on,
-to match the 314 PPI of the 2.16" AMOLED.
+The `firmware/src/font_*.c` files are pre-compiled LVGL bitmap fonts.
 
 ```bash
 npm install -g lv_font_conv
@@ -226,4 +224,4 @@ See `tools/README.md` for details.
 
 ## Licensing gray area warning
 
-The software in this repository uses and adheres to the Anthropic brand guidelines and uses the same proprietary fonts that Anthropic has a licnese for but this software uses without permission as well as using assets from Anthropic such as the copyrighted Clawd mascot so even though the code in this repo is non-proprietary I will not license it myself under a copyleft license since this repo includes proprietary fonts and copyrighted assets. Please be aware of this if you fork or copy the code from this repo. **You have been warned!**
+The software in this repository uses and adheres to the Anthropic brand guidelines and uses the same proprietary fonts that Anthropic has a license for but this software uses without permission as well as using assets from Anthropic such as the copyrighted Clawd mascot so even though the code in this repo is non-proprietary I will not license it myself under a copyleft license since this repo includes proprietary fonts and copyrighted assets. Please be aware of this if you fork or copy the code from this repo. **You have been warned!**
