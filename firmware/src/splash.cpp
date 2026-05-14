@@ -2,13 +2,17 @@
 #include "splash_animations.h"
 #include "theme.h"
 #include "usage_rate.h"
+#include "ui_layout.h"
+#include "display_cfg.h"
 #include <Arduino.h>
 #include <string.h>
 #include <esp_heap_caps.h>
 
-// 20x20 grid scaled 24x to fill 480x480
-#define GRID         20
-#define CELL         24
+// 20x20 grid of square cells; cell size is per-board (24 on 2.16, 18 on 1.8).
+// The canvas is square — lv_obj_center() places it inside the (possibly
+// non-square) splash_container so we get equal margins.
+#define GRID         UI_SPLASH_GRID
+#define CELL         UI_SPLASH_CELL
 #define CANVAS_W     (GRID * CELL)
 #define CANVAS_H     (GRID * CELL)
 
@@ -20,7 +24,7 @@ LV_FONT_DECLARE(font_styrene_28);
 static lv_obj_t *splash_container = NULL;
 static lv_obj_t *canvas = NULL;
 static lv_obj_t *label_status = NULL;     // shown only when no animations loaded
-static uint16_t *canvas_buf = NULL;        // 480x480 RGB565 (PSRAM)
+static uint16_t *canvas_buf = NULL;        // CANVAS_W x CANVAS_H RGB565 (PSRAM)
 
 static uint16_t cur_anim = 0;
 static uint16_t cur_frame = 0;
@@ -99,7 +103,7 @@ void splash_init(lv_obj_t *parent) {
     }
 
     splash_container = lv_obj_create(parent);
-    lv_obj_set_size(splash_container, 480, 480);
+    lv_obj_set_size(splash_container, LCD_W, LCD_H);
     lv_obj_set_pos(splash_container, 0, 0);
     lv_obj_set_style_bg_color(splash_container, THEME_BG, 0);
     lv_obj_set_style_bg_opa(splash_container, LV_OPA_COVER, 0);

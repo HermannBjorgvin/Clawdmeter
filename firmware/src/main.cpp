@@ -20,12 +20,43 @@
 // ---- Hardware objects ----
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
     LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
+#ifdef BOARD_AMOLED_18
+Arduino_SH8601 *gfx = new Arduino_SH8601(
+    bus, LCD_RESET, 0 /* rotation */,
+    LCD_W, LCD_H, 0, 0, 0, 0);
+TouchDrvFT6X36 touch;
+#else
 Arduino_CO5300 *gfx = new Arduino_CO5300(
     bus, LCD_RESET, 0 /* rotation */,
-    LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
+    LCD_W, LCD_H, 0, 0, 0, 0);
 TouchDrvCST92xx touch;
+#endif
 XPowersPMU pmu;
 SensorQMI8658 imu;
+
+#ifdef BOARD_AMOLED_18
+// Minimal TCA9554 driver — drives reset lines for LCD, touch, and one
+// peripheral (P0/P1/P2). The Waveshare 1.8 board routes these resets
+// through the expander rather than direct GPIOs.
+static bool tca9554_write(uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(TCA9554_ADDR);
+    Wire.write(reg);
+    Wire.write(val);
+    return Wire.endTransmission() == 0;
+}
+// Pulse P0/P1/P2 LOW for 20 ms then HIGH. Datasheet: reg 0x03 = config
+// (1=input, 0=output), reg 0x01 = output port.
+static bool tca9554_reset_panel(void) {
+    // Configure P0-P2 as outputs (rest as inputs)
+    if (!tca9554_write(0x03, 0xF8)) return false;
+    // Drive P0-P2 LOW
+    if (!tca9554_write(0x01, 0x00)) return false;
+    delay(20);
+    // Drive P0-P2 HIGH
+    if (!tca9554_write(0x01, 0x07)) return false;
+    return true;
+}
+#endif
 
 static UsageData usage = {};
 
@@ -67,18 +98,16 @@ static uint32_t my_tick(void) {
     return millis();
 }
 
-// Rotate a w×h strip and compute destination coordinates on the 480×480 display.
+// Rotate a w×h strip and compute destination coordinates on the LCD_W×LCD_H display.
 // src pixels are in row-major order for the rectangle (sx, sy, w, h).
 // Output goes to rot_buf in row-major order for the destination rectangle.
 static void rotate_strip(const uint16_t *src, int32_t w, int32_t h,
                          int32_t sx, int32_t sy, uint8_t r,
                          int32_t *dx, int32_t *dy, int32_t *dw, int32_t *dh) {
-    const int S = LCD_WIDTH;  // 480
-
     switch (r) {
-    case 1: { // 90° CW: (x,y) -> (S-1-y, x)
+    case 1: { // 90° CW
         *dw = h; *dh = w;
-        *dx = S - sy - h;
+        *dx = LCD_W - sy - h;
         *dy = sx;
         for (int32_t y = 0; y < h; y++) {
             for (int32_t x = 0; x < w; x++) {
@@ -88,10 +117,10 @@ static void rotate_strip(const uint16_t *src, int32_t w, int32_t h,
         }
         break;
     }
-    case 2: { // 180°: (x,y) -> (S-1-x, S-1-y)
+    case 2: { // 180°
         *dw = w; *dh = h;
-        *dx = S - sx - w;
-        *dy = S - sy - h;
+        *dx = LCD_W - sx - w;
+        *dy = LCD_H - sy - h;
         for (int32_t y = 0; y < h; y++) {
             for (int32_t x = 0; x < w; x++) {
                 rot_buf[(h - 1 - y) * w + (w - 1 - x)] = src[y * w + x];
@@ -99,10 +128,10 @@ static void rotate_strip(const uint16_t *src, int32_t w, int32_t h,
         }
         break;
     }
-    case 3: { // 270° CW: (x,y) -> (y, S-1-x)
+    case 3: { // 270° CW
         *dw = h; *dh = w;
         *dx = sy;
-        *dy = S - sx - w;
+        *dy = LCD_H - sx - w;
         for (int32_t y = 0; y < h; y++) {
             for (int32_t x = 0; x < w; x++) {
                 // src(x,y) -> dst(y, w-1-x)
@@ -228,8 +257,18 @@ void setup() {
     delay(300);
     Serial.println("{\"ready\":true}");
 
-    // Init I2C (shared by touch + PMU)
+    // Init I2C (shared by touch + PMU + on 1.8: TCA9554 expander)
     Wire.begin(IIC_SDA, IIC_SCL);
+
+#ifdef BOARD_AMOLED_18
+    // Pulse LCD_RST / TP_RST / AUX_RST via TCA9554 expander. Without this
+    // the SH8601 stays dark.
+    if (!tca9554_reset_panel()) {
+        Serial.println("TCA9554 not responding at 0x20 — display may stay dark");
+    } else {
+        delay(120);  // SH8601 reset settle
+    }
+#endif
 
     // Init display
     gfx->begin();
@@ -243,32 +282,48 @@ void setup() {
     imu_init();
 
     // Init touch
+#ifdef BOARD_AMOLED_18
+    touch.setPins(TP_RST, TP_INT);
+    if (!touch.begin(Wire, FT3168_ADDR, IIC_SDA, IIC_SCL)) {
+        Serial.println("Touch init failed");
+    } else {
+        touch.setMaxCoordinates(LCD_W, LCD_H);
+        // TBD on hardware — bisect through swap/mirror permutations during
+        // bring-up until corner taps report the expected coordinates.
+        touch.setSwapXY(false);
+        touch.setMirrorXY(false, false);
+        attachInterrupt(TP_INT, touch_isr, FALLING);
+        Serial.println("Touch init OK");
+    }
+#else
     touch.setPins(TP_RST, TP_INT);
     if (!touch.begin(Wire, CST9220_ADDR, IIC_SDA, IIC_SCL)) {
         Serial.println("Touch init failed");
     } else {
-        touch.setMaxCoordinates(LCD_WIDTH, LCD_HEIGHT);
+        touch.setMaxCoordinates(LCD_W, LCD_H);
         touch.setSwapXY(true);
         touch.setMirrorXY(true, false);
         attachInterrupt(TP_INT, touch_isr, FALLING);
         Serial.println("Touch init OK");
     }
+#endif
 
     // Init LVGL
     lv_init();
     lv_tick_set_cb(my_tick);
 
     // Allocate PSRAM-backed partial render buffers
-    buf1 = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
-    buf2 = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
-    // rot_buf needs to hold the largest possible strip after rotation
-    // A 480×40 strip rotated 90° becomes 40×480, same pixel count
-    rot_buf = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
+    buf1 = (uint16_t*)heap_caps_malloc(LCD_W * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
+    buf2 = (uint16_t*)heap_caps_malloc(LCD_W * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
+    // rot_buf needs to hold the largest possible strip after rotation.
+    // Use the larger panel dimension so non-square displays still fit.
+    static const int32_t ROT_MAX_DIM = (LCD_W > LCD_H) ? LCD_W : LCD_H;
+    rot_buf = (uint16_t*)heap_caps_malloc(ROT_MAX_DIM * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
 
-    lv_display_t* disp = lv_display_create(LCD_WIDTH, LCD_HEIGHT);
+    lv_display_t* disp = lv_display_create(LCD_W, LCD_H);
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
     lv_display_set_flush_cb(disp, my_flush_cb);
-    lv_display_set_buffers(disp, buf1, buf2, LCD_WIDTH * BUF_LINES * 2,
+    lv_display_set_buffers(disp, buf1, buf2, LCD_W * BUF_LINES * 2,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
 
     // CO5300 even-alignment rounder
