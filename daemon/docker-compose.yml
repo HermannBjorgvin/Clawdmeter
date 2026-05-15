@@ -1,0 +1,27 @@
+# Run the Clawdmeter BLE usage daemon in Docker. Linux only — Docker
+# Desktop on macOS cannot reach the host's Bluetooth stack, so use the
+# launchd install (install-mac.sh) there instead.
+#
+# Quick start:
+#   docker compose -f daemon/docker-compose.yml up -d --build
+#   docker compose -f daemon/docker-compose.yml logs -f
+#
+# Note: only one host process can hold the GATT connection at a time —
+# stop any systemd unit or foreground daemon before starting this.
+
+services:
+  claude-usage-daemon:
+    build: .
+    image: clawdmeter-daemon:latest
+    container_name: claude-usage-daemon
+    # bleak/dbus-fast talks to the host's BlueZ over the system D-Bus
+    # socket; mounting it is enough, no host networking needed.
+    # AppArmor's default container profile blocks D-Bus AddMatch on
+    # Ubuntu/Debian hosts — unconfine so BlueZ method calls go through.
+    security_opt:
+      - apparmor=unconfined
+    volumes:
+      - /var/run/dbus:/var/run/dbus
+      - ${HOME}/.claude/.credentials.json:/root/.claude/.credentials.json:ro
+      - ${HOME}/.config/claude-usage-monitor:/root/.config/claude-usage-monitor
+    restart: unless-stopped
