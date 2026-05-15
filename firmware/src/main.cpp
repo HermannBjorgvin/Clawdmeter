@@ -365,8 +365,8 @@ void setup() {
     // SenseCAP: single button toggles backlight
     pinMode(SENSECAP_BTN, INPUT_PULLUP);
 
-    // Swipe gestures drive screen navigation
-    lv_obj_add_event_cb(lv_screen_active(), sensecap_gesture_cb, LV_EVENT_GESTURE, NULL);
+    // Swipe gestures drive screen navigation — lv_layer_top() persists across screen switches
+    lv_obj_add_event_cb(lv_layer_top(), sensecap_gesture_cb, LV_EVENT_GESTURE, NULL);
 #endif
 
     // Build dashboard
@@ -427,6 +427,7 @@ static void sensecap_gesture_cb(lv_event_t* e) {
     (void)e;
     if (ui_get_current_screen() == SCREEN_SPLASH) return;
     lv_indev_t* indev = lv_indev_active();
+    if (!indev) return;
     lv_dir_t dir = lv_indev_get_gesture_dir(indev);
     if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) {
         ui_cycle_screen();
