@@ -144,8 +144,9 @@ static void my_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_m
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
     uint16_t *src = (uint16_t*)px_map;
-    uint8_t r = imu_get_rotation();
 
+#ifndef TARGET_SENSECAP
+    uint8_t r = imu_get_rotation();
     if (r == 0) {
         gfx->draw16bitRGBBitmap(area->x1, area->y1, src, w, h);
     } else {
@@ -153,6 +154,10 @@ static void my_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_m
         rotate_strip(src, w, h, area->x1, area->y1, r, &dx, &dy, &dw, &dh);
         gfx->draw16bitRGBBitmap(dx, dy, rot_buf, dw, dh);
     }
+#else
+    gfx->draw16bitRGBBitmap(area->x1, area->y1, src, w, h);
+#endif
+
     lv_display_flush_ready(disp);
 }
 
