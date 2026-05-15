@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <lvgl.h>
 #include <ArduinoJson.h>
-#include "display_cfg.h"
+#include "display_cfg_target.h"
 #include "data.h"
 #include "ui.h"
 #include "ble.h"

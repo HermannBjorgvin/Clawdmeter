@@ -3,7 +3,7 @@
 #include <lvgl.h>
 #include "logo.h"
 #include "icons.h"
-#include "display_cfg.h"
+#include "display_cfg_target.h"
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
