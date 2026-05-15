@@ -2,7 +2,7 @@
 
 #include <Arduino_GFX_Library.h>
 #include <TouchLib.h>
-#include <PCA9535.h>
+#include <PCA95x5.h>
 #include <Wire.h>
 
 // ---- Display resolution (same as Waveshare) ----

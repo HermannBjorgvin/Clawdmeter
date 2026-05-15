@@ -18,6 +18,8 @@
 #define BTN_FWD  18
 
 // ---- Hardware objects ----
+#ifndef TARGET_SENSECAP
+// Waveshare ESP32-S3-Touch-AMOLED-2.16
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
     LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
 Arduino_CO5300 *gfx = new Arduino_CO5300(
@@ -26,6 +28,26 @@ Arduino_CO5300 *gfx = new Arduino_CO5300(
 TouchDrvCST92xx touch;
 XPowersPMU pmu;
 SensorQMI8658 imu;
+#else
+// SenseCAP Indicator D1L
+static Arduino_DataBus *spi_bus_init = new Arduino_ESP32SPI(
+    GFX_NOT_DEFINED, GFX_NOT_DEFINED,
+    SENSECAP_LCD_SPI_SCK, SENSECAP_LCD_SPI_MOSI, GFX_NOT_DEFINED);
+static Arduino_ESP32RGBPanel *rgb_panel = new Arduino_ESP32RGBPanel(
+    SENSECAP_LCD_DE, SENSECAP_LCD_VSYNC, SENSECAP_LCD_HSYNC, SENSECAP_LCD_PCLK,
+    SENSECAP_LCD_R0, SENSECAP_LCD_R1, SENSECAP_LCD_R2, SENSECAP_LCD_R3, SENSECAP_LCD_R4,
+    SENSECAP_LCD_G0, SENSECAP_LCD_G1, SENSECAP_LCD_G2, SENSECAP_LCD_G3, SENSECAP_LCD_G4, SENSECAP_LCD_G5,
+    SENSECAP_LCD_B0, SENSECAP_LCD_B1, SENSECAP_LCD_B2, SENSECAP_LCD_B3, SENSECAP_LCD_B4,
+    0 /* hsync_polarity */, 8 /* hsync_front_porch */, 4 /* hsync_pulse_width */, 8 /* hsync_back_porch */,
+    0 /* vsync_polarity */, 8 /* vsync_front_porch */, 4 /* vsync_pulse_width */, 8 /* vsync_back_porch */,
+    1 /* pclk_active_neg */);
+Arduino_GFX *gfx = new Arduino_RGB_Display(
+    LCD_WIDTH, LCD_HEIGHT, rgb_panel, 0 /* rotation */, true /* auto_flush */,
+    spi_bus_init, GFX_NOT_DEFINED /* RST */,
+    st7701_type6_init_operations, sizeof(st7701_type6_init_operations));
+TouchLib touch_sc(Wire, SENSECAP_IIC_SDA, SENSECAP_IIC_SCL, FT3267_SLAVE_ADDRESS);
+PCA9535 pca;
+#endif
 
 static UsageData usage = {};
 
