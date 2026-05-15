@@ -1,19 +1,24 @@
 #!/bin/bash
-# Take a screenshot from the Waveshare AMOLED display via LVGL snapshot.
+# Capture a screenshot via the firmware's LVGL snapshot command.
+# Works on both Waveshare (480x480) and LILYGO (170x320) — the device
+# reports its own dimensions in the SCREENSHOT_START header, which we
+# pipe through to ffmpeg so the same script handles any panel.
+#
 # Usage: ./screenshot.sh [output.png] [port]
 
 OUTPUT="${1:-screenshot.png}"
 PORT="${2:-/dev/ttyACM0}"
 
 TMPRAW=$(mktemp /tmp/screenshot_XXXXXX.raw)
-trap "rm -f '$TMPRAW'" EXIT
+SIZEFILE=$(mktemp /tmp/screenshot_XXXXXX.size)
+trap "rm -f '$TMPRAW' '$SIZEFILE'" EXIT
 
 echo "Taking screenshot from $PORT..."
 
-python3 - "$PORT" "$TMPRAW" << 'PYEOF'
+python3 - "$PORT" "$TMPRAW" "$SIZEFILE" << 'PYEOF'
 import serial, sys
 
-port_path, raw_path = sys.argv[1], sys.argv[2]
+port_path, raw_path, size_path = sys.argv[1], sys.argv[2], sys.argv[3]
 
 port = serial.Serial(port_path, 115200, timeout=10)
 port.reset_input_buffer()
@@ -40,6 +45,8 @@ while len(data) < raw_size:
 
 with open(raw_path, "wb") as f:
     f.write(data)
+with open(size_path, "w") as f:
+    f.write(f"{w} {h}\n")
 
 for _ in range(10):
     line = port.readline().decode("utf-8", errors="replace").strip()
@@ -55,12 +62,14 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-ffmpeg -y -f rawvideo -pixel_format rgb565le -video_size 480x480 \
+read W H < "$SIZEFILE"
+
+ffmpeg -y -f rawvideo -pixel_format rgb565le -video_size "${W}x${H}" \
     -i "$TMPRAW" -update 1 -frames:v 1 "$OUTPUT" 2>/dev/null || true
 
 
 if [ -f "$OUTPUT" ]; then
-    echo "Saved: $OUTPUT"
+    echo "Saved: $OUTPUT (${W}x${H})"
 else
     echo "Error: conversion failed"
     exit 1

@@ -2,8 +2,9 @@
 #include <stdint.h>
 #include <lvgl.h>
 
-// Initialize splash module. Creates the canvas widget inside `parent` and
-// allocates the 480x480 pixel buffer (PSRAM).
+// Initialize splash module. Creates the canvas widget inside `parent`
+// and allocates the pixel buffer in PSRAM. Canvas size is derived from
+// the board's panel dimensions in splash.cpp.
 void splash_init(lv_obj_t *parent);
 
 // Advance animation frame if hold time elapsed. Call from main loop.

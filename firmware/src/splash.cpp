@@ -2,13 +2,19 @@
 #include "splash_animations.h"
 #include "theme.h"
 #include "usage_rate.h"
+#include "display_cfg.h"
 #include <Arduino.h>
 #include <string.h>
 #include <esp_heap_caps.h>
 
-// 20x20 grid scaled 24x to fill 480x480
+// 20x20 pixel-art grid. Cell size is chosen at compile time so the
+// canvas always fits within the panel: pick the smallest screen edge,
+// divide by the grid size, and the result is the largest integer scale
+// that still fits. On Waveshare (480x480) that's CELL=24 → 480x480; on
+// LILYGO 170x320 that's CELL=8 → 160x160 (centered).
 #define GRID         20
-#define CELL         24
+#define SPLASH_MIN_EDGE  ((BOARD_LCD_W < BOARD_LCD_H) ? BOARD_LCD_W : BOARD_LCD_H)
+#define CELL         (SPLASH_MIN_EDGE / GRID)
 #define CANVAS_W     (GRID * CELL)
 #define CANVAS_H     (GRID * CELL)
 
@@ -20,7 +26,7 @@ LV_FONT_DECLARE(font_styrene_28);
 static lv_obj_t *splash_container = NULL;
 static lv_obj_t *canvas = NULL;
 static lv_obj_t *label_status = NULL;     // shown only when no animations loaded
-static uint16_t *canvas_buf = NULL;        // 480x480 RGB565 (PSRAM)
+static uint16_t *canvas_buf = NULL;        // CANVAS_W x CANVAS_H RGB565 (PSRAM)
 
 static uint16_t cur_anim = 0;
 static uint16_t cur_frame = 0;
@@ -69,8 +75,11 @@ static void resolve_group_lists(void) {
 }
 
 static void render_frame(const uint8_t *cells, const uint16_t *palette) {
+    // CANVAS_W is a compile-time constant per board but VLAs on the
+    // stack are fine for our two configurations (max 480 entries on
+    // Waveshare). Keep it dynamic so the same code handles both.
+    uint16_t row[CANVAS_W];
     for (int gy = 0; gy < GRID; gy++) {
-        uint16_t row[CANVAS_W];
         for (int gx = 0; gx < GRID; gx++) {
             uint8_t code = cells[gy * GRID + gx];
             uint16_t color = (palette && code < SPLASH_PALETTE_SIZE) ? palette[code] : COL_EMPTY;
@@ -99,7 +108,7 @@ void splash_init(lv_obj_t *parent) {
     }
 
     splash_container = lv_obj_create(parent);
-    lv_obj_set_size(splash_container, 480, 480);
+    lv_obj_set_size(splash_container, BOARD_LCD_W, BOARD_LCD_H);
     lv_obj_set_pos(splash_container, 0, 0);
     lv_obj_set_style_bg_color(splash_container, THEME_BG, 0);
     lv_obj_set_style_bg_opa(splash_container, LV_OPA_COVER, 0);
