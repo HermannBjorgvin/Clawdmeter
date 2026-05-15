@@ -2,7 +2,7 @@
 
 A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
 
-It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) and pairs with my laptop over Bluetooth, the splash screen plays pixel-art Clawd animations that get
+It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) (the original target) or a [LILYGO T-Display S3](https://www.lilygo.cc/products/t-display-s3), pairs with my laptop over Bluetooth, the splash screen plays pixel-art Clawd animations that get
 busier when your usage rate climbs. The two side buttons send Space and
 Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
 
@@ -25,7 +25,47 @@ While the splash is up, the middle button cycles animations instead of screens. 
 
 ## Hardware
 
-- [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) - ESP32-S3R8, 2.16" 480×480 AMOLED (CO5300 QSPI), CST9220 cap touch, AXP2101 PMU + Li-Po battery, QMI8658 IMU
+### Supported boards
+
+The firmware now compiles for two boards out of the same source tree.
+Each board is selected at build time via a PlatformIO environment
+(`pio run -e <env>`) — pinout, capability flags, and UI layout live
+behind `BOARD_*` macros so neither target's behaviour bleeds into the
+other.
+
+| Board                                                                                                                | PlatformIO env                   | Display                   | Touch   | PMU       | IMU      | Buttons             |
+| -------------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------------------------- | :-----: | :-------: | :------: | ------------------- |
+| [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786)      | `waveshare_amoled_216`           | 480×480 AMOLED (CO5300)   | CST9220 | AXP2101   | QMI8658  | 3 (incl. PMU PKEY)  |
+| [LILYGO T-Display S3](https://www.lilygo.cc/products/t-display-s3) (Basic, no touch)                                 | `lilygo_t_display_s3`            | 170×320 ST7789 (parallel) | —       | ADC sense | —        | 2 (BOOT + IO14)     |
+| [Waveshare ESP32-S3-Touch-LCD-2](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-2)                                | `waveshare_esp32_s3_touch_lcd_2` | 240×320 ST7789T3 (SPI)    | CST816D | ADC sense | QMI8658† | 0 (touch-only nav)  |
+
+Common to all targets: ESP32-S3 (R8 / 16 MB flash, 8 MB PSRAM), USB-C
+for flashing, optional 3.7 V Li-Po battery, and the BLE HID + custom
+GATT service used by the host daemon.
+
+† On the Touch-LCD-2 the IMU is wired but `BOARD_HAS_IMU` is left at 0
+in the initial port — rotation is fixed via `BOARD_FIXED_ROTATION`. Flip
+that pair in `boards/board_waveshare_esp32_s3_touch_lcd_2.h` to enable
+auto-rotation once the orientation mapping has been tuned for the
+non-square panel.
+
+### Planned boards
+
+A few more panels I'd like to land next. None of these are in the tree
+yet — open to PRs.
+
+- **Waveshare ESP32-P4 Smart 86 Box** — 4" 720×720 touchscreen, RS485, relay, camera, RJ45 ETH. ESP32-P4 has no native BLE, so the BLE path needs to go over ESP-Hosted to a coprocessor — bigger lift than the S3 ports.
+- **Waveshare ESP32-P4-WIFI6 dev board (3.5" LCD)** — same ESP32-P4 / ESP-Hosted constraint as the Smart 86 Box, smaller form factor.
+
+If you want to port Clawdmeter to a different panel, the structure is:
+
+1. Add `firmware/src/boards/board_<name>.h` with pinout + capability flags (`BOARD_HAS_TOUCH` / `BOARD_HAS_PMU` / `BOARD_HAS_IMU` / `BOARD_HAS_BATTERY_ADC`).
+2. Wire the new `BOARD_*` macro into `firmware/src/display_cfg.h` and instantiate the GFX driver in the matching `#if` block of `firmware/src/main.cpp`.
+3. Add a `[env:<name>]` section to `firmware/platformio.ini`.
+4. Tune `firmware/src/ui_layout.h` for the panel's dimensions and fonts.
+
+### Accessories
+
 - USB-C cable for flashing firmware and charging
 - 3.7V Li-Po battery (MX1.25 2-pin connector, optional)
 
@@ -43,10 +83,26 @@ The macOS host pieces — Python daemon, LaunchAgent, and flash helper — were 
 
 ### Flash the firmware
 
+`flash-mac.sh` invokes `pio run -t upload` with the default
+PlatformIO env, which is set to `waveshare_amoled_216`. For the Waveshare
+board, the script suffices:
+
 ```bash
 ./flash-mac.sh                       # auto-detects /dev/cu.usbmodem*
 ./flash-mac.sh /dev/cu.usbmodem1101  # or pass an explicit USB serial port
 ```
+
+For the **LILYGO T-Display S3** or **Waveshare ESP32-S3-Touch-LCD-2**,
+drive `pio` directly so you can pick the env:
+
+```bash
+cd firmware
+pio run -e lilygo_t_display_s3            -t upload --upload-port /dev/cu.usbmodem1101
+pio run -e waveshare_esp32_s3_touch_lcd_2 -t upload --upload-port /dev/cu.usbmodem1101
+```
+
+(See the LILYGO download-mode note in the Linux section if the chip
+doesn't auto-reset into the ROM bootloader.)
 
 ### Pair the device
 
@@ -75,10 +131,28 @@ launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # st
 
 ### Flash the firmware
 
+Pick the env that matches your board. The two currently-supported targets
+both flash over USB-C to `/dev/ttyACM0` on Linux (no boot-mode gymnastics
+needed for either):
+
 ```bash
 cd firmware
-pio run -t upload --upload-port /dev/ttyACM0
+
+# Waveshare ESP32-S3-Touch-AMOLED-2.16 (default — the original target)
+pio run -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0
+
+# LILYGO T-Display S3 (Basic, no touch)
+pio run -e lilygo_t_display_s3 -t upload --upload-port /dev/ttyACM0
+
+# Waveshare ESP32-S3-Touch-LCD-2 (240x320 + CST816D touch)
+pio run -e waveshare_esp32_s3_touch_lcd_2 -t upload --upload-port /dev/ttyACM0
 ```
+
+> **LILYGO note:** if `esptool` reports `Failed to connect to ESP32-S3:
+> Invalid head of packet`, the existing firmware is holding the native
+> USB and the chip isn't dropping into the ROM bootloader on its own.
+> Put it in download mode manually: hold **BOOT** (GPIO 0), tap **RST**,
+> release BOOT — then retry the upload.
 
 ### Pair the device
 

@@ -2,32 +2,32 @@
 #include "display_cfg.h"
 #include <Arduino.h>
 
-// Poll and hysteresis timing
-#define IMU_POLL_MS       100    // read accel at ~10 Hz
-#define STABLE_TIME_MS    300    // orientation must be stable this long before rotating
-#define TILT_THRESHOLD    0.5f   // ~30 degrees from axis (sin(30) ~ 0.5)
+#if BOARD_HAS_IMU
 
-static uint8_t  current_rotation = 0;
-static uint8_t  candidate_rotation = 0;
+// Auto-rotation from the QMI8658 accelerometer's gravity vector. Active
+// only on boards that physically have an IMU; everywhere else the
+// rotation is fixed at BOARD_FIXED_ROTATION and we don't even compile
+// the polling code.
+
+#define IMU_POLL_MS       100    // ~10 Hz accel polling
+#define STABLE_TIME_MS    300    // hold the new orientation for this long
+#define TILT_THRESHOLD    0.5f   // ~30 deg from axis (sin(30) ≈ 0.5)
+
+static uint8_t  current_rotation = BOARD_FIXED_ROTATION;
+static uint8_t  candidate_rotation = BOARD_FIXED_ROTATION;
 static uint32_t candidate_since = 0;
 static uint32_t last_poll_ms = 0;
 static bool     imu_ok = false;
 
-// Determine target rotation from accelerometer gravity vector.
-// Returns 0-3 or 255 if ambiguous (e.g. face-up/face-down).
 static uint8_t accel_to_rotation(float ax, float ay) {
     float abs_ax = fabsf(ax);
     float abs_ay = fabsf(ay);
 
-    if (abs_ax < TILT_THRESHOLD && abs_ay < TILT_THRESHOLD) {
-        return 255;  // ambiguous, keep current
-    }
+    // Ambiguous when laid flat — keep the current orientation.
+    if (abs_ax < TILT_THRESHOLD && abs_ay < TILT_THRESHOLD) return 255;
 
-    if (abs_ay > abs_ax) {
-        return (ay > 0) ? 3 : 1;
-    } else {
-        return (ax > 0) ? 0 : 2;
-    }
+    if (abs_ay > abs_ax) return (ay > 0) ? 3 : 1;
+    else                 return (ax > 0) ? 0 : 2;
 }
 
 void imu_init(void) {
@@ -71,6 +71,14 @@ void imu_tick(void) {
     }
 }
 
-uint8_t imu_get_rotation(void) {
-    return current_rotation;
-}
+uint8_t imu_get_rotation(void) { return current_rotation; }
+
+#else
+
+// No IMU on this board — rotation is a compile-time constant pulled from
+// the board header, and the tick is a no-op.
+void    imu_init(void)         { Serial.println("imu: not present on this board"); }
+void    imu_tick(void)         {}
+uint8_t imu_get_rotation(void) { return BOARD_FIXED_ROTATION; }
+
+#endif
