@@ -1,33 +1,29 @@
 #include "imu.h"
 #include "display_cfg.h"
 #include <Arduino.h>
+#include <math.h>
 
-// Poll and hysteresis timing
+// QMI8658 accelerometer driver. The 1.8" AMOLED panel runs in landscape only —
+// imu_get_rotation() returns 1 (90° CW) or 3 (270° CW), never portrait.
+// When the device is held in portrait we hold the last landscape orientation.
+
 #define IMU_POLL_MS       100    // read accel at ~10 Hz
-#define STABLE_TIME_MS    300    // orientation must be stable this long before rotating
-#define TILT_THRESHOLD    0.5f   // ~30 degrees from axis (sin(30) ~ 0.5)
+#define STABLE_TIME_MS    300    // orientation must be stable this long before flipping
+#define LANDSCAPE_THRESHOLD 0.6f // |ax| must exceed this (relative to 1g) to flip
 
-static uint8_t  current_rotation = 0;
-static uint8_t  candidate_rotation = 0;
+static uint8_t  current_rotation = 1;    // boot in landscape (90° CW)
+static uint8_t  candidate_rotation = 1;
 static uint32_t candidate_since = 0;
 static uint32_t last_poll_ms = 0;
 static bool     imu_ok = false;
 
-// Determine target rotation from accelerometer gravity vector.
-// Returns 0-3 or 255 if ambiguous (e.g. face-up/face-down).
+// Landscape-only orientation: ax dominant means the board is on its side.
+// Returns 255 when the device is portrait or flat (ambiguous — keep current).
 static uint8_t accel_to_rotation(float ax, float ay) {
-    float abs_ax = fabsf(ax);
-    float abs_ay = fabsf(ay);
-
-    if (abs_ax < TILT_THRESHOLD && abs_ay < TILT_THRESHOLD) {
-        return 255;  // ambiguous, keep current
-    }
-
-    if (abs_ay > abs_ax) {
-        return (ay > 0) ? 3 : 1;
-    } else {
-        return (ax > 0) ? 0 : 2;
-    }
+    (void)ay;
+    if (ax >  LANDSCAPE_THRESHOLD) return 1;  // one landscape direction
+    if (ax < -LANDSCAPE_THRESHOLD) return 3;  // the other
+    return 255;
 }
 
 void imu_init(void) {

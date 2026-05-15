@@ -5,7 +5,7 @@
 #include "data.h"
 #include "ui.h"
 #include "ble.h"
-#include "power.h"
+// #include "power.h"  // TODO: Enable once AXP2101 presence confirmed
 #include "imu.h"
 #include "splash.h"
 #include "usage_rate.h"
@@ -18,14 +18,50 @@
 #define BTN_FWD  18
 
 // ---- Hardware objects ----
+// SH8601 uses QSPI. Reset pin is on the TCA9554 expander, not a direct GPIO —
+// pass GFX_NOT_DEFINED so Arduino_GFX doesn't try to toggle a non-existent pin,
+// and handle reset ourselves in io_expander_init().
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
     LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
-Arduino_CO5300 *gfx = new Arduino_CO5300(
-    bus, LCD_RESET, 0 /* rotation */,
-    LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
-TouchDrvCST92xx touch;
-XPowersPMU pmu;
+// SH8601 sees the PHYSICAL panel (368×448 portrait). The landscape rotation
+// happens in software in my_flush_cb, not in the controller.
+Arduino_SH8601 *gfx = new Arduino_SH8601(
+    bus, GFX_NOT_DEFINED /* reset on expander */, 0 /* rotation */,
+    PANEL_W, PANEL_H);
+TouchDrvFT6X36 touch;
 SensorQMI8658 imu;
+
+// Minimal TCA9554 driver — we only need to set all pins as outputs and drive
+// LCD_RESET, DSI_PWR_EN, and TP_RESET. No need for the full bus master.
+static bool tca9554_write_reg(uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(TCA9554_ADDR);
+    Wire.write(reg);
+    Wire.write(val);
+    return Wire.endTransmission() == 0;
+}
+
+// Bring up the I/O expander, power on the AMOLED panel, and run a clean
+// reset pulse for both LCD and touch.
+static void io_expander_init(void) {
+    // Configuration register (0x03): 0 = output, 1 = input. All outputs.
+    if (!tca9554_write_reg(0x03, 0x00)) {
+        Serial.println("TCA9554: not responding at 0x20");
+        return;
+    }
+    // Output register (0x01): start with everything low (reset asserted).
+    tca9554_write_reg(0x01, 0x00);
+    delay(20);
+    // Power on the panel (DSI_PWR_EN high), keep resets asserted.
+    tca9554_write_reg(0x01, (1 << EXIO_LCD_PWR_EN));
+    delay(50);
+    // Release LCD_RESET and TP_RESET; panel power stays on.
+    uint8_t out = (1 << EXIO_LCD_PWR_EN) |
+                  (1 << EXIO_LCD_RESET)  |
+                  (1 << EXIO_TP_RESET);
+    tca9554_write_reg(0x01, out);
+    delay(150);
+    Serial.println("TCA9554 init OK (panel powered, resets released)");
+}
 
 static UsageData usage = {};
 
@@ -46,9 +82,22 @@ static void touch_read() {
     int16_t tx[5], ty[5];
     uint8_t n = touch.getPoint(tx, ty, touch.getSupportTouchPoint());
     if (n > 0) {
+        // Touch returns physical panel coords (0..PANEL_W × 0..PANEL_H).
+        // Map them into logical landscape coords using the inverse of the
+        // rotation applied in rotate_strip.
+        uint16_t px = (uint16_t)tx[0];
+        uint16_t py = (uint16_t)ty[0];
+        uint8_t r = imu_get_rotation();
+        if (r == 3) {
+            // Inverse of 270° CW: physical (px, py) -> logical (PANEL_H - 1 - py, px)
+            touch_x = (PANEL_H - 1) - py;
+            touch_y = px;
+        } else {
+            // Inverse of 90° CW: physical (px, py) -> logical (py, PANEL_W - 1 - px)
+            touch_x = py;
+            touch_y = (PANEL_W - 1) - px;
+        }
         touch_pressed = true;
-        touch_x = (uint16_t)tx[0];
-        touch_y = (uint16_t)ty[0];
     } else {
         touch_pressed = false;
     }
@@ -70,77 +119,48 @@ static uint32_t my_tick(void) {
 // Rotate a w×h strip and compute destination coordinates on the 480×480 display.
 // src pixels are in row-major order for the rectangle (sx, sy, w, h).
 // Output goes to rot_buf in row-major order for the destination rectangle.
+// Landscape rotation: maps a strip from logical 448×368 landscape coords
+// onto the physical 368×448 portrait panel. r=1 is 90° CW, r=3 is 270° CW.
+// Any other value falls back to r=1 (default landscape).
 static void rotate_strip(const uint16_t *src, int32_t w, int32_t h,
                          int32_t sx, int32_t sy, uint8_t r,
                          int32_t *dx, int32_t *dy, int32_t *dw, int32_t *dh) {
-    const int S = LCD_WIDTH;  // 480
-
-    switch (r) {
-    case 1: { // 90° CW: (x,y) -> (S-1-y, x)
-        *dw = h; *dh = w;
-        *dx = S - sy - h;
-        *dy = sx;
-        for (int32_t y = 0; y < h; y++) {
-            for (int32_t x = 0; x < w; x++) {
-                // src(x,y) -> dst(h-1-y, x)
-                rot_buf[x * h + (h - 1 - y)] = src[y * w + x];
-            }
-        }
-        break;
-    }
-    case 2: { // 180°: (x,y) -> (S-1-x, S-1-y)
-        *dw = w; *dh = h;
-        *dx = S - sx - w;
-        *dy = S - sy - h;
-        for (int32_t y = 0; y < h; y++) {
-            for (int32_t x = 0; x < w; x++) {
-                rot_buf[(h - 1 - y) * w + (w - 1 - x)] = src[y * w + x];
-            }
-        }
-        break;
-    }
-    case 3: { // 270° CW: (x,y) -> (y, S-1-x)
+    if (r == 3) {
+        // 270° CW: logical (x, y) -> physical (y, PANEL_H - 1 - x)
         *dw = h; *dh = w;
         *dx = sy;
-        *dy = S - sx - w;
+        *dy = PANEL_H - sx - w;
         for (int32_t y = 0; y < h; y++) {
             for (int32_t x = 0; x < w; x++) {
-                // src(x,y) -> dst(y, w-1-x)
                 rot_buf[(w - 1 - x) * h + y] = src[y * w + x];
             }
         }
-        break;
-    }
-    default:
-        *dx = sx; *dy = sy; *dw = w; *dh = h;
-        break;
+    } else {
+        // 90° CW (default): logical (x, y) -> physical (PANEL_W - 1 - y, x)
+        *dw = h; *dh = w;
+        *dx = PANEL_W - sy - h;
+        *dy = sx;
+        for (int32_t y = 0; y < h; y++) {
+            for (int32_t x = 0; x < w; x++) {
+                rot_buf[x * h + (h - 1 - y)] = src[y * w + x];
+            }
+        }
     }
 }
 
-// LVGL flush callback — rotates partial strips and writes to display
+// LVGL flush callback — always rotates from logical landscape into the
+// physical portrait panel. IMU picks 90° vs 270° based on which way the
+// device is held.
 static void my_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
     uint16_t *src = (uint16_t*)px_map;
     uint8_t r = imu_get_rotation();
 
-    if (r == 0) {
-        gfx->draw16bitRGBBitmap(area->x1, area->y1, src, w, h);
-    } else {
-        int32_t dx, dy, dw, dh;
-        rotate_strip(src, w, h, area->x1, area->y1, r, &dx, &dy, &dw, &dh);
-        gfx->draw16bitRGBBitmap(dx, dy, rot_buf, dw, dh);
-    }
+    int32_t dx, dy, dw, dh;
+    rotate_strip(src, w, h, area->x1, area->y1, r, &dx, &dy, &dw, &dh);
+    gfx->draw16bitRGBBitmap(dx, dy, rot_buf, dw, dh);
     lv_display_flush_ready(disp);
-}
-
-// CO5300 requires even-aligned flush regions
-static void rounder_cb(lv_event_t* e) {
-    lv_area_t *area = (lv_area_t*)lv_event_get_param(e);
-    area->x1 = area->x1 & ~1;
-    area->y1 = area->y1 & ~1;
-    area->x2 = area->x2 | 1;
-    area->y2 = area->y2 | 1;
 }
 
 // LVGL touch callback
@@ -228,29 +248,36 @@ void setup() {
     delay(300);
     Serial.println("{\"ready\":true}");
 
-    // Init I2C (shared by touch + PMU)
+    // Init I2C (shared by touch + I/O expander + future PMU/IMU/RTC)
     Wire.begin(IIC_SDA, IIC_SCL);
+
+    // Bring up the I/O expander first — the AMOLED panel power rail is gated
+    // by EXIO1 (DSI_PWR_EN), and the LCD reset line is on EXIO0. Without
+    // this, gfx->begin() talks to an unpowered panel and the screen stays black.
+    io_expander_init();
 
     // Init display
     gfx->begin();
     gfx->fillScreen(0x0000);
     gfx->setBrightness(200);
 
-    // Init PMU
-    power_init();
-
-    // Init IMU (accelerometer for auto-rotation)
+    // TODO: Enable once AXP2101 wiring confirmed
+    // power_init();
     imu_init();
 
-    // Init touch
-    touch.setPins(TP_RST, TP_INT);
-    if (!touch.begin(Wire, CST9220_ADDR, IIC_SDA, IIC_SCL)) {
+    // Init touch (FT3168)
+    // Note: FT6X36 driver is used for FT3168 compatibility
+    if (!touch.begin(Wire, FT3168_ADDR)) {
         Serial.println("Touch init failed");
     } else {
-        touch.setMaxCoordinates(LCD_WIDTH, LCD_HEIGHT);
-        touch.setSwapXY(true);
-        touch.setMirrorXY(true, false);
-        attachInterrupt(TP_INT, touch_isr, FALLING);
+        // Touch returns physical panel coordinates; rotation is handled in
+        // touch_read() based on imu_get_rotation().
+        touch.setMaxCoordinates(PANEL_W, PANEL_H);
+        touch.setSwapXY(false);
+        touch.setMirrorXY(false, false);
+        if (TP_INT != -1) {
+            attachInterrupt(TP_INT, touch_isr, FALLING);
+        }
         Serial.println("Touch init OK");
     }
 
@@ -271,9 +298,6 @@ void setup() {
     lv_display_set_buffers(disp, buf1, buf2, LCD_WIDTH * BUF_LINES * 2,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
 
-    // CO5300 even-alignment rounder
-    lv_display_add_event_cb(disp, rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
-
     lv_indev_t* indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, my_touch_cb);
@@ -291,8 +315,8 @@ void setup() {
     // Show initial BLE status on Bluetooth screen
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
 
-    // Show initial battery status
-    ui_update_battery(power_battery_pct(), power_is_charging());
+    // TODO: Show battery status once power module confirmed
+    // ui_update_battery(power_battery_pct(), power_is_charging());
 
     ui_show_screen(SCREEN_SPLASH);
 
@@ -301,10 +325,9 @@ void setup() {
 
 static ble_state_t last_ble_state = BLE_STATE_INIT;
 
-// Brightness ramp state for rotation transition
-// On rotation change we blank the panel, force a full LVGL redraw at the
-// new orientation, then ramp brightness back up over ~125ms so the
-// transition reads as deliberate instead of as a glitch.
+// Brightness ramp state for rotation transition. On rotation change we blank
+// the panel, force a full LVGL redraw at the new orientation, then ramp
+// brightness back up over ~125ms so the transition reads as deliberate.
 static void handle_rotation_change(void) {
     static uint8_t last_rotation = 0;
     static uint8_t  ramp_step = 0;  // 0=idle, 1-4=ramping
@@ -335,7 +358,7 @@ void loop() {
     lv_timer_handler();
     ui_tick_anim();
     ble_tick();
-    power_tick();
+    // power_tick();  // TODO: Enable once AXP2101 confirmed
     imu_tick();
     splash_tick();
 
@@ -359,10 +382,11 @@ void loop() {
             fwd_was = fwd_now;
         }
 
-        if (power_pwr_pressed()) {
-            if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
-            else                                          ui_cycle_screen();
-        }
+        // TODO: Enable once AXP2101 confirmed
+        // if (power_pwr_pressed()) {
+        //     if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
+        //     else                                          ui_cycle_screen();
+        // }
     }
 
     handle_rotation_change();
@@ -374,16 +398,16 @@ void loop() {
         ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());
     }
 
-    // Update battery indicator
-    static int last_pct = -2;
-    static bool last_charging = false;
-    int pct = power_battery_pct();
-    bool charging = power_is_charging();
-    if (pct != last_pct || charging != last_charging) {
-        last_pct = pct;
-        last_charging = charging;
-        ui_update_battery(pct, charging);
-    }
+    // TODO: Update battery indicator once power module confirmed
+    // static int last_pct = -2;
+    // static bool last_charging = false;
+    // int pct = power_battery_pct();
+    // bool charging = power_is_charging();
+    // if (pct != last_pct || charging != last_charging) {
+    //     last_pct = pct;
+    //     last_charging = charging;
+    //     ui_update_battery(pct, charging);
+    // }
 
     // Check for serial commands (screenshot, etc.)
     check_serial_cmd();

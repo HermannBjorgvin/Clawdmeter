@@ -2,15 +2,16 @@
 #include "splash_animations.h"
 #include "theme.h"
 #include "usage_rate.h"
+#include "display_cfg.h"
 #include <Arduino.h>
 #include <string.h>
 #include <esp_heap_caps.h>
 
-// 20x20 grid scaled 24x to fill 480x480
+// 20x20 grid scaled 18x for landscape 448x368 (360x360 art, centered)
 #define GRID         20
-#define CELL         24
-#define CANVAS_W     (GRID * CELL)
-#define CANVAS_H     (GRID * CELL)
+#define CELL         18
+#define CANVAS_W     448
+#define CANVAS_H     368
 
 // Background fallback when palette is missing
 #define COL_EMPTY    0x0000  // true black (matches THEME_BG)
@@ -69,16 +70,25 @@ static void resolve_group_lists(void) {
 }
 
 static void render_frame(const uint8_t *cells, const uint16_t *palette) {
+    // Art is GRID*CELL square (360x360). The canvas is larger in landscape
+    // (448x368), so center the art and fill the rest with COL_EMPTY.
+    const int art_size = GRID * CELL;
+    const int x_off = (CANVAS_W - art_size) / 2;
+    const int y_off = (CANVAS_H - art_size) / 2;
+
+    // Clear the whole canvas first so the gutters are clean.
+    for (int i = 0; i < CANVAS_W * CANVAS_H; i++) canvas_buf[i] = COL_EMPTY;
+
     for (int gy = 0; gy < GRID; gy++) {
-        uint16_t row[CANVAS_W];
         for (int gx = 0; gx < GRID; gx++) {
             uint8_t code = cells[gy * GRID + gx];
             uint16_t color = (palette && code < SPLASH_PALETTE_SIZE) ? palette[code] : COL_EMPTY;
-            uint16_t *p = &row[gx * CELL];
-            for (int i = 0; i < CELL; i++) p[i] = color;
-        }
-        for (int dy = 0; dy < CELL; dy++) {
-            memcpy(&canvas_buf[(gy * CELL + dy) * CANVAS_W], row, CANVAS_W * 2);
+            int px = x_off + gx * CELL;
+            int py = y_off + gy * CELL;
+            for (int dy = 0; dy < CELL; dy++) {
+                uint16_t *p = &canvas_buf[(py + dy) * CANVAS_W + px];
+                for (int dx = 0; dx < CELL; dx++) p[dx] = color;
+            }
         }
     }
     if (canvas) lv_obj_invalidate(canvas);
@@ -99,7 +109,7 @@ void splash_init(lv_obj_t *parent) {
     }
 
     splash_container = lv_obj_create(parent);
-    lv_obj_set_size(splash_container, 480, 480);
+    lv_obj_set_size(splash_container, LCD_WIDTH, LCD_HEIGHT);
     lv_obj_set_pos(splash_container, 0, 0);
     lv_obj_set_style_bg_color(splash_container, THEME_BG, 0);
     lv_obj_set_style_bg_opa(splash_container, LV_OPA_COVER, 0);

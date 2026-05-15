@@ -1,74 +1,25 @@
 #include "power.h"
-#include "display_cfg.h"
 #include <Arduino.h>
 
-// Poll intervals
-#define BATTERY_POLL_MS   2000
-#define CHARGING_POLL_MS  500
-
-static int      cached_pct      = -1;
-static bool     cached_charging = false;
-static bool     pwr_pressed_flag = false;
-static uint32_t last_battery_ms  = 0;
-static uint32_t last_charging_ms = 0;
-static uint32_t last_pwr_ms      = 0;
-#define PWR_POLL_MS 50
+// Stub implementation — AXP2101 not available on 1.8" board
+// Return safe defaults: no battery, not charging, no button press
 
 void power_init(void) {
-    if (!pmu.begin(Wire, AXP2101_ADDR, IIC_SDA, IIC_SCL)) {
-        Serial.println("AXP2101 init failed");
-        return;
-    }
-    Serial.println("AXP2101 init OK");
-
-    pmu.enableBattDetection();
-    pmu.enableBattVoltageMeasure();
-
-    // Enable PWR button short-press IRQ (mid button for cycling screens)
-    pmu.disableIRQ(XPOWERS_AXP2101_ALL_IRQ);
-    pmu.clearIrqStatus();
-    pmu.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ);
-
-    cached_charging = pmu.isCharging();
-    cached_pct = pmu.getBatteryPercent();
+    Serial.println("power_init: skipped (AXP2101 not available)");
 }
 
 void power_tick(void) {
-    uint32_t now = millis();
-
-    if (now - last_charging_ms >= CHARGING_POLL_MS) {
-        last_charging_ms = now;
-        cached_charging = pmu.isCharging();
-    }
-
-    if (now - last_battery_ms >= BATTERY_POLL_MS) {
-        last_battery_ms = now;
-        cached_pct = pmu.getBatteryPercent();
-    }
-
-    // Poll PWR button (AXP2101 short-press IRQ)
-    if (now - last_pwr_ms >= PWR_POLL_MS) {
-        last_pwr_ms = now;
-        pmu.getIrqStatus();
-        if (pmu.isPekeyShortPressIrq()) {
-            pwr_pressed_flag = true;
-        }
-        pmu.clearIrqStatus();
-    }
+    // no-op
 }
 
 int power_battery_pct(void) {
-    return cached_pct;
+    return -1;  // no battery info available
 }
 
 bool power_is_charging(void) {
-    return cached_charging;
+    return false;
 }
 
 bool power_pwr_pressed(void) {
-    if (pwr_pressed_flag) {
-        pwr_pressed_flag = false;
-        return true;
-    }
-    return false;
+    return false;  // no PWR button available
 }
