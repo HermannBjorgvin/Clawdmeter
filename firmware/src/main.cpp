@@ -38,8 +38,8 @@ static Arduino_ESP32RGBPanel *rgb_panel = new Arduino_ESP32RGBPanel(
     SENSECAP_LCD_R0, SENSECAP_LCD_R1, SENSECAP_LCD_R2, SENSECAP_LCD_R3, SENSECAP_LCD_R4,
     SENSECAP_LCD_G0, SENSECAP_LCD_G1, SENSECAP_LCD_G2, SENSECAP_LCD_G3, SENSECAP_LCD_G4, SENSECAP_LCD_G5,
     SENSECAP_LCD_B0, SENSECAP_LCD_B1, SENSECAP_LCD_B2, SENSECAP_LCD_B3, SENSECAP_LCD_B4,
-    0 /* hsync_polarity */, 8 /* hsync_front_porch */, 4 /* hsync_pulse_width */, 8 /* hsync_back_porch */,
-    0 /* vsync_polarity */, 8 /* vsync_front_porch */, 4 /* vsync_pulse_width */, 8 /* vsync_back_porch */,
+    0 /* hsync_polarity */, 10 /* hsync_front_porch */, 8 /* hsync_pulse_width */, 50 /* hsync_back_porch */,
+    0 /* vsync_polarity */, 10 /* vsync_front_porch */, 8 /* vsync_pulse_width */, 20 /* vsync_back_porch */,
     1 /* pclk_active_neg */);
 Arduino_GFX *gfx = new Arduino_RGB_Display(
     LCD_WIDTH, LCD_HEIGHT, rgb_panel, 0 /* rotation */, true /* auto_flush */,
