@@ -108,6 +108,17 @@ Check status: `systemctl --user status claude-usage-daemon`
 
 View logs: `journalctl --user -u claude-usage-daemon -f`
 
+### Run the daemon in Docker (alternative)
+
+Skip the systemd unit and run the daemon in a container instead. The compose file mounts the host's system D-Bus so `bleak` reaches BlueZ, plus your credentials file and the cached MAC dir.
+
+```bash
+docker compose -f daemon/docker-compose.yml up -d --build
+docker compose -f daemon/docker-compose.yml logs -f
+```
+
+Only one BLE client can hold the GATT connection — stop the systemd unit (`systemctl --user stop claude-usage-daemon`) before starting the container. Docker Desktop on macOS can't reach host Bluetooth, so this path is Linux only.
+
 ## How it works
 
 1. The daemon reads your Claude Code OAuth token from `~/.claude/.credentials.json`.
