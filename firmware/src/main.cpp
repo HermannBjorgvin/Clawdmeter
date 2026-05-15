@@ -12,20 +12,31 @@
 
 // Physical buttons (global, screen-independent):
 //   BTN_BACK   (GPIO 0)  — left,  send Space (Claude Code voice mode push-to-talk)
-//   BTN_FWD    (GPIO 18) — right, send Shift+Tab (Claude Code mode toggle)
-//   AXP PWR    (PMU)     — middle, cycle screens; on splash, cycle animations
+//   BTN_FWD    (HAS_BTN_FWD boards only) — right, send Shift+Tab
+//   PMU PKEY   (HAS_PMU_BUTTON boards)   — middle, cycle screens
+//
+// Single-button boards (e.g. LilyGO T4-S3): GPIO 0 still sends Space on press;
+// a long-press (>= 800 ms) cycles screens / advances splash animations.
 #define BTN_BACK 0
-#define BTN_FWD  18
+#define BTN_LONG_PRESS_MS 800
 
 // ---- Hardware objects ----
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
     LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
-Arduino_CO5300 *gfx = new Arduino_CO5300(
+// LCD_COL_OFFSET: the RM690B0 controller addresses a 482-wide RAM but the
+// LilyGO T4-S3 viewport is only 450 px wide, so x coords need +16 to land
+// inside the visible glass. The CO5300 on the Waveshare has no such offset.
+#ifndef LCD_COL_OFFSET
+#define LCD_COL_OFFSET 0
+#endif
+DisplayDriver *gfx = new DisplayDriver(
     bus, LCD_RESET, 0 /* rotation */,
-    LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
-TouchDrvCST92xx touch;
-XPowersPMU pmu;
-SensorQMI8658 imu;
+    LCD_WIDTH, LCD_HEIGHT, LCD_COL_OFFSET, 0, LCD_COL_OFFSET, 0);
+TouchDriver touch;
+PmuDriver pmu;
+#if HAS_IMU
+ImuDriver imu;
+#endif
 
 static UsageData usage = {};
 
@@ -231,6 +242,11 @@ void setup() {
     // Init I2C (shared by touch + PMU)
     Wire.begin(IIC_SDA, IIC_SCL);
 
+    // Pull PMICEN HIGH first on boards that gate panel power through the PMIC
+    // (LilyGO T4-S3). No-op on boards without one. Must run before gfx->begin()
+    // or the panel never sees its supply during init.
+    power_early_enable();
+
     // Init display
     gfx->begin();
     gfx->fillScreen(0x0000);
@@ -244,7 +260,7 @@ void setup() {
 
     // Init touch
     touch.setPins(TP_RST, TP_INT);
-    if (!touch.begin(Wire, CST9220_ADDR, IIC_SDA, IIC_SCL)) {
+    if (!touch.begin(Wire, TOUCH_ADDR, IIC_SDA, IIC_SCL)) {
         Serial.println("Touch init failed");
     } else {
         touch.setMaxCoordinates(LCD_WIDTH, LCD_HEIGHT);
@@ -281,9 +297,11 @@ void setup() {
     // Init BLE data channel
     ble_init();
 
-    // Physical buttons: back (GPIO 0) and forward (GPIO 18)
+    // Physical buttons
     pinMode(BTN_BACK, INPUT_PULLUP);
-    pinMode(BTN_FWD,  INPUT_PULLUP);
+#if HAS_BTN_FWD
+    pinMode(BTN_FWD_GPIO, INPUT_PULLUP);
+#endif
 
     // Build dashboard
     ui_init();
@@ -339,30 +357,53 @@ void loop() {
     imu_tick();
     splash_tick();
 
-    // Three-button input (global, screen-independent):
-    //   LEFT  (GPIO 0)  → Space (voice-mode push-to-talk; press & release tracked)
-    //   RIGHT (GPIO 18) → Shift+Tab (Claude Code mode toggle)
-    //   PWR   (AXP)     → cycle screens; on splash, cycle animations
+    // Button input. The Waveshare board has three buttons (left/right/PMU-pkey);
+    // the LilyGO T4-S3 has only the boot button on GPIO 0, so it gets long-press
+    // emulation for screen cycling.
     {
-        static bool back_was = false, fwd_was = false;
+        static bool back_was = false;
+        static uint32_t back_pressed_at = 0;
+        static bool back_long_consumed = false;
         bool back_now = (digitalRead(BTN_BACK) == LOW);
-        bool fwd_now  = (digitalRead(BTN_FWD)  == LOW);
 
         if (back_now != back_was) {
-            if (back_now) ble_keyboard_press(0x2C, 0);  // HID Space, no mods
-            else          ble_keyboard_release();
+            if (back_now) {
+                back_pressed_at = millis();
+                back_long_consumed = false;
+                ble_keyboard_press(0x2C, 0);  // HID Space, no mods
+            } else {
+                ble_keyboard_release();
+            }
             back_was = back_now;
         }
+
+#if !HAS_PMU_BUTTON && !HAS_BTN_FWD
+        // Single-button board: long-press cycles screens / advances splash.
+        if (back_now && !back_long_consumed &&
+            millis() - back_pressed_at >= BTN_LONG_PRESS_MS) {
+            ble_keyboard_release();  // cancel the latched Space
+            back_long_consumed = true;
+            if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
+            else                                          ui_cycle_screen();
+        }
+#endif
+
+#if HAS_BTN_FWD
+        static bool fwd_was = false;
+        bool fwd_now = (digitalRead(BTN_FWD_GPIO) == LOW);
         if (fwd_now != fwd_was) {
             if (fwd_now) ble_keyboard_press(0x2B, 0x02);  // HID Tab + LEFT_SHIFT
             else         ble_keyboard_release();
             fwd_was = fwd_now;
         }
+#endif
 
+#if HAS_PMU_BUTTON
         if (power_pwr_pressed()) {
             if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
             else                                          ui_cycle_screen();
         }
+#endif
     }
 
     handle_rotation_change();

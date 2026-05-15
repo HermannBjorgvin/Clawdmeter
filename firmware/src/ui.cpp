@@ -4,14 +4,7 @@
 #include "logo.h"
 #include "icons.h"
 #include "display_cfg.h"
-
-// Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
-LV_FONT_DECLARE(font_tiempos_56);
-LV_FONT_DECLARE(font_styrene_48);
-LV_FONT_DECLARE(font_styrene_28);
-LV_FONT_DECLARE(font_styrene_24);
-LV_FONT_DECLARE(font_styrene_20);
-LV_FONT_DECLARE(font_mono_32);
+#include "ui_layout.h"
 
 // Anthropic brand palette — design tokens live in theme.h
 #include "theme.h"
@@ -24,14 +17,6 @@ LV_FONT_DECLARE(font_mono_32);
 #define COL_AMBER     THEME_AMBER
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
-
-// ---- Layout constants for 480x480 (scaled for 2.16" high-DPI + rounded corners) ----
-#define SCR_W         480
-#define SCR_H         480
-#define MARGIN        20    // wider margin for rounded display corners
-#define TITLE_Y       30
-#define CONTENT_Y     100
-#define CONTENT_W     (SCR_W - 2 * MARGIN)   // 440
 
 // ---- Usage screen widgets ----
 static lv_obj_t* usage_container;
@@ -67,7 +52,6 @@ static uint8_t anim_spinner_idx = 0;
 static uint8_t anim_phase = 0;
 static uint8_t anim_msg_idx = 0;
 static uint32_t anim_msg_start = 0;
-#define ANIM_MSG_MS     4000
 
 static const char* const spinner_frames[] = {
     "\xC2\xB7", "\xE2\x9C\xBB", "\xE2\x9C\xBD",
@@ -218,10 +202,7 @@ static void init_battery_icons(void) {
     init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_W, ICON_BATTERY_CHARGING_H, icon_battery_charging_data);
 }
 
-// ======== Usage Screen (480x480) ========
-
-#define PANEL_H     150
-#define PANEL_GAP   16
+// ======== Usage Screen ========
 
 // One Session/Weekly panel: big % label, pill on the right, bar, reset label.
 // Pill y=1: symmetric inside the panel — panel-outer-top → pill-top equals
@@ -229,7 +210,7 @@ static void init_battery_icons(void) {
 static void make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
                              lv_obj_t** out_pct, lv_obj_t** out_pill,
                              lv_obj_t** out_bar, lv_obj_t** out_reset) {
-    lv_obj_t* panel = make_panel(parent, MARGIN, y, CONTENT_W, PANEL_H);
+    lv_obj_t* panel = make_panel(parent, UI_MARGIN, y, UI_CONTENT_W, UI_PANEL_H);
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "---%");
@@ -240,18 +221,18 @@ static void make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
     *out_pill = make_pill(panel, pill_text);
     lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
 
-    *out_bar = make_bar(panel, 0, 56, CONTENT_W - 32, 24);
+    *out_bar = make_bar(panel, 0, UI_PANEL_BAR_Y, UI_PANEL_BAR_W, UI_PANEL_BAR_H);
 
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
     lv_obj_set_style_text_font(*out_reset, &font_styrene_28, 0);
     lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
-    lv_obj_set_pos(*out_reset, 0, 94);
+    lv_obj_set_pos(*out_reset, 0, UI_PANEL_RESET_Y);
 }
 
 static void init_usage_screen(lv_obj_t* scr) {
     usage_container = lv_obj_create(scr);
-    lv_obj_set_size(usage_container, SCR_W, SCR_H);
+    lv_obj_set_size(usage_container, UI_SCR_W, UI_SCR_H);
     lv_obj_set_pos(usage_container, 0, 0);
     lv_obj_set_style_bg_opa(usage_container, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(usage_container, 0, 0);
@@ -263,12 +244,12 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_title, "Usage");
     lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, UI_TITLE_Y);
 
-    make_usage_panel(usage_container, CONTENT_Y, "Current",
+    make_usage_panel(usage_container, UI_CONTENT_Y, "Current",
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
-    make_usage_panel(usage_container, CONTENT_Y + PANEL_H + PANEL_GAP, "Weekly",
+    make_usage_panel(usage_container, UI_CONTENT_Y + UI_PANEL_H + UI_PANEL_GAP, "Weekly",
                      &lbl_weekly_pct, &lbl_weekly_label,
                      &bar_weekly, &lbl_weekly_reset);
 
@@ -276,14 +257,14 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_anim, "");
     lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
-    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -UI_ANIM_BOTTOM_INSET);
 }
 
-// ======== Bluetooth Screen (480x480) ========
+// ======== Bluetooth Screen ========
 
 static void init_bluetooth_screen(lv_obj_t* scr) {
     ble_container = lv_obj_create(scr);
-    lv_obj_set_size(ble_container, SCR_W, SCR_H);
+    lv_obj_set_size(ble_container, UI_SCR_W, UI_SCR_H);
     lv_obj_set_pos(ble_container, 0, 0);
     lv_obj_set_style_bg_opa(ble_container, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(ble_container, 0, 0);
@@ -295,10 +276,10 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_ble_title, "Bluetooth");
     lv_obj_set_style_text_font(lbl_ble_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_ble_title, COL_TEXT, 0);
-    lv_obj_align(lbl_ble_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
+    lv_obj_align(lbl_ble_title, LV_ALIGN_TOP_MID, 16, UI_TITLE_Y);
 
-    // Info panel (taller for 480x480)
-    lv_obj_t* p_info = make_panel(ble_container, MARGIN, CONTENT_Y, CONTENT_W, 160);
+    // Info panel
+    lv_obj_t* p_info = make_panel(ble_container, UI_MARGIN, UI_CONTENT_Y, UI_CONTENT_W, UI_BT_INFO_PANEL_H);
 
     // Bluetooth icon + status row
     static lv_image_dsc_t icon_bt_dsc;
@@ -316,21 +297,21 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
 
     lbl_ble_device = lv_label_create(p_info);
     lv_label_set_text(lbl_ble_device, "Device: ---");
-    lv_obj_set_style_text_font(lbl_ble_device, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl_ble_device, &UI_BT_LINE_FONT, 0);
     lv_obj_set_style_text_color(lbl_ble_device, COL_DIM, 0);
     lv_obj_set_pos(lbl_ble_device, 0, 64);
 
     lbl_ble_mac = lv_label_create(p_info);
     lv_label_set_text(lbl_ble_mac, "Address: ---");
-    lv_obj_set_style_text_font(lbl_ble_mac, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl_ble_mac, &UI_BT_LINE_FONT, 0);
     lv_obj_set_style_text_color(lbl_ble_mac, COL_DIM, 0);
     lv_obj_set_pos(lbl_ble_mac, 0, 100);
 
     // Reset Bluetooth tap zone with trash icon
-    int reset_y = CONTENT_Y + 160 + 16;
+    int reset_y = UI_CONTENT_Y + UI_BT_INFO_PANEL_H + UI_BT_RESET_ZONE_GAP;
     lv_obj_t* reset_zone = lv_obj_create(ble_container);
-    lv_obj_set_pos(reset_zone, MARGIN, reset_y);
-    lv_obj_set_size(reset_zone, CONTENT_W, 110);
+    lv_obj_set_pos(reset_zone, UI_MARGIN, reset_y);
+    lv_obj_set_size(reset_zone, UI_CONTENT_W, UI_BT_RESET_ZONE_H);
     lv_obj_set_style_bg_color(reset_zone, COL_PANEL, 0);
     lv_obj_set_style_bg_opa(reset_zone, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(reset_zone, 8, 0);
@@ -356,13 +337,13 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_credit, "Built by @hermannbjorgvin");
     lv_obj_set_style_text_font(lbl_credit, &font_styrene_24, 0);
     lv_obj_set_style_text_color(lbl_credit, COL_DIM, 0);
-    lv_obj_align(lbl_credit, LV_ALIGN_BOTTOM_MID, 0, -46);
+    lv_obj_align(lbl_credit, LV_ALIGN_BOTTOM_MID, 0, -UI_BT_CREDIT_BOTTOM);
 
     lv_obj_t* lbl_credit2 = lv_label_create(ble_container);
     lv_label_set_text(lbl_credit2, "Clawd animation by @amaanbuilds");
     lv_obj_set_style_text_font(lbl_credit2, &font_styrene_20, 0);
     lv_obj_set_style_text_color(lbl_credit2, COL_DIM, 0);
-    lv_obj_align(lbl_credit2, LV_ALIGN_BOTTOM_MID, 0, -20);
+    lv_obj_align(lbl_credit2, LV_ALIGN_BOTTOM_MID, 0, -UI_BT_CREDIT2_BOTTOM);
 
     // Start hidden
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
@@ -395,12 +376,12 @@ void ui_init(void) {
     // Logo on top of all containers (inset for rounded corners)
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
-    lv_obj_set_pos(logo_img, MARGIN, TITLE_Y - 10);
+    lv_obj_set_pos(logo_img, UI_LOGO_X, UI_LOGO_Y);
 
     // Battery indicator on top of all containers (upper-right, inset)
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
-    lv_obj_set_pos(battery_img, SCR_W - 48 - MARGIN, TITLE_Y);
+    lv_obj_set_pos(battery_img, UI_SCR_W - UI_BATTERY_RIGHT_PAD, UI_BATTERY_Y);
 }
 
 void ui_update(const UsageData* data) {
@@ -431,7 +412,7 @@ void ui_tick_anim(void) {
 
     uint32_t now = lv_tick_get();
 
-    if (now - anim_msg_start >= ANIM_MSG_MS) {
+    if (now - anim_msg_start >= UI_ANIM_MSG_MS) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
         anim_msg_start = now;
     }
