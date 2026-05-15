@@ -15,8 +15,10 @@ firmware/.vscode/
 tools/node_modules/
 tools/package-lock.json
 
-# Mac daemon venv
+# Python venvs
 daemon/.venv/
+firmware/.venv/
+firmware/.pio_home/
 
 # Python bytecode cache
 __pycache__/
