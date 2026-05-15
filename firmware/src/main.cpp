@@ -38,13 +38,13 @@ static Arduino_ESP32RGBPanel *rgb_panel = new Arduino_ESP32RGBPanel(
     SENSECAP_LCD_R0, SENSECAP_LCD_R1, SENSECAP_LCD_R2, SENSECAP_LCD_R3, SENSECAP_LCD_R4,
     SENSECAP_LCD_G0, SENSECAP_LCD_G1, SENSECAP_LCD_G2, SENSECAP_LCD_G3, SENSECAP_LCD_G4, SENSECAP_LCD_G5,
     SENSECAP_LCD_B0, SENSECAP_LCD_B1, SENSECAP_LCD_B2, SENSECAP_LCD_B3, SENSECAP_LCD_B4,
-    0 /* hsync_polarity */, 10 /* hsync_front_porch */, 8 /* hsync_pulse_width */, 50 /* hsync_back_porch */,
-    0 /* vsync_polarity */, 10 /* vsync_front_porch */, 8 /* vsync_pulse_width */, 20 /* vsync_back_porch */,
-    1 /* pclk_active_neg */);
+    1 /* hsync_polarity */, 10 /* hsync_front_porch */, 8 /* hsync_pulse_width */, 50 /* hsync_back_porch */,
+    1 /* vsync_polarity */, 10 /* vsync_front_porch */, 8 /* vsync_pulse_width */, 20 /* vsync_back_porch */,
+    0 /* pclk_active_neg */, 12000000 /* prefer_speed */);
 Arduino_GFX *gfx = new Arduino_RGB_Display(
     LCD_WIDTH, LCD_HEIGHT, rgb_panel, 0 /* rotation */, true /* auto_flush */,
     spi_bus_init, GFX_NOT_DEFINED /* RST */,
-    st7701_type6_init_operations, sizeof(st7701_type6_init_operations));
+    st7701_type9_init_operations, sizeof(st7701_type9_init_operations));
 TouchLib touch_sc(Wire, SENSECAP_IIC_SDA, SENSECAP_IIC_SCL, FT3267_SLAVE_ADDRESS);
 PCA9535 pca;
 #endif
