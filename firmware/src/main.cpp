@@ -57,6 +57,7 @@ static volatile uint16_t touch_x = 0;
 static volatile uint16_t touch_y = 0;
 static volatile bool     touch_data_ready = false;
 
+#ifndef TARGET_SENSECAP
 static void IRAM_ATTR touch_isr(void) {
     touch_data_ready = true;
 }
@@ -75,6 +76,18 @@ static void touch_read() {
         touch_pressed = false;
     }
 }
+#else
+static void touch_read() {
+    if (touch_sc.read()) {
+        TP_Point p = touch_sc.getPoint(0);
+        touch_pressed = true;
+        touch_x = (uint16_t)p.x;
+        touch_y = (uint16_t)p.y;
+    } else {
+        touch_pressed = false;
+    }
+}
+#endif
 
 // ---- LVGL draw buffers (PSRAM-backed, partial render) ----
 #define BUF_LINES 40
@@ -250,12 +263,17 @@ static void check_serial_cmd() {
     }
 }
 
+#ifdef TARGET_SENSECAP
+static void sensecap_gesture_cb(lv_event_t* e);
+#endif
+
 void setup() {
     Serial.begin(115200);
     delay(300);
     Serial.println("{\"ready\":true}");
 
-    // Init I2C (shared by touch + PMU)
+#ifndef TARGET_SENSECAP
+    // ---- Waveshare: I2C for touch + PMU ----
     Wire.begin(IIC_SDA, IIC_SCL);
 
     // Init display
@@ -280,17 +298,45 @@ void setup() {
         attachInterrupt(TP_INT, touch_isr, FALLING);
         Serial.println("Touch init OK");
     }
+#else
+    // ---- SenseCAP: I2C for touch + PCA9535 expander ----
+    Wire.begin(SENSECAP_IIC_SDA, SENSECAP_IIC_SCL);
 
-    // Init LVGL
+    // Reset the FT6336 touch controller via PCA9535 expander
+    pca.attach(Wire, SENSECAP_PCA9535_ADDR);
+    pca.direction(static_cast<PCA95x5::Port::Port>(SENSECAP_TP_RST_PIN), PCA95x5::Direction::OUT);
+    pca.write(static_cast<PCA95x5::Port::Port>(SENSECAP_TP_RST_PIN), PCA95x5::Level::L);
+    delay(10);
+    pca.write(static_cast<PCA95x5::Port::Port>(SENSECAP_TP_RST_PIN), PCA95x5::Level::H);
+    delay(100);
+
+    // Init display (ST7701S over RGB parallel)
+    gfx->begin();
+    gfx->fillScreen(0x0000);
+
+    // Turn on backlight via GPIO (ST7701S has no brightness register)
+    pinMode(SENSECAP_BACKLIGHT, OUTPUT);
+    digitalWrite(SENSECAP_BACKLIGHT, HIGH);
+
+    // Init FT6336 touch
+    if (!touch_sc.init()) {
+        Serial.println("Touch init failed");
+    } else {
+        Serial.println("Touch init OK");
+    }
+#endif
+
+    // ---- LVGL init (common) ----
     lv_init();
     lv_tick_set_cb(my_tick);
 
     // Allocate PSRAM-backed partial render buffers
     buf1 = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
     buf2 = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
-    // rot_buf needs to hold the largest possible strip after rotation
-    // A 480×40 strip rotated 90° becomes 40×480, same pixel count
+#ifndef TARGET_SENSECAP
+    // rot_buf only needed for IMU-driven rotation (Waveshare only)
     rot_buf = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
+#endif
 
     lv_display_t* disp = lv_display_create(LCD_WIDTH, LCD_HEIGHT);
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
@@ -298,8 +344,10 @@ void setup() {
     lv_display_set_buffers(disp, buf1, buf2, LCD_WIDTH * BUF_LINES * 2,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
 
-    // CO5300 even-alignment rounder
+#ifndef TARGET_SENSECAP
+    // CO5300 requires even-aligned flush regions; ST7701S does not
     lv_display_add_event_cb(disp, rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
+#endif
 
     lv_indev_t* indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
@@ -308,9 +356,18 @@ void setup() {
     // Init BLE data channel
     ble_init();
 
-    // Physical buttons: back (GPIO 0) and forward (GPIO 18)
+    // Physical buttons
+#ifndef TARGET_SENSECAP
+    // Waveshare: back (GPIO 0) and forward (GPIO 18) — BLE HID keystrokes
     pinMode(BTN_BACK, INPUT_PULLUP);
     pinMode(BTN_FWD,  INPUT_PULLUP);
+#else
+    // SenseCAP: single button toggles backlight
+    pinMode(SENSECAP_BTN, INPUT_PULLUP);
+
+    // Swipe gestures drive screen navigation
+    lv_obj_add_event_cb(lv_screen_active(), sensecap_gesture_cb, LV_EVENT_GESTURE, NULL);
+#endif
 
     // Build dashboard
     ui_init();
@@ -318,8 +375,10 @@ void setup() {
     // Show initial BLE status on Bluetooth screen
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
 
-    // Show initial battery status
+#ifndef TARGET_SENSECAP
+    // Show initial battery status (Waveshare only — SenseCAP hides the widget)
     ui_update_battery(power_battery_pct(), power_is_charging());
+#endif
 
     ui_show_screen(SCREEN_SPLASH);
 
@@ -332,6 +391,8 @@ static ble_state_t last_ble_state = BLE_STATE_INIT;
 // On rotation change we blank the panel, force a full LVGL redraw at the
 // new orientation, then ramp brightness back up over ~125ms so the
 // transition reads as deliberate instead of as a glitch.
+// Waveshare only — SenseCAP has no IMU and backlight is a plain GPIO.
+#ifndef TARGET_SENSECAP
 static void handle_rotation_change(void) {
     static uint8_t last_rotation = 0;
     static uint8_t  ramp_step = 0;  // 0=idle, 1-4=ramping
@@ -356,6 +417,7 @@ static void handle_rotation_change(void) {
     if (ramp_step >= 4) ramp_step = 0;
     else                ramp_step++;
 }
+#endif
 
 void loop() {
     touch_read();
