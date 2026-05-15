@@ -30,9 +30,13 @@
 
 // ---- Touch (CST9220) ----
 #define BOARD_HAS_TOUCH         1
+// Unified SensorLib CST driver — auto-detects the actual chip at the
+// configured address, so the same type works for CST92xx (Waveshare
+// AMOLED) and CST816 (Touch-LCD-2).
+#define BOARD_TOUCH_CLASS       TouchDrvCSTXXX
+#define BOARD_TOUCH_ADDR        0x5A
 #define TP_INT                  11
 #define TP_RST                  2     // shared with LCD_RESET
-#define CST9220_ADDR            0x5A
 
 // ---- PMU (AXP2101) ----
 #define BOARD_HAS_PMU           1

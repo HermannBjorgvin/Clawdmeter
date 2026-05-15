@@ -20,8 +20,10 @@
 #  include "boards/board_waveshare_amoled_216.h"
 #elif defined(BOARD_LILYGO_T_DISPLAY_S3)
 #  include "boards/board_lilygo_t_display_s3.h"
+#elif defined(BOARD_WAVESHARE_ESP32_S3_TOUCH_LCD_2)
+#  include "boards/board_waveshare_esp32_s3_touch_lcd_2.h"
 #else
-#  error "No board selected. Define one of: BOARD_WAVESHARE_AMOLED_216, BOARD_LILYGO_T_DISPLAY_S3."
+#  error "No board selected. Define one of: BOARD_WAVESHARE_AMOLED_216, BOARD_LILYGO_T_DISPLAY_S3, BOARD_WAVESHARE_ESP32_S3_TOUCH_LCD_2."
 #endif
 
 // ---- Legacy aliases ----
@@ -55,11 +57,10 @@
 // ---- Global hardware objects (defined in main.cpp) ----
 // `gfx` is the base GFX pointer so callsites stay board-agnostic. The
 // concrete driver type (Arduino_CO5300 vs Arduino_ST7789) is picked in
-// main.cpp behind the BOARD_* macro.
+// main.cpp behind the BOARD_* macro. The touch driver type also varies
+// per board (CST92xx vs CST816) — it stays main.cpp-local since no
+// other compilation unit needs it.
 extern Arduino_GFX *gfx;
-#if BOARD_HAS_TOUCH
-extern TouchDrvCST92xx touch;
-#endif
 #if BOARD_HAS_PMU
 extern XPowersPMU pmu;
 #endif

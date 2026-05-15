@@ -153,6 +153,16 @@ void buttons_tick(void) {
     }
 }
 
+#elif defined(BOARD_WAVESHARE_ESP32_S3_TOUCH_LCD_2)
+
+// Touch-only navigation on this board. KEY1 is wired to ESP_EN (a pure
+// hardware reset, not exposed as a GPIO), and KEY2 (BOOT/GPIO0) doubles
+// as LCD_RESET — pressing it briefly while the firmware runs would
+// reset the panel, which is too noisy to use for navigation. Touch
+// gestures driven through LVGL cover the same ground.
+void buttons_init(void) {}
+void buttons_tick(void) {}
+
 #else
 #  error "buttons.cpp: no board-specific implementation for the selected board"
 #endif

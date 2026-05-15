@@ -110,7 +110,73 @@ LV_FONT_DECLARE(font_mono_18);
 #define UI_LOGO_Y              0
 #define UI_TITLE_X_OFFSET      -8         // nudge left so the title clears the battery icon
 
+#elif defined(BOARD_WAVESHARE_ESP32_S3_TOUCH_LCD_2)
+
+// 240x320 ST7789 IPS, capacitive touch, no rounded corners. Sits in
+// between the LILYGO (170 wide) and Waveshare AMOLED (480 wide) layouts
+// — the BLE Reset Bluetooth tap zone is kept because the board has
+// touch.
+#define UI_MARGIN              12
+#define UI_TITLE_Y             8
+#define UI_CONTENT_Y           54
+#define UI_PANEL_H             108
+#define UI_PANEL_GAP           10
+#define UI_PANEL_PAD           12
+#define UI_BAR_H               16
+#define UI_BAR_Y               44
+#define UI_RESET_Y             70
+
+#define UI_BLE_PANEL_H         124
+#define UI_BLE_RESET_H         54
+#define UI_BLE_STATUS_X        38
+#define UI_BLE_DEVICE_Y        42
+#define UI_BLE_MAC_Y           76
+#define UI_BLE_DEVICE_PREFIX   "Name: "
+#define UI_BLE_MAC_PREFIX      "MAC: "
+#define UI_CREDIT_OFFSET       42
+#define UI_CREDIT2_OFFSET      16
+
+#define UI_FONT_TITLE          (&font_styrene_28)
+#define UI_FONT_PCT            (&font_styrene_48)
+#define UI_FONT_BODY           (&font_styrene_16)
+#define UI_FONT_DIM            (&font_styrene_14)
+#define UI_FONT_PILL           (&font_styrene_16)
+#define UI_FONT_ANIM           (&font_mono_18)
+#define UI_FONT_CREDIT         (&font_styrene_14)
+#define UI_FONT_CREDIT_SMALL   (&font_styrene_12)
+#define UI_FONT_BLE_STATUS     (&font_styrene_20)
+
+// 48x48 icons drawn at 28x28 — wider than LILYGO but still leaves room
+// next to the title at this panel width.
+#define UI_ICON_W              28
+#define UI_ICON_H              28
+#define UI_SHOW_LOGO           1
+#define UI_LOGO_X              24
+#define UI_LOGO_Y              10
+#define UI_LOGO_W              24
+#define UI_LOGO_H              24
+#define UI_TITLE_X_OFFSET      8          // logo on the left, battery on the right
+
 #endif
 
 // Common derived constant.
 #define UI_CONTENT_W           (BOARD_LCD_W - 2 * UI_MARGIN)
+
+#ifndef UI_BLE_DEVICE_PREFIX
+#define UI_BLE_DEVICE_PREFIX   "Device: "
+#endif
+#ifndef UI_BLE_MAC_PREFIX
+#define UI_BLE_MAC_PREFIX      "Address: "
+#endif
+#ifndef UI_BATTERY_ICON_W
+#define UI_BATTERY_ICON_W      UI_ICON_W
+#endif
+#ifndef UI_BATTERY_ICON_H
+#define UI_BATTERY_ICON_H      UI_ICON_H
+#endif
+#ifndef UI_LOGO_W
+#define UI_LOGO_W              80
+#endif
+#ifndef UI_LOGO_H
+#define UI_LOGO_H              80
+#endif

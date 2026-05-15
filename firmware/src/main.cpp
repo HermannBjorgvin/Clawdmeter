@@ -30,7 +30,6 @@ Arduino_GFX *gfx = amoled;
 
 void board_set_brightness(uint8_t level) { amoled->setBrightness(level); }
 
-TouchDrvCST92xx touch;
 XPowersPMU      pmu;
 SensorQMI8658   imu;
 
@@ -55,6 +54,24 @@ void board_set_brightness(uint8_t level) {
     digitalWrite(LCD_BL, level > 0 ? HIGH : LOW);
 }
 
+#elif defined(BOARD_WAVESHARE_ESP32_S3_TOUCH_LCD_2)
+
+// ST7789T3 over standard 4-wire SPI. Standard 240x320 panel, no column
+// offset. LCD_RESET is shared with GPIO0/BOOT/STRAP — gfx->begin()
+// briefly drives it low (panel reset), which is fine because the reset
+// pulse happens before anything else uses the pin.
+static Arduino_DataBus *bus = new Arduino_ESP32SPI(
+    LCD_DC, LCD_CS, LCD_SCLK, LCD_MOSI, LCD_MISO);
+static Arduino_ST7789 *st7789 = new Arduino_ST7789(
+    bus, LCD_RESET, BOARD_FIXED_ROTATION,
+    true /* IPS */, BOARD_LCD_W, BOARD_LCD_H,
+    LCD_COL_OFFSET, LCD_ROW_OFFSET, LCD_COL_OFFSET, LCD_ROW_OFFSET);
+Arduino_GFX *gfx = st7789;
+
+void board_set_brightness(uint8_t level) {
+    digitalWrite(LCD_BL, level > 0 ? HIGH : LOW);
+}
+
 #endif
 
 // ============================================================
@@ -63,8 +80,12 @@ void board_set_brightness(uint8_t level) {
 
 static UsageData usage = {};
 
-// ---- Touch (Waveshare only) ----
+// ---- Touch ----
+// The concrete driver class differs per board (CST92xx vs CST816), so
+// each board header defines BOARD_TOUCH_CLASS and we instantiate it
+// here as a file-local object. No other compilation unit needs it.
 #if BOARD_HAS_TOUCH
+static BOARD_TOUCH_CLASS touch;
 static volatile bool     touch_pressed = false;
 static volatile uint16_t touch_x = 0;
 static volatile uint16_t touch_y = 0;
@@ -275,6 +296,11 @@ void setup(void) {
     digitalWrite(LCD_BL, HIGH);
     pinMode(LCD_RD, OUTPUT);
     digitalWrite(LCD_RD, HIGH);
+#elif defined(BOARD_WAVESHARE_ESP32_S3_TOUCH_LCD_2)
+    // Drive the backlight high before the panel comes up so the first
+    // frame isn't a black flash. Reset is handled inside gfx->begin().
+    pinMode(LCD_BL, OUTPUT);
+    digitalWrite(LCD_BL, HIGH);
 #endif
 
 #if BOARD_HAS_I2C
@@ -291,12 +317,18 @@ void setup(void) {
 
 #if BOARD_HAS_TOUCH
     touch.setPins(TP_RST, TP_INT);
-    if (!touch.begin(Wire, CST9220_ADDR, IIC_SDA, IIC_SCL)) {
+    if (!touch.begin(Wire, BOARD_TOUCH_ADDR, IIC_SDA, IIC_SCL)) {
         Serial.println("Touch init failed");
     } else {
         touch.setMaxCoordinates(BOARD_LCD_W, BOARD_LCD_H);
+        // The CST9220 on the Waveshare AMOLED needs its axes swapped +
+        // mirrored to match the panel; the CST816D on the Touch-LCD-2
+        // already reports coordinates aligned to the ST7789, so leave
+        // those transforms off there.
+#  if defined(BOARD_WAVESHARE_AMOLED_216)
         touch.setSwapXY(true);
         touch.setMirrorXY(true, false);
+#  endif
         attachInterrupt(TP_INT, touch_isr, FALLING);
         Serial.println("Touch init OK");
     }

@@ -130,6 +130,12 @@ static void global_click_cb(lv_event_t* e);
 #if BOARD_HAS_TOUCH
 static void ble_reset_click_cb(lv_event_t* e);
 #endif
+// Touch-only nav (no physical buttons): long-press Usage → Bluetooth.
+#if BOARD_HAS_TOUCH && (BOARD_BTN_COUNT == 0) && !BOARD_HAS_PWR_BUTTON
+static void long_press_cycle_cb(lv_event_t* e);
+static bool ignore_click_after_long_press = false;
+static uint32_t ignore_click_since_ms = 0;
+#endif
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -243,6 +249,9 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_pad_all(usage_container, 0, 0);
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+#if BOARD_HAS_TOUCH && (BOARD_BTN_COUNT == 0) && !BOARD_HAS_PWR_BUTTON
+    lv_obj_add_event_cb(usage_container, long_press_cycle_cb, LV_EVENT_LONG_PRESSED, NULL);
+#endif
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
@@ -274,6 +283,10 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_set_style_border_width(ble_container, 0, 0);
     lv_obj_set_style_pad_all(ble_container, 0, 0);
     lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_SCROLLABLE);
+#if BOARD_HAS_TOUCH && (BOARD_BTN_COUNT == 0) && !BOARD_HAS_PWR_BUTTON
+    // Tap anywhere on BT screen (outside Reset zone) → back to Usage.
+    lv_obj_add_event_cb(ble_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+#endif
 
     lv_obj_t* lbl_ble_title = lv_label_create(ble_container);
     lv_label_set_text(lbl_ble_title, "Bluetooth");
@@ -295,6 +308,8 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
 
     lbl_ble_status = lv_label_create(p_info);
     lv_label_set_text(lbl_ble_status, "Initializing...");
+    lv_label_set_long_mode(lbl_ble_status, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(lbl_ble_status, UI_CONTENT_W - 2 * UI_PANEL_PAD - UI_BLE_STATUS_X);
     lv_obj_set_style_text_font(lbl_ble_status, UI_FONT_BLE_STATUS, 0);
     lv_obj_set_style_text_color(lbl_ble_status, COL_DIM, 0);
     lv_obj_set_pos(lbl_ble_status, UI_BLE_STATUS_X, 2);
@@ -304,7 +319,7 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     const int ble_text_w = UI_CONTENT_W - 2 * UI_PANEL_PAD;
 
     lbl_ble_device = lv_label_create(p_info);
-    lv_label_set_text(lbl_ble_device, "Device: ---");
+    lv_label_set_text(lbl_ble_device, UI_BLE_DEVICE_PREFIX "---");
     lv_label_set_long_mode(lbl_ble_device, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl_ble_device, ble_text_w);
     lv_obj_set_style_text_font(lbl_ble_device, UI_FONT_BODY, 0);
@@ -312,7 +327,7 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_set_pos(lbl_ble_device, 0, UI_BLE_DEVICE_Y);
 
     lbl_ble_mac = lv_label_create(p_info);
-    lv_label_set_text(lbl_ble_mac, "Address: ---");
+    lv_label_set_text(lbl_ble_mac, UI_BLE_MAC_PREFIX "---");
     lv_label_set_long_mode(lbl_ble_mac, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl_ble_mac, ble_text_w);
     lv_obj_set_style_text_font(lbl_ble_mac, UI_FONT_BODY, 0);
@@ -341,6 +356,8 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     init_icon_dsc(&icon_trash_dsc, ICON_TRASH2_W, ICON_TRASH2_H, icon_trash2_data);
     lv_obj_t* trash_img = lv_image_create(reset_zone);
     lv_image_set_src(trash_img, &icon_trash_dsc);
+    lv_obj_set_size(trash_img, UI_ICON_W, UI_ICON_H);
+    lv_image_set_inner_align(trash_img, LV_IMAGE_ALIGN_STRETCH);
 
     lv_obj_t* reset_lbl = lv_label_create(reset_zone);
     lv_label_set_text(reset_lbl, "Reset Bluetooth");
@@ -407,6 +424,8 @@ void ui_init(void) {
     if (UI_SHOW_LOGO) {
         logo_img = lv_image_create(scr);
         lv_image_set_src(logo_img, &logo_dsc);
+        lv_obj_set_size(logo_img, UI_LOGO_W, UI_LOGO_H);
+        lv_image_set_inner_align(logo_img, LV_IMAGE_ALIGN_STRETCH);
         lv_obj_set_pos(logo_img, UI_LOGO_X, UI_LOGO_Y);
     } else {
         logo_img = NULL;
@@ -418,9 +437,10 @@ void ui_init(void) {
     // source. Without this LVGL keeps the bounding box at the source
     // dimensions (48x48), so any positioning past the right edge of a
     // compact panel clips the visible icon.
-    lv_obj_set_size(battery_img, UI_ICON_W, UI_ICON_H);
+    lv_obj_set_size(battery_img, UI_BATTERY_ICON_W, UI_BATTERY_ICON_H);
     lv_image_set_inner_align(battery_img, LV_IMAGE_ALIGN_STRETCH);
     lv_obj_align(battery_img, LV_ALIGN_TOP_RIGHT, -UI_MARGIN, UI_TITLE_Y);
+    lv_obj_move_foreground(battery_img);
 }
 
 void ui_update(const UsageData* data) {
@@ -483,7 +503,23 @@ static void apply_battery_visibility(void) {
 // they have their own event callback, e.g. the Reset Bluetooth zone).
 static void global_click_cb(lv_event_t* e) {
     (void)e;
+#if BOARD_HAS_TOUCH && (BOARD_BTN_COUNT == 0) && !BOARD_HAS_PWR_BUTTON
+    if (ignore_click_after_long_press) {
+        uint32_t elapsed = lv_tick_get() - ignore_click_since_ms;
+        ignore_click_after_long_press = false;
+        if (elapsed < 1000 && ui_get_current_screen() == SCREEN_BLUETOOTH) {
+            return;
+        }
+    }
+
+    // Touch-only board: tap on BT → Usage; tap elsewhere → toggle splash.
+    if (ui_get_current_screen() == SCREEN_BLUETOOTH) {
+        ui_show_screen(SCREEN_USAGE);
+        return;
+    }
+#else
     if (ui_get_current_screen() == SCREEN_BLUETOOTH) return;
+#endif
     ui_toggle_splash();
 }
 
@@ -491,6 +527,18 @@ static void global_click_cb(lv_event_t* e) {
 static void ble_reset_click_cb(lv_event_t* e) {
     (void)e;
     ble_clear_bonds();
+}
+#endif
+
+#if BOARD_HAS_TOUCH && (BOARD_BTN_COUNT == 0) && !BOARD_HAS_PWR_BUTTON
+// Long-press on Usage navigates to Bluetooth on touch-only boards.
+static void long_press_cycle_cb(lv_event_t* e) {
+    (void)e;
+    if (ui_get_current_screen() == SCREEN_USAGE) {
+        ignore_click_after_long_press = true;
+        ignore_click_since_ms = lv_tick_get();
+        ui_cycle_screen();
+    }
 }
 #endif
 
@@ -514,6 +562,7 @@ void ui_show_screen(screen_t screen) {
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
     current_screen = screen;
     apply_battery_visibility();
+    if (battery_img) lv_obj_move_foreground(battery_img);
 }
 
 void ui_cycle_screen(void) {
@@ -550,12 +599,12 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
 
     if (name) {
         static char nbuf[48];
-        snprintf(nbuf, sizeof(nbuf), "Device: %s", name);
+        snprintf(nbuf, sizeof(nbuf), UI_BLE_DEVICE_PREFIX "%s", name);
         lv_label_set_text(lbl_ble_device, nbuf);
     }
     if (mac) {
         static char mbuf[48];
-        snprintf(mbuf, sizeof(mbuf), "Address: %s", mac);
+        snprintf(mbuf, sizeof(mbuf), UI_BLE_MAC_PREFIX "%s", mac);
         lv_label_set_text(lbl_ble_mac, mbuf);
     }
 }

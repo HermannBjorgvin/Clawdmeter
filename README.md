@@ -33,21 +33,27 @@ Each board is selected at build time via a PlatformIO environment
 behind `BOARD_*` macros so neither target's behaviour bleeds into the
 other.
 
-| Board                                                                                                                | PlatformIO env          | Display                  | Touch | PMU      | IMU     | Buttons          |
-| -------------------------------------------------------------------------------------------------------------------- | ----------------------- | ------------------------ | :---: | :------: | :-----: | ---------------- |
-| [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786)      | `waveshare_amoled_216`  | 480×480 AMOLED (CO5300)  | CST9220 | AXP2101 | QMI8658 | 3 (incl. PMU PKEY) |
-| [LILYGO T-Display S3](https://www.lilygo.cc/products/t-display-s3) (Basic, no touch)                                 | `lilygo_t_display_s3`   | 170×320 ST7789 (parallel)| —     | ADC sense | —       | 2 (BOOT + IO14)  |
+| Board                                                                                                                | PlatformIO env                   | Display                   | Touch   | PMU       | IMU      | Buttons             |
+| -------------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------------------------- | :-----: | :-------: | :------: | ------------------- |
+| [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786)      | `waveshare_amoled_216`           | 480×480 AMOLED (CO5300)   | CST9220 | AXP2101   | QMI8658  | 3 (incl. PMU PKEY)  |
+| [LILYGO T-Display S3](https://www.lilygo.cc/products/t-display-s3) (Basic, no touch)                                 | `lilygo_t_display_s3`            | 170×320 ST7789 (parallel) | —       | ADC sense | —        | 2 (BOOT + IO14)     |
+| [Waveshare ESP32-S3-Touch-LCD-2](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-2)                                | `waveshare_esp32_s3_touch_lcd_2` | 240×320 ST7789T3 (SPI)    | CST816D | ADC sense | QMI8658† | 0 (touch-only nav)  |
 
-Common to both targets: ESP32-S3 (R8 / 16 MB flash, 8 MB PSRAM), USB-C
+Common to all targets: ESP32-S3 (R8 / 16 MB flash, 8 MB PSRAM), USB-C
 for flashing, optional 3.7 V Li-Po battery, and the BLE HID + custom
 GATT service used by the host daemon.
 
+† On the Touch-LCD-2 the IMU is wired but `BOARD_HAS_IMU` is left at 0
+in the initial port — rotation is fixed via `BOARD_FIXED_ROTATION`. Flip
+that pair in `boards/board_waveshare_esp32_s3_touch_lcd_2.h` to enable
+auto-rotation once the orientation mapping has been tuned for the
+non-square panel.
+
 ### Planned boards
 
-I've started scouting a few more panels for future targets. They all
-need additional driver work and aren't in the tree yet — open to PRs.
+A few more panels I'd like to land next. None of these are in the tree
+yet — open to PRs.
 
-- **Waveshare ESP32-S3 Touch LCD 2.0"** — 240×320 IPS, capacitive touch, optional camera. Similar driver story to the LILYGO, plus touch.
 - **Waveshare ESP32-P4 Smart 86 Box** — 4" 720×720 touchscreen, RS485, relay, camera, RJ45 ETH. ESP32-P4 has no native BLE, so the BLE path needs to go over ESP-Hosted to a coprocessor — bigger lift than the S3 ports.
 - **Waveshare ESP32-P4-WIFI6 dev board (3.5" LCD)** — same ESP32-P4 / ESP-Hosted constraint as the Smart 86 Box, smaller form factor.
 
@@ -86,12 +92,13 @@ board, the script suffices:
 ./flash-mac.sh /dev/cu.usbmodem1101  # or pass an explicit USB serial port
 ```
 
-For the **LILYGO T-Display S3**, drive `pio` directly so you can pick the
-env:
+For the **LILYGO T-Display S3** or **Waveshare ESP32-S3-Touch-LCD-2**,
+drive `pio` directly so you can pick the env:
 
 ```bash
 cd firmware
-pio run -e lilygo_t_display_s3 -t upload --upload-port /dev/cu.usbmodem1101
+pio run -e lilygo_t_display_s3            -t upload --upload-port /dev/cu.usbmodem1101
+pio run -e waveshare_esp32_s3_touch_lcd_2 -t upload --upload-port /dev/cu.usbmodem1101
 ```
 
 (See the LILYGO download-mode note in the Linux section if the chip
@@ -136,6 +143,9 @@ pio run -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0
 
 # LILYGO T-Display S3 (Basic, no touch)
 pio run -e lilygo_t_display_s3 -t upload --upload-port /dev/ttyACM0
+
+# Waveshare ESP32-S3-Touch-LCD-2 (240x320 + CST816D touch)
+pio run -e waveshare_esp32_s3_touch_lcd_2 -t upload --upload-port /dev/ttyACM0
 ```
 
 > **LILYGO note:** if `esptool` reports `Failed to connect to ESP32-S3:
