@@ -25,13 +25,17 @@ LV_FONT_DECLARE(font_mono_32);
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
 
-// ---- Layout constants for 480x480 (scaled for 2.16" high-DPI + rounded corners) ----
-#define SCR_W         480
-#define SCR_H         480
+// ---- Layout constants ----
+// Width is the limiting dimension for our portrait/square AMOLED panels;
+// height varies between square (480) and portrait (600). Per-screen layouts
+// anchor to top / bottom so the extra vertical room on portrait boards just
+// leaves whitespace in the middle.
+#define SCR_W         LCD_WIDTH
+#define SCR_H         LCD_HEIGHT
 #define MARGIN        20    // wider margin for rounded display corners
 #define TITLE_Y       30
 #define CONTENT_Y     100
-#define CONTENT_W     (SCR_W - 2 * MARGIN)   // 440
+#define CONTENT_W     (SCR_W - 2 * MARGIN)
 
 // ---- Usage screen widgets ----
 static lv_obj_t* usage_container;

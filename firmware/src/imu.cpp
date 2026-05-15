@@ -2,6 +2,8 @@
 #include "display_cfg.h"
 #include <Arduino.h>
 
+#if HAS_IMU
+
 // Poll and hysteresis timing
 #define IMU_POLL_MS       100    // read accel at ~10 Hz
 #define STABLE_TIME_MS    300    // orientation must be stable this long before rotating
@@ -74,3 +76,11 @@ void imu_tick(void) {
 uint8_t imu_get_rotation(void) {
     return current_rotation;
 }
+
+#else  // !HAS_IMU — board has no accelerometer; rotation is fixed at 0.
+
+void imu_init(void) {}
+void imu_tick(void) {}
+uint8_t imu_get_rotation(void) { return 0; }
+
+#endif
