@@ -401,6 +401,9 @@ void ui_init(void) {
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
     lv_obj_set_pos(battery_img, SCR_W - 48 - MARGIN, TITLE_Y);
+#ifdef TARGET_SENSECAP
+    lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+#endif
 }
 
 void ui_update(const UsageData* data) {
