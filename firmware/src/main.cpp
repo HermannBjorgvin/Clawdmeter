@@ -419,19 +419,34 @@ static void handle_rotation_change(void) {
 }
 #endif
 
+#ifdef TARGET_SENSECAP
+// Swipe left → advance screen, swipe right → go back.
+// With two main screens (Usage ↔ Bluetooth) either direction cycles identically,
+// but directional intent is preserved for if screens are added later.
+static void sensecap_gesture_cb(lv_event_t* e) {
+    (void)e;
+    if (ui_get_current_screen() == SCREEN_SPLASH) return;
+    lv_indev_t* indev = lv_indev_active();
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) {
+        ui_cycle_screen();
+    }
+}
+#endif
+
 void loop() {
     touch_read();
     lv_timer_handler();
     ui_tick_anim();
     ble_tick();
+#ifndef TARGET_SENSECAP
     power_tick();
     imu_tick();
+#endif
     splash_tick();
 
-    // Three-button input (global, screen-independent):
-    //   LEFT  (GPIO 0)  → Space (voice-mode push-to-talk; press & release tracked)
-    //   RIGHT (GPIO 18) → Shift+Tab (Claude Code mode toggle)
-    //   PWR   (AXP)     → cycle screens; on splash, cycle animations
+#ifndef TARGET_SENSECAP
+    // ---- Waveshare: two buttons + PMU power button ----
     {
         static bool back_was = false, fwd_was = false;
         bool back_now = (digitalRead(BTN_BACK) == LOW);
@@ -456,13 +471,6 @@ void loop() {
 
     handle_rotation_change();
 
-    // Update BLE status on screen when state changes
-    ble_state_t bs = ble_get_state();
-    if (bs != last_ble_state) {
-        last_ble_state = bs;
-        ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());
-    }
-
     // Update battery indicator
     static int last_pct = -2;
     static bool last_charging = false;
@@ -472,6 +480,26 @@ void loop() {
         last_pct = pct;
         last_charging = charging;
         ui_update_battery(pct, charging);
+    }
+#else
+    // ---- SenseCAP: single button toggles backlight ----
+    {
+        static bool btn_was = false;
+        static bool backlight_on = true;
+        bool btn_now = (digitalRead(SENSECAP_BTN) == LOW);
+        if (btn_now && !btn_was) {
+            backlight_on = !backlight_on;
+            digitalWrite(SENSECAP_BACKLIGHT, backlight_on ? HIGH : LOW);
+        }
+        btn_was = btn_now;
+    }
+#endif
+
+    // Update BLE status on screen when state changes
+    ble_state_t bs = ble_get_state();
+    if (bs != last_ble_state) {
+        last_ble_state = bs;
+        ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());
     }
 
     // Check for serial commands (screenshot, etc.)
