@@ -1,0 +1,9 @@
+.venv
+__pycache__
+*.pyc
+docker-compose.yml
+Dockerfile
+.dockerignore
+claude-usage-daemon.service
+com.user.claude-usage-daemon.plist
+claude-usage-daemon.sh
