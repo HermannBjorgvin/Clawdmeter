@@ -40,11 +40,15 @@ static Arduino_ESP32RGBPanel *rgb_panel = new Arduino_ESP32RGBPanel(
     SENSECAP_LCD_B0, SENSECAP_LCD_B1, SENSECAP_LCD_B2, SENSECAP_LCD_B3, SENSECAP_LCD_B4,
     1 /* hsync_polarity */, 10 /* hsync_front_porch */, 8 /* hsync_pulse_width */, 50 /* hsync_back_porch */,
     1 /* vsync_polarity */, 10 /* vsync_front_porch */, 8 /* vsync_pulse_width */, 20 /* vsync_back_porch */,
-    0 /* pclk_active_neg */, 12000000 /* prefer_speed */);
-Arduino_GFX *gfx = new Arduino_RGB_Display(
+    0 /* pclk_active_neg */, 12000000 /* prefer_speed */,
+    false /* useBigEndian */, 0 /* de_idle_high */, 0 /* pclk_idle_high */,
+    480 * 10 /* bounce_buffer_size_px — SRAM relay cuts PSRAM bus contention */);
+// Typed pointer kept so setup() can call getFramebuffer() without re-init.
+static Arduino_RGB_Display *gfx_rgb = new Arduino_RGB_Display(
     LCD_WIDTH, LCD_HEIGHT, rgb_panel, 0 /* rotation */, true /* auto_flush */,
     spi_bus_init, GFX_NOT_DEFINED /* RST */,
-    st7701_type9_init_operations, sizeof(st7701_type9_init_operations));
+    st7701_sensecap_init_operations, sizeof(st7701_sensecap_init_operations));
+Arduino_GFX *gfx = gfx_rgb;
 TouchLib touch_sc(Wire, SENSECAP_IIC_SDA, SENSECAP_IIC_SCL, FT3267_SLAVE_ADDRESS);
 PCA9535 pca;
 #endif
@@ -56,6 +60,9 @@ static volatile bool     touch_pressed = false;
 static volatile uint16_t touch_x = 0;
 static volatile uint16_t touch_y = 0;
 static volatile bool     touch_data_ready = false;
+#ifdef TARGET_SENSECAP
+static bool touch_init_ok = false;
+#endif
 
 #ifndef TARGET_SENSECAP
 static void IRAM_ATTR touch_isr(void) {
@@ -78,6 +85,12 @@ static void touch_read() {
 }
 #else
 static void touch_read() {
+    if (!touch_init_ok) return;
+    static uint32_t last_ms = 0;
+    uint32_t now = millis();
+    if (now - last_ms < 20) return;  // poll FT6336 at 50 Hz
+    last_ms = now;
+
     if (touch_sc.read()) {
         TP_Point p = touch_sc.getPoint(0);
         touch_pressed = true;
@@ -152,13 +165,21 @@ static void rotate_strip(const uint16_t *src, int32_t w, int32_t h,
     }
 }
 
-// LVGL flush callback — rotates partial strips and writes to display
+// LVGL flush callback
 static void my_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
+#ifdef TARGET_SENSECAP
+    int32_t w = area->x2 - area->x1 + 1;
+    int32_t h = area->y2 - area->y1 + 1;
+    // draw16bitRGBBitmap handles the DMA cache writeback internally.
+    // A raw memcpy to getFramebuffer() leaves data in the CPU write-back
+    // cache; the LCD DMA reads PSRAM directly and would see stale zeros.
+    gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t*)px_map, w, h);
+    lv_display_flush_ready(disp);
+#else
+    // Waveshare: partial strip mode with optional IMU rotation.
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
     uint16_t *src = (uint16_t*)px_map;
-
-#ifndef TARGET_SENSECAP
     uint8_t r = imu_get_rotation();
     if (r == 0) {
         gfx->draw16bitRGBBitmap(area->x1, area->y1, src, w, h);
@@ -167,11 +188,8 @@ static void my_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_m
         rotate_strip(src, w, h, area->x1, area->y1, r, &dx, &dy, &dw, &dh);
         gfx->draw16bitRGBBitmap(dx, dy, rot_buf, dw, dh);
     }
-#else
-    gfx->draw16bitRGBBitmap(area->x1, area->y1, src, w, h);
-#endif
-
     lv_display_flush_ready(disp);
+#endif
 }
 
 // CO5300 requires even-aligned flush regions
@@ -299,16 +317,12 @@ void setup() {
         Serial.println("Touch init OK");
     }
 #else
-    // ---- SenseCAP: I2C for touch + PCA9535 expander ----
+    // ---- SenseCAP: I2C for FT6336 touch ----
+    // The PCA9535 expander is owned by the RP2040 co-processor on SenseCAP;
+    // attempting I2C to it from ESP32 produces NACK errors that corrupt
+    // the ESP-IDF 5.x I2C state machine for all subsequent transactions.
+    // Touch RST is managed by the RP2040 at boot — no reset needed here.
     Wire.begin(SENSECAP_IIC_SDA, SENSECAP_IIC_SCL);
-
-    // Reset the FT6336 touch controller via PCA9535 expander
-    pca.attach(Wire, SENSECAP_PCA9535_ADDR);
-    pca.direction(static_cast<PCA95x5::Port::Port>(SENSECAP_TP_RST_PIN), PCA95x5::Direction::OUT);
-    pca.write(static_cast<PCA95x5::Port::Port>(SENSECAP_TP_RST_PIN), PCA95x5::Level::L);
-    delay(10);
-    pca.write(static_cast<PCA95x5::Port::Port>(SENSECAP_TP_RST_PIN), PCA95x5::Level::H);
-    delay(100);
 
     // Init display (ST7701S over RGB parallel)
     gfx->begin();
@@ -319,32 +333,34 @@ void setup() {
     digitalWrite(SENSECAP_BACKLIGHT, HIGH);
 
     // Init FT6336 touch
-    if (!touch_sc.init()) {
-        Serial.println("Touch init failed");
-    } else {
-        Serial.println("Touch init OK");
-    }
+    touch_init_ok = touch_sc.init();
+    Serial.println(touch_init_ok ? "Touch init OK" : "Touch init failed");
 #endif
 
     // ---- LVGL init (common) ----
     lv_init();
     lv_tick_set_cb(my_tick);
 
-    // Allocate PSRAM-backed partial render buffers
-    buf1 = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
-    buf2 = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
-#ifndef TARGET_SENSECAP
-    // rot_buf only needed for IMU-driven rotation (Waveshare only)
-    rot_buf = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
-#endif
-
     lv_display_t* disp = lv_display_create(LCD_WIDTH, LCD_HEIGHT);
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
     lv_display_set_flush_cb(disp, my_flush_cb);
+
+#ifdef TARGET_SENSECAP
+    // Full-screen off-screen draw buffer: LCD_WIDTH × LCD_HEIGHT fits the
+    // entire frame, so LVGL renders all dirty regions in one pass and calls
+    // flush once with the completed composite (background + canvas).
+    // The flush callback then copies the finished frame to the display
+    // framebuffer in one memcpy — no intermediate states hit the live buffer.
+    buf1 = (uint16_t*)heap_caps_malloc(LCD_WIDTH * LCD_HEIGHT * 2, MALLOC_CAP_SPIRAM);
+    lv_display_set_buffers(disp, buf1, NULL, LCD_WIDTH * LCD_HEIGHT * 2,
+                           LV_DISPLAY_RENDER_MODE_PARTIAL);
+#else
+    // Waveshare: two PSRAM-backed partial render buffers + rotation buffer.
+    buf1 = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
+    buf2 = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
+    rot_buf = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
     lv_display_set_buffers(disp, buf1, buf2, LCD_WIDTH * BUF_LINES * 2,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
-
-#ifndef TARGET_SENSECAP
     // CO5300 requires even-aligned flush regions; ST7701S does not
     lv_display_add_event_cb(disp, rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
 #endif
@@ -425,12 +441,12 @@ static void handle_rotation_change(void) {
 // but directional intent is preserved for if screens are added later.
 static void sensecap_gesture_cb(lv_event_t* e) {
     (void)e;
-    if (ui_get_current_screen() == SCREEN_SPLASH) return;
     lv_indev_t* indev = lv_indev_active();
     if (!indev) return;
     lv_dir_t dir = lv_indev_get_gesture_dir(indev);
     if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) {
-        ui_cycle_screen();
+        if (ui_get_current_screen() == SCREEN_SPLASH) ui_show_screen(SCREEN_USAGE);
+        else ui_cycle_screen();
     }
 }
 #endif
@@ -518,6 +534,9 @@ void loop() {
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
             ui_update(&usage);
+#ifdef TARGET_SENSECAP
+            if (ui_get_current_screen() == SCREEN_SPLASH) ui_show_screen(SCREEN_USAGE);
+#endif
             ble_send_ack();
         } else {
             ble_send_nack();
