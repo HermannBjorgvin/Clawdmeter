@@ -25,13 +25,13 @@ LV_FONT_DECLARE(font_mono_32);
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
 
-// ---- Layout constants for 480x480 (scaled for 2.16" high-DPI + rounded corners) ----
-#define SCR_W         480
-#define SCR_H         480
-#define MARGIN        20    // wider margin for rounded display corners
-#define TITLE_Y       30
-#define CONTENT_Y     100
-#define CONTENT_W     (SCR_W - 2 * MARGIN)   // 440
+// ---- Layout constants for 448x368 landscape (Waveshare 1.8" AMOLED) ----
+#define SCR_W         448
+#define SCR_H         368
+#define MARGIN        15
+#define TITLE_Y       12
+#define CONTENT_Y     75
+#define CONTENT_W     (SCR_W - 2 * MARGIN)   // 418
 
 // ---- Usage screen widgets ----
 static lv_obj_t* usage_container;
@@ -218,10 +218,10 @@ static void init_battery_icons(void) {
     init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_W, ICON_BATTERY_CHARGING_H, icon_battery_charging_data);
 }
 
-// ======== Usage Screen (480x480) ========
+// ======== Usage Screen (448x368 landscape) ========
 
-#define PANEL_H     150
-#define PANEL_GAP   16
+#define PANEL_H     110
+#define PANEL_GAP   10
 
 // One Session/Weekly panel: big % label, pill on the right, bar, reset label.
 // Pill y=1: symmetric inside the panel — panel-outer-top → pill-top equals
@@ -297,8 +297,8 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_color(lbl_ble_title, COL_TEXT, 0);
     lv_obj_align(lbl_ble_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
 
-    // Info panel (taller for 480x480)
-    lv_obj_t* p_info = make_panel(ble_container, MARGIN, CONTENT_Y, CONTENT_W, 160);
+    // Info panel
+    lv_obj_t* p_info = make_panel(ble_container, MARGIN, CONTENT_Y, CONTENT_W, 120);
 
     // Bluetooth icon + status row
     static lv_image_dsc_t icon_bt_dsc;
@@ -327,10 +327,10 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_set_pos(lbl_ble_mac, 0, 100);
 
     // Reset Bluetooth tap zone with trash icon
-    int reset_y = CONTENT_Y + 160 + 16;
+    int reset_y = CONTENT_Y + 120 + 10;
     lv_obj_t* reset_zone = lv_obj_create(ble_container);
     lv_obj_set_pos(reset_zone, MARGIN, reset_y);
-    lv_obj_set_size(reset_zone, CONTENT_W, 110);
+    lv_obj_set_size(reset_zone, CONTENT_W, 70);
     lv_obj_set_style_bg_color(reset_zone, COL_PANEL, 0);
     lv_obj_set_style_bg_opa(reset_zone, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(reset_zone, 8, 0);
@@ -354,15 +354,15 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     // Attribution
     lv_obj_t* lbl_credit = lv_label_create(ble_container);
     lv_label_set_text(lbl_credit, "Built by @hermannbjorgvin");
-    lv_obj_set_style_text_font(lbl_credit, &font_styrene_24, 0);
+    lv_obj_set_style_text_font(lbl_credit, &font_styrene_20, 0);
     lv_obj_set_style_text_color(lbl_credit, COL_DIM, 0);
-    lv_obj_align(lbl_credit, LV_ALIGN_BOTTOM_MID, 0, -46);
+    lv_obj_align(lbl_credit, LV_ALIGN_BOTTOM_MID, 0, -35);
 
     lv_obj_t* lbl_credit2 = lv_label_create(ble_container);
     lv_label_set_text(lbl_credit2, "Clawd animation by @amaanbuilds");
     lv_obj_set_style_text_font(lbl_credit2, &font_styrene_20, 0);
     lv_obj_set_style_text_color(lbl_credit2, COL_DIM, 0);
-    lv_obj_align(lbl_credit2, LV_ALIGN_BOTTOM_MID, 0, -20);
+    lv_obj_align(lbl_credit2, LV_ALIGN_BOTTOM_MID, 0, -10);
 
     // Start hidden
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
