@@ -74,10 +74,12 @@ static NimBLECharacteristic *req_char = nullptr;
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
 static char rx_buf[BLE_BUF_SIZE];
+static char rx_snapshot[BLE_BUF_SIZE];
 static volatile bool data_ready = false;
 static volatile bool has_received_data = false;
 static char mac_str[18];
 static uint32_t last_adv_attempt_ms = 0;
+static portMUX_TYPE rx_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void start_advertising()
 {
@@ -120,10 +122,12 @@ class RxCallbacks : public NimBLECharacteristicCallbacks
         size_t len = val.length();
         if (len >= BLE_BUF_SIZE)
             len = BLE_BUF_SIZE - 1;
+        taskENTER_CRITICAL(&rx_mux);
         memcpy(rx_buf, val.c_str(), len);
         rx_buf[len] = '\0';
         data_ready = true;
         has_received_data = true;
+        taskEXIT_CRITICAL(&rx_mux);
     }
 };
 
@@ -239,13 +243,20 @@ void ble_clear_bonds(void)
 
 bool ble_has_data(void)
 {
-    return data_ready;
+    bool ready;
+    taskENTER_CRITICAL(&rx_mux);
+    ready = data_ready;
+    taskEXIT_CRITICAL(&rx_mux);
+    return ready;
 }
 
 const char *ble_get_data(void)
 {
+    taskENTER_CRITICAL(&rx_mux);
+    memcpy(rx_snapshot, rx_buf, BLE_BUF_SIZE);
     data_ready = false;
-    return rx_buf;
+    taskEXIT_CRITICAL(&rx_mux);
+    return rx_snapshot;
 }
 
 void ble_send_ack(void)

@@ -231,9 +231,9 @@ class Session:
 async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
     """Connect to a known address and poll until disconnected or stopped.
 
-    Returns True if the connection was used successfully (so the caller
-    keeps the cached address), False if the connection failed and the
-    cache should be invalidated.
+    Returns True if the address connected successfully (so the caller
+    keeps the cached address), False only when the address itself appears
+    invalid/unreachable and should be invalidated.
     """
     log(f"Connecting to {address}...")
     client = BleakClient(address)
@@ -252,7 +252,7 @@ async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
     await session.setup_refresh_subscription()
 
     last_poll = 0.0
-    used_successfully = False
+    keep_cached_address = True
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
@@ -267,7 +267,6 @@ async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
                     if payload is not None:
                         if await session.write_payload(payload):
                             last_poll = time.time()
-                            used_successfully = True
 
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
@@ -280,7 +279,7 @@ async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
             pass
 
     log("Device disconnected" if not stop_event.is_set() else "Stopping")
-    return used_successfully
+    return keep_cached_address
 
 
 async def main() -> None:

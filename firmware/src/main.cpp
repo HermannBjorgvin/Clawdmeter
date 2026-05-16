@@ -269,9 +269,10 @@ Arduino_GFX *gfx = st7789_gfx;
 
 static Arduino_DataBus *bus = new Arduino_ESP32QSPI(
     LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
-Arduino_GFX *gfx = new Arduino_CO5300(
+static Arduino_CO5300 *co5300_gfx = new Arduino_CO5300(
     bus, LCD_RESET, 0 /* rotation */,
     LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
+Arduino_GFX *gfx = co5300_gfx;
 TouchDrvCST92xx touch;
 XPowersPMU pmu;
 SensorQMI8658 imu;
@@ -431,7 +432,7 @@ static void lcd_set_brightness(uint8_t val)
 static void lcd_backlight_init(void) {} // nothing extra needed
 static void lcd_set_brightness(uint8_t val)
 {
-    gfx->setBrightness(val);
+    co5300_gfx->setBrightness(val);
 }
 #endif
 
