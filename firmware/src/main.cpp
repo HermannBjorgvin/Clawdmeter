@@ -412,11 +412,7 @@ void setup() {
     lv_tick_set_cb(my_tick);
 
     lv_display_t* disp = lv_display_create(LCD_WIDTH, LCD_HEIGHT);
-#ifdef TARGET_SENSECAP
-    lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565_SWAPPED);
-#else
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
-#endif
     lv_display_set_flush_cb(disp, my_flush_cb);
 
 #ifdef TARGET_SENSECAP
@@ -578,13 +574,14 @@ void loop() {
         ui_update_battery(pct, charging);
     }
 #else
-    // ---- SenseCAP: physical button cycles screens (same as Waveshare middle) ----
+    // ---- SenseCAP: physical button toggles backlight on/off ----
     {
-        static bool btn_was = false;
+        static bool btn_was      = false;
+        static bool backlight_on = true;
         bool btn_now = (digitalRead(SENSECAP_BTN) == LOW);
         if (btn_now && !btn_was) {
-            if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
-            else                                          ui_cycle_screen();
+            backlight_on = !backlight_on;
+            digitalWrite(SENSECAP_BACKLIGHT, backlight_on ? HIGH : LOW);
         }
         btn_was = btn_now;
     }

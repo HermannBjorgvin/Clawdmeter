@@ -14,28 +14,30 @@
 #define SENSECAP_LCD_VSYNC  17
 #define SENSECAP_LCD_HSYNC  16
 #define SENSECAP_LCD_PCLK   21
-// The SenseCAP Indicator PCB routes ESP32-S3 GPIO_n to LCD data bus pin D[(n+5) mod 16].
-// Standard RGB565 maps D[4:0]=B, D[10:5]=G, D[15:11]=R.
-// To compensate: Arduino_GFX R parameter must use GPIOs 6-10 (→ D[11-15] = LCD R),
-//                G parameter must use GPIOs 0-5  (→ D[5-10]  = LCD G),
-//                B parameter must use GPIOs 11-15 (→ D[0-4]   = LCD B).
-// Empirically confirmed: 0xF800→blue, 0x001F→green with any other assignment.
-#define SENSECAP_LCD_R0      6
-#define SENSECAP_LCD_R1      7
-#define SENSECAP_LCD_R2      8
-#define SENSECAP_LCD_R3      9
-#define SENSECAP_LCD_R4     10
-#define SENSECAP_LCD_G0      0
-#define SENSECAP_LCD_G1      1
-#define SENSECAP_LCD_G2      2
-#define SENSECAP_LCD_G3      3
-#define SENSECAP_LCD_G4      4
+// The SenseCAP Indicator PCB routes ESP32-S3 GPIO_n to LCD data bus pin D[15-n]
+// (bit-reversal, confirmed against Seeed's reference ESP-IDF source).
+// Standard RGB565 maps data bit i → data_gpio_nums[i].  With the reversal,
+// bit i must use GPIO (15-i) so it reaches LCD_D[15-(15-i)] = LCD_D[i]:
+//   B[4:0]  = bits  4:0  → GPIOs 11-15  (B4=GPIO11 … B0=GPIO15)
+//   G[5:0]  = bits 10:5  → GPIOs  5-10  (G5=GPIO5  … G0=GPIO10)
+//   R[4:0]  = bits 15:11 → GPIOs  0-4   (R4=GPIO0  … R0=GPIO4)
+// (Previous cyclic-shift-of-+5 theory was wrong; it put R bits on G pins.)
+#define SENSECAP_LCD_R0      4
+#define SENSECAP_LCD_R1      3
+#define SENSECAP_LCD_R2      2
+#define SENSECAP_LCD_R3      1
+#define SENSECAP_LCD_R4      0
+#define SENSECAP_LCD_G0     10
+#define SENSECAP_LCD_G1      9
+#define SENSECAP_LCD_G2      8
+#define SENSECAP_LCD_G3      7
+#define SENSECAP_LCD_G4      6
 #define SENSECAP_LCD_G5      5
-#define SENSECAP_LCD_B0     11
-#define SENSECAP_LCD_B1     12
+#define SENSECAP_LCD_B0     15
+#define SENSECAP_LCD_B1     14
 #define SENSECAP_LCD_B2     13
-#define SENSECAP_LCD_B3     14
-#define SENSECAP_LCD_B4     15
+#define SENSECAP_LCD_B3     12
+#define SENSECAP_LCD_B4     11
 #define SENSECAP_LCD_SPI_SCK  41
 #define SENSECAP_LCD_SPI_MOSI 48
 #define SENSECAP_BACKLIGHT    45
