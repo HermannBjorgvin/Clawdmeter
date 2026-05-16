@@ -53,9 +53,13 @@
 #define SENSECAP_TOUCH_ADDR  0x48
 
 // ---- PCA9535 I2C expander ----
-// Controls touch RST and other GPIOs not wired directly to ESP32-S3.
+// Controls touch RST and ST7701S SPI CS — must be initialised BEFORE gfx->begin().
 // Address confirmed from Seeed schematic (A0=A1=A2=GND → 0x20).
 #define SENSECAP_PCA9535_ADDR  0x20
+// P04 = ST7701S SPI CS (active LOW).  PCA9535 output register defaults to
+// 0xFFFF at power-on, so P04 starts HIGH (deasserted).  Assert LOW before
+// the gfx->begin() init sequence, release HIGH after.
+#define SENSECAP_LCD_CS_PORT   4   // PCA9535 P04
 // P07 = touch RST output (EXPANDER_IO_TP_RESET = 7 per Seeed ESP-IDF source).
 #define SENSECAP_TP_RST_PIN    7
 

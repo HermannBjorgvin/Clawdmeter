@@ -380,24 +380,33 @@ void setup() {
     // ---- SenseCAP: I2C for PCA9535 expander + FT6336 touch ----
     Wire.begin(SENSECAP_IIC_SDA, SENSECAP_IIC_SCL);
 
-    // Init display (ST7701S over RGB parallel + SPI config).
-    // Requires a full power cycle after flashing: the RP2040 co-processor
-    // initialises the ST7701S at boot and must complete before ESP32-S3
-    // touches the SPI bus.  A USB-only reset (esptool RTS) does not reset
-    // the RP2040, so the SPI bus may be in a contested state.
-    gfx->begin();
+    // PCA9535 must be initialised BEFORE gfx->begin().
+    // P04 is the SPI CS for the ST7701S init bus (SCK=GPIO41, MOSI=GPIO48).
+    // The PCA9535 output register defaults to 0xFFFF at power-on (all HIGH),
+    // so P04 starts deasserted.  If we call gfx->begin() without first
+    // asserting P04 LOW, every SPI init command is ignored by the ST7701S
+    // and the display keeps the RP2040's boot-time settings (COLMOD=0x60
+    // RGB666, wrong for our RGB565 pixel pipeline → wrong colours).
+    // P07 = touch RST; configure both outputs here in one pass.
+    pca.attach(Wire, SENSECAP_PCA9535_ADDR);
+    pca.direction(PCA95x5::Port::P04, PCA95x5::Direction::OUT);
+    pca.direction(PCA95x5::Port::P07, PCA95x5::Direction::OUT);
 
-    // Turn on backlight via GPIO (ST7701S has no brightness register)
+    // Give the RP2040 SPI activity time to complete before we assert CS.
+    // A USB-only reset (esptool RTS) does not reset the RP2040, so after
+    // flashing the RP2040 may still be driving the SPI bus.
+    delay(200);
+
+    // Assert LCD SPI CS and send the init sequence (includes COLMOD=0x50).
+    pca.write(PCA95x5::Port::P04, PCA95x5::Level::L);
+    gfx->begin();
+    pca.write(PCA95x5::Port::P04, PCA95x5::Level::H);
+
+    // Turn on backlight
     pinMode(SENSECAP_BACKLIGHT, OUTPUT);
     digitalWrite(SENSECAP_BACKLIGHT, HIGH);
 
-    delay(200);
-
-    // FT6336 touch init via PCA9535 expander.
-    // PCA9535 P07 = touch RST (EXPANDER_IO_TP_RESET=7 per Seeed ESP-IDF source).
-    // Touch IC is at I2C address 0x48 on this board (not the standard 0x38).
-    pca.attach(Wire, SENSECAP_PCA9535_ADDR);
-    pca.direction(PCA95x5::Port::P07, PCA95x5::Direction::OUT);
+    // Touch RST via P07
     pca.write(PCA95x5::Port::P07, PCA95x5::Level::L);
     delay(50);
     pca.write(PCA95x5::Port::P07, PCA95x5::Level::H);
