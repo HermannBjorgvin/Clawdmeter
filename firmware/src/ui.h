@@ -1,4 +1,5 @@
 #pragma once
+#include <lvgl.h>
 #include "data.h"
 #include "ble.h"
 
@@ -18,3 +19,6 @@ void ui_toggle_splash(void);
 screen_t ui_get_current_screen(void);
 void ui_update_ble_status(ble_state_t state, const char* name, const char* mac);
 void ui_update_battery(int percent, bool charging);
+#ifdef TARGET_SENSECAP
+void ui_register_sensecap_gesture_cb(void);
+#endif

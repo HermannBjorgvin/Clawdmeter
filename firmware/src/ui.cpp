@@ -3,7 +3,7 @@
 #include <lvgl.h>
 #include "logo.h"
 #include "icons.h"
-#include "display_cfg.h"
+#include "display_cfg_target.h"
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
@@ -289,6 +289,9 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_set_style_border_width(ble_container, 0, 0);
     lv_obj_set_style_pad_all(ble_container, 0, 0);
     lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_SCROLLABLE);
+#ifdef TARGET_SENSECAP
+    lv_obj_add_event_cb(ble_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+#endif
 
     // Title
     lv_obj_t* lbl_ble_title = lv_label_create(ble_container);
@@ -401,6 +404,9 @@ void ui_init(void) {
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
     lv_obj_set_pos(battery_img, SCR_W - 48 - MARGIN, TITLE_Y);
+#ifdef TARGET_SENSECAP
+    lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+#endif
 }
 
 void ui_update(const UsageData* data) {
@@ -455,8 +461,12 @@ static screen_t prev_non_splash_screen = SCREEN_USAGE;
 // noisy over the pixel-art creature animations.
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
+#ifdef TARGET_SENSECAP
+    lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+#else
     if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
     else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+#endif
 }
 
 // LVGL handles click debouncing internally. Screen-level handler fires when
@@ -465,12 +475,19 @@ static void apply_battery_visibility(void) {
 // splash toggle so only the reset zone is interactive there.
 static void global_click_cb(lv_event_t* e) {
     (void)e;
+#ifdef TARGET_SENSECAP
+    // Suppress the spurious LV_EVENT_CLICKED that fires at the end of a swipe gesture.
+    extern uint32_t sensecap_last_gesture_ms;
+    if ((lv_tick_get() - sensecap_last_gesture_ms) < 400) return;
+    ui_cycle_screen();
+#else
     if (ui_get_current_screen() == SCREEN_BLUETOOTH) return;
     ui_toggle_splash();
+#endif
 }
 
 static void ble_reset_click_cb(lv_event_t* e) {
-    (void)e;
+    lv_event_stop_bubbling(e);
     ble_clear_bonds();
 }
 
@@ -561,3 +578,42 @@ void ui_update_battery(int percent, bool charging) {
     lv_image_set_src(battery_img, &battery_dscs[idx]);
     apply_battery_visibility();
 }
+
+#ifdef TARGET_SENSECAP
+uint32_t sensecap_last_gesture_ms = 0;
+
+static void sensecap_gesture_cb(lv_event_t* e) {
+    (void)e;
+    lv_indev_t* indev = lv_indev_active();
+    if (!indev) return;
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return;
+    sensecap_last_gesture_ms = lv_tick_get();
+    screen_t cur = current_screen;
+    screen_t next;
+    if (dir == LV_DIR_LEFT) {
+        // Forward: SPLASH → USAGE → BLUETOOTH → SPLASH
+        if (cur == SCREEN_SPLASH)         next = SCREEN_USAGE;
+        else if (cur == SCREEN_USAGE)     next = SCREEN_BLUETOOTH;
+        else                              next = SCREEN_SPLASH;
+    } else {
+        // Back: SPLASH → BLUETOOTH → USAGE → SPLASH
+        if (cur == SCREEN_SPLASH)         next = SCREEN_BLUETOOTH;
+        else if (cur == SCREEN_BLUETOOTH) next = SCREEN_USAGE;
+        else                              next = SCREEN_SPLASH;
+    }
+    ui_show_screen(next);
+}
+
+void ui_register_sensecap_gesture_cb(void) {
+    // Gesture events bubble from the pressed child object up the parent chain.
+    // usage_container / ble_container / splash root are direct children of the
+    // single LVGL screen; they need GESTURE_BUBBLE so the event reaches the
+    // screen root where we register the callback.
+    lv_obj_add_flag(usage_container, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_flag(ble_container,   LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_t* splash_root = splash_get_root();
+    if (splash_root) lv_obj_add_flag(splash_root, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_event_cb(lv_screen_active(), sensecap_gesture_cb, LV_EVENT_GESTURE, NULL);
+}
+#endif
