@@ -43,13 +43,12 @@ static Arduino_ESP32RGBPanel *rgb_panel = new Arduino_ESP32RGBPanel(
     0 /* pclk_active_neg */, 12000000 /* prefer_speed */,
     false /* useBigEndian */, 0 /* de_idle_high */, 0 /* pclk_idle_high */,
     480 * 10 /* bounce_buffer_size_px — SRAM relay cuts PSRAM bus contention */);
-// Typed pointer kept so setup() can call getFramebuffer() without re-init.
 static Arduino_RGB_Display *gfx_rgb = new Arduino_RGB_Display(
-    LCD_WIDTH, LCD_HEIGHT, rgb_panel, 0 /* rotation */, true /* auto_flush */,
+    LCD_WIDTH, LCD_HEIGHT, rgb_panel, 2 /* rotation: panel mounted 180° */, true /* auto_flush */,
     spi_bus_init, GFX_NOT_DEFINED /* RST */,
     st7701_sensecap_init_operations, sizeof(st7701_sensecap_init_operations));
 Arduino_GFX *gfx = gfx_rgb;
-TouchLib touch_sc(Wire, SENSECAP_IIC_SDA, SENSECAP_IIC_SCL, FT3267_SLAVE_ADDRESS);
+TouchLib touch_sc(Wire, SENSECAP_IIC_SDA, SENSECAP_IIC_SCL, SENSECAP_TOUCH_ADDR);
 PCA9535 pca;
 #endif
 
@@ -94,8 +93,10 @@ static void touch_read() {
     if (touch_sc.read()) {
         TP_Point p = touch_sc.getPoint(0);
         touch_pressed = true;
-        touch_x = (uint16_t)p.x;
-        touch_y = (uint16_t)p.y;
+        // Panel is mounted 180° rotated; flip both axes so LVGL logical (0,0)
+        // matches the top-left corner as seen by the user.
+        touch_x = (LCD_WIDTH  - 1) - (uint16_t)p.x;
+        touch_y = (LCD_HEIGHT - 1) - (uint16_t)p.y;
     } else {
         touch_pressed = false;
     }
@@ -170,9 +171,6 @@ static void my_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_m
 #ifdef TARGET_SENSECAP
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
-    // draw16bitRGBBitmap handles the DMA cache writeback internally.
-    // A raw memcpy to getFramebuffer() leaves data in the CPU write-back
-    // cache; the LCD DMA reads PSRAM directly and would see stale zeros.
     gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t*)px_map, w, h);
     lv_display_flush_ready(disp);
 #else
@@ -273,6 +271,67 @@ static void check_serial_cmd() {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) {
                 send_screenshot();
+#ifdef TARGET_SENSECAP
+            } else if (strcmp(cmd_buf, "diag") == 0) {
+                Serial.printf("touch_init_ok=%d screen=%d touch_pressed=%d x=%d y=%d\n",
+                    (int)touch_init_ok, (int)ui_get_current_screen(),
+                    (int)touch_pressed, (int)touch_x, (int)touch_y);
+                Serial.println("I2C scan:");
+                for (uint8_t a = 1; a < 127; a++) {
+                    Wire.beginTransmission(a);
+                    if (Wire.endTransmission() == 0) {
+                        Serial.printf("  found 0x%02X\n", a);
+                    }
+                }
+                Serial.println("I2C scan done");
+            } else if (strcmp(cmd_buf, "touch_reset") == 0) {
+                // Manually re-run the PCA9535 RST sequence and re-probe.
+                touch_init_ok = false;
+                Serial.println("Asserting RST low...");
+                pca.write(PCA95x5::Port::P07, PCA95x5::Level::L);
+                delay(50);
+                Serial.println("Releasing RST high...");
+                pca.write(PCA95x5::Port::P07, PCA95x5::Level::H);
+                delay(500);
+                Serial.println("I2C scan after RST release:");
+                for (uint8_t a = 1; a < 127; a++) {
+                    Wire.beginTransmission(a);
+                    if (Wire.endTransmission() == 0) {
+                        Serial.printf("  found 0x%02X\n", a);
+                    }
+                }
+                Serial.println("I2C scan done");
+                bool ft_found = false;
+                // Check for touch IC at expected address
+                Wire.beginTransmission(SENSECAP_TOUCH_ADDR);
+                ft_found = (Wire.endTransmission() == 0);
+                if (ft_found) {
+                    touch_init_ok = true;
+                    Serial.printf("Touch IC found at 0x%02X — OK\n", SENSECAP_TOUCH_ADDR);
+                } else {
+                    touch_init_ok = false;
+                    Serial.printf("Touch IC not found at 0x%02X\n", SENSECAP_TOUCH_ADDR);
+                }
+            } else if (strcmp(cmd_buf, "probe48") == 0) {
+                // Read a few registers from 0x48 to identify what device it is.
+                Serial.println("Probing 0x48:");
+                for (uint8_t reg : {0x00u, 0x01u, 0x02u, 0x3Au, 0xA3u, 0xA6u, 0xA8u}) {
+                    Wire.beginTransmission(0x48);
+                    Wire.write(reg);
+                    if (Wire.endTransmission(false) == 0) {
+                        Wire.requestFrom((uint8_t)0x48, (uint8_t)1);
+                        if (Wire.available()) {
+                            uint8_t val = Wire.read();
+                            Serial.printf("  reg 0x%02X = 0x%02X (%d)\n", reg, val, val);
+                        } else {
+                            Serial.printf("  reg 0x%02X = no data\n", reg);
+                        }
+                    } else {
+                        Serial.printf("  reg 0x%02X = nack\n", reg);
+                    }
+                }
+                Serial.println("probe done");
+#endif
             }
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
@@ -287,6 +346,7 @@ static void sensecap_gesture_cb(lv_event_t* e);
 
 void setup() {
     Serial.begin(115200);
+    // Print for 3 s so the serial monitor can be opened before boot messages scroll past.
     delay(300);
     Serial.println("{\"ready\":true}");
 
@@ -317,22 +377,32 @@ void setup() {
         Serial.println("Touch init OK");
     }
 #else
-    // ---- SenseCAP: I2C for FT6336 touch ----
-    // The PCA9535 expander is owned by the RP2040 co-processor on SenseCAP;
-    // attempting I2C to it from ESP32 produces NACK errors that corrupt
-    // the ESP-IDF 5.x I2C state machine for all subsequent transactions.
-    // Touch RST is managed by the RP2040 at boot — no reset needed here.
+    // ---- SenseCAP: I2C for PCA9535 expander + FT6336 touch ----
     Wire.begin(SENSECAP_IIC_SDA, SENSECAP_IIC_SCL);
 
-    // Init display (ST7701S over RGB parallel)
+    // Init display (ST7701S over RGB parallel + SPI config).
+    // Requires a full power cycle after flashing: the RP2040 co-processor
+    // initialises the ST7701S at boot and must complete before ESP32-S3
+    // touches the SPI bus.  A USB-only reset (esptool RTS) does not reset
+    // the RP2040, so the SPI bus may be in a contested state.
     gfx->begin();
-    gfx->fillScreen(0x0000);
 
     // Turn on backlight via GPIO (ST7701S has no brightness register)
     pinMode(SENSECAP_BACKLIGHT, OUTPUT);
     digitalWrite(SENSECAP_BACKLIGHT, HIGH);
 
-    // Init FT6336 touch
+    delay(200);
+
+    // FT6336 touch init via PCA9535 expander.
+    // PCA9535 P07 = touch RST (EXPANDER_IO_TP_RESET=7 per Seeed ESP-IDF source).
+    // Touch IC is at I2C address 0x48 on this board (not the standard 0x38).
+    pca.attach(Wire, SENSECAP_PCA9535_ADDR);
+    pca.direction(PCA95x5::Port::P07, PCA95x5::Direction::OUT);
+    pca.write(PCA95x5::Port::P07, PCA95x5::Level::L);
+    delay(50);
+    pca.write(PCA95x5::Port::P07, PCA95x5::Level::H);
+    delay(300);
+
     touch_init_ok = touch_sc.init();
     Serial.println(touch_init_ok ? "Touch init OK" : "Touch init failed");
 #endif
@@ -499,14 +569,13 @@ void loop() {
         ui_update_battery(pct, charging);
     }
 #else
-    // ---- SenseCAP: single button toggles backlight ----
+    // ---- SenseCAP: physical button cycles screens (same as Waveshare middle) ----
     {
         static bool btn_was = false;
-        static bool backlight_on = true;
         bool btn_now = (digitalRead(SENSECAP_BTN) == LOW);
         if (btn_now && !btn_was) {
-            backlight_on = !backlight_on;
-            digitalWrite(SENSECAP_BACKLIGHT, backlight_on ? HIGH : LOW);
+            if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
+            else                                          ui_cycle_screen();
         }
         btn_was = btn_now;
     }

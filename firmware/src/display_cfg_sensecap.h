@@ -14,38 +14,48 @@
 #define SENSECAP_LCD_VSYNC  17
 #define SENSECAP_LCD_HSYNC  16
 #define SENSECAP_LCD_PCLK   21
-// Bit order is reversed within each channel — verified against Meshtastic LGFX_INDICATOR.h
-#define SENSECAP_LCD_R0      4
-#define SENSECAP_LCD_R1      3
-#define SENSECAP_LCD_R2      2
-#define SENSECAP_LCD_R3      1
-#define SENSECAP_LCD_R4      0
-#define SENSECAP_LCD_G0     10
-#define SENSECAP_LCD_G1      9
-#define SENSECAP_LCD_G2      8
-#define SENSECAP_LCD_G3      7
-#define SENSECAP_LCD_G4      6
+// The SenseCAP Indicator PCB routes ESP32-S3 GPIO_n to LCD data bus pin D[(n+5) mod 16].
+// Standard RGB565 maps D[4:0]=B, D[10:5]=G, D[15:11]=R.
+// To compensate: Arduino_GFX R parameter must use GPIOs 6-10 (→ D[11-15] = LCD R),
+//                G parameter must use GPIOs 0-5  (→ D[5-10]  = LCD G),
+//                B parameter must use GPIOs 11-15 (→ D[0-4]   = LCD B).
+// Empirically confirmed: 0xF800→blue, 0x001F→green with any other assignment.
+#define SENSECAP_LCD_R0      6
+#define SENSECAP_LCD_R1      7
+#define SENSECAP_LCD_R2      8
+#define SENSECAP_LCD_R3      9
+#define SENSECAP_LCD_R4     10
+#define SENSECAP_LCD_G0      0
+#define SENSECAP_LCD_G1      1
+#define SENSECAP_LCD_G2      2
+#define SENSECAP_LCD_G3      3
+#define SENSECAP_LCD_G4      4
 #define SENSECAP_LCD_G5      5
-#define SENSECAP_LCD_B0     15
-#define SENSECAP_LCD_B1     14
+#define SENSECAP_LCD_B0     11
+#define SENSECAP_LCD_B1     12
 #define SENSECAP_LCD_B2     13
-#define SENSECAP_LCD_B3     12
-#define SENSECAP_LCD_B4     11
+#define SENSECAP_LCD_B3     14
+#define SENSECAP_LCD_B4     15
 #define SENSECAP_LCD_SPI_SCK  41
 #define SENSECAP_LCD_SPI_MOSI 48
 #define SENSECAP_BACKLIGHT    45
 
 // ---- I2C bus (touch + PCA9535 expander) ----
-#define SENSECAP_IIC_SDA  40
-#define SENSECAP_IIC_SCL  39
+// Confirmed from Seeed ESP-IDF reference: SCL=40, SDA=39.
+#define SENSECAP_IIC_SDA  39
+#define SENSECAP_IIC_SCL  40
+
+// FT6x36 touch I2C address on this board.
+// Note: standard FT6336 address is 0x38, but the D1L board has it at 0x48.
+// Confirmed by I2C scan + FT5x06 register probe (CHIP_ID=0x64, DEVICE_MODE=0x00).
+#define SENSECAP_TOUCH_ADDR  0x48
 
 // ---- PCA9535 I2C expander ----
 // Controls touch RST and other GPIOs not wired directly to ESP32-S3.
 // Address confirmed from Seeed schematic (A0=A1=A2=GND → 0x20).
 #define SENSECAP_PCA9535_ADDR  0x20
-// P06 = touch RST output. Verify pin number against the SenseCAP Indicator
-// schematic before flashing if touch does not initialise.
-#define SENSECAP_TP_RST_PIN    6
+// P07 = touch RST output (EXPANDER_IO_TP_RESET = 7 per Seeed ESP-IDF source).
+#define SENSECAP_TP_RST_PIN    7
 
 // ---- User button ----
 // Single physical button on the front panel. Verify GPIO against schematic.
@@ -162,6 +172,7 @@ static const uint8_t st7701_sensecap_init_operations[] = {
     DELAY, 120,
 
     BEGIN_WRITE,
+    WRITE_COMMAND_8, 0x21, // Display Inversion ON (IPS panel — must follow Sleep Out)
     WRITE_COMMAND_8, 0x29, // Display On
     END_WRITE,
 };
