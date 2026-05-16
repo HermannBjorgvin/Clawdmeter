@@ -412,7 +412,11 @@ void setup() {
     lv_tick_set_cb(my_tick);
 
     lv_display_t* disp = lv_display_create(LCD_WIDTH, LCD_HEIGHT);
+#ifdef TARGET_SENSECAP
+    lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565_SWAPPED);
+#else
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
+#endif
     lv_display_set_flush_cb(disp, my_flush_cb);
 
 #ifdef TARGET_SENSECAP
@@ -448,15 +452,20 @@ void setup() {
     pinMode(BTN_BACK, INPUT_PULLUP);
     pinMode(BTN_FWD,  INPUT_PULLUP);
 #else
-    // SenseCAP: single button toggles backlight
+    // SenseCAP: single button cycles screens
     pinMode(SENSECAP_BTN, INPUT_PULLUP);
-
-    // Swipe gestures drive screen navigation — lv_layer_top() persists across screen switches
-    lv_obj_add_event_cb(lv_layer_top(), sensecap_gesture_cb, LV_EVENT_GESTURE, NULL);
 #endif
 
     // Build dashboard
     ui_init();
+
+#ifdef TARGET_SENSECAP
+    // Register swipe-gesture handler on containers (must be after ui_init so objects exist).
+    // lv_layer_top() is not in the parent chain of screen objects, so gesture events from
+    // usage_container/ble_container never reach it.  ui_register_sensecap_gesture_cb()
+    // sets GESTURE_BUBBLE on each container and attaches the callback to lv_screen_active().
+    ui_register_sensecap_gesture_cb(sensecap_gesture_cb);
+#endif
 
     // Show initial BLE status on Bluetooth screen
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());

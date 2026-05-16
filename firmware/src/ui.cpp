@@ -289,6 +289,9 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_set_style_border_width(ble_container, 0, 0);
     lv_obj_set_style_pad_all(ble_container, 0, 0);
     lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_SCROLLABLE);
+#ifdef TARGET_SENSECAP
+    lv_obj_add_event_cb(ble_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+#endif
 
     // Title
     lv_obj_t* lbl_ble_title = lv_label_create(ble_container);
@@ -458,8 +461,12 @@ static screen_t prev_non_splash_screen = SCREEN_USAGE;
 // noisy over the pixel-art creature animations.
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
+#ifdef TARGET_SENSECAP
+    lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+#else
     if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
     else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+#endif
 }
 
 // LVGL handles click debouncing internally. Screen-level handler fires when
@@ -468,8 +475,13 @@ static void apply_battery_visibility(void) {
 // splash toggle so only the reset zone is interactive there.
 static void global_click_cb(lv_event_t* e) {
     (void)e;
+#ifdef TARGET_SENSECAP
+    // SenseCAP has a single button; tapping any screen cycles SPLASH→USAGE→BT→USAGE…
+    ui_cycle_screen();
+#else
     if (ui_get_current_screen() == SCREEN_BLUETOOTH) return;
     ui_toggle_splash();
+#endif
 }
 
 static void ble_reset_click_cb(lv_event_t* e) {
@@ -564,3 +576,17 @@ void ui_update_battery(int percent, bool charging) {
     lv_image_set_src(battery_img, &battery_dscs[idx]);
     apply_battery_visibility();
 }
+
+#ifdef TARGET_SENSECAP
+void ui_register_sensecap_gesture_cb(lv_event_cb_t cb) {
+    // Gesture events bubble from the pressed child object up the parent chain.
+    // usage_container / ble_container / splash root are direct children of the
+    // single LVGL screen; they need GESTURE_BUBBLE so the event reaches the
+    // screen root where we register the callback.
+    lv_obj_add_flag(usage_container, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_flag(ble_container,   LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_t* splash_root = splash_get_root();
+    if (splash_root) lv_obj_add_flag(splash_root, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_event_cb(lv_screen_active(), cb, LV_EVENT_GESTURE, NULL);
+}
+#endif
