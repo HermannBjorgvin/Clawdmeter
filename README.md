@@ -29,6 +29,26 @@ While the splash is up, the middle button cycles animations instead of screens. 
 - USB-C cable for flashing firmware and charging
 - 3.7V Li-Po battery (MX1.25 2-pin connector, optional)
 
+## Board support
+
+This repository now supports two ESP32-S3 board targets:
+
+- Waveshare ESP32-S3-Touch-AMOLED-2.16 (default, 480x480, touch + PMU + IMU)
+- xingzhi-cube 1.83" 2mic ESP32-S3 (284x240 ST7789 SPI panel)
+
+Build/flash commands:
+
+```bash
+# Waveshare (default)
+pio run -d firmware -e waveshare_amoled_216
+
+# xingzhi-cube 1.83
+pio run -d firmware -e xingzhi_cube_183
+pio run -d firmware -e xingzhi_cube_183 -t upload --upload-port <PORT>
+```
+
+Detailed bring-up notes, root causes, and fixes for the xingzhi board are documented in [docs/xingzhi-bringup-issues.md](docs/xingzhi-bringup-issues.md).
+
 ## Prerequisites
 
 - Linux (tested on Ubuntu) or macOS
