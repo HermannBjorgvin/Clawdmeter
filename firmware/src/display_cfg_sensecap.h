@@ -67,20 +67,26 @@
 // Single physical button on the front panel. Verify GPIO against schematic.
 #define SENSECAP_BTN  38
 
-// ---- ST7701S init sequence: type9 + COLMOD=0x50 (RGB565) ----
-// type9 from Arduino_GFX uses COLMOD=0x60 (RGB666), which misaligns the
-// R/G/B channels on a 16-bit parallel bus and produces a green tint.
-// This array is byte-for-byte identical to st7701_type9_init_operations
-// except the single COLMOD byte is changed from 0x60 to 0x50.
+// ---- ST7701S init sequence ----
+// Based on Arduino_GFX type9 with two corrections verified against LovyanGFX
+// Panel_ST7701 (Meshtastic LGFX_INDICATOR, known-working on this board):
+//   1. Register 0xCD: 0x00 → 0x08  (type9 had 0x00; 0x08 is required for correct
+//      RGB colour output — wrong value produces a green tint on all content)
+//   2. Register 0xC0 omitted entirely (type9 set 0x3B,0x00; LovyanGFX leaves it
+//      at default — removing it caused no regressions)
+//   3. COLMOD 0x3A: kept at 0x60 (RGB666) to match RP2040 boot config
+//      (0x50 was also tried; 0xCD was the real root cause, not COLMOD)
+//
+// P04 (PCA9535) is asserted LOW before gfx->begin() so this sequence reaches
+// the ST7701S; see setup() in main.cpp.
 static const uint8_t st7701_sensecap_init_operations[] = {
     BEGIN_WRITE,
     WRITE_COMMAND_8, 0xFF,
     WRITE_BYTES, 5, 0x77, 0x01, 0x00, 0x00, 0x10,
 
-    WRITE_C8_D16, 0xC0, 0x3B, 0x00,
     WRITE_C8_D16, 0xC1, 0x0D, 0x02,
     WRITE_C8_D16, 0xC2, 0x31, 0x05,
-    WRITE_C8_D8, 0xCD, 0x00,
+    WRITE_C8_D8, 0xCD, 0x08,
 
     WRITE_COMMAND_8, 0xB0, // Positive Voltage Gamma Control
     WRITE_BYTES, 16,
@@ -170,7 +176,7 @@ static const uint8_t st7701_sensecap_init_operations[] = {
     WRITE_COMMAND_8, 0xFF,
     WRITE_BYTES, 5, 0x77, 0x01, 0x00, 0x00, 0x00,
 
-    WRITE_C8_D8, 0x3A, 0x50, // RGB565 (type9 uses 0x60 RGB666 which green-shifts on 16-bit bus)
+    WRITE_C8_D8, 0x3A, 0x60, // COLMOD=0x60 (RGB666, matches RP2040 boot config)
 
     WRITE_COMMAND_8, 0x11, // Sleep Out
     END_WRITE,
@@ -178,7 +184,7 @@ static const uint8_t st7701_sensecap_init_operations[] = {
     DELAY, 120,
 
     BEGIN_WRITE,
-    WRITE_COMMAND_8, 0x21, // Display Inversion ON (IPS panel — must follow Sleep Out)
+    WRITE_COMMAND_8, 0x21, // Display Inversion ON (IPS panel)
     WRITE_COMMAND_8, 0x29, // Display On
     END_WRITE,
 };
