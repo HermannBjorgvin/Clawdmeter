@@ -476,7 +476,9 @@ static void apply_battery_visibility(void) {
 static void global_click_cb(lv_event_t* e) {
     (void)e;
 #ifdef TARGET_SENSECAP
-    // SenseCAP has a single button; tapping any screen cycles SPLASH→USAGE→BT→USAGE…
+    // Suppress the spurious LV_EVENT_CLICKED that fires at the end of a swipe gesture.
+    extern uint32_t sensecap_last_gesture_ms;
+    if ((lv_tick_get() - sensecap_last_gesture_ms) < 400) return;
     ui_cycle_screen();
 #else
     if (ui_get_current_screen() == SCREEN_BLUETOOTH) return;
@@ -485,7 +487,7 @@ static void global_click_cb(lv_event_t* e) {
 }
 
 static void ble_reset_click_cb(lv_event_t* e) {
-    (void)e;
+    lv_event_stop_bubbling(e);
     ble_clear_bonds();
 }
 
@@ -578,7 +580,32 @@ void ui_update_battery(int percent, bool charging) {
 }
 
 #ifdef TARGET_SENSECAP
-void ui_register_sensecap_gesture_cb(lv_event_cb_t cb) {
+uint32_t sensecap_last_gesture_ms = 0;
+
+static void sensecap_gesture_cb(lv_event_t* e) {
+    (void)e;
+    lv_indev_t* indev = lv_indev_active();
+    if (!indev) return;
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return;
+    sensecap_last_gesture_ms = lv_tick_get();
+    screen_t cur = current_screen;
+    screen_t next;
+    if (dir == LV_DIR_LEFT) {
+        // Forward: SPLASH → USAGE → BLUETOOTH → SPLASH
+        if (cur == SCREEN_SPLASH)         next = SCREEN_USAGE;
+        else if (cur == SCREEN_USAGE)     next = SCREEN_BLUETOOTH;
+        else                              next = SCREEN_SPLASH;
+    } else {
+        // Back: SPLASH → BLUETOOTH → USAGE → SPLASH
+        if (cur == SCREEN_SPLASH)         next = SCREEN_BLUETOOTH;
+        else if (cur == SCREEN_BLUETOOTH) next = SCREEN_USAGE;
+        else                              next = SCREEN_SPLASH;
+    }
+    ui_show_screen(next);
+}
+
+void ui_register_sensecap_gesture_cb(void) {
     // Gesture events bubble from the pressed child object up the parent chain.
     // usage_container / ble_container / splash root are direct children of the
     // single LVGL screen; they need GESTURE_BUBBLE so the event reaches the
@@ -587,6 +614,6 @@ void ui_register_sensecap_gesture_cb(lv_event_cb_t cb) {
     lv_obj_add_flag(ble_container,   LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_t* splash_root = splash_get_root();
     if (splash_root) lv_obj_add_flag(splash_root, LV_OBJ_FLAG_GESTURE_BUBBLE);
-    lv_obj_add_event_cb(lv_screen_active(), cb, LV_EVENT_GESTURE, NULL);
+    lv_obj_add_event_cb(lv_screen_active(), sensecap_gesture_cb, LV_EVENT_GESTURE, NULL);
 }
 #endif

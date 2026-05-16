@@ -340,10 +340,6 @@ static void check_serial_cmd() {
     }
 }
 
-#ifdef TARGET_SENSECAP
-static void sensecap_gesture_cb(lv_event_t* e);
-#endif
-
 void setup() {
     Serial.begin(115200);
     // Print for 3 s so the serial monitor can be opened before boot messages scroll past.
@@ -469,7 +465,7 @@ void setup() {
     // lv_layer_top() is not in the parent chain of screen objects, so gesture events from
     // usage_container/ble_container never reach it.  ui_register_sensecap_gesture_cb()
     // sets GESTURE_BUBBLE on each container and attaches the callback to lv_screen_active().
-    ui_register_sensecap_gesture_cb(sensecap_gesture_cb);
+    ui_register_sensecap_gesture_cb();
 #endif
 
     // Show initial BLE status on Bluetooth screen
@@ -516,22 +512,6 @@ static void handle_rotation_change(void) {
     gfx->setBrightness(levels[ramp_step - 1]);
     if (ramp_step >= 4) ramp_step = 0;
     else                ramp_step++;
-}
-#endif
-
-#ifdef TARGET_SENSECAP
-// Swipe left → advance screen, swipe right → go back.
-// With two main screens (Usage ↔ Bluetooth) either direction cycles identically,
-// but directional intent is preserved for if screens are added later.
-static void sensecap_gesture_cb(lv_event_t* e) {
-    (void)e;
-    lv_indev_t* indev = lv_indev_active();
-    if (!indev) return;
-    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
-    if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) {
-        if (ui_get_current_screen() == SCREEN_SPLASH) ui_show_screen(SCREEN_USAGE);
-        else ui_cycle_screen();
-    }
 }
 #endif
 
