@@ -10,26 +10,126 @@
 #include "splash.h"
 #include "usage_rate.h"
 
+#ifdef BOARD_XINGZHI_CUBE
+// ---- xingzhi-cube hardware objects ----
+// Buttons: BTN_WAKE/BTN_VOL/BTN_MID defined in display_cfg.h
+// Unified names for shared button logic:
+#define BTN_LEFT   BTN_WAKE  // GPIO  0 — Space / voice push-to-talk
+#define BTN_RIGHT  BTN_VOL   // GPIO 40 — Shift+Tab / mode toggle
+// BTN_MID (GPIO 39) replaces AXP PWR button for screen cycling
+
+
+// Vendor-specific init sequence for the xingzhi-cube 1.83" ST7789V-like panel.
+// Recovered from the board's ESPHome YAML. Without this the screen stays blank.
+// Includes SLPOUT at the end, followed by the minimal standard setup.
+// NOTE: Arduino_ST7789::tftInit() always sends SWRESET which would wipe these
+// vendor registers, so we do NOT call super — we handle the full init here.
+static const uint8_t xingzhi_vendor_init[] = {
+    BEGIN_WRITE,
+    WRITE_C8_BYTES, 0xFD, 2, 0x06, 0x08,
+    WRITE_C8_BYTES, 0x61, 2, 0x07, 0x04,
+    WRITE_C8_BYTES, 0x62, 3, 0x00, 0x44, 0x45,
+    WRITE_C8_BYTES, 0x63, 4, 0x41, 0x07, 0x12, 0x12,
+    WRITE_C8_D8,    0x64, 0x37,
+    WRITE_C8_BYTES, 0x65, 3, 0x09, 0x10, 0x21,
+    WRITE_C8_BYTES, 0x66, 3, 0x09, 0x10, 0x21,
+    WRITE_C8_BYTES, 0x67, 2, 0x20, 0x40,
+    WRITE_C8_BYTES, 0x68, 4, 0x90, 0x4C, 0x7C, 0x66,
+    WRITE_C8_BYTES, 0xB1, 3, 0x0F, 0x02, 0x01,
+    WRITE_C8_D8,    0xB4, 0x01,
+    WRITE_C8_BYTES, 0xB5, 4, 0x02, 0x02, 0x0A, 0x14,
+    WRITE_C8_BYTES, 0xB6, 5, 0x04, 0x01, 0x9F, 0x00, 0x02,
+    WRITE_C8_D8,    0xDF, 0x11,
+    WRITE_C8_BYTES, 0xE2, 6, 0x13, 0x00, 0x00, 0x30, 0x33, 0x3F,
+    WRITE_C8_BYTES, 0xE5, 6, 0x3F, 0x33, 0x30, 0x00, 0x00, 0x13,
+    WRITE_C8_BYTES, 0xE1, 2, 0x00, 0x57,
+    WRITE_C8_BYTES, 0xE4, 2, 0x58, 0x00,
+    WRITE_C8_BYTES, 0xE0, 8, 0x01, 0x03, 0x0D, 0x0E, 0x0E, 0x0C, 0x15, 0x19,
+    WRITE_C8_BYTES, 0xE3, 8, 0x1A, 0x16, 0x0C, 0x0F, 0x0E, 0x0D, 0x02, 0x01,
+    WRITE_C8_BYTES, 0xE6, 2, 0x00, 0xFF,
+    WRITE_C8_BYTES, 0xE7, 6, 0x01, 0x04, 0x03, 0x03, 0x00, 0x12,
+    WRITE_C8_BYTES, 0xE8, 3, 0x00, 0x70, 0x00,
+    WRITE_C8_D8,    0xEC, 0x52,
+    WRITE_C8_BYTES, 0xF1, 3, 0x01, 0x01, 0x02,
+    WRITE_C8_BYTES, 0xF6, 4, 0x09, 0x10, 0x00, 0x00,
+    WRITE_C8_BYTES, 0xFD, 2, 0xFA, 0xFC,
+    WRITE_C8_D8,    0x35, 0x00,     // TEON  — tearing effect line on
+    WRITE_COMMAND_8, 0x11,          // SLPOUT
+    DELAY, 120,                     // 120 ms for SLPOUT to settle
+    WRITE_C8_D8,    0x3A, 0x55,     // COLMOD — RGB565
+    WRITE_COMMAND_8, 0x13,          // NORON
+    WRITE_COMMAND_8, 0x29,          // DISPON
+    END_WRITE,
+};
+
+class CalibratedST7789 : public Arduino_ST7789 {
+public:
+    using Arduino_ST7789::Arduino_ST7789;
+
+    void setPanelOffsets(uint8_t c1, uint8_t r1, uint8_t c2, uint8_t r2, uint8_t rot) {
+        COL_OFFSET1 = c1;
+        ROW_OFFSET1 = r1;
+        COL_OFFSET2 = c2;
+        ROW_OFFSET2 = r2;
+        setRotation(rot);
+    }
+
+protected:
+    void tftInit() override {
+        // Hardware reset — Arduino_ST7789::tftInit() would SWRESET after this,
+        // wiping our vendor registers, so we handle the full init ourselves.
+        if (_rst != GFX_NOT_DEFINED) {
+            pinMode(_rst, OUTPUT);
+            digitalWrite(_rst, HIGH);
+            delay(10);
+            digitalWrite(_rst, LOW);
+            delay(20);
+            digitalWrite(_rst, HIGH);
+            delay(120);
+        }
+        // Vendor init + COLMOD + NORON + DISPON — no SWRESET
+        _bus->batchOperation(xingzhi_vendor_init, sizeof(xingzhi_vendor_init));
+        // invertDisplay() is called by the caller (main.cpp) after begin()
+    }
+};
+
+static Arduino_DataBus *bus = new Arduino_ESP32SPI(
+    LCD_DC, LCD_CS, LCD_SPI_CLK, LCD_SPI_MOSI);
+// rotation=3 -> MADCTL MY+MV, which matches swap_xy + mirror_y.
+// Arduino_TFT maps rotation=3 offsets as: xStart=ROW_OFFSET2, yStart=COL_OFFSET1.
+// We need gap_x=36, gap_y=0 -> ROW_OFFSET2=36 and COL_OFFSET1=0.
+static CalibratedST7789 *st7789_gfx = new CalibratedST7789(
+    bus, LCD_RST,
+    3,           // rotation: swap_xy + mirror_y -> landscape
+    false,       // IPS = false
+    240, 284,    // native W×H (portrait); rotation=1 yields 284×240 logical
+    0, 0,        // col_offset1, row_offset1
+    0, 36);      // col_offset2, row_offset2
+Arduino_GFX *gfx = st7789_gfx;
+
+
+#else  // Waveshare ESP32-S3-Touch-AMOLED-2.16
 // Physical buttons (global, screen-independent):
 //   BTN_BACK   (GPIO 0)  — left,  send Space (Claude Code voice mode push-to-talk)
 //   BTN_FWD    (GPIO 18) — right, send Shift+Tab (Claude Code mode toggle)
 //   AXP PWR    (PMU)     — middle, cycle screens; on splash, cycle animations
-#define BTN_BACK 0
-#define BTN_FWD  18
+#define BTN_LEFT   BTN_BACK
+#define BTN_RIGHT  BTN_FWD
 
-// ---- Hardware objects ----
-Arduino_DataBus *bus = new Arduino_ESP32QSPI(
+static Arduino_DataBus *bus = new Arduino_ESP32QSPI(
     LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
-Arduino_CO5300 *gfx = new Arduino_CO5300(
+Arduino_GFX *gfx = new Arduino_CO5300(
     bus, LCD_RESET, 0 /* rotation */,
     LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
 TouchDrvCST92xx touch;
 XPowersPMU pmu;
 SensorQMI8658 imu;
+#endif
 
 static UsageData usage = {};
 
-// ---- Touch interrupt + shared state ----
+#ifndef BOARD_XINGZHI_CUBE
+// ---- Touch interrupt + shared state (Waveshare only) ----
 static volatile bool     touch_pressed = false;
 static volatile uint16_t touch_x = 0;
 static volatile uint16_t touch_y = 0;
@@ -53,20 +153,23 @@ static void touch_read() {
         touch_pressed = false;
     }
 }
+#endif // BOARD_XINGZHI_CUBE
 
 // ---- LVGL draw buffers (PSRAM-backed, partial render) ----
 #define BUF_LINES 40
 static uint16_t *buf1 = nullptr;
 static uint16_t *buf2 = nullptr;
+#ifndef BOARD_XINGZHI_CUBE
 // rot_buf for strip rotation — max size is 480×480 (full invalidation case)
-// but typical partial strips are much smaller
 static uint16_t *rot_buf = nullptr;
+#endif
 
 // LVGL tick callback
 static uint32_t my_tick(void) {
     return millis();
 }
 
+#ifndef BOARD_XINGZHI_CUBE
 // Rotate a w×h strip and compute destination coordinates on the 480×480 display.
 // src pixels are in row-major order for the rectangle (sx, sy, w, h).
 // Output goes to rot_buf in row-major order for the destination rectangle.
@@ -116,14 +219,34 @@ static void rotate_strip(const uint16_t *src, int32_t w, int32_t h,
         break;
     }
 }
+#endif // BOARD_XINGZHI_CUBE
 
-// LVGL flush callback — rotates partial strips and writes to display
+// ---- Backlight control (board-specific) ----
+#ifdef BOARD_XINGZHI_CUBE
+// LEDC PWM backlight on GPIO LCD_BL (0–255)
+static void lcd_backlight_init(void) {
+    ledcAttach(LCD_BL, 5000, 8);  // 5kHz, 8-bit resolution
+    ledcWrite(LCD_BL, 0);
+}
+static void lcd_set_brightness(uint8_t val) {
+    ledcWrite(LCD_BL, val);
+}
+#else
+// CO5300 has on-chip brightness register (0–255)
+static void lcd_backlight_init(void) {}  // nothing extra needed
+static void lcd_set_brightness(uint8_t val) {
+    gfx->setBrightness(val);
+}
+#endif
+
+// LVGL flush callback
 static void my_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
     uint16_t *src = (uint16_t*)px_map;
+#ifndef BOARD_XINGZHI_CUBE
+    // Waveshare: CPU-side strip rotation for auto-rotate via IMU
     uint8_t r = imu_get_rotation();
-
     if (r == 0) {
         gfx->draw16bitRGBBitmap(area->x1, area->y1, src, w, h);
     } else {
@@ -131,9 +254,14 @@ static void my_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_m
         rotate_strip(src, w, h, area->x1, area->y1, r, &dx, &dy, &dw, &dh);
         gfx->draw16bitRGBBitmap(dx, dy, rot_buf, dw, dh);
     }
+#else
+    // xingzhi-cube: fixed orientation, direct blit
+    gfx->draw16bitRGBBitmap(area->x1, area->y1, src, w, h);
+#endif
     lv_display_flush_ready(disp);
 }
 
+#ifndef BOARD_XINGZHI_CUBE
 // CO5300 requires even-aligned flush regions
 static void rounder_cb(lv_event_t* e) {
     lv_area_t *area = (lv_area_t*)lv_event_get_param(e);
@@ -143,7 +271,7 @@ static void rounder_cb(lv_event_t* e) {
     area->y2 = area->y2 | 1;
 }
 
-// LVGL touch callback
+// LVGL touch callback (Waveshare only)
 static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     if (touch_pressed) {
         data->point.x = touch_x;
@@ -153,6 +281,7 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
         data->state = LV_INDEV_STATE_RELEASED;
     }
 }
+#endif // BOARD_XINGZHI_CUBE
 
 // Parse a JSON line into UsageData
 static bool parse_json(const char* json, UsageData* out) {
@@ -228,21 +357,29 @@ void setup() {
     delay(300);
     Serial.println("{\"ready\":true}");
 
-    // Init I2C (shared by touch + PMU)
+#ifndef BOARD_XINGZHI_CUBE
+    // Init I2C (shared by touch + PMU + IMU on Waveshare)
     Wire.begin(IIC_SDA, IIC_SCL);
+#endif
 
     // Init display
+    lcd_backlight_init();
     gfx->begin();
+#ifdef BOARD_XINGZHI_CUBE
+    // This panel's known-good setup uses inverted colors.
+    gfx->invertDisplay(true);
+#endif
     gfx->fillScreen(0x0000);
-    gfx->setBrightness(200);
+    lcd_set_brightness(200);
 
-    // Init PMU
+    // Init PMU (stubbed on xingzhi)
     power_init();
 
-    // Init IMU (accelerometer for auto-rotation)
+    // Init IMU for auto-rotation (stubbed on xingzhi — always returns 0)
     imu_init();
 
-    // Init touch
+#ifndef BOARD_XINGZHI_CUBE
+    // Init touch (Waveshare only)
     touch.setPins(TP_RST, TP_INT);
     if (!touch.begin(Wire, CST9220_ADDR, IIC_SDA, IIC_SCL)) {
         Serial.println("Touch init failed");
@@ -253,6 +390,7 @@ void setup() {
         attachInterrupt(TP_INT, touch_isr, FALLING);
         Serial.println("Touch init OK");
     }
+#endif
 
     // Init LVGL
     lv_init();
@@ -261,9 +399,10 @@ void setup() {
     // Allocate PSRAM-backed partial render buffers
     buf1 = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
     buf2 = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
-    // rot_buf needs to hold the largest possible strip after rotation
-    // A 480×40 strip rotated 90° becomes 40×480, same pixel count
+#ifndef BOARD_XINGZHI_CUBE
+    // rot_buf for IMU-driven strip rotation (Waveshare only)
     rot_buf = (uint16_t*)heap_caps_malloc(LCD_WIDTH * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
+#endif
 
     lv_display_t* disp = lv_display_create(LCD_WIDTH, LCD_HEIGHT);
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
@@ -271,19 +410,27 @@ void setup() {
     lv_display_set_buffers(disp, buf1, buf2, LCD_WIDTH * BUF_LINES * 2,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
 
-    // CO5300 even-alignment rounder
+#ifndef BOARD_XINGZHI_CUBE
+    // CO5300 requires even-aligned flush regions
     lv_display_add_event_cb(disp, rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
 
     lv_indev_t* indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, my_touch_cb);
+#endif
 
     // Init BLE data channel
     ble_init();
 
-    // Physical buttons: back (GPIO 0) and forward (GPIO 18)
+    // Physical buttons
+#ifdef BOARD_XINGZHI_CUBE
+    pinMode(BTN_WAKE, INPUT_PULLUP);
+    pinMode(BTN_VOL,  INPUT_PULLUP);
+    pinMode(BTN_MID,  INPUT_PULLUP);
+#else
     pinMode(BTN_BACK, INPUT_PULLUP);
     pinMode(BTN_FWD,  INPUT_PULLUP);
+#endif
 
     // Build dashboard
     ui_init();
@@ -294,17 +441,21 @@ void setup() {
     // Show initial battery status
     ui_update_battery(power_battery_pct(), power_is_charging());
 
+#ifdef BOARD_XINGZHI_CUBE
+    // Start on Usage for xingzhi so a dark splash palette can't look like a blank panel.
+    ui_show_screen(SCREEN_USAGE);
+#else
     ui_show_screen(SCREEN_SPLASH);
+#endif
 
     Serial.println("Dashboard ready, waiting for data on BLE...");
 }
 
 static ble_state_t last_ble_state = BLE_STATE_INIT;
 
-// Brightness ramp state for rotation transition
-// On rotation change we blank the panel, force a full LVGL redraw at the
-// new orientation, then ramp brightness back up over ~125ms so the
-// transition reads as deliberate instead of as a glitch.
+// Brightness ramp for rotation transition (Waveshare/CO5300 only)
+// On rotation change: blank panel, force full LVGL redraw, ramp brightness back.
+#ifndef BOARD_XINGZHI_CUBE
 static void handle_rotation_change(void) {
     static uint8_t last_rotation = 0;
     static uint8_t  ramp_step = 0;  // 0=idle, 1-4=ramping
@@ -312,7 +463,7 @@ static void handle_rotation_change(void) {
 
     uint8_t rot = imu_get_rotation();
     if (rot != last_rotation) {
-        gfx->setBrightness(0);
+        lcd_set_brightness(0);
         last_rotation = rot;
         lv_obj_invalidate(lv_screen_active());
         ramp_step = 1;
@@ -325,13 +476,16 @@ static void handle_rotation_change(void) {
     ramp_last = now;
 
     static const uint8_t levels[] = {60, 120, 170, 200};
-    gfx->setBrightness(levels[ramp_step - 1]);
+    lcd_set_brightness(levels[ramp_step - 1]);
     if (ramp_step >= 4) ramp_step = 0;
     else                ramp_step++;
 }
+#endif // BOARD_XINGZHI_CUBE
 
 void loop() {
+#ifndef BOARD_XINGZHI_CUBE
     touch_read();
+#endif
     lv_timer_handler();
     ui_tick_anim();
     ble_tick();
@@ -340,13 +494,14 @@ void loop() {
     splash_tick();
 
     // Three-button input (global, screen-independent):
-    //   LEFT  (GPIO 0)  → Space (voice-mode push-to-talk; press & release tracked)
-    //   RIGHT (GPIO 18) → Shift+Tab (Claude Code mode toggle)
-    //   PWR   (AXP)     → cycle screens; on splash, cycle animations
+    //   LEFT   — Space (voice-mode push-to-talk; press & release tracked)
+    //   RIGHT  — Shift+Tab (Claude Code mode toggle)
+    //   MIDDLE — cycle screens; on splash, cycle animations
+    //           (xingzhi: GPIO39 / Waveshare: AXP PMU short-press)
     {
         static bool back_was = false, fwd_was = false;
-        bool back_now = (digitalRead(BTN_BACK) == LOW);
-        bool fwd_now  = (digitalRead(BTN_FWD)  == LOW);
+        bool back_now = (digitalRead(BTN_LEFT)  == LOW);
+        bool fwd_now  = (digitalRead(BTN_RIGHT) == LOW);
 
         if (back_now != back_was) {
             if (back_now) ble_keyboard_press(0x2C, 0);  // HID Space, no mods
@@ -359,13 +514,30 @@ void loop() {
             fwd_was = fwd_now;
         }
 
+#ifdef BOARD_XINGZHI_CUBE
+        // xingzhi: GPIO39 (BTN_MID) always cycles screens so we can
+        // recover even if splash content appears too dark.
+        static bool mid_was = false;
+        bool mid_now = (digitalRead(BTN_MID) == LOW);
+        if (!mid_now && mid_was) {  // trigger on release
+            screen_t s = ui_get_current_screen();
+            if (s == SCREEN_USAGE)          ui_show_screen(SCREEN_BLUETOOTH);
+            else if (s == SCREEN_BLUETOOTH) ui_show_screen(SCREEN_SPLASH);
+            else                            ui_show_screen(SCREEN_USAGE);
+        }
+        mid_was = mid_now;
+#else
+        // Waveshare: AXP PWR short-press is the cycle button
         if (power_pwr_pressed()) {
             if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
             else                                          ui_cycle_screen();
         }
+#endif  // BOARD_XINGZHI_CUBE
     }
 
+#ifndef BOARD_XINGZHI_CUBE
     handle_rotation_change();
+#endif
 
     // Update BLE status on screen when state changes
     ble_state_t bs = ble_get_state();

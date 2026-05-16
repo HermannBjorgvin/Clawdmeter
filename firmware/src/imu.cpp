@@ -2,6 +2,8 @@
 #include "display_cfg.h"
 #include <Arduino.h>
 
+#ifndef BOARD_XINGZHI_CUBE
+
 // Poll and hysteresis timing
 #define IMU_POLL_MS       100    // read accel at ~10 Hz
 #define STABLE_TIME_MS    300    // orientation must be stable this long before rotating
@@ -74,3 +76,11 @@ void imu_tick(void) {
 uint8_t imu_get_rotation(void) {
     return current_rotation;
 }
+
+#else  // BOARD_XINGZHI_CUBE — no IMU; rotation is always 0
+
+void    imu_init(void)          {}
+void    imu_tick(void)          {}
+uint8_t imu_get_rotation(void)  { return 0; }
+
+#endif // BOARD_XINGZHI_CUBE

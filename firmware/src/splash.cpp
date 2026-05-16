@@ -1,14 +1,15 @@
 #include "splash.h"
 #include "splash_animations.h"
 #include "theme.h"
+#include "display_cfg.h"
 #include "usage_rate.h"
 #include <Arduino.h>
 #include <string.h>
 #include <esp_heap_caps.h>
 
-// 20x20 grid scaled 24x to fill 480x480
+// 20x20 grid scaled to panel height (480x480 on Waveshare, 240x240 on xingzhi)
 #define GRID         20
-#define CELL         24
+#define CELL         (LCD_HEIGHT / GRID)
 #define CANVAS_W     (GRID * CELL)
 #define CANVAS_H     (GRID * CELL)
 
@@ -51,6 +52,41 @@ static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
     { "dance bounce dj", "dance sway dj", "dance djmix", NULL },
 };
 
+#ifdef BOARD_XINGZHI_CUBE
+static inline uint16_t rgb565_from_888(uint8_t r, uint8_t g, uint8_t b) {
+    return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+}
+
+// Keep the sprite's shading but force hue toward Anthropic-style orange.
+// This avoids panel/order quirks that can make light tones look white.
+static uint16_t tint_orange_565(uint16_t color) {
+    if (color == COL_EMPTY) return COL_EMPTY;
+
+    uint8_t r5 = (color >> 11) & 0x1F;
+    uint8_t g6 = (color >> 5) & 0x3F;
+    uint8_t b5 = color & 0x1F;
+
+    uint8_t r = (uint8_t)((r5 * 255) / 31);
+    uint8_t g = (uint8_t)((g6 * 255) / 63);
+    uint8_t b = (uint8_t)((b5 * 255) / 31);
+
+    // Luminance preserves per-cell contrast from the source palette.
+    uint8_t y = (uint8_t)((77 * r + 150 * g + 29 * b) >> 8);
+
+    // Target accent: #D97757. Clamp to avoid near-white highlights.
+    const uint8_t ar = 0xD9;
+    const uint8_t ag = 0x77;
+    const uint8_t ab = 0x57;
+    uint16_t scale = (uint16_t)(140 + ((uint16_t)y * 115) / 255); // 140..255
+
+    uint8_t nr = (uint8_t)((ar * scale) / 255);
+    uint8_t ng = (uint8_t)((ag * scale) / 255);
+    uint8_t nb = (uint8_t)((ab * scale) / 255);
+
+    return rgb565_from_888(nr, ng, nb);
+}
+#endif
+
 static void resolve_group_lists(void) {
     for (int g = 0; g < GROUP_COUNT; g++) {
         group_size[g] = 0;
@@ -69,11 +105,16 @@ static void resolve_group_lists(void) {
 }
 
 static void render_frame(const uint8_t *cells, const uint16_t *palette) {
+    bool any_visible = false;
     for (int gy = 0; gy < GRID; gy++) {
         uint16_t row[CANVAS_W];
         for (int gx = 0; gx < GRID; gx++) {
             uint8_t code = cells[gy * GRID + gx];
             uint16_t color = (palette && code < SPLASH_PALETTE_SIZE) ? palette[code] : COL_EMPTY;
+#ifdef BOARD_XINGZHI_CUBE
+            color = tint_orange_565(color);
+#endif
+            if (color != COL_EMPTY) any_visible = true;
             uint16_t *p = &row[gx * CELL];
             for (int i = 0; i < CELL; i++) p[i] = color;
         }
@@ -81,6 +122,26 @@ static void render_frame(const uint8_t *cells, const uint16_t *palette) {
             memcpy(&canvas_buf[(gy * CELL + dy) * CANVAS_W], row, CANVAS_W * 2);
         }
     }
+
+#ifdef BOARD_XINGZHI_CUBE
+    // Safety fallback: if a frame resolves to full black on this panel,
+    // draw a small orange marker so the screen never looks dead.
+    if (!any_visible) {
+        const uint16_t marker = rgb565_from_888(0xD9, 0x77, 0x57);
+        const int cx = CANVAS_W / 2;
+        const int cy = CANVAS_H / 2;
+        for (int y = cy - 8; y <= cy + 8; y++) {
+            if (y < 0 || y >= CANVAS_H) continue;
+            for (int x = cx - 8; x <= cx + 8; x++) {
+                if (x < 0 || x >= CANVAS_W) continue;
+                if (x == cx || y == cy) {
+                    canvas_buf[y * CANVAS_W + x] = marker;
+                }
+            }
+        }
+    }
+#endif
+
     if (canvas) lv_obj_invalidate(canvas);
 }
 
@@ -99,7 +160,7 @@ void splash_init(lv_obj_t *parent) {
     }
 
     splash_container = lv_obj_create(parent);
-    lv_obj_set_size(splash_container, 480, 480);
+    lv_obj_set_size(splash_container, LCD_WIDTH, LCD_HEIGHT);
     lv_obj_set_pos(splash_container, 0, 0);
     lv_obj_set_style_bg_color(splash_container, THEME_BG, 0);
     lv_obj_set_style_bg_opa(splash_container, LV_OPA_COVER, 0);

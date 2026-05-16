@@ -1,6 +1,7 @@
 # PlatformIO build artifacts
 firmware/.pio/
 firmware/.vscode/
+firmware/monitor_output.txt
 
 # OS
 .DS_Store
