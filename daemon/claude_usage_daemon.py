@@ -149,11 +149,16 @@ def save_address(addr: str) -> None:
 
 async def scan_for_device() -> str | None:
     log(f"Scanning for '{DEVICE_NAME}' ({SCAN_TIMEOUT}s)...")
-    devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
-    for d in devices:
-        if d.name == DEVICE_NAME:
-            log(f"Found: {d.address}")
-            return d.address
+    # Windows often omits local name in passive scans; match by either
+    # advertised local name/device name OR our custom service UUID.
+    devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT, return_adv=True)
+    for addr, (dev, adv) in devices.items():
+        uuids = [u.lower() for u in (adv.service_uuids or [])]
+        name = dev.name
+        local_name = adv.local_name
+        if name == DEVICE_NAME or local_name == DEVICE_NAME or SERVICE_UUID.lower() in uuids:
+            log(f"Found: {addr} (name={name!r}, local_name={local_name!r}, uuids={uuids})")
+            return addr
     return None
 
 
@@ -292,7 +297,7 @@ async def main() -> None:
         except NotImplementedError:
             signal.signal(sig, _stop)
 
-    log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
+    log("=== Claude Usage Tracker Daemon (BLE) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
 
     backoff = 1
@@ -310,6 +315,8 @@ async def main() -> None:
                     pass
                 backoff = min(backoff * 2, 60)
                 continue
+        else:
+            log(f"Using cached address: {address}")
 
         ok = await connect_and_run(address, stop_event)
         if not ok:
