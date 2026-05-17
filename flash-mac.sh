@@ -27,7 +27,7 @@ echo "Port: $PORT"
 echo ""
 
 cd "$SCRIPT_DIR/firmware"
-pio run -t upload --upload-port "$PORT"
+pio run -e waveshare_amoled_216 -t upload --upload-port "$PORT"
 
 echo ""
 echo "=== Done ==="
