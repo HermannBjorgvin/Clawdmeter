@@ -51,6 +51,49 @@ sed \
 echo "  Installed: $PLIST_DST"
 echo ""
 
+echo "[3b/5] Registering Claude Code hook (~/.claude/settings.json)..."
+# Adds a UserPromptSubmit/PreToolUse/Stop hook that pipes events into
+# daemon/clawdmeter_hook.py, which writes ~/.clawdmeter/state.json — the
+# daemon reads that file on every tick and forwards the Activity / todo
+# state to the ESP32. Idempotent: skips if the same command is already
+# registered for all three matchers.
+CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+HOOK_CMD="$PYTHON_BIN $SCRIPT_DIR/daemon/clawdmeter_hook.py"
+mkdir -p "$HOME/.claude"
+"$PYTHON_BIN" - "$CLAUDE_SETTINGS" "$HOOK_CMD" << 'PYEOF'
+import json, sys, os
+path, hook_cmd = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f: data = json.load(f)
+    if not isinstance(data, dict): data = {}
+except (FileNotFoundError, json.JSONDecodeError):
+    data = {}
+hooks = data.setdefault("hooks", {})
+# Subscribe to events that move session state: tool-use boundaries and Stop.
+# UserPromptSubmit gives us a session lifecycle anchor when the user first
+# engages even before any tool fires.
+EVENTS = ["PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit", "SessionStart"]
+for event in EVENTS:
+    rules = hooks.setdefault(event, [])
+    if not isinstance(rules, list): rules = []
+    already = any(
+        any(h.get("command") == hook_cmd for h in r.get("hooks", []) if isinstance(h, dict))
+        for r in rules if isinstance(r, dict)
+    )
+    if already: continue
+    rules.append({
+        "matcher": "",  # all tools / all prompts
+        "hooks": [{"type": "command", "command": hook_cmd}],
+    })
+    hooks[event] = rules
+data["hooks"] = hooks
+tmp = path + ".tmp"
+with open(tmp, "w") as f: json.dump(data, f, indent=2)
+os.replace(tmp, path)
+print(f"  Wrote {path}")
+PYEOF
+echo ""
+
 echo "[4/5] Bluetooth permission check..."
 echo "  On first run the daemon will trigger a Bluetooth permission prompt."
 echo "  macOS only prompts for foreground processes — so we'll run it"
