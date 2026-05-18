@@ -36,6 +36,16 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
 
+# Token refresh: piggyback on Claude Code CLI. When the cached accessToken
+# is within TOKEN_REFRESH_BUFFER_SECONDS of expiry, spawn the CLI with a
+# trivial prompt — the CLI auto-refreshes via OAuth and writes the new
+# token back to Keychain / credentials.json, which the next read picks up.
+# Cost: one message per refresh (~every 8h on a healthy token).
+TOKEN_REFRESH_BUFFER_SECONDS = 120
+TOKEN_REFRESH_CMD = "claude"
+TOKEN_REFRESH_CMD_ARGS = ("-p", "ping")
+TOKEN_REFRESH_TIMEOUT_SECONDS = 60
+
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
@@ -54,39 +64,59 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def _extract_access_token(blob: str) -> str | None:
-    """Pull the accessToken out of a credentials blob.
+def _extract_credentials(blob: str) -> tuple[str, int] | None:
+    """Pull (accessToken, expiresAtMs) out of a credentials blob.
 
     Claude Code stores credentials as a JSON object; the blob may also be
-    nested ({"claudeAiOauth": {"accessToken": "..."}}). Fall back to a
-    regex match so unexpected shapes still work, and finally treat the
-    blob as a raw token if nothing else matches.
+    nested ({"claudeAiOauth": {"accessToken": "...", "expiresAt": ...}}).
+    Fall back to a regex match so unexpected shapes still work, and
+    finally treat the blob as a raw token if nothing else matches.
+
+    expiresAtMs == 0 means "unknown" — callers should skip proactive
+    refresh in that case (e.g., raw-token shape with no expiry field).
     """
     blob = blob.strip()
     if not blob:
         return None
+
+    def _coerce_expiry(v: object) -> int:
+        try:
+            return int(v) if v is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    def _pluck(d: dict) -> tuple[str, int] | None:
+        tok = d.get("accessToken")
+        if isinstance(tok, str) and tok:
+            return tok, _coerce_expiry(d.get("expiresAt"))
+        return None
+
     try:
         data = json.loads(blob)
     except json.JSONDecodeError:
         data = None
     if isinstance(data, dict):
-        # direct: {"accessToken": "..."}
-        if isinstance(data.get("accessToken"), str):
-            return data["accessToken"]
-        # nested: {"claudeAiOauth": {"accessToken": "..."}}
+        # direct: {"accessToken": "...", "expiresAt": ...}
+        result = _pluck(data)
+        if result:
+            return result
+        # nested: {"claudeAiOauth": {...}}
         for v in data.values():
-            if isinstance(v, dict) and isinstance(v.get("accessToken"), str):
-                return v["accessToken"]
+            if isinstance(v, dict):
+                result = _pluck(v)
+                if result:
+                    return result
     m = re.search(r'"accessToken"\s*:\s*"([^"]+)"', blob)
     if m:
-        return m.group(1)
+        m2 = re.search(r'"expiresAt"\s*:\s*(\d+)', blob)
+        return m.group(1), int(m2.group(1)) if m2 else 0
     # Raw token (no JSON wrapper) — must look plausible (sk-ant-... etc.)
     if re.fullmatch(r"[A-Za-z0-9_\-.~+/=]{20,}", blob):
-        return blob
+        return blob, 0
     return None
 
 
-def _read_token_keychain() -> str | None:
+def _read_credentials_keychain() -> tuple[str, int] | None:
     try:
         out = subprocess.run(
             [
@@ -109,22 +139,90 @@ def _read_token_keychain() -> str | None:
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         log(f"Keychain access error: {e}")
         return None
-    return _extract_access_token(out.stdout)
+    return _extract_credentials(out.stdout)
 
 
-def _read_token_file() -> str | None:
+def _read_credentials_file() -> tuple[str, int] | None:
     try:
         raw = CREDENTIALS_PATH.read_text()
     except OSError as e:
         log(f"Error reading credentials: {e}")
         return None
-    return _extract_access_token(raw)
+    return _extract_credentials(raw)
 
 
-def read_token() -> str | None:
+def read_credentials() -> tuple[str, int] | None:
     if sys.platform == "darwin":
-        return _read_token_keychain()
-    return _read_token_file()
+        return _read_credentials_keychain()
+    return _read_credentials_file()
+
+
+async def _trigger_cli_refresh() -> bool:
+    """Spawn `claude -p ping` to force the CLI to refresh the OAuth token
+    and persist it back to Keychain / credentials.json. Returns True if
+    the subprocess exited cleanly within the timeout.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            TOKEN_REFRESH_CMD,
+            *TOKEN_REFRESH_CMD_ARGS,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        log(f"{TOKEN_REFRESH_CMD} CLI not found on PATH; cannot refresh token")
+        return False
+    except OSError as e:
+        log(f"Failed to spawn {TOKEN_REFRESH_CMD} for token refresh: {e}")
+        return False
+    try:
+        _, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=TOKEN_REFRESH_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        try:
+            await proc.wait()
+        except Exception:
+            pass
+        log(f"Token refresh via CLI timed out after {TOKEN_REFRESH_TIMEOUT_SECONDS}s")
+        return False
+    if proc.returncode != 0:
+        snippet = stderr.decode(errors="replace").strip().splitlines()
+        tail = snippet[-1][:200] if snippet else ""
+        log(f"{TOKEN_REFRESH_CMD} exited {proc.returncode}: {tail}")
+        return False
+    return True
+
+
+async def ensure_fresh_token() -> str | None:
+    """Read the cached credentials; if the accessToken is within the
+    refresh buffer of its expiry (or already expired), trigger the CLI
+    to refresh it, then re-read. Returns the (possibly stale) token, or
+    None if nothing usable is available.
+    """
+    creds = read_credentials()
+    if creds is None:
+        return None
+    token, expires_at_ms = creds
+    if expires_at_ms <= 0:
+        return token  # unknown expiry — can't decide; let the API call judge
+    seconds_left = expires_at_ms / 1000.0 - time.time()
+    if seconds_left > TOKEN_REFRESH_BUFFER_SECONDS:
+        return token
+    log(f"Token expires in {int(seconds_left)}s; triggering CLI refresh")
+    if not await _trigger_cli_refresh():
+        return token  # stale; the upcoming API call will surface the 401
+    creds2 = read_credentials()
+    if creds2 is None:
+        return token
+    new_token, new_expires_at_ms = creds2
+    if new_expires_at_ms > expires_at_ms:
+        new_left_h = (new_expires_at_ms / 1000.0 - time.time()) / 3600.0
+        log(f"Token refreshed; new expiry in {new_left_h:+.1f}h")
+    else:
+        log("CLI returned cleanly but cached expiry did not advance")
+    return new_token
 
 
 def load_cached_address() -> str | None:
@@ -257,7 +355,7 @@ async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
-                token = read_token()
+                token = await ensure_fresh_token()
                 if not token:
                     log("No token; skipping poll")
                 else:
