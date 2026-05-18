@@ -1,12 +1,26 @@
 #!/bin/bash
 # Build and flash Clawdmeter firmware on macOS.
 # Usage:
-#   ./flash-mac.sh                       # auto-detect /dev/cu.usbmodem*
-#   ./flash-mac.sh /dev/cu.usbmodem1101  # explicit USB serial port
+#   ./flash-mac.sh <env>                            # auto-detect USB port
+#   ./flash-mac.sh <env> /dev/cu.usbmodem1101       # explicit USB serial port
+#
+# Available environments:
+#   waveshare_amoled_216   Waveshare ESP32-S3-Touch-AMOLED-2.16
+#   waveshare_lcd4         Waveshare ESP32-S3-Touch-LCD-4
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PORT="$1"
+ENV="$1"
+PORT="$2"
+
+if [ -z "$ENV" ]; then
+    echo "Usage: $0 <env> [port]"
+    echo ""
+    echo "Available environments:"
+    echo "  waveshare_amoled_216   Waveshare ESP32-S3-Touch-AMOLED-2.16"
+    echo "  waveshare_lcd4         Waveshare ESP32-S3-Touch-LCD-4"
+    exit 1
+fi
 
 if [ -z "$PORT" ]; then
     PORT=$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)
@@ -23,11 +37,12 @@ if ! command -v pio >/dev/null; then
 fi
 
 echo "=== Flashing Clawdmeter ==="
+echo "Env:  $ENV"
 echo "Port: $PORT"
 echo ""
 
 cd "$SCRIPT_DIR/firmware"
-pio run -t upload --upload-port "$PORT"
+pio run -e "$ENV" -t upload --upload-port "$PORT"
 
 echo ""
 echo "=== Done ==="

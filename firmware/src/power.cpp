@@ -2,6 +2,16 @@
 #include "display_cfg.h"
 #include <Arduino.h>
 
+#ifdef BOARD_WAVESHARE_LCD4
+
+void  power_init(void)          {}
+void  power_tick(void)          {}
+int   power_battery_pct(void)   { return -1; }
+bool  power_is_charging(void)   { return false; }
+bool  power_pwr_pressed(void)   { return false; }
+
+#else  // BOARD_WAVESHARE_AMOLED_216
+
 // Poll intervals
 #define BATTERY_POLL_MS   2000
 #define CHARGING_POLL_MS  500
@@ -72,3 +82,5 @@ bool power_pwr_pressed(void) {
     }
     return false;
 }
+
+#endif // BOARD_WAVESHARE_LCD4

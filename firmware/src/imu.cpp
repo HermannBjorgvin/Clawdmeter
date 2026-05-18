@@ -2,6 +2,14 @@
 #include "display_cfg.h"
 #include <Arduino.h>
 
+#ifdef BOARD_WAVESHARE_LCD4
+
+void    imu_init(void)          {}
+void    imu_tick(void)          {}
+uint8_t imu_get_rotation(void)  { return 0; }
+
+#else  // BOARD_WAVESHARE_AMOLED_216
+
 // Poll and hysteresis timing
 #define IMU_POLL_MS       100    // read accel at ~10 Hz
 #define STABLE_TIME_MS    300    // orientation must be stable this long before rotating
@@ -74,3 +82,5 @@ void imu_tick(void) {
 uint8_t imu_get_rotation(void) {
     return current_rotation;
 }
+
+#endif // BOARD_WAVESHARE_LCD4
