@@ -287,10 +287,6 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_set_style_border_width(ble_container, 0, 0);
     lv_obj_set_style_pad_all(ble_container, 0, 0);
     lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_SCROLLABLE);
-#ifdef TARGET_SENSECAP
-    lv_obj_add_event_cb(ble_container, global_click_cb, LV_EVENT_CLICKED, NULL);
-#endif
-
     // Title
     lv_obj_t* lbl_ble_title = lv_label_create(ble_container);
     lv_label_set_text(lbl_ble_title, "Bluetooth");
