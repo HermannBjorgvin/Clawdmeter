@@ -222,6 +222,10 @@ See `tools/README.md` for details.
 - Lucide icon set ([lucide.dev](https://lucide.dev), MIT) for bluetooth and battery UI glyphs.
 - Anthropic brand fonts (Tiempos Text, Styrene B) — see licensing warning below.
 
+## Related projects
+
+- [ccusage-mqtt](https://github.com/george-vice/ccusage-mqtt) — same telemetry surface as a Home Assistant MQTT publisher (no ESP32 required). Mood / burn-rate thresholds are ported verbatim from this firmware's `usage_rate.cpp` so calibration matches frame-for-frame (golden test included).
+
 ## Licensing gray area warning
 
 The software in this repository uses and adheres to the Anthropic brand guidelines and uses the same proprietary fonts that Anthropic has a license for but this software uses without permission as well as using assets from Anthropic such as the copyrighted Clawd mascot so even though the code in this repo is non-proprietary I will not license it myself under a copyleft license since this repo includes proprietary fonts and copyrighted assets. Please be aware of this if you fork or copy the code from this repo. **You have been warned!**
