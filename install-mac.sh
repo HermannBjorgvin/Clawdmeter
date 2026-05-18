@@ -52,11 +52,16 @@ echo "  Installed: $PLIST_DST"
 echo ""
 
 echo "[3b/5] Registering Claude Code hook (~/.claude/settings.json)..."
-# Adds a UserPromptSubmit/PreToolUse/Stop hook that pipes events into
-# daemon/clawdmeter_hook.py, which writes ~/.clawdmeter/state.json — the
-# daemon reads that file on every tick and forwards the Activity / todo
-# state to the ESP32. Idempotent: skips if the same command is already
-# registered for all three matchers.
+echo "  This wires daemon/clawdmeter_hook.py into Claude Code as a hook"
+echo "  on TodoWrite / Stop / UserPromptSubmit etc., so the Activity"
+echo "  screen shows live session state. Skip if you only want the"
+echo "  5h/7d usage panels without the per-session view."
+echo ""
+read -r -p "Register the Claude Code hook? [Y/n] " hook_ans
+if [[ "$hook_ans" =~ ^[Nn]$ ]]; then
+    echo "  Skipped. Re-run this installer later if you change your mind."
+    echo ""
+else
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 HOOK_CMD="$PYTHON_BIN $SCRIPT_DIR/daemon/clawdmeter_hook.py"
 mkdir -p "$HOME/.claude"
@@ -93,6 +98,7 @@ os.replace(tmp, path)
 print(f"  Wrote {path}")
 PYEOF
 echo ""
+fi
 
 echo "[4/5] Bluetooth permission check..."
 echo "  On first run the daemon will trigger a Bluetooth permission prompt."
