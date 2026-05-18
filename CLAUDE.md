@@ -1,16 +1,28 @@
 # Project context
 
-ESP32-S3 firmware for a desk-side Claude Code usage monitor on a **Waveshare ESP32-S3-Touch-AMOLED-2.16** board (480×480 square AMOLED). Connects to a host daemon over BLE; daemon polls Anthropic API for usage data.
+ESP32-S3 firmware for a desk-side Claude Code usage monitor. Supports two boards:
+- **Waveshare ESP32-S3-Touch-AMOLED-2.16** (480×480 AMOLED) — env `waveshare_amoled_216`
+- **Waveshare ESP32-S3-Touch-LCD-4** (480×480 RGB LCD) — env `waveshare_lcd4`
+
+Connects to a host daemon over BLE; daemon polls Anthropic API for usage data.
 
 This file is for future Claude Code sessions to bootstrap quickly. Read this first.
 
 ## Hardware (critical pins)
 
+### AMOLED-216
 - Display: **CO5300** AMOLED via QSPI (CS=12, SCLK=38, SDIO0..3=4..7, RST=2)
 - Touch: **CST9220** via I2C (SDA=15, SCL=14, INT=11, addr=0x5A)
 - PMU: **AXP2101** on same I2C bus (addr=0x34) — battery, USB VBUS, PWR button IRQ
 - IMU: **QMI8658** on same I2C bus (addr=0x6B) — accelerometer for auto-rotation
-- Buttons: GPIO 0 (left → Space/voice-mode), GPIO 18 (right → Shift+Tab/mode-toggle), AXP PKEY (middle → cycle screens; on splash → cycle animations)
+- Buttons: GPIO 0 (Space/PTT), GPIO 18 (Shift+Tab), AXP PKEY (cycle screens/animations)
+
+### LCD-4
+- Display: **ST7701** RGB parallel (DE=40, VSYNC=39, HSYNC=38, PCLK=41, R0-4=46/3/8/18/17, G0-5=14/13/12/11/10/9, B0-4=5/45/48/47/21); ST7701 init via SPI (CS=42, SCK=2, MOSI=1)
+- Touch: **GT911** via I2C (SDA=15, SCL=7), polled (no IRQ pin)
+- IO expander: **addr 0x24** on I2C — must init before `gfx->begin()` (regs 0x02=0xFF, 0x03=0x3A)
+- Buttons: GPIO 0 only — short press = Space, long press ≥700ms = cycle screens/animations
+  (RST button is hardware-only; no PMU/IMU on this board)
 
 ## Architecture
 
@@ -33,13 +45,16 @@ splash_animations.h — generated, do not hand-edit
 ## Build / flash
 
 ```bash
-pio run -d firmware                                       # build
-pio run -d firmware -t upload --upload-port /dev/ttyACM0  # flash (binary path uses USB JTAG)
+pio run -d firmware -e waveshare_amoled_216                                              # build AMOLED
+pio run -d firmware -e waveshare_lcd4                                                    # build LCD-4
+pio run -d firmware -e <env> -t upload --upload-port /dev/ttyACM0                       # flash Linux
+./flash-mac.sh <env>                                                                     # flash macOS
+./flash-mac.sh <env> /dev/cu.usbmodem1101                                               # flash macOS explicit port
 ```
 
-`/home/hermann/.platformio/penv/bin/pio` if `pio` isn't on PATH.
+Available envs: `waveshare_amoled_216`, `waveshare_lcd4`. The `-e` flag is required — omitting it builds/flashes the wrong env.
 
-Device shows up as `/dev/ttyACM0` (Espressif USB JTAG/serial debug unit). No boot-mode gymnastics needed — direct flash works.
+Device shows up as `/dev/ttyACM0` on Linux (Espressif USB JTAG/serial debug unit). No boot-mode gymnastics needed — direct flash works.
 
 ## QA your own UI changes — don't ask the user
 
@@ -50,13 +65,16 @@ The boot screen is `SCREEN_SPLASH` and only advances on a physical button press,
 ## Critical gotchas
 
 1. **CO5300 cannot rotate.** Its MADCTL only supports axis flips, not column/row exchange. Rotation is done by **CPU pixel remapping in `my_flush_cb`** in main.cpp. We use **PARTIAL render mode with strip rotation** (small 480×40 strips, fast). On rotation change → AMOLED brightness flash → force redraw.
-2. **OPI PSRAM** required: `board_build.arduino.memory_type = qio_opi` in platformio.ini. Without this, `MALLOC_CAP_SPIRAM` returns NULL and the screen is black.
+2. **OPI PSRAM required on both boards.** `board_build.arduino.memory_type = qio_opi` in platformio.ini. Both the AMOLED-216 and LCD-4 use ESP32-S3R8 with OPI PSRAM. Using `qio_qspi` causes `MALLOC_CAP_SPIRAM` to return NULL and the screen is black.
 3. **pioarduino platform required.** GFX Library for Arduino needs Arduino Core 3.x (`esp32-hal-periman.h`), not the 2.x that standard `espressif32` ships. We pin `pioarduino/platform-espressif32` 55.03.38-1.
 4. **LVGL 9 font patching.** `lv_font_conv` outputs LVGL 8 format. Must remove `#if LVGL_VERSION_MAJOR >= 8` guards, drop `.cache` field, add `.release_glyph`, `.kerning`, `.static_bitmap`, `.fallback`, `.user_data`. Without patching, fonts render invisible.
 5. **Touch reading must be centralized.** CST9220's `getPoint()` does a full I2C transaction. Calling it from multiple places consumed each other's data and broke input. `touch_read()` is called once per loop in main.cpp; both LVGL `my_touch_cb` and `touch.cpp` read from shared `touch_pressed/touch_x/touch_y` state.
-6. **CO5300 needs even-aligned flush regions.** `rounder_cb` enforces this.
-7. **Touch `setSwapXY(true)` and `setMirrorXY(true, false)`** are the empirically-correct values for default rotation 0. IMU rotation logic doesn't change touch mapping (it does CPU-side rotation of the rendered pixels, so LVGL still thinks the display is portrait at 0°).
+6. **CO5300 needs even-aligned flush regions.** `rounder_cb` enforces this (AMOLED only; not needed for ST7701).
+7. **Touch `setSwapXY(true)` and `setMirrorXY(true, false)`** are the empirically-correct values for the AMOLED's CST9220 at default rotation 0. IMU rotation logic doesn't change touch mapping (it does CPU-side rotation of the rendered pixels, so LVGL still thinks the display is portrait at 0°).
 8. **LVGL RGB565A8 is planar.** `w*h` RGB565 pixels followed by `w*h` alpha bytes; `data_size = w*h*3`, `stride = w*2`. Use `init_icon_dsc_rgb565a8()` for icons that overlap non-uniform backgrounds (e.g. battery over splash). Lucide source PNGs are black-on-transparent — converter must tint to white or icons render invisible. See `tools/png_to_lvgl.js`.
+9. **LCD-4 IO expander must init before `gfx->begin()`.** The TCA9554-style expander at I2C 0x24 controls display power rails. Write reg 0x02=0xFF (outputs high) then reg 0x03=0x3A (direction) before calling `gfx->begin()`, or the display stays dark.
+10. **LCD-4 RGB panel tearing fix: bounce buffers.** `Arduino_RGB_Display` DMA-scans directly from PSRAM, causing write races. We pass `bounce_buffer_size_px = LCD_WIDTH * 10` to `Arduino_ESP32RGBPanel` so ESP-IDF allocates two ~9.4 KB SRAM bounce buffers; DMA reads from SRAM, CPU writes to PSRAM freely. Do not call `rgbpanel->getFrameBuffer()` after `gfx->begin()` — it calls `esp_lcd_new_rgb_panel()` a second time and crashes (no free slot).
+11. **LCD-4 has only one user button (GPIO 0 / BOOT).** GPIO 18 is display R3. The KEY/PWR button is wired to EN/RST (hardware reset), not a GPIO. `BTN_FWD` is not defined for the LCD-4 build.
 
 ## Icons
 
@@ -86,6 +104,7 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 - Fonts and icons re-scaled ~1.9× for the higher-DPI panel.
 - All UI margins widened to 20px to clear the rounded display corners.
 - Battery icons converted to RGB565A8 alpha so they blend cleanly over the splash animations.
+- Added Waveshare ESP32-S3-Touch-LCD-4 support (`waveshare_lcd4` env). ST7701 RGB parallel panel with GT911 touch; AXP2101/QMI8658 absent (stubs in power.cpp/imu.cpp). Bounce buffers eliminate DMA tearing. Single-button UX: short press = Space, long press = cycle screens.
 
 ## Daemon / host side
 

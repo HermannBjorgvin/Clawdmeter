@@ -2,9 +2,11 @@
 
 A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
 
-It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) and pairs with my laptop over Bluetooth, the splash screen plays pixel-art Clawd animations that get
-busier when your usage rate climbs. The two side buttons send Space and
-Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
+It pairs with my laptop over Bluetooth, the splash screen plays pixel-art Clawd animations that get busier when your usage rate climbs. The side buttons send Space and Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
+
+Supports two boards:
+- [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) — 480×480 AMOLED, 3 buttons, battery, IMU auto-rotate
+- [Waveshare ESP32-S3-Touch-LCD-4](https://www.waveshare.com/esp32-s3-touch-lcd-4.htm) — 480×480 RGB LCD, 1 button
 
 |              Usage meter              |              Clawd animation screen              |
 | :-----------------------------------: | :----------------------------------------------: |
@@ -25,9 +27,14 @@ While the splash is up, the middle button cycles animations instead of screens. 
 
 ## Hardware
 
-- [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) - ESP32-S3R8, 2.16" 480×480 AMOLED (CO5300 QSPI), CST9220 cap touch, AXP2101 PMU + Li-Po battery, QMI8658 IMU
+**AMOLED-216** (full-featured)
+- [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) — ESP32-S3R8, 2.16" 480×480 AMOLED (CO5300 QSPI), CST9220 cap touch, AXP2101 PMU + Li-Po battery, QMI8658 IMU (auto-rotate)
 - USB-C cable for flashing firmware and charging
 - 3.7V Li-Po battery (MX1.25 2-pin connector, optional)
+
+**LCD-4**
+- [Waveshare ESP32-S3-Touch-LCD-4](https://www.waveshare.com/esp32-s3-touch-lcd-4.htm) — ESP32-S3R8, 4" 480×480 RGB LCD (ST7701), GT911 cap touch
+- USB-C cable for flashing firmware
 
 ## Prerequisites
 
@@ -44,8 +51,9 @@ The macOS host pieces — Python daemon, LaunchAgent, and flash helper — were 
 ### Flash the firmware
 
 ```bash
-./flash-mac.sh                       # auto-detects /dev/cu.usbmodem*
-./flash-mac.sh /dev/cu.usbmodem1101  # or pass an explicit USB serial port
+./flash-mac.sh waveshare_amoled_216                      # AMOLED board, auto-detect port
+./flash-mac.sh waveshare_lcd4                            # LCD-4 board, auto-detect port
+./flash-mac.sh waveshare_amoled_216 /dev/cu.usbmodem1101 # explicit port
 ```
 
 ### Pair the device
@@ -77,7 +85,8 @@ launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # st
 
 ```bash
 cd firmware
-pio run -t upload --upload-port /dev/ttyACM0
+pio run -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0  # AMOLED board
+pio run -e waveshare_lcd4       -t upload --upload-port /dev/ttyACM0  # LCD-4 board
 ```
 
 ### Pair the device
@@ -93,7 +102,7 @@ bluetoothctl pair F4:12:FA:C0:8F:E5    # use your device's MAC
 bluetoothctl trust F4:12:FA:C0:8F:E5
 ```
 
-The MAC address is shown on the Bluetooth screen — press the middle (PWR) button to cycle to it.
+The MAC address is shown on the Bluetooth screen — cycle to it with the middle button (AMOLED) or long-press BOOT (LCD-4).
 
 ### Install the daemon
 
@@ -120,7 +129,7 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 
 ## Physical buttons
 
-The board has three side buttons. Left and right do the same thing on every screen; the middle button is screen-aware.
+### AMOLED-216 (3 buttons)
 
 | Button           | GPIO         | Function                                                       |
 | ---------------- | ------------ | -------------------------------------------------------------- |
@@ -128,7 +137,13 @@ The board has three side buttons. Left and right do the same thing on every scre
 | **Middle** (PWR) | AXP2101 PKEY | Cycle screens (Usage ↔ Bluetooth); on splash, cycle animations |
 | **Right**        | GPIO 18      | Press to send Shift+Tab (Claude Code mode toggle)              |
 
-Space and Shift+Tab go out as standard BLE HID keyboard reports, so they trigger in whatever window has focus on the paired host — not just Claude Code.
+### LCD-4 (1 button)
+
+| Button    | GPIO   | Function                                                              |
+| --------- | ------ | --------------------------------------------------------------------- |
+| **BOOT**  | GPIO 0 | Short press: send Space; long press (≥700 ms): cycle screens/animations |
+
+The RST button is a hardware reset only. Space and Shift+Tab are standard BLE HID keyboard reports — they trigger in whatever window has focus on the paired host.
 
 ## BLE protocol
 
