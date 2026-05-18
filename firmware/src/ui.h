@@ -2,10 +2,13 @@
 #include "data.h"
 #include "ble.h"
 
+// The default (splash) screen morphs to show Activity content when the
+// daemon reports active sessions, and reverts to the Clawd animation
+// when all sessions have gone idle. Activity is therefore not a
+// separately cycled screen — it lives inside SCREEN_SPLASH.
 enum screen_t {
     SCREEN_SPLASH,
     SCREEN_USAGE,
-    SCREEN_ACTIVITY,
     SCREEN_BLUETOOTH,
     SCREEN_COUNT,
 };

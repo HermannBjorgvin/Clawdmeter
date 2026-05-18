@@ -199,6 +199,7 @@ static void global_click_cb(lv_event_t* e);
 static void ble_reset_click_cb(lv_event_t* e);
 static void activity_gesture_cb(lv_event_t* e);
 static void render_activity(void);
+static void apply_default_screen_state(void);
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -729,14 +730,15 @@ static void render_activity(void) {
 
 static void activity_gesture_cb(lv_event_t* e) {
     (void)e;
-    // Only act on gestures while the Activity screen is showing — this
-    // same handler is registered on the screen root and fires for every
-    // gesture regardless of which screen is visible.
-    if (ui_get_current_screen() != SCREEN_ACTIVITY) return;
+    // Only act when the splash screen is currently morphed into Activity
+    // (i.e. there's at least one session to swipe between). This handler
+    // is registered on the screen root so it fires for every gesture
+    // regardless of which screen is visible.
+    if (ui_get_current_screen() != SCREEN_SPLASH) return;
+    if (cached_activity.session_count <= 1) return;
     lv_indev_t* indev = lv_indev_active();
     if (!indev) return;
     lv_dir_t dir = lv_indev_get_gesture_dir(indev);
-    if (cached_activity.session_count <= 1) return;
     if (dir == LV_DIR_LEFT) {
         current_session_idx = (current_session_idx + 1) % cached_activity.session_count;
     } else if (dir == LV_DIR_RIGHT) {
@@ -793,6 +795,9 @@ void ui_update_activity(const ActivityData* data) {
     if (cached_activity.session_count == 0) current_session_idx = 0;
     else if (current_session_idx >= cached_activity.session_count) current_session_idx = 0;
     render_activity();
+    // If we're on the default (splash) screen, the morph state may have
+    // changed from animation → activity widgets or vice versa.
+    apply_default_screen_state();
 }
 
 void ui_update(const UsageData* data) {
@@ -851,17 +856,17 @@ static void apply_battery_visibility(void) {
     else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
-// Screen-level click handler — cycles forward through all four screens
-// (Splash → Usage → Activity → Bluetooth → Splash). The Bluetooth reset
-// zone has its own callback that consumes the click first, so taps inside
-// it still trigger ble_clear_bonds rather than the cycle.
+// Screen-level click handler — cycles forward through the three
+// top-level screens (Splash → Usage → Bluetooth → Splash). Splash
+// auto-morphs to Activity content when sessions are active, so there's
+// no separate Activity cycle entry. The Bluetooth reset zone has its
+// own callback that consumes the click first.
 static void global_click_cb(lv_event_t* e) {
     (void)e;
     screen_t next;
     switch (ui_get_current_screen()) {
     case SCREEN_SPLASH:    next = SCREEN_USAGE;     break;
-    case SCREEN_USAGE:     next = SCREEN_ACTIVITY;  break;
-    case SCREEN_ACTIVITY:  next = SCREEN_BLUETOOTH; break;
+    case SCREEN_USAGE:     next = SCREEN_BLUETOOTH; break;
     case SCREEN_BLUETOOTH: next = SCREEN_SPLASH;    break;
     default:               next = SCREEN_SPLASH;    break;
     }
@@ -873,44 +878,83 @@ static void ble_reset_click_cb(lv_event_t* e) {
     ble_clear_bonds();
 }
 
+// Fade duration for the splash <-> activity morph. Short enough to feel
+// snappy, long enough to read as a transform rather than a hard cut.
+#define SPLASH_MORPH_MS  280
+
+// Decide what to show inside the splash "default" screen based on the
+// daemon's session state. Cross-fades the splash animation against the
+// activity widget tree so a fresh session arrives as a transform, not a
+// hard swap. Safe to call when we're on a non-splash screen — it no-ops
+// in that case because the splash + activity containers are already
+// hidden by ui_show_screen().
+static void apply_default_screen_state(void) {
+    if (current_screen != SCREEN_SPLASH) return;
+    const bool has_sessions = cached_activity.valid && cached_activity.session_count > 0;
+    lv_obj_t* splash_root = splash_get_root();
+    if (has_sessions) {
+        lv_obj_clear_flag(activity_container, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_fade_in(activity_container, SPLASH_MORPH_MS, 0);
+        if (splash_root && !lv_obj_has_flag(splash_root, LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_fade_out(splash_root, SPLASH_MORPH_MS, 0);
+        } else {
+            splash_hide();
+        }
+    } else {
+        splash_show();
+        if (splash_root) {
+            lv_obj_set_style_opa(splash_root, LV_OPA_COVER, 0);
+            lv_obj_fade_in(splash_root, SPLASH_MORPH_MS, 0);
+        }
+        if (!lv_obj_has_flag(activity_container, LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_fade_out(activity_container, SPLASH_MORPH_MS, 0);
+        }
+    }
+}
+
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(activity_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
+    // Reset opacity on the morphable containers so a leftover fade-out
+    // from a previous transition doesn't render them invisible.
+    lv_obj_set_style_opa(activity_container, LV_OPA_COVER, 0);
+    if (splash_get_root()) lv_obj_set_style_opa(splash_get_root(), LV_OPA_COVER, 0);
 
     switch (screen) {
-    case SCREEN_SPLASH:     splash_show(); break;
+    case SCREEN_SPLASH:
+        // Decided by apply_default_screen_state below — could be the
+        // Clawd animation or the Activity widget tree depending on
+        // whether any sessions are live.
+        break;
     case SCREEN_USAGE:      lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
-    case SCREEN_ACTIVITY:   lv_obj_clear_flag(activity_container, LV_OBJ_FLAG_HIDDEN); break;
     case SCREEN_BLUETOOTH:  lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
     }
 
-    // Hide the logo overlay on screens where it would collide with the
-    // content area: splash (full-screen animation) and Activity (title
-    // text starts flush against the left margin).
+    // Hide the logo overlay on the splash screen — both morph states
+    // (Clawd animation or Activity title) want a clean left margin.
     if (logo_img) {
-        if (screen == SCREEN_SPLASH || screen == SCREEN_ACTIVITY)
-            lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        else
-            lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
     }
 
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
     current_screen = screen;
     apply_battery_visibility();
+    apply_default_screen_state();
 }
 
 void ui_cycle_screen(void) {
-    // Cycle order: Usage → Activity → Bluetooth → Usage. Splash is not in
-    // the cycle (tap to enter/leave instead).
+    // Three-way cycle now: Usage → Bluetooth → Splash → Usage. Splash
+    // morphs to Activity content automatically when sessions are live.
     screen_t next;
     switch (current_screen) {
-    case SCREEN_USAGE:     next = SCREEN_ACTIVITY;   break;
-    case SCREEN_ACTIVITY:  next = SCREEN_BLUETOOTH;  break;
-    case SCREEN_BLUETOOTH: next = SCREEN_USAGE;      break;
-    default:               next = SCREEN_USAGE;      break;
+    case SCREEN_SPLASH:    next = SCREEN_USAGE;     break;
+    case SCREEN_USAGE:     next = SCREEN_BLUETOOTH; break;
+    case SCREEN_BLUETOOTH: next = SCREEN_SPLASH;    break;
+    default:               next = SCREEN_USAGE;     break;
     }
     ui_show_screen(next);
 }
