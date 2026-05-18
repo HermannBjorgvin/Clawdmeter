@@ -479,7 +479,7 @@ static void global_click_cb(lv_event_t* e) {
     // Suppress the spurious LV_EVENT_CLICKED that fires at the end of a swipe gesture.
     extern uint32_t sensecap_last_gesture_ms;
     if ((lv_tick_get() - sensecap_last_gesture_ms) < 400) return;
-    ui_cycle_screen();
+    if (current_screen == SCREEN_SPLASH) splash_next();
 #else
     if (ui_get_current_screen() == SCREEN_BLUETOOTH) return;
     ui_toggle_splash();
