@@ -31,10 +31,11 @@ While the splash is up, the middle button cycles animations instead of screens. 
 
 ## Prerequisites
 
-- Linux (tested on Ubuntu) or macOS
+- Linux (tested on Ubuntu), macOS, or Windows 10 v1709+ / Windows 11
 - [PlatformIO CLI](https://docs.platformio.org/en/latest/core/installation/index.html)
 - Linux: `curl`, `bluetoothctl`, `busctl` (BlueZ Bluetooth stack)
 - macOS: `python3` (the installer sets up a venv with `bleak` and `httpx`)
+- Windows: Python 3.9+ (the installer sets up a venv with `bleak` and `httpx`); built-in or USB Bluetooth 4.0+ LE adapter
 - Claude Code with an active subscription
 
 ## macOS installation
@@ -107,6 +108,50 @@ systemctl --user start claude-usage-daemon
 Check status: `systemctl --user status claude-usage-daemon`
 
 View logs: `journalctl --user -u claude-usage-daemon -f`
+
+## Windows installation
+
+The Windows host pieces use the same Python daemon as the macOS port — `bleak` ships a WinRT BLE backend, and the daemon already falls back to file-based credentials when not on macOS, so no daemon code changes are needed beyond a platform-aware startup banner. PowerShell scripts orchestrate venv + dependencies, and a per-user Task Scheduler "At log on" trigger replaces LaunchAgents / systemd user units.
+
+### Flash the firmware
+
+From the repo root in PowerShell:
+
+```powershell
+.\flash-win.ps1                # auto-detects ESP32-S3 USB JTAG COM port
+.\flash-win.ps1 -Port COM7     # explicit override
+```
+
+`pio device list` shows candidate ports if auto-detect picks the wrong one.
+
+### Pair the device
+
+After flashing, the board advertises as **Claude Controller**. `bleak`'s WinRT backend requires the device to be paired in Windows Settings before the daemon can connect:
+
+1. Open `Settings` → `Bluetooth & devices` → `Add device` → `Bluetooth`
+2. Pick `Claude Controller`, click `Done`
+
+The daemon caches the resolved BLE address at `%USERPROFILE%\.config\claude-usage-monitor\ble-address` after the first scan.
+
+### Install the daemon
+
+```powershell
+.\install-win.ps1
+```
+
+The installer creates a Python venv in `daemon\.venv\`, installs `bleak` and `httpx`, smoke-imports the daemon to fail fast, registers the `Clawdmeter Daemon` scheduled task (per-user, At log on, hidden), and starts it. No admin elevation required. Pass `-SkipScheduledTask` to set up the venv only.
+
+Output is redirected to `%LOCALAPPDATA%\Clawdmeter\daemon.out.log` (rolls over to `.1` past 5 MB).
+
+Useful commands:
+
+```powershell
+Get-ScheduledTask  -TaskName 'Clawdmeter Daemon'                            # check it's registered
+Start-ScheduledTask -TaskName 'Clawdmeter Daemon'                           # start now
+Stop-ScheduledTask  -TaskName 'Clawdmeter Daemon'                           # stop
+Get-Content "$env:LOCALAPPDATA\Clawdmeter\daemon.out.log" -Tail 30 -Wait    # live logs
+.\uninstall-win.ps1 -RemoveVenv -RemoveLogs                                 # full teardown
+```
 
 ## How it works
 
