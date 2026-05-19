@@ -113,6 +113,17 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 
 The Windows host pieces use the same Python daemon as the macOS port — `bleak` ships a WinRT BLE backend, and the daemon already falls back to file-based credentials when not on macOS, so no daemon code changes are needed beyond a platform-aware startup banner. PowerShell scripts orchestrate venv + dependencies, and a per-user Task Scheduler "At log on" trigger replaces LaunchAgents / systemd user units.
 
+### Quick start (guided wizard)
+
+If you'd rather not run each step manually, `setup-win.ps1` walks through all six steps in order: PlatformIO check, board detection, firmware flash, BLE pairing prompt (opens the right Settings pane), daemon install, and first-payload verification.
+
+```powershell
+.\setup-win.ps1                # full setup
+.\setup-win.ps1 -Step 4        # re-enter at a specific step (1-6)
+```
+
+Each step is idempotent, so re-running after fixing a problem is safe. Read on for what each underlying step does.
+
 ### Flash the firmware
 
 From the repo root in PowerShell:
