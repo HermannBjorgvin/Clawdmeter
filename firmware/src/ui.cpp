@@ -46,11 +46,10 @@ static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 static lv_obj_t* lbl_anim;
 
-// ---- Bluetooth screen widgets ----
-static lv_obj_t* ble_container;
-static lv_obj_t* lbl_ble_status;
-static lv_obj_t* lbl_ble_device;
-static lv_obj_t* lbl_ble_mac;
+// ---- Link screen widgets ----
+static lv_obj_t* link_container;
+static lv_obj_t* lbl_link_status;
+static lv_obj_t* lbl_link_port;
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
@@ -138,7 +137,6 @@ static void format_reset_time(int mins, char* buf, size_t len) {
 
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
-static void ble_reset_click_cb(lv_event_t* e);
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -279,93 +277,54 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
 }
 
-// ======== Bluetooth Screen (480x480) ========
+// ======== Link Screen (480x480) ========
+// Shows USB CDC transport state. No interactive controls — the link comes
+// up automatically when /dev/ttyACM0 is opened by the host daemon.
 
-static void init_bluetooth_screen(lv_obj_t* scr) {
-    ble_container = lv_obj_create(scr);
-    lv_obj_set_size(ble_container, SCR_W, SCR_H);
-    lv_obj_set_pos(ble_container, 0, 0);
-    lv_obj_set_style_bg_opa(ble_container, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(ble_container, 0, 0);
-    lv_obj_set_style_pad_all(ble_container, 0, 0);
-    lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_SCROLLABLE);
+static void init_link_screen(lv_obj_t* scr) {
+    link_container = lv_obj_create(scr);
+    lv_obj_set_size(link_container, SCR_W, SCR_H);
+    lv_obj_set_pos(link_container, 0, 0);
+    lv_obj_set_style_bg_opa(link_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(link_container, 0, 0);
+    lv_obj_set_style_pad_all(link_container, 0, 0);
+    lv_obj_clear_flag(link_container, LV_OBJ_FLAG_SCROLLABLE);
 
     // Title
-    lv_obj_t* lbl_ble_title = lv_label_create(ble_container);
-    lv_label_set_text(lbl_ble_title, "Bluetooth");
-    lv_obj_set_style_text_font(lbl_ble_title, &font_tiempos_56, 0);
-    lv_obj_set_style_text_color(lbl_ble_title, COL_TEXT, 0);
-    lv_obj_align(lbl_ble_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
+    lv_obj_t* lbl_link_title = lv_label_create(link_container);
+    lv_label_set_text(lbl_link_title, "USB Link");
+    lv_obj_set_style_text_font(lbl_link_title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_color(lbl_link_title, COL_TEXT, 0);
+    lv_obj_align(lbl_link_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
 
-    // Info panel (taller for 480x480)
-    lv_obj_t* p_info = make_panel(ble_container, MARGIN, CONTENT_Y, CONTENT_W, 160);
+    lv_obj_t* p_info = make_panel(link_container, MARGIN, CONTENT_Y, CONTENT_W, 160);
 
-    // Bluetooth icon + status row
-    static lv_image_dsc_t icon_bt_dsc;
-    init_icon_dsc(&icon_bt_dsc, ICON_BLUETOOTH_W, ICON_BLUETOOTH_H, icon_bluetooth_data);
+    lbl_link_status = lv_label_create(p_info);
+    lv_label_set_text(lbl_link_status, "Waiting for host...");
+    lv_obj_set_style_text_font(lbl_link_status, &font_styrene_48, 0);
+    lv_obj_set_style_text_color(lbl_link_status, COL_DIM, 0);
+    lv_obj_set_pos(lbl_link_status, 0, 2);
 
-    lv_obj_t* bt_img = lv_image_create(p_info);
-    lv_image_set_src(bt_img, &icon_bt_dsc);
-    lv_obj_set_pos(bt_img, 0, 0);
-
-    lbl_ble_status = lv_label_create(p_info);
-    lv_label_set_text(lbl_ble_status, "Initializing...");
-    lv_obj_set_style_text_font(lbl_ble_status, &font_styrene_48, 0);
-    lv_obj_set_style_text_color(lbl_ble_status, COL_DIM, 0);
-    lv_obj_set_pos(lbl_ble_status, 56, 2);
-
-    lbl_ble_device = lv_label_create(p_info);
-    lv_label_set_text(lbl_ble_device, "Device: ---");
-    lv_obj_set_style_text_font(lbl_ble_device, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_ble_device, COL_DIM, 0);
-    lv_obj_set_pos(lbl_ble_device, 0, 64);
-
-    lbl_ble_mac = lv_label_create(p_info);
-    lv_label_set_text(lbl_ble_mac, "Address: ---");
-    lv_obj_set_style_text_font(lbl_ble_mac, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_ble_mac, COL_DIM, 0);
-    lv_obj_set_pos(lbl_ble_mac, 0, 100);
-
-    // Reset Bluetooth tap zone with trash icon
-    int reset_y = CONTENT_Y + 160 + 16;
-    lv_obj_t* reset_zone = lv_obj_create(ble_container);
-    lv_obj_set_pos(reset_zone, MARGIN, reset_y);
-    lv_obj_set_size(reset_zone, CONTENT_W, 110);
-    lv_obj_set_style_bg_color(reset_zone, COL_PANEL, 0);
-    lv_obj_set_style_bg_opa(reset_zone, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(reset_zone, 8, 0);
-    lv_obj_set_style_border_width(reset_zone, 0, 0);
-    lv_obj_set_style_pad_column(reset_zone, 14, 0);
-    lv_obj_set_flex_flow(reset_zone, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(reset_zone, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_clear_flag(reset_zone, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(reset_zone, ble_reset_click_cb, LV_EVENT_CLICKED, NULL);
-
-    static lv_image_dsc_t icon_trash_dsc;
-    init_icon_dsc(&icon_trash_dsc, ICON_TRASH2_W, ICON_TRASH2_H, icon_trash2_data);
-    lv_obj_t* trash_img = lv_image_create(reset_zone);
-    lv_image_set_src(trash_img, &icon_trash_dsc);
-
-    lv_obj_t* reset_lbl = lv_label_create(reset_zone);
-    lv_label_set_text(reset_lbl, "Reset Bluetooth");
-    lv_obj_set_style_text_font(reset_lbl, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(reset_lbl, COL_DIM, 0);
+    lbl_link_port = lv_label_create(p_info);
+    lv_label_set_text(lbl_link_port, "Port: ---");
+    lv_obj_set_style_text_font(lbl_link_port, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_link_port, COL_DIM, 0);
+    lv_obj_set_pos(lbl_link_port, 0, 80);
 
     // Attribution
-    lv_obj_t* lbl_credit = lv_label_create(ble_container);
+    lv_obj_t* lbl_credit = lv_label_create(link_container);
     lv_label_set_text(lbl_credit, "Built by @hermannbjorgvin");
     lv_obj_set_style_text_font(lbl_credit, &font_styrene_24, 0);
     lv_obj_set_style_text_color(lbl_credit, COL_DIM, 0);
     lv_obj_align(lbl_credit, LV_ALIGN_BOTTOM_MID, 0, -46);
 
-    lv_obj_t* lbl_credit2 = lv_label_create(ble_container);
+    lv_obj_t* lbl_credit2 = lv_label_create(link_container);
     lv_label_set_text(lbl_credit2, "Clawd animation by @amaanbuilds");
     lv_obj_set_style_text_font(lbl_credit2, &font_styrene_20, 0);
     lv_obj_set_style_text_color(lbl_credit2, COL_DIM, 0);
     lv_obj_align(lbl_credit2, LV_ALIGN_BOTTOM_MID, 0, -20);
 
-    // Start hidden
-    lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(link_container, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ======== Public API ========
@@ -384,7 +343,7 @@ void ui_init(void) {
     init_battery_icons();
 
     init_usage_screen(scr);
-    init_bluetooth_screen(scr);
+    init_link_screen(scr);
     splash_init(scr);
 
     // Splash is touch-toggled — tap anywhere on the splash dismisses it
@@ -460,29 +419,23 @@ static void apply_battery_visibility(void) {
 }
 
 // LVGL handles click debouncing internally. Screen-level handler fires when
-// no child consumed the event (children only consume if they have their own
-// event callback, e.g. the Reset Bluetooth zone). On BT screen we skip the
-// splash toggle so only the reset zone is interactive there.
+// no child consumed the event. On the Link screen we skip the splash toggle
+// so the screen stays visible while you check transport status.
 static void global_click_cb(lv_event_t* e) {
     (void)e;
-    if (ui_get_current_screen() == SCREEN_BLUETOOTH) return;
+    if (ui_get_current_screen() == SCREEN_LINK) return;
     ui_toggle_splash();
-}
-
-static void ble_reset_click_cb(lv_event_t* e) {
-    (void)e;
-    ble_clear_bonds();
 }
 
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(link_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
-    case SCREEN_SPLASH:     splash_show(); break;
-    case SCREEN_USAGE:      lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
-    case SCREEN_BLUETOOTH:  lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_SPLASH: splash_show(); break;
+    case SCREEN_USAGE:  lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_LINK:   lv_obj_clear_flag(link_container, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
     }
 
@@ -498,7 +451,7 @@ void ui_show_screen(screen_t screen) {
 }
 
 void ui_cycle_screen(void) {
-    screen_t next = (current_screen == SCREEN_USAGE) ? SCREEN_BLUETOOTH : SCREEN_USAGE;
+    screen_t next = (current_screen == SCREEN_USAGE) ? SCREEN_LINK : SCREEN_USAGE;
     ui_show_screen(next);
 }
 
@@ -511,35 +464,30 @@ screen_t ui_get_current_screen(void) {
     return current_screen;
 }
 
-void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) {
+void ui_update_link_status(link_state_t state, const char* port) {
     switch (state) {
-    case BLE_STATE_CONNECTED:
-        lv_label_set_text(lbl_ble_status, "Connected");
-        lv_obj_set_style_text_color(lbl_ble_status, COL_GREEN, 0);
+    case LINK_STATE_CONNECTED:
+        lv_label_set_text(lbl_link_status, "Connected");
+        lv_obj_set_style_text_color(lbl_link_status, COL_GREEN, 0);
         break;
-    case BLE_STATE_ADVERTISING:
-        lv_label_set_text(lbl_ble_status, "Advertising...");
-        lv_obj_set_style_text_color(lbl_ble_status, COL_AMBER, 0);
+    case LINK_STATE_WAITING:
+        lv_label_set_text(lbl_link_status, "Waiting...");
+        lv_obj_set_style_text_color(lbl_link_status, COL_AMBER, 0);
         break;
-    case BLE_STATE_DISCONNECTED:
-        lv_label_set_text(lbl_ble_status, "Disconnected");
-        lv_obj_set_style_text_color(lbl_ble_status, COL_RED, 0);
+    case LINK_STATE_STALE:
+        lv_label_set_text(lbl_link_status, "Stale");
+        lv_obj_set_style_text_color(lbl_link_status, COL_RED, 0);
         break;
     default:
-        lv_label_set_text(lbl_ble_status, "Initializing...");
-        lv_obj_set_style_text_color(lbl_ble_status, COL_DIM, 0);
+        lv_label_set_text(lbl_link_status, "Initializing...");
+        lv_obj_set_style_text_color(lbl_link_status, COL_DIM, 0);
         break;
     }
 
-    if (name) {
-        static char nbuf[48];
-        snprintf(nbuf, sizeof(nbuf), "Device: %s", name);
-        lv_label_set_text(lbl_ble_device, nbuf);
-    }
-    if (mac) {
-        static char mbuf[48];
-        snprintf(mbuf, sizeof(mbuf), "Address: %s", mac);
-        lv_label_set_text(lbl_ble_mac, mbuf);
+    if (port) {
+        static char pbuf[48];
+        snprintf(pbuf, sizeof(pbuf), "Port: %s", port);
+        lv_label_set_text(lbl_link_port, pbuf);
     }
 }
 

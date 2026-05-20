@@ -1,6 +1,6 @@
 # Project context
 
-ESP32-S3 firmware for a desk-side Claude Code usage monitor on a **Waveshare ESP32-S3-Touch-AMOLED-2.16** board (480×480 square AMOLED). Connects to a host daemon over BLE; daemon polls Anthropic API for usage data.
+ESP32-S3 firmware for a desk-side Claude Code usage monitor on a **Waveshare ESP32-S3-Touch-AMOLED-2.16** board (480×480 square AMOLED). Connects to a host daemon over **USB CDC serial**; daemon polls Anthropic API for usage data. The `main` branch uses BLE GATT instead; this branch (`usb-transport`) is the wired/cabled variant.
 
 This file is for future Claude Code sessions to bootstrap quickly. Read this first.
 
@@ -22,7 +22,7 @@ splash.{h,cpp}  — 20×20 pixel-art animation engine, 24× upscale to 480×480
 imu.{h,cpp}     — accelerometer-driven rotation tracker (returns 0..3)
 power.{h,cpp}   — AXP2101 wrapper (battery %, charging, VBUS, PWR button)
 touch.{h,cpp}   — minimal tap detector → ui_toggle_splash() (Usage/Splash) or ble_clear_bonds() (BT reset zone)
-ble.{h,cpp}     — NimBLE peripheral: custom data service + HID keyboard
+serial_link.{h,cpp} — USB CDC line protocol: owns all Serial I/O including the legacy `screenshot` debug cmd
 data.h          — UsageData struct
 icons.h         — icon arrays. Battery (5×) are RGB565A8 with alpha; rest are raw RGB565.
 logo.h          — 80×80 RGB565 logo
@@ -89,16 +89,18 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 
 ## Daemon / host side
 
-Bash daemon (`daemon/claude-usage-daemon.sh`) reads OAuth token, polls Anthropic API, sends JSON over BLE GATT. Run with `systemctl --user start claude-usage-daemon`. The unit file's `ExecStart` is the absolute path to the script — repoint it when switching between the worktree and the main checkout.
+Bash daemon (`daemon/claude-usage-daemon.sh`) reads OAuth token, polls Anthropic API, writes JSON lines over USB CDC. Run with `systemctl --user start claude-usage-daemon`. The unit file's `ExecStart` is the absolute path to the script — repoint it when switching between the worktree and the main checkout.
 
-**Discovery & resilience:**
+**Port resolution & resilience:**
 
-- Connects by name (`"Claude Controller"`) on first run, caches resolved MAC at `~/.config/claude-usage-monitor/ble-address`. ESP32 BLE addresses are factory-burned per-chip, so swapping any board invalidates the cache.
-- On connect failure: cache is dropped AND device is removed from bluez (`bluetoothctl remove`) so the next scan won't re-pick a dead MAC. Multi-candidate scans pick `head -1` and let the failure cycle converge.
-- `POLL_INTERVAL=60`, `TICK=5`. Inner loop wakes every 5s to detect disconnects fast; polls Anthropic when 60s elapsed OR when ESP fires a refresh request.
+- Default port `/dev/ttyACM0`, overridable via `DEVICE_PORT` env var.
+- Daemon blocks at startup until the port appears (`wait_for_port`, exponential backoff up to 30s). When the cable is unplugged the inner loop drops out and the outer loop re-waits.
+- `stty -F $DEVICE_PORT 115200 raw -echo -hupcl` — **`-hupcl` is critical**: without it, opening the port toggles DTR and resets the ESP32-S3 firmware on every write.
+- Background reader (`setsid bash -c "stdbuf -oL cat $PORT | awk ..."`) tails device output; when the firmware emits `REQ`, awk drops a flag file the inner loop picks up. ACK/NACK and other lines are echoed into the journal as `[device] …`.
+- Two consecutive write failures (`printf > $PORT` returned non-zero) breaks out of the inner loop and recycles the port — recovers if the port name shifted after a re-enumeration.
 
-**GATT characteristics on service `4c41555a-...0001`:**
+**Wire protocol (line-delimited, `\n` terminator):**
 
-- `...0002` RX — daemon writes JSON usage payload here.
-- `...0003` TX — firmware notifies ack/nack (daemon doesn't subscribe).
-- `...0004` REQ — firmware fires `0x01` notify in `onSubscribe` if `has_received_data` is false. Daemon subscribes via `setsid bash -c "stdbuf -oL dbus-monitor … | awk …"`; awk drops a flag file the inner loop picks up. See the `feedback_dbus_monitor_pipe` memory for the three subtle gotchas (pipe buffering, busctl-exits race, `wait` blocking on pipeline jobs).
+- host → device : `{"s":..,"sr":..,"w":..,"wr":..,"st":"..","ok":..}` usage payload
+- host → device : `screenshot` (legacy framebuffer dump cmd, handled in `serial_link.cpp`)
+- device → host : `ACK` / `NACK` / `REQ` / `READY` / misc debug lines

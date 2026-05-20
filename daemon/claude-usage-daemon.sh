@@ -1,20 +1,21 @@
 #!/bin/bash
-# Claude Usage Tracker Daemon (BLE)
-# Reads Claude Code OAuth token, polls usage via API, sends to ESP32 over BLE GATT.
-# Auto-connects and reconnects to the Claude Controller BLE device.
-# Dependencies: curl, awk, bluetoothctl
+# Claude Usage Tracker Daemon (USB CDC)
+# Reads Claude Code OAuth token, polls usage via API, sends to ESP32 over
+# the device's USB serial port (CDC). Replaces the older BLE GATT transport.
+#
+# Wire protocol matches firmware/src/serial_link.cpp:
+#   host → device : {"s":..,"sr":..,"w":..,"wr":..,"st":"..","ok":..}\n
+#   host → device : screenshot\n     (legacy framebuffer dump cmd)
+#   device → host : ACK | NACK | REQ | READY | misc log lines
+#
+# Dependencies: curl, awk, stty
 
-DEVICE_NAME="Claude Controller"
-DEVICE_MAC="${DEVICE_MAC:-}"  # auto-discovered if empty
-SERVICE_UUID="4c41555a-4465-7669-6365-000000000001"
-RX_CHAR_UUID="4c41555a-4465-7669-6365-000000000002"
-REQ_CHAR_UUID="4c41555a-4465-7669-6365-000000000004"
+DEVICE_PORT="${DEVICE_PORT:-/dev/ttyACM0}"
+BAUD=115200
 POLL_INTERVAL=60
 TICK=5
-SAVED_MAC_FILE="$HOME/.config/claude-usage-monitor/ble-address"
 REFRESH_FLAG="/tmp/claude-usage-refresh-$$"
-DBUS_DEST="org.bluez"
-NOTIFY_PID=""
+READER_PID=""
 
 log() {
     echo "[$(date '+%H:%M:%S')] $1"
@@ -24,171 +25,65 @@ read_token() {
     grep -o '"accessToken":"[^"]*"' "$HOME/.claude/.credentials.json" | cut -d'"' -f4
 }
 
-# Convert MAC to D-Bus path: AA:BB:CC:DD:EE:FF -> dev_AA_BB_CC_DD_EE_FF
-mac_to_dbus_path() {
-    local adapter
-    adapter=$(busctl call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects 2>/dev/null | grep -o '/org/bluez/hci[0-9]' | head -1)
-    adapter=${adapter:-/org/bluez/hci0}
-    echo "${adapter}/dev_$(echo "$1" | tr ':' '_')"
+# Configure the TTY:
+#   raw / -echo                : no line discipline mangling
+#   -hupcl                     : DON'T toggle DTR on close — the ESP32-S3
+#                                resets on DTR transition with the default
+#                                Arduino USB CDC config, which would reboot
+#                                the firmware every time we open the port.
+#   $BAUD                      : USB CDC ignores baud but stty needs it.
+configure_port() {
+    stty -F "$DEVICE_PORT" "$BAUD" raw -echo -echoe -echok -echoctl -echoke -hupcl 2>/dev/null
 }
 
-# Check if device is connected via D-Bus
-is_connected() {
-    local path
-    path=$(mac_to_dbus_path "$DEVICE_MAC")
-    busctl get-property "$DBUS_DEST" "$path" org.bluez.Device1 Connected 2>/dev/null | grep -q "true"
-}
-
-# Load saved MAC address
-load_mac() {
-    if [ -n "$DEVICE_MAC" ]; then return 0; fi
-    if [ -f "$SAVED_MAC_FILE" ]; then
-        DEVICE_MAC=$(head -1 "$SAVED_MAC_FILE" | tr -d '\r\n ')
-        if [[ "$DEVICE_MAC" =~ ^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$ ]]; then
-            return 0
-        fi
-        log "Cached MAC is malformed, discarding"
-        rm -f "$SAVED_MAC_FILE"
-        DEVICE_MAC=""
-    fi
-    return 1
-}
-
-# Save MAC for fast reconnect
-save_mac() {
-    mkdir -p "$(dirname "$SAVED_MAC_FILE")"
-    echo "$DEVICE_MAC" > "$SAVED_MAC_FILE"
-}
-
-# Scan for Claude Controller
-scan_for_device() {
-    log "Scanning for '$DEVICE_NAME'..."
-    # Start LE scan
-    bluetoothctl scan le &>/dev/null &
-    local scan_pid=$!
-    sleep 8
-    kill "$scan_pid" 2>/dev/null
-    wait "$scan_pid" 2>/dev/null
-
-    # Pick the first matching device. Multiple matches happen when bluez
-    # remembers old hardware (e.g. after swapping ESP boards). Stale entries
-    # are removed on connect failure (see connect_device), so a few retry
-    # cycles will converge on the live device.
-    local found
-    found=$(bluetoothctl devices 2>/dev/null | grep "$DEVICE_NAME" | head -1 | awk '{print $2}')
-    if [ -n "$found" ]; then
-        DEVICE_MAC="$found"
-        save_mac
-        log "Found: $DEVICE_MAC"
-        return 0
-    fi
-    return 1
-}
-
-# Connect to the device
-connect_device() {
-    log "Connecting to $DEVICE_MAC..."
-
-    # Trust first (allows auto-reconnect)
-    bluetoothctl trust "$DEVICE_MAC" &>/dev/null
-
-    # Connect
-    bluetoothctl connect "$DEVICE_MAC" &>/dev/null
-    sleep 2
-
-    if is_connected; then
-        log "Connected"
-        return 0
-    fi
-    log "Connection failed"
-    if [ -f "$SAVED_MAC_FILE" ] && [ "$(cat "$SAVED_MAC_FILE")" = "$DEVICE_MAC" ]; then
-        log "Invalidating cached MAC, will rescan by name"
-        rm -f "$SAVED_MAC_FILE"
-    fi
-    # Remove from bluez so the next scan won't re-pick this dead MAC.
-    # If the device comes back online it'll re-advertise and be re-discovered.
-    bluetoothctl remove "$DEVICE_MAC" &>/dev/null
-    DEVICE_MAC=""
-    return 1
-}
-
-# Find a GATT characteristic path by UUID via D-Bus
-find_char_path_by_uuid() {
-    local target_uuid="$1"
-    local dev_path
-    dev_path=$(mac_to_dbus_path "$DEVICE_MAC")
-
-    busctl tree "$DBUS_DEST" 2>/dev/null | grep -o "${dev_path}/service[0-9a-f]*/char[0-9a-f]*" | while read -r char_path; do
-        local uuid
-        uuid=$(busctl get-property "$DBUS_DEST" "$char_path" org.bluez.GattCharacteristic1 UUID 2>/dev/null | tr -d '"' | awk '{print $2}')
-        if [ "$uuid" = "$target_uuid" ]; then
-            echo "$char_path"
-            return 0
-        fi
+wait_for_port() {
+    local backoff=1
+    while [ ! -c "$DEVICE_PORT" ]; do
+        log "Waiting for $DEVICE_PORT (retry in ${backoff}s)..."
+        sleep "$backoff"
+        backoff=$((backoff < 30 ? backoff * 2 : 30))
     done
 }
 
-# Subscribe to refresh-request notifications. The ESP fires this when it
-# has no usage data yet (e.g. after a fresh boot). Daemon awk drops a flag
-# file that the inner loop picks up on its next 5s tick.
-#
-# Implementation notes:
-# - dbus-monitor must be running BEFORE we call StartNotify, because busctl
-#   exits immediately, the subscription tears down within milliseconds, and
-#   the ESP's notify fires inside that brief window.
-# - stdbuf -oL forces line-buffered stdout on dbus-monitor; without it,
-#   glibc switches to block buffering when stdout is a pipe and signals
-#   never reach awk until ~4KB accumulates.
-# - The pipeline runs in a setsid'd child so we can kill the whole process
-#   group (dbus-monitor + awk) atomically. Killing only awk leaves
-#   dbus-monitor orphaned, and `wait $!` in bash waits on the whole job
-#   until every pipeline member exits, hanging the daemon.
-start_notify_subscriber() {
-    local req_path
-    req_path=$(find_char_path_by_uuid "$REQ_CHAR_UUID")
-    if [ -z "$req_path" ]; then
-        log "Refresh char not found, skipping notify subscriber"
-        return 1
-    fi
-
-    setsid bash -c "stdbuf -oL dbus-monitor --system \"type='signal',interface='org.freedesktop.DBus.Properties',path='$req_path',member='PropertiesChanged'\" 2>/dev/null | awk -v flag='$REFRESH_FLAG' '/Value/ { system(\"touch \" flag); fflush() }'" &
-    NOTIFY_PID=$!
-
-    # Give dbus-monitor a moment to register its match rule, then trigger
-    # the GATT subscription that causes the ESP to fire its notify.
-    sleep 0.3
-    busctl call "$DBUS_DEST" "$req_path" org.bluez.GattCharacteristic1 StartNotify >/dev/null 2>&1
-
-    log "Refresh subscriber started (pgid=$NOTIFY_PID)"
+# Background reader: tail incoming bytes from the device, watch for REQ
+# refresh requests. Each REQ touches the flag file the inner loop polls.
+# ACK/NACK lines are observable in the journal but otherwise ignored.
+start_reader() {
+    # cat blocks reading the tty; tagging each line makes the source obvious
+    # in the journal. setsid puts cat into its own process group so we can
+    # kill the whole pipeline atomically (the awk drops the flag and exits
+    # cleanly on EOF if the device disappears).
+    setsid bash -c "stdbuf -oL cat \"$DEVICE_PORT\" 2>/dev/null | stdbuf -oL awk -v flag='$REFRESH_FLAG' '
+        {
+            print \"[device] \" \$0
+            if (\$0 ~ /^REQ\$/)   { system(\"touch \" flag) }
+        }
+        END { exit 0 }
+    '" &
+    READER_PID=$!
+    log "Reader started (pgid=$READER_PID)"
 }
 
-stop_notify_subscriber() {
-    if [ -n "$NOTIFY_PID" ]; then
-        # Kill the whole process group (setsid made NOTIFY_PID the leader).
-        # Don't wait — we don't care about exit status and waiting can hang
-        # if any group member is slow to exit.
-        kill -TERM -"$NOTIFY_PID" 2>/dev/null
-        NOTIFY_PID=""
+stop_reader() {
+    if [ -n "$READER_PID" ]; then
+        kill -TERM -"$READER_PID" 2>/dev/null
+        READER_PID=""
     fi
     rm -f "$REFRESH_FLAG"
 }
 
-# Write data to the RX characteristic via D-Bus
-write_gatt() {
-    local char_path="$1"
-    local data="$2"
+# Returns 0 if the TTY exists and we can write to it.
+port_alive() {
+    [ -c "$DEVICE_PORT" ] && [ -w "$DEVICE_PORT" ]
+}
 
-    # Convert string to byte array for D-Bus: "hi" -> 0x68 0x69
-    local bytes=""
-    for ((i = 0; i < ${#data}; i++)); do
-        local byte
-        byte=$(printf "0x%02x" "'${data:$i:1}")
-        bytes="$bytes $byte"
-    done
-    local count=${#data}
-
-    busctl call "$DBUS_DEST" "$char_path" org.bluez.GattCharacteristic1 \
-        WriteValue "aya{sv}" "$count" $bytes 0 2>/dev/null
+# Send a single line. Returns nonzero on write failure (device unplugged).
+write_line() {
+    local line="$1"
+    # printf appends '\n'. Redirect open with the noctty effect via exec
+    # so we don't pay open/close cost per write — but a simple > re-open
+    # works too because we set -hupcl. Keep it simple.
+    printf '%s\n' "$line" > "$DEVICE_PORT" 2>/dev/null
 }
 
 poll() {
@@ -232,73 +127,56 @@ poll() {
         }')
 
     log "Sending: $payload"
-    write_gatt "$RX_CHAR_PATH" "$payload" || { log "Write failed"; return 1; }
+    write_line "$payload" || { log "Write failed"; return 1; }
     return 0
 }
 
 cleanup() {
-    stop_notify_subscriber
+    stop_reader
     log "Daemon stopped"
     exit 0
 }
 
 trap cleanup INT TERM
 
-log "=== Claude Usage Tracker Daemon (BLE) ==="
+log "=== Claude Usage Tracker Daemon (USB CDC) ==="
+log "Port: $DEVICE_PORT"
 log "Poll interval: ${POLL_INTERVAL}s"
 
-BACKOFF=1
-
 while true; do
-    # Find the device
-    if ! load_mac; then
-        scan_for_device || {
-            log "Device not found, retrying in ${BACKOFF}s..."
-            sleep "$BACKOFF"
-            BACKOFF=$((BACKOFF < 60 ? BACKOFF * 2 : 60))
-            continue
-        }
-    fi
+    wait_for_port
+    configure_port
 
-    # Connect if not connected
-    if ! is_connected; then
-        connect_device || {
-            log "Retrying in ${BACKOFF}s..."
-            sleep "$BACKOFF"
-            BACKOFF=$((BACKOFF < 60 ? BACKOFF * 2 : 60))
-            continue
-        }
-    fi
+    log "Port opened: $DEVICE_PORT"
+    start_reader
 
-    # Find the GATT characteristic
-    RX_CHAR_PATH=$(find_char_path_by_uuid "$RX_CHAR_UUID")
-    if [ -z "$RX_CHAR_PATH" ]; then
-        log "Error: RX characteristic not found, retrying..."
-        sleep 5
-        continue
-    fi
-    log "GATT RX path: $RX_CHAR_PATH"
-
-    BACKOFF=1  # reset backoff on successful connection
-
-    start_notify_subscriber
-
-    # Poll loop: tick every $TICK seconds. Poll Anthropic when the
-    # interval has elapsed OR when the ESP requested a refresh.
+    # Tight inner loop: tick every $TICK seconds. Poll Anthropic when the
+    # interval has elapsed, when the device asked for a refresh, or after
+    # a write failure (which indicates the port has gone away).
     LAST_POLL=0
-    while is_connected; do
+    WRITE_FAILS=0
+    while port_alive; do
         NOW=$(date +%s)
         if [ -f "$REFRESH_FLAG" ] || (( NOW - LAST_POLL >= POLL_INTERVAL )); then
             if [ -f "$REFRESH_FLAG" ]; then
                 log "Refresh requested by device"
                 rm -f "$REFRESH_FLAG"
             fi
-            poll && LAST_POLL=$NOW
+            if poll; then
+                LAST_POLL=$NOW
+                WRITE_FAILS=0
+            else
+                WRITE_FAILS=$((WRITE_FAILS + 1))
+                if (( WRITE_FAILS >= 2 )); then
+                    log "Write failed ${WRITE_FAILS}x, recycling port"
+                    break
+                fi
+            fi
         fi
         sleep "$TICK"
     done
 
-    stop_notify_subscriber
-    log "Device disconnected, reconnecting..."
-    sleep 2
+    stop_reader
+    log "Port lost, reconnecting..."
+    sleep 1
 done

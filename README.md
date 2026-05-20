@@ -2,9 +2,9 @@
 
 A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
 
-It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) and pairs with my laptop over Bluetooth, the splash screen plays pixel-art Clawd animations that get
-busier when your usage rate climbs. The two side buttons send Space and
-Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
+It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) and talks to the host daemon over **USB CDC serial** (this is the `usb-transport` branch; `main` uses BLE GATT instead). The splash screen plays pixel-art Clawd animations that get busier when your usage rate climbs.
+
+> **Why USB?** The BLE pairing dance on Linux/bluez can be flaky — half-bonded links, stale GATT handles after firmware reboots, alternating write failures from missing ACKs. USB CDC is a wire; if you're plugging the board in for power anyway, the data link rides for free with zero pairing state.
 
 |              Usage meter              |              Clawd animation screen              |
 | :-----------------------------------: | :----------------------------------------------: |
@@ -14,12 +14,12 @@ The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaa
 
 ## Screens
 
-The device boots into the splash and stays there until you press the middle (PWR) button, which cycles between Usage and Bluetooth. Tap the screen anywhere (except the Reset zone on the Bluetooth screen) to flip back to the splash; tap again to dismiss it.
+The device boots into the splash and stays there until you press the middle (PWR) button, which cycles between Usage and Link. Tap the screen anywhere to flip back to the splash; tap again to dismiss it.
 
-|              Splash               |              Usage              |                Bluetooth                |
-| :-------------------------------: | :-----------------------------: | :-------------------------------------: |
-| ![Splash](screenshots/splash.png) | ![Usage](screenshots/usage.png) | ![Bluetooth](screenshots/bluetooth.png) |
-|   Splash; touch-toggle anytime    | Session and weekly utilization  |    Connection status and bond reset     |
+|              Splash               |              Usage              |             USB Link             |
+| :-------------------------------: | :-----------------------------: | :------------------------------: |
+| ![Splash](screenshots/splash.png) | ![Usage](screenshots/usage.png) | Connection + port status         |
+|   Splash; touch-toggle anytime    | Session and weekly utilization  | "Connected" / "Waiting" / "Stale" |
 
 While the splash is up, the middle button cycles animations instead of screens. The firmware also auto-rotates every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
 
@@ -31,15 +31,13 @@ While the splash is up, the middle button cycles animations instead of screens. 
 
 ## Prerequisites
 
-- Linux (tested on Ubuntu) or macOS
+- Linux (tested on Arch / CachyOS) or macOS
 - [PlatformIO CLI](https://docs.platformio.org/en/latest/core/installation/index.html)
-- Linux: `curl`, `bluetoothctl`, `busctl` (BlueZ Bluetooth stack)
-- macOS: `python3` (the installer sets up a venv with `bleak` and `httpx`)
+- Linux: `curl`, `awk`, `stty` (all standard); user in the `dialout` (or `uucp`) group for `/dev/ttyACM0` access
+- macOS: `python3` (the installer sets up a venv with `pyserial` and `httpx`)
 - Claude Code with an active subscription
 
 ## macOS installation
-
-The macOS host pieces — Python daemon, LaunchAgent, and flash helper — were ported by [Chris Davidson (@lorddavidson)](https://github.com/lorddavidson). Thanks Chris!
 
 ### Flash the firmware
 
@@ -48,19 +46,15 @@ The macOS host pieces — Python daemon, LaunchAgent, and flash helper — were 
 ./flash-mac.sh /dev/cu.usbmodem1101  # or pass an explicit USB serial port
 ```
 
-### Pair the device
-
-After flashing, open **System Settings → Bluetooth** and click *Connect* next to "Clawdmeter". The daemon will discover it on its next scan (~30 s).
-
 ### Install the daemon
 
-The daemon reads your Claude OAuth token from the macOS Keychain (service `Claude Code-credentials`), polls usage every 60 s, and pushes it to the display over BLE.
+The macOS daemon reads your Claude OAuth token from the Keychain (service `Claude Code-credentials`), polls usage every 60 s, and writes JSON lines to `/dev/cu.usbmodem*`. No Bluetooth permissions needed.
 
 ```bash
 ./install-mac.sh
 ```
 
-The installer creates a Python venv in `daemon/.venv/`, installs `bleak` and `httpx`, renders a LaunchAgent into `~/Library/LaunchAgents/com.user.claude-usage-daemon.plist`, and loads it. The first run is launched interactively so macOS prompts for Bluetooth permission.
+The installer creates a Python venv in `daemon/.venv/`, installs `pyserial` and `httpx`, renders a LaunchAgent into `~/Library/LaunchAgents/com.user.claude-usage-daemon.plist`, and loads it.
 
 Useful commands:
 
@@ -71,6 +65,8 @@ launchctl unload ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist  # st
 launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # start
 ```
 
+> **Why `/dev/cu.usbmodem*` not `/dev/tty.usbmodem*`?** The `cu.` (callout) device doesn't assert DTR on open. The `tty.` (dial-in) device does, which the ESP32-S3's USB CDC implementation interprets as a reset — the firmware would reboot every time we wrote a payload. The daemon's `find_port()` only matches `cu.*`.
+
 ## Linux installation
 
 ### Flash the firmware
@@ -80,29 +76,22 @@ cd firmware
 pio run -t upload --upload-port /dev/ttyACM0
 ```
 
-### Pair the device
-
-After flashing, the device advertises as "Claudemeter". Pair it once:
-
-```bash
-# Scan for the device
-bluetoothctl scan le
-
-# When "Claude Controller" appears, pair and trust it
-bluetoothctl pair F4:12:FA:C0:8F:E5    # use your device's MAC
-bluetoothctl trust F4:12:FA:C0:8F:E5
-```
-
-The MAC address is shown on the Bluetooth screen — press the middle (PWR) button to cycle to it.
-
 ### Install the daemon
 
-The daemon polls your Claude usage every 60 seconds and sends it to the display over BLE.
+The daemon polls your Claude usage every 60 seconds and writes JSON lines to `/dev/ttyACM0`. No pairing — plug in the USB cable and start the service.
 
 ```bash
 ./install.sh
 systemctl --user start claude-usage-daemon
 ```
+
+If you get a permission error on `/dev/ttyACM0`, add yourself to the `dialout` group (the group name may be `uucp` on Arch) and log in again:
+
+```bash
+sudo usermod -aG dialout $USER
+```
+
+Override the serial port via the `DEVICE_PORT` environment variable (e.g. `DEVICE_PORT=/dev/ttyACM1`) — `systemctl --user edit claude-usage-daemon`.
 
 Check status: `systemctl --user status claude-usage-daemon`
 
@@ -113,41 +102,38 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 1. The daemon reads your Claude Code OAuth token from `~/.claude/.credentials.json`.
 2. It makes a minimal API call to `api.anthropic.com/v1/messages` — one token of Haiku, basically free.
 3. The usage numbers come straight out of the response headers (`anthropic-ratelimit-unified-5h-utilization` and friends).
-4. The daemon connects to the ESP32 over BLE and writes a JSON payload to the GATT RX characteristic.
-5. The firmware parses it and updates the LVGL dashboard.
-6. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.
-7. The two side buttons are independent of all of this — they send Space and Shift+Tab as BLE HID keyboard input to the paired host directly.
+4. The daemon writes a JSON line to `/dev/ttyACM0`. The firmware's serial line reader (`serial_link.cpp`) parses it and updates the LVGL dashboard.
+5. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.
+6. The two side buttons currently don't do anything — they used to send Space and Shift+Tab over BLE HID on `main`. A USB HID composite port is a future TODO so they can do the same over USB.
 
 ## Physical buttons
 
-The board has three side buttons. Left and right do the same thing on every screen; the middle button is screen-aware.
+The board has three side buttons. The middle button cycles screens; left and right are reserved for a future USB HID composite port.
 
-| Button           | GPIO         | Function                                                       |
-| ---------------- | ------------ | -------------------------------------------------------------- |
-| **Left**         | GPIO 0       | Hold to send Space (Claude Code voice-mode push-to-talk)       |
-| **Middle** (PWR) | AXP2101 PKEY | Cycle screens (Usage ↔ Bluetooth); on splash, cycle animations |
-| **Right**        | GPIO 18      | Press to send Shift+Tab (Claude Code mode toggle)              |
+| Button           | GPIO         | Function                                                  |
+| ---------------- | ------------ | --------------------------------------------------------- |
+| **Left**         | GPIO 0       | Reserved (was BLE HID Space on `main`)                    |
+| **Middle** (PWR) | AXP2101 PKEY | Cycle screens (Usage ↔ Link); on splash, cycle animations |
+| **Right**        | GPIO 18      | Reserved (was BLE HID Shift+Tab on `main`)                |
 
-Space and Shift+Tab go out as standard BLE HID keyboard reports, so they trigger in whatever window has focus on the paired host — not just Claude Code.
+## Wire protocol
 
-## BLE protocol
+The host daemon and firmware speak a line-delimited (`\n`-terminated) text protocol over `/dev/ttyACM0`:
 
-The device advertises a custom GATT service alongside the standard HID keyboard service:
+| Direction      | Line                                                       | Meaning                              |
+| -------------- | ---------------------------------------------------------- | ------------------------------------ |
+| host → device  | `{"s":45,"sr":120,"w":28,"wr":7200,"st":"allowed","ok":true}` | Usage payload                        |
+| host → device  | `screenshot`                                               | Dump current LVGL framebuffer        |
+| device → host  | `ACK`                                                      | Last payload accepted                |
+| device → host  | `NACK`                                                     | Last payload failed JSON parse       |
+| device → host  | `REQ`                                                      | Asking host for a fresh poll        |
+| device → host  | `READY`                                                    | Sent once on boot                    |
 
-|                            | UUID                                   |
-| -------------------------- | -------------------------------------- |
-| **Data Service**           | `4c41555a-4465-7669-6365-000000000001` |
-| RX Characteristic (write)  | `4c41555a-4465-7669-6365-000000000002` |
-| TX Characteristic (notify) | `4c41555a-4465-7669-6365-000000000003` |
-| **HID Service**            | `00001812-0000-1000-8000-00805f9b34fb` |
+Payload fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
 
-JSON payload format (written to RX):
+## USB CDC gotcha
 
-```json
-{ "s": 45, "sr": 120, "w": 28, "wr": 7200, "st": "allowed", "ok": true }
-```
-
-Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
+The daemon configures the TTY with `stty -hupcl` — this is **critical**. Without it, every time a process opens `/dev/ttyACM0` the kernel toggles DTR, which the ESP32-S3's USB CDC implementation interprets as a reset request. The firmware would reboot on every write. `-hupcl` keeps DTR steady through open/close cycles.
 
 ## Recompiling fonts
 
@@ -190,7 +176,7 @@ Without these patches, fonts compile but render as invisible.
 
 ## Converting Lucide icons
 
-The UI uses a small set of [Lucide](https://lucide.dev) icons (bluetooth + battery states) converted to RGB565 / RGB565A8 C arrays for LVGL.
+The UI uses a small set of [Lucide](https://lucide.dev) icons (battery states) converted to RGB565 / RGB565A8 C arrays for LVGL.
 
 ```bash
 node tools/png_to_lvgl.js assets/icon_bluetooth_48.png icon_bluetooth_data ICON_BLUETOOTH_WIDTH ICON_BLUETOOTH_HEIGHT

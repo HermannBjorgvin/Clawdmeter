@@ -1,6 +1,6 @@
 #!/bin/bash
-# macOS installer for Clawdmeter daemon (Python + bleak + launchd).
-# Mirrors install.sh but uses LaunchAgents instead of systemd user units.
+# macOS installer for Clawdmeter daemon (USB CDC, Python + pyserial + launchd).
+# Mirrors install.sh; uses LaunchAgents instead of systemd user units.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -13,32 +13,32 @@ LOG_DIR="$HOME/Library/Logs"
 LOG_OUT="$LOG_DIR/claude-usage-daemon.out.log"
 LOG_ERR="$LOG_DIR/claude-usage-daemon.err.log"
 
-echo "=== Clawdmeter macOS install ==="
+echo "=== Clawdmeter macOS install (USB CDC) ==="
 echo ""
 
-echo "[1/5] Checking prerequisites..."
+echo "[1/4] Checking prerequisites..."
 for cmd in python3 curl; do
     command -v "$cmd" >/dev/null || { echo "Error: $cmd is required"; exit 1; }
 done
 if [ ! -f "$HOME/.claude/.credentials.json" ]; then
-    echo "Warning: ~/.claude/.credentials.json not found."
-    echo "  Sign in via Claude Code first, then re-run this installer."
-    echo "  Continuing anyway — the daemon will retry on each poll."
+    echo "Note: ~/.claude/.credentials.json not found — the daemon reads"
+    echo "      the token from the Keychain on macOS (service 'Claude Code-credentials')."
+    echo "      Sign in via Claude Code first if you haven't."
 fi
 echo "  OK"
 echo ""
 
-echo "[2/5] Creating Python virtualenv at daemon/.venv ..."
+echo "[2/4] Creating Python virtualenv at daemon/.venv ..."
 if [ ! -d "$VENV_DIR" ]; then
     python3 -m venv "$VENV_DIR"
 fi
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet "bleak>=0.22" "httpx>=0.27"
+"$VENV_DIR/bin/pip" install --quiet "pyserial>=3.5" "httpx>=0.27"
 PYTHON_BIN="$VENV_DIR/bin/python"
 echo "  OK ($PYTHON_BIN)"
 echo ""
 
-echo "[3/5] Rendering launchd plist..."
+echo "[3/4] Rendering launchd plist..."
 mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
 sed \
     -e "s|__PYTHON_BIN__|${PYTHON_BIN}|g" \
@@ -51,20 +51,7 @@ sed \
 echo "  Installed: $PLIST_DST"
 echo ""
 
-echo "[4/5] Bluetooth permission check..."
-echo "  On first run the daemon will trigger a Bluetooth permission prompt."
-echo "  macOS only prompts for foreground processes — so we'll run it"
-echo "  interactively once below. Press Ctrl+C after you see 'Scanning...'"
-echo "  and grant permission when prompted. Then re-run this installer"
-echo "  (or just continue) to enable launchd autostart."
-echo ""
-read -r -p "Run a permission-priming scan now? [Y/n] " ans
-if [[ ! "$ans" =~ ^[Nn]$ ]]; then
-    "$PYTHON_BIN" "$DAEMON_PY" || true
-fi
-echo ""
-
-echo "[5/5] Loading launchd service..."
+echo "[4/4] Loading launchd service..."
 launchctl unload "$PLIST_DST" 2>/dev/null || true
 launchctl load -w "$PLIST_DST"
 echo "  Loaded."
@@ -72,11 +59,13 @@ echo ""
 
 echo "=== Done ==="
 echo ""
-echo "First-time Bluetooth pairing (after firmware is flashed):"
-echo "  1. Power on the device."
-echo "  2. Open System Settings → Bluetooth."
-echo "  3. Click 'Connect' next to 'Claude Controller'."
-echo "  4. The daemon will discover it within ~30 s and start polling."
+echo "First-time setup (after firmware is flashed):"
+echo "  1. Plug the Clawdmeter into your Mac via USB-C."
+echo "  2. Confirm the port appears: ls /dev/cu.usbmodem*"
+echo "  3. The daemon should pick it up within a few seconds — no pairing needed."
+echo ""
+echo "Override the port (rarely needed):"
+echo "  DEVICE_PORT=/dev/cu.usbmodem1101 in the plist's EnvironmentVariables."
 echo ""
 echo "Useful commands:"
 echo "  launchctl list | grep claude-usage     # check it's running"
