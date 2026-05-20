@@ -4,16 +4,18 @@
 #include "display_cfg.h"
 #include "data.h"
 #include "ui.h"
-#include "ble.h"
+#include "serial_link.h"
 #include "power.h"
 #include "imu.h"
 #include "splash.h"
 #include "usage_rate.h"
 
 // Physical buttons (global, screen-independent):
-//   BTN_BACK   (GPIO 0)  — left,  send Space (Claude Code voice mode push-to-talk)
-//   BTN_FWD    (GPIO 18) — right, send Shift+Tab (Claude Code mode toggle)
+//   BTN_BACK   (GPIO 0)  — left,  reserved (was BLE HID Space, no-op on USB build)
+//   BTN_FWD    (GPIO 18) — right, reserved (was BLE HID Shift+Tab, no-op on USB build)
 //   AXP PWR    (PMU)     — middle, cycle screens; on splash, cycle animations
+// TODO(usb-transport): wire left/right buttons to USB HID composite for
+// equivalent Space / Shift+Tab keystrokes.
 #define BTN_BACK 0
 #define BTN_FWD  18
 
@@ -173,56 +175,6 @@ static bool parse_json(const char* json, UsageData* out) {
     return true;
 }
 
-// Serial command buffer
-#define CMD_BUF_SIZE 64
-static char cmd_buf[CMD_BUF_SIZE];
-static int cmd_pos = 0;
-
-static void send_screenshot() {
-    const uint32_t w = LCD_WIDTH, h = LCD_HEIGHT;
-    const uint32_t row_bytes = w * 2;
-    const uint32_t buf_size = row_bytes * h;
-    uint8_t* sbuf = (uint8_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
-    if (!sbuf) {
-        Serial.println("SCREENSHOT_ERR");
-        return;
-    }
-
-    lv_draw_buf_t draw_buf;
-    lv_draw_buf_init(&draw_buf, w, h, LV_COLOR_FORMAT_RGB565, row_bytes, sbuf, buf_size);
-
-    lv_result_t res = lv_snapshot_take_to_draw_buf(lv_screen_active(), LV_COLOR_FORMAT_RGB565, &draw_buf);
-    if (res != LV_RESULT_OK) {
-        heap_caps_free(sbuf);
-        Serial.println("SCREENSHOT_ERR");
-        return;
-    }
-
-    Serial.printf("SCREENSHOT_START %lu %lu %lu\n", (unsigned long)w, (unsigned long)h, (unsigned long)buf_size);
-    Serial.flush();
-    Serial.write(sbuf, buf_size);
-    Serial.flush();
-    Serial.println();
-    Serial.println("SCREENSHOT_END");
-
-    heap_caps_free(sbuf);
-}
-
-static void check_serial_cmd() {
-    while (Serial.available()) {
-        char c = Serial.read();
-        if (c == '\n' || c == '\r') {
-            cmd_buf[cmd_pos] = '\0';
-            if (strcmp(cmd_buf, "screenshot") == 0) {
-                send_screenshot();
-            }
-            cmd_pos = 0;
-        } else if (cmd_pos < CMD_BUF_SIZE - 1) {
-            cmd_buf[cmd_pos++] = c;
-        }
-    }
-}
-
 void setup() {
     Serial.begin(115200);
     delay(300);
@@ -278,8 +230,8 @@ void setup() {
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, my_touch_cb);
 
-    // Init BLE data channel
-    ble_init();
+    // Init USB CDC data channel
+    serial_link_init();
 
     // Physical buttons: back (GPIO 0) and forward (GPIO 18)
     pinMode(BTN_BACK, INPUT_PULLUP);
@@ -288,18 +240,18 @@ void setup() {
     // Build dashboard
     ui_init();
 
-    // Show initial BLE status on Bluetooth screen
-    ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
+    // Show initial link status on Link screen
+    ui_update_link_status(serial_link_get_state(), serial_link_get_port_name());
 
     // Show initial battery status
     ui_update_battery(power_battery_pct(), power_is_charging());
 
     ui_show_screen(SCREEN_SPLASH);
 
-    Serial.println("Dashboard ready, waiting for data on BLE...");
+    Serial.println("Dashboard ready, waiting for data on USB CDC...");
 }
 
-static ble_state_t last_ble_state = BLE_STATE_INIT;
+static link_state_t last_link_state = LINK_STATE_INIT;
 
 // Brightness ramp state for rotation transition
 // On rotation change we blank the panel, force a full LVGL redraw at the
@@ -334,7 +286,7 @@ void loop() {
     touch_read();
     lv_timer_handler();
     ui_tick_anim();
-    ble_tick();
+    serial_link_tick();
     power_tick();
     imu_tick();
     splash_tick();
@@ -349,13 +301,11 @@ void loop() {
         bool fwd_now  = (digitalRead(BTN_FWD)  == LOW);
 
         if (back_now != back_was) {
-            if (back_now) ble_keyboard_press(0x2C, 0);  // HID Space, no mods
-            else          ble_keyboard_release();
+            // TODO(usb-transport): USB HID Space here.
             back_was = back_now;
         }
         if (fwd_now != fwd_was) {
-            if (fwd_now) ble_keyboard_press(0x2B, 0x02);  // HID Tab + LEFT_SHIFT
-            else         ble_keyboard_release();
+            // TODO(usb-transport): USB HID Shift+Tab here.
             fwd_was = fwd_now;
         }
 
@@ -367,11 +317,11 @@ void loop() {
 
     handle_rotation_change();
 
-    // Update BLE status on screen when state changes
-    ble_state_t bs = ble_get_state();
-    if (bs != last_ble_state) {
-        last_ble_state = bs;
-        ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());
+    // Update link status on screen when state changes
+    link_state_t ls = serial_link_get_state();
+    if (ls != last_link_state) {
+        last_link_state = ls;
+        ui_update_link_status(ls, serial_link_get_port_name());
     }
 
     // Update battery indicator
@@ -385,12 +335,9 @@ void loop() {
         ui_update_battery(pct, charging);
     }
 
-    // Check for serial commands (screenshot, etc.)
-    check_serial_cmd();
-
-    // Process incoming BLE data
-    if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
+    // Process incoming serial data (screenshot cmd handled inside the tick)
+    if (serial_link_has_data()) {
+        if (parse_json(serial_link_get_data(), &usage)) {
             int g_before = usage_rate_group();
             usage_rate_sample(usage.session_pct);
             int g_after = usage_rate_group();
@@ -400,9 +347,9 @@ void loop() {
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
             ui_update(&usage);
-            ble_send_ack();
+            serial_link_send_ack();
         } else {
-            ble_send_nack();
+            serial_link_send_nack();
         }
     }
 
