@@ -2,9 +2,14 @@
 
 A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
 
-It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) and pairs with my laptop over Bluetooth, the splash screen plays pixel-art Clawd animations that get
-busier when your usage rate climbs. The two side buttons send Space and
-Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
+It supports two firmware targets:
+
+| Target | Board | Experience |
+| --- | --- | --- |
+| `waveshare_amoled_216` | [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) | Full experience: touch UI, splash animations, Bluetooth screen, battery UI, auto-rotation, and BLE HID shortcuts |
+| `freenove_s3_display_minimal` | Freenove ESP32-S3 Display NonTouch **FNK0104B** (2.8" 240×320 ILI9341) | Minimal experience: one Usage screen plus BLE data updates |
+
+The Waveshare build is the original version: it pairs with my laptop over Bluetooth, the splash screen plays pixel-art Clawd animations that get busier when your usage rate climbs, and the two side buttons send Space and Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
 
 |              Usage meter              |              Clawd animation screen              |
 | :-----------------------------------: | :----------------------------------------------: |
@@ -25,9 +30,17 @@ While the splash is up, the middle button cycles animations instead of screens. 
 
 ## Hardware
 
+### Waveshare target
+
 - [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) - ESP32-S3R8, 2.16" 480×480 AMOLED (CO5300 QSPI), CST9220 cap touch, AXP2101 PMU + Li-Po battery, QMI8658 IMU
 - USB-C cable for flashing firmware and charging
 - 3.7V Li-Po battery (MX1.25 2-pin connector, optional)
+
+### Freenove minimal target
+
+- Freenove ESP32-S3 Display NonTouch **FNK0104B** - 2.8" 240×320 ILI9341 TFT
+- USB-C cable for flashing firmware
+- No extra input hardware required for the minimal build
 
 ## Prerequisites
 
@@ -43,18 +56,26 @@ The macOS host pieces — Python daemon, LaunchAgent, and flash helper — were 
 
 ### Flash the firmware
 
+Waveshare target:
+
 ```bash
-./flash-mac.sh                       # auto-detects /dev/cu.usbmodem*
+./flash-mac.sh                        # auto-detects /dev/cu.usbmodem*
 ./flash-mac.sh /dev/cu.usbmodem1101  # or pass an explicit USB serial port
+```
+
+Freenove minimal target:
+
+```bash
+pio run -d firmware -e freenove_s3_display_minimal -t upload --upload-port /dev/cu.usbmodem101
 ```
 
 ### Pair the device
 
-After flashing, open **System Settings → Bluetooth** and click *Connect* next to "Clawdmeter". The daemon will discover it on its next scan (~30 s).
+After flashing, open **System Settings → Bluetooth** and click *Connect* next to **"Claude Controller"**. Both firmware targets advertise under that BLE name, and the daemon will discover the device on its next scan (~30 s).
 
 ### Install the daemon
 
-The daemon reads your Claude OAuth token from the macOS Keychain (service `Claude Code-credentials`), polls usage every 60 s, and pushes it to the display over BLE.
+The daemon reads your Claude OAuth token from the macOS Keychain (service `Claude Code-credentials`), polls usage every 60 s, and pushes it to the display over BLE. If Claude Code is already signed in on the Mac, you do not need to create a separate API key for this flow.
 
 ```bash
 ./install-mac.sh
@@ -75,14 +96,22 @@ launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # st
 
 ### Flash the firmware
 
+Waveshare target:
+
 ```bash
 cd firmware
-pio run -t upload --upload-port /dev/ttyACM0
+pio run -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0
+```
+
+Freenove minimal target:
+
+```bash
+pio run -d firmware -e freenove_s3_display_minimal -t upload --upload-port /dev/ttyACM0
 ```
 
 ### Pair the device
 
-After flashing, the device advertises as "Claudemeter". Pair it once:
+After flashing, the device advertises as **"Claude Controller"**. Pair it once:
 
 ```bash
 # Scan for the device
@@ -93,7 +122,7 @@ bluetoothctl pair F4:12:FA:C0:8F:E5    # use your device's MAC
 bluetoothctl trust F4:12:FA:C0:8F:E5
 ```
 
-The MAC address is shown on the Bluetooth screen — press the middle (PWR) button to cycle to it.
+On the Waveshare target, the MAC address is shown on the Bluetooth screen. The Freenove minimal target has no Bluetooth screen; use `bluetoothctl devices` after scanning instead.
 
 ### Install the daemon
 
@@ -110,7 +139,7 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 
 ## How it works
 
-1. The daemon reads your Claude Code OAuth token from `~/.claude/.credentials.json`.
+1. The daemon reads your Claude Code OAuth token from the macOS Keychain on macOS, or from `~/.claude/.credentials.json` on Linux.
 2. It makes a minimal API call to `api.anthropic.com/v1/messages` — one token of Haiku, basically free.
 3. The usage numbers come straight out of the response headers (`anthropic-ratelimit-unified-5h-utilization` and friends).
 4. The daemon connects to the ESP32 over BLE and writes a JSON payload to the GATT RX characteristic.
@@ -225,3 +254,18 @@ See `tools/README.md` for details.
 ## Licensing gray area warning
 
 The software in this repository uses and adheres to the Anthropic brand guidelines and uses the same proprietary fonts that Anthropic has a license for but this software uses without permission as well as using assets from Anthropic such as the copyrighted Clawd mascot so even though the code in this repo is non-proprietary I will not license it myself under a copyleft license since this repo includes proprietary fonts and copyrighted assets. Please be aware of this if you fork or copy the code from this repo. **You have been warned!**
+
+## Target comparison
+
+| Capability | Waveshare target | Freenove minimal target |
+| --- | --- | --- |
+| Usage meter | Yes | Yes |
+| BLE data service | Yes | Yes |
+| Splash animations | Yes | No |
+| Touch input | Yes | No |
+| Bluetooth status screen | Yes | No |
+| BLE HID keyboard buttons | Yes | No |
+| Battery indicator | Yes | No |
+| Auto-rotation | Yes | No |
+
+The Freenove build boots directly into the Usage screen and waits for BLE data from the same host daemon. It intentionally keeps only the core product loop: receive usage data over BLE and render the meter.

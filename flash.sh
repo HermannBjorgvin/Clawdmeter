@@ -10,7 +10,7 @@ echo "Port: $PORT"
 echo ""
 
 cd "$SCRIPT_DIR/firmware"
-~/.platformio/penv/bin/pio run -t upload --upload-port "$PORT"
+~/.platformio/penv/bin/pio run -e waveshare_amoled_216 -t upload --upload-port "$PORT"
 
 echo ""
 echo "=== Done! ==="
