@@ -30,6 +30,7 @@ XPowersPMU pmu;
 SensorQMI8658 imu;
 
 static UsageData usage = {};
+static ActivityData activity = {};
 
 // ---- Touch interrupt + shared state ----
 static volatile bool     touch_pressed = false;
@@ -186,8 +187,11 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 }
 
-// Parse a JSON line into UsageData
-static bool parse_json(const char* json, UsageData* out) {
+// Parse a JSON line into UsageData and (optionally) ActivityData. The
+// daemon sends both in the same payload; the activity portion is absent
+// when no hook events have fired recently — in that case act_out is
+// updated to "no sessions" so the Activity screen renders a placeholder.
+static bool parse_json(const char* json, UsageData* out, ActivityData* act_out) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
@@ -202,6 +206,40 @@ static bool parse_json(const char* json, UsageData* out) {
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
     out->valid = true;
+
+    if (!act_out) return true;
+    act_out->session_count = 0;
+    JsonArrayConst sessions = doc["sessions"].as<JsonArrayConst>();
+    if (!sessions.isNull()) {
+        for (JsonVariantConst sv : sessions) {
+            if (act_out->session_count >= MAX_SESSIONS) break;
+            SessionData& s = act_out->sessions[act_out->session_count];
+            strlcpy(s.project,      sv["p"] | "", sizeof(s.project));
+            strlcpy(s.model,        sv["m"] | "", sizeof(s.model));
+            strlcpy(s.last_prompt,        sv["u"]  | "", sizeof(s.last_prompt));
+            strlcpy(s.current_tool,       sv["t"]  | "", sizeof(s.current_tool));
+            strlcpy(s.current_tool_args,  sv["ta"] | "", sizeof(s.current_tool_args));
+            s.phase = ((int)(sv["ph"] | 0)) == 1 ? PHASE_RUNNING : PHASE_IDLE;
+            s.last_active_secs = sv["la"] | 0;
+            s.todo_count = 0;
+            JsonArrayConst td = sv["td"].as<JsonArrayConst>();
+            if (!td.isNull()) {
+                for (JsonVariantConst tv : td) {
+                    if (s.todo_count >= MAX_TODOS_PER_SESSION) break;
+                    TodoItem& t = s.todos[s.todo_count];
+                    strlcpy(t.content, tv["c"] | "", sizeof(t.content));
+                    strlcpy(t.active_form, tv["a"] | "", sizeof(t.active_form));
+                    int sn = tv["s"] | 0;
+                    if      (sn == 1) t.status = TODO_IN_PROGRESS;
+                    else if (sn == 2) t.status = TODO_COMPLETED;
+                    else              t.status = TODO_PENDING;
+                    s.todo_count++;
+                }
+            }
+            act_out->session_count++;
+        }
+    }
+    act_out->valid = true;
     return true;
 }
 
@@ -326,7 +364,7 @@ void setup() {
     // Show initial battery status
     ui_update_battery(power_battery_pct(), power_is_charging());
 
-    ui_show_screen(SCREEN_SPLASH);
+    ui_show_screen(SCREEN_SPLASH);  // morphs to Activity automatically when sessions arrive
 
     Serial.println("Dashboard ready, waiting for data on BLE...");
 }
@@ -451,7 +489,7 @@ void loop() {
 
     // Process incoming BLE data
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
+        if (parse_json(ble_get_data(), &usage, &activity)) {
             int g_before = usage_rate_group();
             usage_rate_sample(usage.session_pct);
             int g_after = usage_rate_group();
@@ -461,6 +499,7 @@ void loop() {
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
             ui_update(&usage);
+            ui_update_activity(&activity);
             ble_send_ack();
         } else {
             ble_send_nack();

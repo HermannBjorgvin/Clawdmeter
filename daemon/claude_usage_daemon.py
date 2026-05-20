@@ -30,6 +30,18 @@ POLL_INTERVAL = 60
 TICK = 5
 SCAN_TIMEOUT = 8.0
 
+# Activity / hook state — written by daemon/clawdmeter_hook.py on every
+# Claude Code hook event, read here on every tick.
+STATE_FILE = Path.home() / ".clawdmeter" / "state.json"
+MAX_SESSIONS = 3            # most-recently-active sessions sent to device
+MAX_TODOS_PER_SESSION = 10  # head of the list, oldest-first ordering preserved
+TODO_CONTENT_MAX = 50
+TODO_ACTIVEFORM_MAX = 40
+SESSION_STALE_SECONDS = 10 * 60   # drop from payload if no activity within this window
+# BLE single-attribute write limit per the Core spec is 512 bytes; we leave
+# headroom for header/framing variability.
+MAX_BLE_PAYLOAD = 480
+
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
 KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -147,6 +159,84 @@ def save_address(addr: str) -> None:
     SAVED_ADDR_FILE.write_text(addr)
 
 
+_STATUS_NUM = {"pending": 0, "in_progress": 1, "completed": 2}
+_PHASE_NUM = {"idle": 0, "running": 1}
+
+USER_PROMPT_MAX = 60
+CURRENT_TOOL_MAX = 24
+TOOL_ARGS_MAX = 60
+
+
+def load_activity_sessions() -> list[dict]:
+    """Read state.json written by the hook script and project it into the
+    compact session schema the firmware expects.
+
+    Returns up to MAX_SESSIONS entries, sorted most-recently-active first,
+    each with a head-truncated todos list. activeForm is included only on
+    the in-progress item — every other state would never display it.
+    """
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    sessions = state.get("sessions") or {}
+    if not isinstance(sessions, dict):
+        return []
+    now = time.time()
+    fresh = []
+    for sid, s in sessions.items():
+        if not isinstance(s, dict):
+            continue
+        la_ts = s.get("last_active_ts") or 0
+        age = now - la_ts
+        if age > SESSION_STALE_SECONDS:
+            continue
+        fresh.append((la_ts, s))
+    fresh.sort(key=lambda x: x[0], reverse=True)
+    out = []
+    for la_ts, s in fresh[:MAX_SESSIONS]:
+        todos = s.get("todos") or []
+        compact_todos = []
+        for t in todos[:MAX_TODOS_PER_SESSION]:
+            if not isinstance(t, dict):
+                continue
+            sn = _STATUS_NUM.get(str(t.get("status", "pending")), 0)
+            entry = {
+                "c": str(t.get("content", ""))[:TODO_CONTENT_MAX],
+                "s": sn,
+            }
+            if sn == 1:
+                af = str(t.get("activeForm", ""))[:TODO_ACTIVEFORM_MAX]
+                if af:
+                    entry["a"] = af
+            compact_todos.append(entry)
+        entry = {
+            "p": str(s.get("project", ""))[:24],
+            "m": str(s.get("model", ""))[:24],
+            "la": max(0, int(now - la_ts)),
+            "ph": _PHASE_NUM.get(str(s.get("phase", "idle")), 0),
+            "td": compact_todos,
+        }
+        ct = str(s.get("current_tool", ""))[:CURRENT_TOOL_MAX]
+        if ct:
+            entry["t"] = ct
+        ta = str(s.get("current_tool_args", ""))[:TOOL_ARGS_MAX]
+        if ta:
+            entry["ta"] = ta
+        up = str(s.get("last_user_prompt", ""))[:USER_PROMPT_MAX]
+        if up:
+            entry["u"] = up
+        out.append(entry)
+    return out
+
+
+def state_file_mtime() -> float:
+    try:
+        return STATE_FILE.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 async def scan_for_device() -> str | None:
     log(f"Scanning for '{DEVICE_NAME}' ({SCAN_TIMEOUT}s)...")
     devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
@@ -216,18 +306,86 @@ class Session:
             log(f"Refresh subscription unavailable: {e}")
 
     async def write_payload(self, payload: dict) -> bool:
-        data = json.dumps(payload, separators=(",", ":")).encode()
-        log(f"Sending: {data.decode()}")
+        data = _serialize_capped(payload).encode()
+        # response=True (Write Request, not Write Command) lets bleak fall
+        # back to ATT Long Write for payloads up to the 512-byte spec cap.
+        # Without this, payloads larger than MTU-3 would be silently split
+        # into multiple onWrite callbacks on the firmware side.
         try:
-            await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
+            log(f"Sending {len(data)}B: "
+                f"{data[:200].decode('utf-8', errors='replace')}{'…' if len(data) > 200 else ''}")
+            await self.client.write_gatt_char(RX_CHAR_UUID, data, response=True)
             return True
         except BleakError as e:
             log(f"Write failed: {e}")
             return False
 
 
+def _serialize_capped(payload: dict) -> str:
+    """JSON-serialize payload, shrinking the sessions array if needed so the
+    encoded length stays under MAX_BLE_PAYLOAD bytes.
+
+    Graduated trim from the tail-most session, in order of least UX impact:
+      1. drop `u` (user prompt) — long-ish, usually optional
+      2. drop tail todos one at a time
+      3. drop `t` (current_tool) — short, but signal-bearing
+      4. drop the whole session
+    Repeat across remaining sessions, finally drop `sessions` entirely if
+    even an empty list doesn't fit.
+    """
+    work = json.loads(json.dumps(payload))  # cheap deep copy
+
+    def encode():
+        # ensure_ascii=False keeps UTF-8 multi-byte chars as their 2-3
+        # byte form instead of 6-byte \uXXXX escapes — saves ~50% on
+        # payloads with CJK or other non-Latin user prompts. ArduinoJson
+        # on the firmware side decodes UTF-8 transparently.
+        return json.dumps(work, separators=(",", ":"), ensure_ascii=False)
+
+    def encoded_bytes():
+        # Compare against the BLE byte budget — Python `str` length
+        # counts Unicode code points, which under-counts CJK by 3x
+        # because each char is 3 bytes in UTF-8.
+        return len(encode().encode("utf-8"))
+
+    if encoded_bytes() <= MAX_BLE_PAYLOAD:
+        return encode()
+    sessions = work.get("sessions") or []
+    while sessions:
+        last = sessions[-1]
+        # Step 1: drop the optional user prompt first
+        if "u" in last:
+            last.pop("u", None)
+        # Step 2: drop the tool-args summary (the tool name itself is
+        # short and signal-rich enough by itself)
+        elif "ta" in last:
+            last.pop("ta", None)
+        # Step 3: drop tail todos one at a time
+        elif last.get("td"):
+            last["td"] = last["td"][:-1]
+        # Step 4: drop current_tool (still keep project+model+phase
+        # so the user sees the session exists)
+        elif "t" in last:
+            last.pop("t", None)
+        # Step 5: drop the whole session
+        else:
+            sessions.pop()
+        work["sessions"] = sessions
+        if encoded_bytes() <= MAX_BLE_PAYLOAD:
+            return encode()
+    work.pop("sessions", None)
+    return encode()
+
+
 async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
     """Connect to a known address and poll until disconnected or stopped.
+
+    Two independent push triggers run on the same TICK loop:
+      * 60s API poll → refresh rate-limit fields
+      * state.json mtime change → forward latest hook-collected sessions
+
+    Whenever either triggers, we resend the merged payload (api fields +
+    sessions) so the firmware always has a coherent view.
 
     Returns True if the connection was used successfully (so the caller
     keeps the cached address), False if the connection failed and the
@@ -249,23 +407,40 @@ async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
     session = Session(client)
     await session.setup_refresh_subscription()
 
+    cached_api: dict | None = None
     last_poll = 0.0
+    last_state_mtime = -1.0
     used_successfully = False
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
             elapsed = now - last_poll
-            if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
+            api_due = session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL or cached_api is None
+            state_mtime = state_file_mtime()
+            state_changed = state_mtime != last_state_mtime
+
+            if api_due:
                 session.refresh_requested.clear()
                 token = read_token()
                 if not token:
-                    log("No token; skipping poll")
+                    log("No token; skipping API poll")
                 else:
-                    payload = await poll_api(token)
-                    if payload is not None:
-                        if await session.write_payload(payload):
-                            last_poll = time.time()
-                            used_successfully = True
+                    fresh = await poll_api(token)
+                    if fresh is not None:
+                        cached_api = fresh
+                        last_poll = time.time()
+
+            if api_due or state_changed:
+                payload = dict(cached_api) if cached_api else {
+                    "s": 0, "sr": 0, "w": 0, "wr": 0,
+                    "st": "unknown", "ok": False,
+                }
+                sessions = load_activity_sessions()
+                if sessions:
+                    payload["sessions"] = sessions
+                if await session.write_payload(payload):
+                    last_state_mtime = state_mtime
+                    used_successfully = True
 
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
