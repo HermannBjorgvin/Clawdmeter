@@ -1,40 +1,46 @@
 #!/usr/bin/env python3
-"""Claude Usage Tracker Daemon (BLE) — macOS port of claude-usage-daemon.sh.
+"""Claude Usage Tracker Daemon (USB CDC) — macOS port of claude-usage-daemon.sh.
 
 Polls Claude API rate-limit headers and writes a JSON payload to the
-ESP32 "Claude Controller" peripheral over a custom GATT service. Uses
-bleak (CoreBluetooth backend on macOS).
+ESP32 over USB CDC serial (default port: /dev/cu.usbmodem*). This is the
+`usb-transport` branch's macOS daemon — the `main` branch uses BLE instead.
+
+Why /dev/cu.usbmodem* and not /dev/tty.usbmodem*?
+  The `cu.*` (callout) node does NOT assert DTR on open. The `tty.*`
+  (dial-in) node does, which would reset the ESP32-S3 every time we
+  open the port. We also explicitly clear HUPCL via termios as belt and
+  braces in case the kernel ever defaults differently.
 """
 
 import asyncio
 import getpass
+import glob
 import json
 import os
 import re
 import signal
 import subprocess
 import sys
+import termios
 import time
 from pathlib import Path
 
 import httpx
-from bleak import BleakClient, BleakScanner
-from bleak.exc import BleakError
-
-DEVICE_NAME = "Claude Controller"
-SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
-RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
-REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
+import serial  # pyserial
 
 POLL_INTERVAL = 60
 TICK = 5
-SCAN_TIMEOUT = 8.0
+BAUD = 115200
+PORT_GLOBS = (
+    "/dev/cu.usbmodem*",  # macOS preferred
+    "/dev/ttyACM*",        # Linux fallback (rarely useful — the bash daemon handles Linux)
+)
+ENV_PORT = os.environ.get("DEVICE_PORT")  # explicit override wins
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
-SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
@@ -70,17 +76,14 @@ def _extract_access_token(blob: str) -> str | None:
     except json.JSONDecodeError:
         data = None
     if isinstance(data, dict):
-        # direct: {"accessToken": "..."}
         if isinstance(data.get("accessToken"), str):
             return data["accessToken"]
-        # nested: {"claudeAiOauth": {"accessToken": "..."}}
         for v in data.values():
             if isinstance(v, dict) and isinstance(v.get("accessToken"), str):
                 return v["accessToken"]
     m = re.search(r'"accessToken"\s*:\s*"([^"]+)"', blob)
     if m:
         return m.group(1)
-    # Raw token (no JSON wrapper) — must look plausible (sk-ant-... etc.)
     if re.fullmatch(r"[A-Za-z0-9_\-.~+/=]{20,}", blob):
         return blob
     return None
@@ -127,34 +130,42 @@ def read_token() -> str | None:
     return _read_token_file()
 
 
-def load_cached_address() -> str | None:
-    if not SAVED_ADDR_FILE.exists():
-        return None
-    addr = SAVED_ADDR_FILE.read_text().strip()
-    # Accept both Linux MAC (AA:BB:CC:DD:EE:FF) and macOS CoreBluetooth UUID
-    # (E621E1F8-C36C-495A-93FC-0C247A3E6E5F).
-    if re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", addr) or re.fullmatch(
-        r"[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}", addr
-    ):
-        return addr
-    log("Cached address malformed, discarding")
-    SAVED_ADDR_FILE.unlink(missing_ok=True)
+def find_port() -> str | None:
+    if ENV_PORT and os.path.exists(ENV_PORT):
+        return ENV_PORT
+    for pattern in PORT_GLOBS:
+        matches = sorted(glob.glob(pattern))
+        if matches:
+            return matches[0]
     return None
 
 
-def save_address(addr: str) -> None:
-    SAVED_ADDR_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SAVED_ADDR_FILE.write_text(addr)
+def open_port(path: str) -> serial.Serial:
+    """Open the CDC port with HUPCL cleared.
 
-
-async def scan_for_device() -> str | None:
-    log(f"Scanning for '{DEVICE_NAME}' ({SCAN_TIMEOUT}s)...")
-    devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
-    for d in devices:
-        if d.name == DEVICE_NAME:
-            log(f"Found: {d.address}")
-            return d.address
-    return None
+    pyserial's `dsrdtr=False` covers the obvious DTR-on-open case, but on
+    some kernels HUPCL still drops DTR when the file descriptor closes,
+    which the firmware sees as a reset on every reconnect. Stomp it
+    explicitly via termios after open.
+    """
+    ser = serial.Serial(
+        path,
+        baudrate=BAUD,
+        timeout=1.0,        # read timeout (s)
+        write_timeout=2.0,
+        dsrdtr=False,
+        rtscts=False,
+        xonxoff=False,
+    )
+    try:
+        fd = ser.fileno()
+        attrs = termios.tcgetattr(fd)
+        # cflag is index 2; HUPCL is in cflag.
+        attrs[2] &= ~termios.HUPCL
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    except (termios.error, OSError) as e:
+        log(f"HUPCL clear failed (non-fatal): {e}")
+    return ser
 
 
 async def poll_api(token: str) -> dict | None:
@@ -189,7 +200,7 @@ async def poll_api(token: str) -> dict | None:
         except ValueError:
             return 0
 
-    payload = {
+    return {
         "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
         "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
         "w": pct(hdr("anthropic-ratelimit-unified-7d-utilization")),
@@ -197,88 +208,97 @@ async def poll_api(token: str) -> dict | None:
         "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
         "ok": True,
     }
-    return payload
 
 
-class Session:
-    def __init__(self, client: BleakClient) -> None:
-        self.client = client
-        self.refresh_requested = asyncio.Event()
+async def reader_task(ser: serial.Serial, refresh_event: asyncio.Event,
+                      stop_event: asyncio.Event) -> None:
+    """Background task: read lines from the device, set refresh_event on REQ.
 
-    def _on_refresh(self, _char, _data: bytearray) -> None:
-        log("Refresh requested by device")
-        self.refresh_requested.set()
-
-    async def setup_refresh_subscription(self) -> None:
-        try:
-            await self.client.start_notify(REQ_CHAR_UUID, self._on_refresh)
-        except (BleakError, ValueError) as e:
-            log(f"Refresh subscription unavailable: {e}")
-
-    async def write_payload(self, payload: dict) -> bool:
-        data = json.dumps(payload, separators=(",", ":")).encode()
-        log(f"Sending: {data.decode()}")
-        try:
-            await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
-            return True
-        except BleakError as e:
-            log(f"Write failed: {e}")
-            return False
-
-
-async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
-    """Connect to a known address and poll until disconnected or stopped.
-
-    Returns True if the connection was used successfully (so the caller
-    keeps the cached address), False if the connection failed and the
-    cache should be invalidated.
+    Runs the blocking pyserial readline in a thread executor so it doesn't
+    block the asyncio loop. ACK/NACK/READY/etc are logged but otherwise
+    not acted on — they're informational.
     """
-    log(f"Connecting to {address}...")
-    client = BleakClient(address)
+    loop = asyncio.get_running_loop()
+    while not stop_event.is_set():
+        try:
+            line_bytes = await loop.run_in_executor(None, ser.readline)
+        except (serial.SerialException, OSError) as e:
+            log(f"Reader: port error: {e}")
+            return
+        if not line_bytes:
+            continue  # timeout, no data
+        line = line_bytes.decode(errors="replace").strip()
+        if not line:
+            continue
+        log(f"[device] {line}")
+        if line == "REQ":
+            refresh_event.set()
+
+
+async def write_payload(ser: serial.Serial, payload: dict) -> bool:
+    data = (json.dumps(payload, separators=(",", ":")) + "\n").encode()
+    log(f"Sending: {data.decode().rstrip()}")
     try:
-        await client.connect()
-    except (BleakError, asyncio.TimeoutError) as e:
-        log(f"Connection failed: {e}")
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: (ser.write(data), ser.flush())
+        )
+        return True
+    except (serial.SerialException, OSError) as e:
+        log(f"Write failed: {e}")
         return False
 
-    if not client.is_connected:
-        log("Connection failed (no error but not connected)")
-        return False
 
-    log("Connected")
-    session = Session(client)
-    await session.setup_refresh_subscription()
+async def run_session(port_path: str, stop_event: asyncio.Event) -> None:
+    log(f"Opening {port_path}...")
+    try:
+        ser = open_port(port_path)
+    except (serial.SerialException, OSError) as e:
+        log(f"Open failed: {e}")
+        await asyncio.sleep(2)
+        return
+
+    log("Port opened")
+    refresh_event = asyncio.Event()
+    reader = asyncio.create_task(reader_task(ser, refresh_event, stop_event))
 
     last_poll = 0.0
-    used_successfully = False
+    write_fails = 0
     try:
-        while client.is_connected and not stop_event.is_set():
+        while not stop_event.is_set():
             now = time.time()
-            elapsed = now - last_poll
-            if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
-                session.refresh_requested.clear()
+            if refresh_event.is_set() or (now - last_poll) >= POLL_INTERVAL:
+                if refresh_event.is_set():
+                    log("Refresh requested by device")
+                    refresh_event.clear()
                 token = read_token()
                 if not token:
                     log("No token; skipping poll")
                 else:
                     payload = await poll_api(token)
                     if payload is not None:
-                        if await session.write_payload(payload):
+                        if await write_payload(ser, payload):
                             last_poll = time.time()
-                            used_successfully = True
+                            write_fails = 0
+                        else:
+                            write_fails += 1
+                            if write_fails >= 2:
+                                log(f"Write failed {write_fails}x, recycling port")
+                                break
 
             try:
-                await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
+                await asyncio.wait_for(refresh_event.wait(), timeout=TICK)
             except asyncio.TimeoutError:
                 pass
     finally:
+        reader.cancel()
         try:
-            await client.disconnect()
-        except BleakError:
+            await reader
+        except asyncio.CancelledError:
             pass
-
-    log("Device disconnected" if not stop_event.is_set() else "Stopping")
-    return used_successfully
+        try:
+            ser.close()
+        except (serial.SerialException, OSError):
+            pass
 
 
 async def main() -> None:
@@ -295,36 +315,26 @@ async def main() -> None:
         except NotImplementedError:
             signal.signal(sig, _stop)
 
-    log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
+    log("=== Claude Usage Tracker Daemon (USB CDC, macOS) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
 
     backoff = 1
     while not stop_event.is_set():
-        address = load_cached_address()
-        if not address:
-            address = await scan_for_device()
-            if address:
-                save_address(address)
-            else:
-                log(f"Device not found, retrying in {backoff}s...")
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=backoff)
-                except asyncio.TimeoutError:
-                    pass
-                backoff = min(backoff * 2, 60)
-                continue
-
-        ok = await connect_and_run(address, stop_event)
-        if not ok:
-            log("Invalidating cached address")
-            SAVED_ADDR_FILE.unlink(missing_ok=True)
+        port = find_port()
+        if not port:
+            log(f"No USB CDC port found, retrying in {backoff}s...")
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=backoff)
             except asyncio.TimeoutError:
                 pass
-            backoff = min(backoff * 2, 60)
-        else:
-            backoff = 1
+            backoff = min(backoff * 2, 30)
+            continue
+
+        backoff = 1
+        await run_session(port, stop_event)
+        if not stop_event.is_set():
+            log("Session ended, looking for port again...")
+            await asyncio.sleep(1)
 
 
 if __name__ == "__main__":

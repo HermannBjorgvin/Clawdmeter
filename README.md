@@ -34,8 +34,38 @@ While the splash is up, the middle button cycles animations instead of screens. 
 - Linux (tested on Arch / CachyOS) or macOS
 - [PlatformIO CLI](https://docs.platformio.org/en/latest/core/installation/index.html)
 - Linux: `curl`, `awk`, `stty` (all standard); user in the `dialout` (or `uucp`) group for `/dev/ttyACM0` access
-- macOS: not yet ported on this branch — see `main` for the BLE-based macOS daemon
+- macOS: `python3` (the installer sets up a venv with `pyserial` and `httpx`)
 - Claude Code with an active subscription
+
+## macOS installation
+
+### Flash the firmware
+
+```bash
+./flash-mac.sh                       # auto-detects /dev/cu.usbmodem*
+./flash-mac.sh /dev/cu.usbmodem1101  # or pass an explicit USB serial port
+```
+
+### Install the daemon
+
+The macOS daemon reads your Claude OAuth token from the Keychain (service `Claude Code-credentials`), polls usage every 60 s, and writes JSON lines to `/dev/cu.usbmodem*`. No Bluetooth permissions needed.
+
+```bash
+./install-mac.sh
+```
+
+The installer creates a Python venv in `daemon/.venv/`, installs `pyserial` and `httpx`, renders a LaunchAgent into `~/Library/LaunchAgents/com.user.claude-usage-daemon.plist`, and loads it.
+
+Useful commands:
+
+```bash
+launchctl list | grep claude-usage                                          # check it's running
+tail -F ~/Library/Logs/claude-usage-daemon.out.log                          # live logs
+launchctl unload ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist  # stop
+launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # start
+```
+
+> **Why `/dev/cu.usbmodem*` not `/dev/tty.usbmodem*`?** The `cu.` (callout) device doesn't assert DTR on open. The `tty.` (dial-in) device does, which the ESP32-S3's USB CDC implementation interprets as a reset — the firmware would reboot every time we wrote a payload. The daemon's `find_port()` only matches `cu.*`.
 
 ## Linux installation
 
