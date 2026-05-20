@@ -184,8 +184,9 @@ static bool parse_json(const char* json, UsageData* out, ActivityData* act_out) 
             SessionData& s = act_out->sessions[act_out->session_count];
             strlcpy(s.project,      sv["p"] | "", sizeof(s.project));
             strlcpy(s.model,        sv["m"] | "", sizeof(s.model));
-            strlcpy(s.last_prompt,  sv["u"] | "", sizeof(s.last_prompt));
-            strlcpy(s.current_tool, sv["t"] | "", sizeof(s.current_tool));
+            strlcpy(s.last_prompt,        sv["u"]  | "", sizeof(s.last_prompt));
+            strlcpy(s.current_tool,       sv["t"]  | "", sizeof(s.current_tool));
+            strlcpy(s.current_tool_args,  sv["ta"] | "", sizeof(s.current_tool_args));
             s.phase = ((int)(sv["ph"] | 0)) == 1 ? PHASE_RUNNING : PHASE_IDLE;
             s.last_active_secs = sv["la"] | 0;
             s.todo_count = 0;
@@ -331,7 +332,7 @@ void setup() {
     // Show initial battery status
     ui_update_battery(power_battery_pct(), power_is_charging());
 
-    ui_show_screen(SCREEN_SPLASH);
+    ui_show_screen(SCREEN_SPLASH);  // morphs to Activity automatically when sessions arrive
 
     Serial.println("Dashboard ready, waiting for data on BLE...");
 }

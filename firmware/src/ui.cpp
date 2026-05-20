@@ -32,23 +32,25 @@ LV_FONT_DECLARE(font_styrene_16);
 // Activity is the only screen that uses its own title baseline (everything
 // else aligns to the shared TITLE_Y=30). We push it ~15px lower so the
 // title doesn't crowd the rounded display corners and battery icon.
+// Per upstream review feedback (HermannBjorgvin/Clawdmeter#22): bigger
+// fonts across the board and the footer dropped, giving the panel more
+// vertical room.
 #define ACT_TITLE_FONT     font_styrene_28
-#define ACT_MODEL_FONT     font_styrene_20
-#define ACT_PROMPT_FONT    font_styrene_20
+#define ACT_MODEL_FONT     font_styrene_24
+#define ACT_PROMPT_FONT    font_styrene_24
 #define ACT_ACTIVE_FONT    font_styrene_28
 #define ACT_PROGRESS_FONT  font_styrene_24
-#define ACT_TODO_FONT      font_styrene_20
-#define ACT_FOOTER_FONT    font_styrene_20
-#define ACT_TODO_ROW_H     30
+#define ACT_TODO_FONT      font_styrene_24
+#define ACT_TODO_ROW_H     34
 #define ACT_TITLE_Y        50
-#define ACT_MODEL_Y        86
-#define ACT_PROMPT_Y       118
-#define ACT_PROMPT_H       30
-#define ACT_ACTIVE_Y       160
-#define ACT_ACTIVE_H       60
-#define ACT_PANEL_Y        228
-#define ACT_PANEL_H        202  // progress header + 5 rows × 30 + padding
-#define ACT_FOOTER_Y       444
+#define ACT_TITLE_H        36
+#define ACT_MODEL_Y        94
+#define ACT_PROMPT_Y       130
+#define ACT_PROMPT_H       34
+#define ACT_ACTIVE_Y       178
+#define ACT_ACTIVE_H       64
+#define ACT_PANEL_Y        252
+#define ACT_PANEL_H        222
 #define ACT_COUNTER_RIGHT  76
 
 // Cap visible todo rows so we can size the panel deterministically.
@@ -99,8 +101,6 @@ static lv_obj_t* lbl_act_in_progress;    // ">> Reworking UI layout"
 static lv_obj_t* act_todo_panel;         // rounded card wrapping progress + list
 static lv_obj_t* lbl_act_progress;       // "5/12 done" — header inside the panel
 static lv_obj_t* act_list;               // scrollable flex container of todo rows
-static lv_obj_t* lbl_act_footer;         // "last active 30s ago"
-static lv_obj_t* lbl_act_placeholder;    // shown when 0 sessions
 static ActivityData cached_activity = {};
 static uint8_t current_session_idx = 0;
 
@@ -480,8 +480,10 @@ static void init_activity_screen(lv_obj_t* scr) {
     // its own ACT_COUNTER_RIGHT pad + a small gap. Fixed height needed
     // alongside LV_LABEL_LONG_DOT or the label wraps instead of clipping.
     lv_obj_set_size(lbl_act_title,
-                    CONTENT_W - (ACT_COUNTER_RIGHT - MARGIN) - 50, 26);
-    lv_label_set_long_mode(lbl_act_title, LV_LABEL_LONG_DOT);
+                    CONTENT_W - (ACT_COUNTER_RIGHT - MARGIN) - 50, ACT_TITLE_H);
+    // Marquee-scroll long project|model strings so we keep the full name
+    // visible without truncating.
+    lv_label_set_long_mode(lbl_act_title, LV_LABEL_LONG_SCROLL_CIRCULAR);
 
     // Model on its own line (subtitle under project name).
     lbl_act_model = lv_label_create(activity_container);
@@ -540,25 +542,9 @@ static void init_activity_screen(lv_obj_t* scr) {
     // gestures on the container above.
     lv_obj_add_flag(act_list, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    // Footer — "last active Ns ago".
-    lbl_act_footer = lv_label_create(activity_container);
-    lv_label_set_text(lbl_act_footer, "");
-    lv_obj_set_style_text_font(lbl_act_footer, &ACT_FOOTER_FONT, 0);
-    lv_obj_set_style_text_color(lbl_act_footer, COL_DIM, 0);
-    lv_obj_set_pos(lbl_act_footer, MARGIN, ACT_FOOTER_Y);
-
-    // Placeholder shown when no sessions are active. Use the progress
-    // font (smaller) and constrain to the content width so multi-line
-    // text wraps within the rounded-corner safe area.
-    lbl_act_placeholder = lv_label_create(activity_container);
-    lv_label_set_text(lbl_act_placeholder,
-                      "No active sessions\n\nStart Claude Code\nin any terminal");
-    lv_obj_set_style_text_font(lbl_act_placeholder, &ACT_PROGRESS_FONT, 0);
-    lv_obj_set_style_text_color(lbl_act_placeholder, COL_DIM, 0);
-    lv_obj_set_style_text_align(lbl_act_placeholder, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_width(lbl_act_placeholder, CONTENT_W);
-    lv_label_set_long_mode(lbl_act_placeholder, LV_LABEL_LONG_WRAP);
-    lv_obj_center(lbl_act_placeholder);
+    // No footer/placeholder: the title row + last_prompt + headline carry
+    // enough liveness signal that "last active Xs ago" is redundant. The
+    // empty-state lives on the splash animation (Activity ↔ Splash morph).
 
     lv_obj_add_flag(activity_container, LV_OBJ_FLAG_HIDDEN);
 }
@@ -581,37 +567,20 @@ static lv_color_t todo_color(todo_status_t s) {
     }
 }
 
-static void format_age(uint32_t secs, char* buf, size_t len) {
-    if (secs < 60)        snprintf(buf, len, "last active %us ago", (unsigned)secs);
-    else if (secs < 3600) snprintf(buf, len, "last active %um ago", (unsigned)(secs / 60));
-    else                  snprintf(buf, len, "last active %uh ago", (unsigned)(secs / 3600));
-}
-
 static void render_activity(void) {
     if (!activity_container) return;
 
     // Clear list children before re-populating (cheap; ≤10 items).
     lv_obj_clean(act_list);
 
+    // No-sessions case: apply_default_screen_state() will have already
+    // hidden activity_container and shown the splash animation. Just bail.
     const bool any = cached_activity.valid && cached_activity.session_count > 0;
-    if (!any) {
-        lv_obj_clear_flag(lbl_act_placeholder, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_act_title,        LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_act_model,        LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_act_counter,      LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_act_prompt,       LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_act_in_progress,  LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(act_todo_panel,       LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_act_footer,       LV_OBJ_FLAG_HIDDEN);
-        return;
-    }
-    lv_obj_add_flag(lbl_act_placeholder, LV_OBJ_FLAG_HIDDEN);
+    if (!any) return;
     lv_obj_clear_flag(lbl_act_title,       LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(lbl_act_model,       LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(lbl_act_counter,     LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(lbl_act_in_progress, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(act_todo_panel,      LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(lbl_act_footer,      LV_OBJ_FLAG_HIDDEN);
 
     if (current_session_idx >= cached_activity.session_count) current_session_idx = 0;
     const SessionData& s = cached_activity.sessions[current_session_idx];
@@ -669,8 +638,15 @@ static void render_activity(void) {
         lv_label_set_text(lbl_act_in_progress, buf);
         lv_obj_set_style_text_color(lbl_act_in_progress, COL_ACCENT, 0);
     } else if (s.current_tool[0]) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), ">>  Doing: %s", s.current_tool);
+        // "Bash | <short summary>" when the hook captured tool_input.
+        // Falls back to "Doing: <tool>" if no summary is available.
+        char buf[128];
+        if (s.current_tool_args[0]) {
+            snprintf(buf, sizeof(buf), ">>  %s | %s",
+                     s.current_tool, s.current_tool_args);
+        } else {
+            snprintf(buf, sizeof(buf), ">>  Doing: %s", s.current_tool);
+        }
         lv_label_set_text(lbl_act_in_progress, buf);
         lv_obj_set_style_text_color(lbl_act_in_progress, COL_ACCENT, 0);
     } else if (s.phase == PHASE_IDLE) {
@@ -680,6 +656,15 @@ static void render_activity(void) {
         lv_label_set_text(lbl_act_in_progress, "(no todos)");
         lv_obj_set_style_text_color(lbl_act_in_progress, COL_DIM, 0);
     }
+
+    // Hide the whole todo panel when this session has no todos. An empty
+    // framed card was visually noisy when the agent was running but
+    // hadn't called TodoWrite yet (typical short tasks).
+    if (s.todo_count == 0) {
+        lv_obj_add_flag(act_todo_panel, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_clear_flag(act_todo_panel, LV_OBJ_FLAG_HIDDEN);
 
     // Progress counter.
     {
@@ -720,12 +705,6 @@ static void render_activity(void) {
         lv_obj_add_flag(row, LV_OBJ_FLAG_EVENT_BUBBLE);
     }
 
-    // Footer.
-    {
-        char buf[40];
-        format_age(s.last_active_secs, buf, sizeof(buf));
-        lv_label_set_text(lbl_act_footer, buf);
-    }
 }
 
 static void activity_gesture_cb(lv_event_t* e) {
@@ -889,25 +868,43 @@ static void ble_reset_click_cb(lv_event_t* e) {
 // in that case because the splash + activity containers are already
 // hidden by ui_show_screen().
 static void apply_default_screen_state(void) {
+    // Only fade on the actual splash↔activity transition. Re-renders
+    // triggered by a swipe between sessions, or by fresh BLE data
+    // while sessions are still present, should swap content instantly
+    // — fading those would feel like a flicker.
+    static bool last_morph_active = false;
+
     if (current_screen != SCREEN_SPLASH) return;
     const bool has_sessions = cached_activity.valid && cached_activity.session_count > 0;
+    const bool state_changed = has_sessions != last_morph_active;
+    last_morph_active = has_sessions;
     lv_obj_t* splash_root = splash_get_root();
     if (has_sessions) {
         lv_obj_clear_flag(activity_container, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_fade_in(activity_container, SPLASH_MORPH_MS, 0);
-        if (splash_root && !lv_obj_has_flag(splash_root, LV_OBJ_FLAG_HIDDEN)) {
-            lv_obj_fade_out(splash_root, SPLASH_MORPH_MS, 0);
+        if (state_changed) {
+            lv_obj_fade_in(activity_container, SPLASH_MORPH_MS, 0);
+            if (splash_root && !lv_obj_has_flag(splash_root, LV_OBJ_FLAG_HIDDEN)) {
+                lv_obj_fade_out(splash_root, SPLASH_MORPH_MS, 0);
+            } else {
+                splash_hide();
+            }
         } else {
+            // Just re-render, no fade.
+            lv_obj_set_style_opa(activity_container, LV_OPA_COVER, 0);
             splash_hide();
         }
     } else {
         splash_show();
         if (splash_root) {
             lv_obj_set_style_opa(splash_root, LV_OPA_COVER, 0);
-            lv_obj_fade_in(splash_root, SPLASH_MORPH_MS, 0);
+            if (state_changed) lv_obj_fade_in(splash_root, SPLASH_MORPH_MS, 0);
         }
         if (!lv_obj_has_flag(activity_container, LV_OBJ_FLAG_HIDDEN)) {
-            lv_obj_fade_out(activity_container, SPLASH_MORPH_MS, 0);
+            if (state_changed) {
+                lv_obj_fade_out(activity_container, SPLASH_MORPH_MS, 0);
+            } else {
+                lv_obj_add_flag(activity_container, LV_OBJ_FLAG_HIDDEN);
+            }
         }
     }
 }

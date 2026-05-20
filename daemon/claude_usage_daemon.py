@@ -164,6 +164,7 @@ _PHASE_NUM = {"idle": 0, "running": 1}
 
 USER_PROMPT_MAX = 60
 CURRENT_TOOL_MAX = 24
+TOOL_ARGS_MAX = 60
 
 
 def load_activity_sessions() -> list[dict]:
@@ -219,6 +220,9 @@ def load_activity_sessions() -> list[dict]:
         ct = str(s.get("current_tool", ""))[:CURRENT_TOOL_MAX]
         if ct:
             entry["t"] = ct
+        ta = str(s.get("current_tool_args", ""))[:TOOL_ARGS_MAX]
+        if ta:
+            entry["ta"] = ta
         up = str(s.get("last_user_prompt", ""))[:USER_PROMPT_MAX]
         if up:
             entry["u"] = up
@@ -352,14 +356,18 @@ def _serialize_capped(payload: dict) -> str:
         # Step 1: drop the optional user prompt first
         if "u" in last:
             last.pop("u", None)
-        # Step 2: drop tail todos one at a time
+        # Step 2: drop the tool-args summary (the tool name itself is
+        # short and signal-rich enough by itself)
+        elif "ta" in last:
+            last.pop("ta", None)
+        # Step 3: drop tail todos one at a time
         elif last.get("td"):
             last["td"] = last["td"][:-1]
-        # Step 3: drop current_tool (still keep project+model+phase
+        # Step 4: drop current_tool (still keep project+model+phase
         # so the user sees the session exists)
         elif "t" in last:
             last.pop("t", None)
-        # Step 4: drop the whole session
+        # Step 5: drop the whole session
         else:
             sessions.pop()
         work["sessions"] = sessions

@@ -51,6 +51,34 @@ def _short_project(cwd: str | None) -> str:
     return Path(cwd).name
 
 
+def _tool_args_summary(tool_name: str, tool_input: dict) -> str:
+    """Return a short human-readable summary of a tool's most relevant
+    arg (the thing you'd want to see next to the tool name on a 1-line
+    display). Returns "" when the tool has nothing useful to show.
+    """
+    if not isinstance(tool_input, dict):
+        return ""
+    if tool_name == "Bash":
+        return str(tool_input.get("command", ""))[:80]
+    if tool_name in ("Read", "Write", "Edit"):
+        path = str(tool_input.get("file_path", ""))
+        return Path(path).name if path else ""
+    if tool_name == "NotebookEdit":
+        path = str(tool_input.get("notebook_path", ""))
+        return Path(path).name if path else ""
+    if tool_name in ("Grep", "Glob"):
+        return str(tool_input.get("pattern", ""))[:60]
+    if tool_name == "Task":
+        return str(tool_input.get("description", ""))[:80]
+    if tool_name == "WebFetch":
+        return str(tool_input.get("url", ""))[:80]
+    if tool_name == "WebSearch":
+        return str(tool_input.get("query", ""))[:80]
+    if tool_name == "SlashCommand":
+        return str(tool_input.get("command", ""))[:80]
+    return ""
+
+
 def _prune(sessions: dict, now: int) -> dict:
     return {
         sid: s for sid, s in sessions.items()
@@ -86,6 +114,7 @@ def _update(payload: dict) -> None:
             "model": "",
             "last_tool": "",
             "current_tool": "",
+            "current_tool_args": "",
             "phase": "idle",
             "last_user_prompt": "",
             "last_active_ts": 0,
@@ -113,10 +142,12 @@ def _update(payload: dict) -> None:
             ]
             session["last_tool"] = "TodoWrite"
             session["current_tool"] = "TodoWrite"
+            session["current_tool_args"] = ""
             session["phase"] = "running"
         elif event == "PreToolUse" and tool_name:
             session["last_tool"] = tool_name
             session["current_tool"] = tool_name
+            session["current_tool_args"] = _tool_args_summary(tool_name, tool_input)
             session["phase"] = "running"
         elif event == "PostToolUse":
             # Intentionally keep `current_tool` set: Claude is usually
@@ -135,12 +166,14 @@ def _update(payload: dict) -> None:
         elif event == "Stop":
             session["last_tool"] = "idle"
             session["current_tool"] = ""
+            session["current_tool_args"] = ""
             session["phase"] = "idle"
         elif event == "SessionStart":
             # Resume / fresh open: assume idle until a tool fires. Avoids
             # a stale "running" sticking around across daemon restarts.
             session["phase"] = "idle"
             session["current_tool"] = ""
+            session["current_tool_args"] = ""
 
         sessions[session_id] = session
         state["sessions"] = sessions

@@ -22,6 +22,7 @@ struct UsageData {
 #define MODEL_NAME_LEN          28
 #define USER_PROMPT_LEN         80
 #define CURRENT_TOOL_LEN        28
+#define CURRENT_TOOL_ARGS_LEN   64
 
 enum todo_status_t {
     TODO_PENDING     = 0,
@@ -46,8 +47,9 @@ struct TodoItem {
 struct SessionData {
     char      project[PROJECT_NAME_LEN];
     char      model[MODEL_NAME_LEN];
-    char      last_prompt[USER_PROMPT_LEN];   // text of most recent UserPromptSubmit
-    char      current_tool[CURRENT_TOOL_LEN]; // tool currently mid-call (PreToolUse → cleared on Stop)
+    char      last_prompt[USER_PROMPT_LEN];          // text of most recent UserPromptSubmit
+    char      current_tool[CURRENT_TOOL_LEN];        // tool currently mid-call (PreToolUse → cleared on Stop)
+    char      current_tool_args[CURRENT_TOOL_ARGS_LEN]; // short summary of tool_input (Bash command, file path, etc)
     phase_t   phase;
     uint32_t  last_active_secs;       // seconds since the daemon last saw activity
     TodoItem  todos[MAX_TODOS_PER_SESSION];
