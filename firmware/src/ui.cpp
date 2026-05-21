@@ -84,6 +84,15 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_credit_2_font = &font_styrene_14;
     }
 
+    // Narrow-panel override: the BT "Address: XX:XX:..." line is the widest
+    // string the UI ever draws, and at styrene_28 it clips off the right
+    // margin on panels narrower than ~470 px (e.g. 450-wide portrait kits).
+    // Tightening this one font keeps the line inside the panel without
+    // disturbing the rest of the large-layout sizing.
+    if (L.bt_device_font == &font_styrene_28 && c.width < 470) {
+        L.bt_device_font = &font_styrene_24;
+    }
+
     L.content_w = L.scr_w - 2 * L.margin;
 }
 
