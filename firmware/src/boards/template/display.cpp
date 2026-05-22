@@ -49,6 +49,14 @@ void display_hal_tick(void) {
     // CPU-rotation transition (see the 2.16 reference port).
 }
 
+lv_color_format_t display_hal_lv_color_format(void) {
+    // Most boards: LVGL writes RGB565 in host-endian and the board's
+    // draw_bitmap byte-swaps for the panel. If your controller wants
+    // big-endian bytes, return LV_COLOR_FORMAT_RGB565_SWAPPED and skip
+    // the byte-swap in draw_bitmap.
+    return LV_COLOR_FORMAT_RGB565;
+}
+
 void display_hal_round_area(int32_t* x1, int32_t* y1, int32_t* x2, int32_t* y2) {
     // Most QSPI AMOLED drivers expect even-aligned flush regions. Harmless
     // to apply on panels that don't strictly require it.

@@ -18,6 +18,23 @@ struct BoardCaps {
     bool    has_rotation;    // IMU-driven CPU rotation in the flush callback
     bool    has_battery;     // AXP2101 battery measurement is meaningful
     bool    has_imu;         // QMI8658 (or compatible) is populated
+    bool    has_touch;       // capacitive touchscreen — when false, the
+                             // PWR/cycle button is the only way to leave
+                             // the splash screen, so shared code routes
+                             // splash-press to ui_toggle_splash() instead
+                             // of splash_next().
+    uint16_t auto_cycle_ms;  // 0 = disabled (default). > 0 enables a
+                             // global timer in main.cpp that calls
+                             // ui_cycle_screen() this often, skipping
+                             // splash and pausing while the display is
+                             // idle/asleep. Useful on touchless boards
+                             // where the user can't tap-toggle.
+    bool    cycle_skip_bluetooth; // When true, the Bluetooth screen is
+                             // omitted from ui_cycle_screen()'s loop —
+                             // useful after first-time pairing where
+                             // the screen has no day-to-day value.
+                             // Still reachable via a direct
+                             // ui_show_screen(SCREEN_BLUETOOTH) call.
 };
 
 const BoardCaps& board_caps(void);

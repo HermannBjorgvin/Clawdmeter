@@ -9,6 +9,8 @@ static const BoardCaps caps = {
     .has_rotation = (bool)BOARD_HAS_ROTATION,
     .has_battery  = (bool)BOARD_HAS_BATTERY,
     .has_imu      = (bool)BOARD_HAS_IMU,
+    .has_touch    = true,    // TODO: false if your board has no touchscreen
+    .auto_cycle_ms = 0,      // TODO: set >0 (e.g. 5000) to auto-cycle screens
 };
 
 const BoardCaps& board_caps(void) { return caps; }

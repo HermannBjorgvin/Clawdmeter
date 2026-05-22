@@ -6,10 +6,11 @@ via PlatformIO's `build_src_filter`. Adding a board means dropping in a new
 folder + a new `[env:...]` block — `main.cpp`, `ui.cpp`, and `splash.cpp`
 never see board-specific code. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md).
 
-Two reference ports today:
+Three reference ports today:
 
 - `boards/waveshare_amoled_216/` — original Waveshare ESP32-S3-Touch-AMOLED-2.16 (CO5300, 480×480 square, CST9220 touch, IMU rotation). Build env: `waveshare_amoled_216`.
 - `boards/waveshare_amoled_18/` — Waveshare ESP32-S3-Touch-AMOLED-1.8 (SH8601, 368×448 portrait, FT3168 touch, XCA9554 IO expander). Build env: `waveshare_amoled_18`.
+- `boards/xingzhi_cube_183/` — Xingzhi Cube 1.83" TFT WiFi 2-mic variant (NV3023 (!), 284×240 landscape, no touch, no PMU, hand-rolled SPI driver, 3 buttons via GPIO+VOL). Build env: `xingzhi_cube_183`. See its README for the pixel-format gotcha that drove the HAL `display_hal_lv_color_format()` addition.
 
 The shared code calls a small HAL (`firmware/src/hal/`) that each board implements: display, touch, input, power, IMU. Optional features are guarded by `BoardCaps` (runtime) and `BOARD_HAS_*` (compile-time) rather than `#ifdef BOARD_*`.
 
@@ -97,6 +98,7 @@ The boot screen is `SCREEN_SPLASH` and only advances on a physical button press,
 8. **LVGL RGB565A8 is planar.** `w*h` RGB565 pixels followed by `w*h` alpha bytes; `data_size = w*h*3`, `stride = w*2`. Use `init_icon_dsc_rgb565a8()` for icons that overlap non-uniform backgrounds (e.g. battery over splash). Lucide source PNGs are black-on-transparent — converter must tint to white or icons render invisible. See `tools/png_to_lvgl.js`.
 9. **Per-board pre-init is `board_init()`.** Each board's `board_init.cpp` brings up `Wire` and any reset-gating IO expander BEFORE `display_hal_init()`. Skipping the IO expander release on AMOLED-1.8 leaves SH8601 + FT3168 in reset and they silently fail to probe.
 10. **No `#ifdef BOARD_*` in shared code.** The whole point of the refactor — if you're about to add one, you probably want a `BoardCaps` field or a per-board file instead. See `docs/porting/capability-flags.md`.
+11. **Pixel byte order is per-board.** `display_hal_lv_color_format()` returns `LV_COLOR_FORMAT_RGB565` (host-endian, default) or `LV_COLOR_FORMAT_RGB565_SWAPPED` (MSB-first, for MIPI-SPI controllers like NV3023 that consume big-endian pixels). main.cpp wires this into `lv_display_set_color_format()` so each board owns its byte order without a per-board `#ifdef` in the LVGL setup.
 
 ## Icons
 

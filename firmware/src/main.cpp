@@ -102,6 +102,41 @@ static bool parse_json(const char* json, UsageData* out) {
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
     out->valid = true;
+
+    // Codex fields are optional — daemon may not have a Codex auth
+    // and the payload will omit them. -1 / 0.0 + codex_valid=false
+    // signals "no data" to the UI.
+    if (doc.containsKey("cs") || doc.containsKey("cw")) {
+        out->codex_session_pct      = doc["cs"]  | 0.0f;
+        out->codex_session_reset_mins = doc["csr"] | -1;
+        out->codex_weekly_pct       = doc["cw"]  | 0.0f;
+        out->codex_weekly_reset_mins  = doc["cwr"] | -1;
+        out->codex_valid = true;
+    }
+    if (doc.containsKey("as") || doc.containsKey("aw")) {
+        out->antig_session_pct       = doc["as"]  | 0.0f;
+        out->antig_session_reset_mins = doc["asr"] | -1;
+        out->antig_weekly_pct        = doc["aw"]  | 0.0f;
+        out->antig_weekly_reset_mins  = doc["awr"] | -1;
+        strlcpy(out->antig_plan,         doc["apn"] | "", sizeof(out->antig_plan));
+        strlcpy(out->antig_prompt_count, doc["apf"] | "", sizeof(out->antig_prompt_count));
+        strlcpy(out->antig_flow_count,   doc["aff"] | "", sizeof(out->antig_flow_count));
+        out->antig_valid = true;
+
+        // Per-model lines from `aml` array. Daemon already formats each
+        // as "Name|status" — we just store the strings.
+        out->antig_model_count = 0;
+        if (doc["aml"].is<JsonArrayConst>()) {
+            for (JsonVariantConst v : doc["aml"].as<JsonArrayConst>()) {
+                if (out->antig_model_count >= 8) break;
+                strlcpy(out->antig_model_lines[out->antig_model_count],
+                        v.as<const char*>() ? v.as<const char*>() : "",
+                        sizeof(out->antig_model_lines[0]));
+                if (out->antig_model_lines[out->antig_model_count][0])
+                    out->antig_model_count++;
+            }
+        }
+    }
     return true;
 }
 
@@ -186,7 +221,7 @@ void setup() {
     buf2 = (uint16_t*)heap_caps_malloc(W * BUF_LINES * 2, MALLOC_CAP_SPIRAM);
 
     lv_display_t* disp = lv_display_create(W, H);
-    lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
+    lv_display_set_color_format(disp, display_hal_lv_color_format());
     lv_display_set_flush_cb(disp, my_flush_cb);
     lv_display_set_buffers(disp, buf1, buf2, W * BUF_LINES * 2,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
@@ -262,10 +297,34 @@ void loop() {
             }
         }
 
+        static uint32_t last_auto_cycle_ms = 0;
+
         if (power_hal_pwr_pressed()) {
             if (!idle_consume_wake_press()) {
-                if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
-                else                                          ui_cycle_screen();
+                if (ui_get_current_screen() == SCREEN_SPLASH) {
+                    // With touch, PWR cycles animations on the splash and
+                    // a tap is what leaves it. Without touch, the user has
+                    // no other way out — route PWR straight to the
+                    // splash<->usage toggle.
+                    if (board_caps().has_touch) splash_next();
+                    else                        ui_toggle_splash();
+                } else {
+                    ui_cycle_screen();
+                }
+                last_auto_cycle_ms = millis();   // reset auto-cycle phase
+            }
+        }
+
+        // Optional auto-cycle Usage <-> Bluetooth at the cadence the board
+        // configured. Skips splash (user toggles in/out of it manually) and
+        // pauses while the display is asleep — no point cycling a dark panel.
+        if (board_caps().auto_cycle_ms > 0 && !idle_is_asleep()
+            && ui_get_current_screen() != SCREEN_SPLASH) {
+            uint32_t now = millis();
+            if (last_auto_cycle_ms == 0) last_auto_cycle_ms = now;
+            if (now - last_auto_cycle_ms >= board_caps().auto_cycle_ms) {
+                last_auto_cycle_ms = now;
+                ui_cycle_screen();
             }
         }
     }

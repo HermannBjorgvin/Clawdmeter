@@ -13,17 +13,26 @@ At minimum:
 - An **ESP32-S3** (other ESP32 family members may work; this is what the
   upstream firmware is tested on). OPI PSRAM is **required** — partial
   flush buffers and the splash canvas are allocated from PSRAM.
-- A QSPI **AMOLED panel** with a driver supported by
-  [GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX)
-  (CO5300, SH8601, NV3041A, etc.). Other interfaces aren't supported yet.
-- A **touch controller** over I2C. The HAL just needs init + read; you
-  can use any driver you can compile.
+- A **display panel**. The two easiest paths:
+  - A QSPI **AMOLED panel** with a driver supported by
+    [GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX)
+    (CO5300, SH8601, NV3041A, etc.). The Waveshare ports use this.
+  - A **SPI TFT / non-AMOLED panel** where Arduino_GFX doesn't have a
+    matching driver — vendor a hand-rolled minimal driver in your
+    board's `display.cpp`. The Xingzhi port shows ~190 lines doing
+    init-sequence + CASET/RASET + RAMWR on an NV3023 over plain SPI.
 - A **primary button** (typically the BOOT/GPIO 0 push button).
 
 Optional:
 
+- A **touch controller** over I2C — when absent, set
+  `BoardCaps.has_touch = false` so shared code routes the PWR-button
+  press on the splash screen straight to `ui_toggle_splash()`.
 - A second physical button (e.g. for HID Shift+Tab mode toggle).
-- An AXP2101 PMU for battery monitoring + a power button.
+- A third button to act as PWR / cycle-screens (the Xingzhi remaps
+  VOL_UP into `power_hal` for this).
+- An AXP2101 PMU for battery monitoring + a power button. Bare Li-Po
+  + ADC voltage divider also works — see Xingzhi's `power.cpp`.
 - A QMI8658 (or compatible) IMU for automatic rotation.
 - An XCA9554 / PCA9554 IO expander if reset / enable lines are routed
   through one (the AMOLED-1.8 board does this).
@@ -47,13 +56,13 @@ Optional:
 
    | File              | Reference port (start here)                                    |
    |-------------------|----------------------------------------------------------------|
-   | `display.cpp`     | `boards/waveshare_amoled_216/display.cpp` (with CPU rotation) or `_18/display.cpp` (no rotation) |
-   | `touch.cpp`       | `_216/touch.cpp` (library-based) or `_18/touch.cpp` (vendored I2C reader) |
+   | `display.cpp`     | `boards/waveshare_amoled_216/display.cpp` (Arduino_GFX + CPU rotation), `_18/display.cpp` (Arduino_GFX, no rotation), or `xingzhi_cube_183/display.cpp` (hand-rolled SPI init for a panel Arduino_GFX doesn't know) |
+   | `touch.cpp`       | `_216/touch.cpp` (SensorLib), `_18/touch.cpp` (vendored I2C reader), or `xingzhi_cube_183/touch.cpp` (stub for no-touch boards) |
    | `input.cpp`       | `_216/input.cpp` (two buttons) or `_18/input.cpp` (one button) |
-   | `power.cpp`       | `_216/power.cpp` (PMU IRQ) or `_18/power.cpp` (PMU + IO expander button) |
-   | `imu.cpp`         | `_216/imu.cpp` (full rotation) or `_18/imu.cpp` (init-only stub) |
-   | `caps.cpp`        | either reference — just edit the struct literal               |
-   | `board_init.cpp`  | `_216/board_init.cpp` (no expander) or `_18/board_init.cpp` (with expander) |
+   | `power.cpp`       | `_216/power.cpp` (AXP2101 + PMU IRQ), `_18/power.cpp` (AXP2101 + IO expander button), or `xingzhi_cube_183/power.cpp` (no PMU — bare ADC + CHRG GPIO + GPIO-edge PWR button) |
+   | `imu.cpp`         | `_216/imu.cpp` (full rotation), `_18/imu.cpp` (init-only stub), or `xingzhi_cube_183/imu.cpp` (full stub when there's no IMU) |
+   | `caps.cpp`        | any reference — just edit the struct literal                  |
+   | `board_init.cpp`  | `_216/board_init.cpp` (no expander), `_18/board_init.cpp` (with expander), or `xingzhi_cube_183/board_init.cpp` (no I2C peripherals, just a power-latch GPIO) |
 
 4. **Add a PlatformIO env.** In `firmware/platformio.ini`, copy one of
    the existing `[env:waveshare_amoled_*]` blocks and adjust:

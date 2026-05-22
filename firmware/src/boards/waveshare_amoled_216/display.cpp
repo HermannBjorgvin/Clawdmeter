@@ -125,6 +125,10 @@ void display_hal_tick(void) {
     else                ramp_step++;
 }
 
+lv_color_format_t display_hal_lv_color_format(void) {
+    return LV_COLOR_FORMAT_RGB565;
+}
+
 // CO5300 requires even-aligned flush regions.
 void display_hal_round_area(int32_t* x1, int32_t* y1, int32_t* x2, int32_t* y2) {
     *x1 = *x1 & ~1;
