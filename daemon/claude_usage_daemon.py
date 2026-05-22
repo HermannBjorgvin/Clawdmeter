@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -69,6 +70,16 @@ CODEX_BODY = {
     "store": False,
     "stream": True,
 }
+
+# Antigravity (Google's VSCode-based agent IDE) runs a local
+# `language_server` binary that talks to chatgpt-style cloud APIs and
+# exposes a GetUserStatus RPC over a localhost HTTPS server. We poll
+# THAT instead of the upstream Google API — no OAuth refresh needed
+# and we get monthly prompt/flow credit balances directly.
+ANTIGRAVITY_PROCESS = "language_server"
+ANTIGRAVITY_RPC_PATH = (
+    "/exa.language_server_pb.LanguageServerService/GetUserStatus"
+)
 
 
 def log(msg: str) -> None:
@@ -294,6 +305,161 @@ async def poll_codex() -> dict | None:
     }
 
 
+def find_antigravity_endpoint() -> tuple[str, str] | None:
+    """Return (base_url, csrf_token) for the Antigravity language_server
+    if it's currently running, or None.
+
+    `language_server` is spawned with --csrf_token <uuid> and listens on
+    a random localhost port. We read PID from pgrep, scrape the csrf
+    token from the command line, then lsof its listening sockets.
+    """
+    # launchd processes start with a very stripped PATH, so reach the
+    # /usr/bin and /usr/sbin tools by absolute path.
+    def _bin(name):
+        for p in ("/usr/bin", "/usr/sbin", "/bin", "/sbin"):
+            f = f"{p}/{name}"
+            if os.path.exists(f): return f
+        return name
+
+    try:
+        pid_line = subprocess.run(
+            [_bin("pgrep"), "-f", ANTIGRAVITY_PROCESS],
+            capture_output=True, text=True, timeout=3,
+        ).stdout.strip()
+        if not pid_line:
+            return None
+        pid = pid_line.splitlines()[0]
+
+        # Get full process args (ps -ww unlimited width).
+        ps = subprocess.run(
+            [_bin("ps"), "-ww", "-o", "args=", "-p", pid],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+        m = re.search(r"--csrf_token\s+([a-f0-9-]{30,})", ps)
+        if not m:
+            return None
+        csrf = m.group(1)
+
+        # lsof for listening TCP ports of that PID. The -a flag ANDs the
+        # filters together (without it, -p OR -i is the union).
+        lso = subprocess.run(
+            [_bin("lsof"), "-a", "-nP", "-iTCP", "-sTCP:LISTEN", "-p", pid],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+        ports = []
+        for line in lso.splitlines():
+            mm = re.search(r"127\.0\.0\.1:(\d+)\s+\(LISTEN\)", line)
+            if mm:
+                ports.append(mm.group(1))
+        if not ports:
+            return None
+        # language_server typically listens on two consecutive ports
+        # (one HTTPS, one HTTP). Encode both as candidates and let the
+        # caller try whichever responds.
+        return ports, csrf
+    except (subprocess.SubprocessError, FileNotFoundError, OSError) as e:
+        log(f"Antigravity endpoint lookup failed: {e}")
+        return None
+
+
+async def poll_antigravity() -> dict | None:
+    endpoint = find_antigravity_endpoint()
+    if not endpoint:
+        return None
+    ports, csrf = endpoint
+
+    resp = None
+    # Try each port with both schemes — language_server splits one
+    # port for HTTPS and the next for HTTP.
+    candidates = [(scheme, port) for port in ports for scheme in ("https", "http")]
+    last_err = None
+    for scheme, port in candidates:
+        url = f"{scheme}://127.0.0.1:{port}{ANTIGRAVITY_RPC_PATH}"
+        try:
+            async with httpx.AsyncClient(timeout=5.0, verify=False) as http:
+                resp = await http.post(url, headers={
+                    "Content-Type": "application/json",
+                    "x-codeium-csrf-token": csrf,
+                }, content=b"{}")
+            if resp.status_code == 200:
+                break
+            resp = None
+        except httpx.HTTPError as e:
+            last_err = e
+            resp = None
+            continue
+    if resp is None:
+        if last_err: log(f"Antigravity call failed: {last_err}")
+        return None
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+
+    plan = data.get("userStatus", {}).get("planStatus", {})
+    info = plan.get("planInfo", {})
+
+    def pct_used(remaining, total):
+        try:
+            r = float(remaining); t = float(total)
+            if t <= 0: return 0
+            return max(0, min(100, int(round((1 - r / t) * 100))))
+        except (TypeError, ValueError):
+            return 0
+
+    prompt_total = float(info.get("monthlyPromptCredits", 0) or 0)
+    flow_total   = float(info.get("monthlyFlowCredits", 0) or 0)
+    prompt_avail = float(plan.get("availablePromptCredits", 0) or 0)
+    flow_avail   = float(plan.get("availableFlowCredits", 0) or 0)
+
+    # Reset minutes — monthly credits track to the LONGEST per-model
+    # reset window we can see (weekly model resets are closer to the
+    # monthly-credit cycle than the per-day promo resets). Fall back to
+    # ~30 days when we have no signal.
+    reset_mins = 30 * 24 * 60
+    longest = 0
+    cfgs = data.get("userStatus", {}).get("cascadeModelConfigData", {}).get("clientModelConfigs", []) or []
+    for cfg in cfgs:
+        rt = cfg.get("quotaInfo", {}).get("resetTime")
+        if not rt: continue
+        try:
+            t = datetime.fromisoformat(rt.replace("Z", "+00:00"))
+            delta = int((t - datetime.now(timezone.utc)).total_seconds() / 60)
+            if delta > longest:
+                longest = delta
+        except Exception:
+            pass
+    if longest > 0:
+        reset_mins = longest
+
+    def fmt_count(n):
+        """Compact number: 50000 -> 50K, 1500 -> 1.5K, 500 -> 500."""
+        try: n = int(round(float(n)))
+        except (TypeError, ValueError): return "?"
+        if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
+        if n >= 10_000:    return f"{n//1000}K"
+        if n >= 1_000:     return f"{n/1000:.1f}K"
+        return str(n)
+
+    plan = (data.get("userStatus", {}).get("userTier", {}).get("name")
+            or info.get("planName")
+            or "")
+    # Trim verbose tier names like "Google AI Ultra" -> "Ultra".
+    short_plan = plan.replace("Google AI ", "").replace("Google ", "")[:12]
+
+    return {
+        "as":  pct_used(prompt_avail, prompt_total),
+        "asr": reset_mins,
+        "aw":  pct_used(flow_avail, flow_total),
+        "awr": reset_mins,
+        # Compact info strings the firmware renders in place of the
+        # "Resets in …" line on the Antigravity screen.
+        "apn": short_plan,
+        "apf": f"{fmt_count(prompt_avail)}/{fmt_count(prompt_total)}",
+        "aff": f"{fmt_count(flow_avail)}/{fmt_count(flow_total)}",
+    }
+
+
 class Session:
     def __init__(self, client: BleakClient) -> None:
         self.client = client
@@ -361,6 +527,10 @@ async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
                         if codex is not None:
                             payload.update(codex)
                             log(f"Codex usage: cs={codex['cs']}% cw={codex['cw']}%")
+                        antig = await poll_antigravity()
+                        if antig is not None:
+                            payload.update(antig)
+                            log(f"Antigravity usage: as={antig['as']}% aw={antig['aw']}%")
                         if await session.write_payload(payload):
                             last_poll = time.time()
                             used_successfully = True

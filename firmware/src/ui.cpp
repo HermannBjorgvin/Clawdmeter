@@ -200,6 +200,20 @@ static lv_obj_t* lbl_codex_weekly_reset;
 static lv_obj_t* lbl_codex_anim;
 static bool      have_codex_data = false;   // skip cycling to this screen until data arrives
 
+// ---- Usage screen widgets (Antigravity) ----
+static lv_obj_t* antig_container;
+static lv_obj_t* lbl_antig_title;
+static lv_obj_t* bar_antig_session;
+static lv_obj_t* lbl_antig_session_pct;
+static lv_obj_t* lbl_antig_session_label;
+static lv_obj_t* lbl_antig_session_reset;
+static lv_obj_t* bar_antig_weekly;
+static lv_obj_t* lbl_antig_weekly_pct;
+static lv_obj_t* lbl_antig_weekly_label;
+static lv_obj_t* lbl_antig_weekly_reset;
+static lv_obj_t* lbl_antig_anim;
+static bool      have_antig_data = false;
+
 // ---- Bluetooth screen widgets ----
 static lv_obj_t* ble_container;
 static lv_obj_t* lbl_ble_status;
@@ -458,6 +472,44 @@ static void init_usage_codex_screen(lv_obj_t* scr) {
     lv_obj_add_flag(codex_container, LV_OBJ_FLAG_HIDDEN);
 }
 
+// ======== Usage (Antigravity) Screen ========
+// Same layout as the Claude / Codex screens, populated from
+// antig_* fields. Cycled in only after the daemon has reported
+// Antigravity data (have_antig_data) so a Codex-only setup never
+// shows an empty "Antigravity" panel.
+static void init_usage_antig_screen(lv_obj_t* scr) {
+    antig_container = lv_obj_create(scr);
+    lv_obj_set_size(antig_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(antig_container, 0, 0);
+    lv_obj_set_style_bg_opa(antig_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(antig_container, 0, 0);
+    lv_obj_set_style_pad_all(antig_container, 0, 0);
+    lv_obj_clear_flag(antig_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(antig_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+
+    lbl_antig_title = lv_label_create(antig_container);
+    lv_label_set_text(lbl_antig_title, "Antigravity");
+    lv_obj_set_style_text_font(lbl_antig_title, L.usage_title_font, 0);
+    lv_obj_set_style_text_color(lbl_antig_title, COL_TEXT, 0);
+    lv_obj_align(lbl_antig_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+
+    make_usage_panel(antig_container, L.content_y, "Prompt",
+                     &lbl_antig_session_pct, &lbl_antig_session_label,
+                     &bar_antig_session, &lbl_antig_session_reset);
+    make_usage_panel(antig_container,
+                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Flow",
+                     &lbl_antig_weekly_pct, &lbl_antig_weekly_label,
+                     &bar_antig_weekly, &lbl_antig_weekly_reset);
+
+    lbl_antig_anim = lv_label_create(antig_container);
+    lv_label_set_text(lbl_antig_anim, "");
+    lv_obj_set_style_text_font(lbl_antig_anim, L.usage_anim_font, 0);
+    lv_obj_set_style_text_color(lbl_antig_anim, COL_ACCENT, 0);
+    lv_obj_align(lbl_antig_anim, LV_ALIGN_BOTTOM_MID, 0, L.usage_anim_offset_y);
+
+    lv_obj_add_flag(antig_container, LV_OBJ_FLAG_HIDDEN);
+}
+
 // ======== Bluetooth Screen ========
 
 static void init_bluetooth_screen(lv_obj_t* scr) {
@@ -569,6 +621,7 @@ void ui_init(void) {
 
     init_usage_screen(scr);
     init_usage_codex_screen(scr);
+    init_usage_antig_screen(scr);
     init_bluetooth_screen(scr);
     splash_init(scr);
 
@@ -634,10 +687,47 @@ void ui_update(const UsageData* data) {
         format_reset_time(data->codex_weekly_reset_mins, buf, sizeof(buf));
         lv_label_set_text(lbl_codex_weekly_reset, buf);
     }
+
+    if (data->antig_valid && antig_container) {
+        have_antig_data = true;
+
+        // Title gets the short plan name appended: "Antigravity Ultra".
+        if (data->antig_plan[0]) {
+            char title_buf[40];
+            snprintf(title_buf, sizeof(title_buf), "Antig %s", data->antig_plan);
+            lv_label_set_text(lbl_antig_title, title_buf);
+        }
+
+        int as = (int)(data->antig_session_pct + 0.5f);
+        lv_label_set_text_fmt(lbl_antig_session_pct, "%d%%", as);
+        lv_bar_set_value(bar_antig_session, as, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_antig_session, pct_color(data->antig_session_pct), LV_PART_INDICATOR);
+        // Show "500/50K" credit count instead of the reset clock —
+        // Antigravity credits roll monthly so a precise reset isn't
+        // as informative as the raw remaining number.
+        if (data->antig_prompt_count[0]) {
+            lv_label_set_text(lbl_antig_session_reset, data->antig_prompt_count);
+        } else {
+            format_reset_time(data->antig_session_reset_mins, buf, sizeof(buf));
+            lv_label_set_text(lbl_antig_session_reset, buf);
+        }
+
+        int aw = (int)(data->antig_weekly_pct + 0.5f);
+        lv_label_set_text_fmt(lbl_antig_weekly_pct, "%d%%", aw);
+        lv_bar_set_value(bar_antig_weekly, aw, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_antig_weekly, pct_color(data->antig_weekly_pct), LV_PART_INDICATOR);
+        if (data->antig_flow_count[0]) {
+            lv_label_set_text(lbl_antig_weekly_reset, data->antig_flow_count);
+        } else {
+            format_reset_time(data->antig_weekly_reset_mins, buf, sizeof(buf));
+            lv_label_set_text(lbl_antig_weekly_reset, buf);
+        }
+    }
 }
 
 void ui_tick_anim(void) {
-    if (current_screen != SCREEN_USAGE && current_screen != SCREEN_USAGE_CODEX) return;
+    if (current_screen != SCREEN_USAGE && current_screen != SCREEN_USAGE_CODEX
+        && current_screen != SCREEN_USAGE_ANTIG) return;
 
     uint32_t now = lv_tick_get();
 
@@ -656,8 +746,9 @@ void ui_tick_anim(void) {
         snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6",
                  spinner_frames[anim_spinner_idx],
                  anim_messages[anim_msg_idx]);
-        lv_obj_t* target = (current_screen == SCREEN_USAGE_CODEX) ? lbl_codex_anim
-                                                                  : lbl_anim;
+        lv_obj_t* target = lbl_anim;
+        if (current_screen == SCREEN_USAGE_CODEX) target = lbl_codex_anim;
+        else if (current_screen == SCREEN_USAGE_ANTIG) target = lbl_antig_anim;
         if (target) lv_label_set_text(target, buf);
     }
 }
@@ -686,6 +777,7 @@ static void ble_reset_click_cb(lv_event_t* e) {
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
     if (codex_container) lv_obj_add_flag(codex_container, LV_OBJ_FLAG_HIDDEN);
+    if (antig_container) lv_obj_add_flag(antig_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
@@ -693,6 +785,7 @@ void ui_show_screen(screen_t screen) {
     case SCREEN_SPLASH:        splash_show(); break;
     case SCREEN_USAGE:         lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
     case SCREEN_USAGE_CODEX:   lv_obj_clear_flag(codex_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_USAGE_ANTIG:   lv_obj_clear_flag(antig_container, LV_OBJ_FLAG_HIDDEN); break;
     case SCREEN_BLUETOOTH:     lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
     }
@@ -713,16 +806,22 @@ void ui_show_screen(screen_t screen) {
 }
 
 void ui_cycle_screen(void) {
-    // Cycle order: Usage(Claude) → Usage(Codex) → Bluetooth → Usage…
-    // The Codex screen is skipped until the daemon has actually sent a
-    // Codex payload (have_codex_data) — otherwise a Codex-less setup
-    // would show an empty "Codex" screen forever.
+    // Cycle order: Usage(Claude) → Usage(Codex) → Usage(Antigravity) →
+    // Bluetooth → Usage… Each "extra" Usage screen is only inserted
+    // once we've seen real data for it, so a Claude-only setup just
+    // pings Usage ↔ Bluetooth and never visits empty placeholder
+    // screens.
     screen_t next;
     switch (current_screen) {
     case SCREEN_USAGE:
-        next = have_codex_data ? SCREEN_USAGE_CODEX : SCREEN_BLUETOOTH;
+        if (have_codex_data)      next = SCREEN_USAGE_CODEX;
+        else if (have_antig_data) next = SCREEN_USAGE_ANTIG;
+        else                       next = SCREEN_BLUETOOTH;
         break;
     case SCREEN_USAGE_CODEX:
+        next = have_antig_data ? SCREEN_USAGE_ANTIG : SCREEN_BLUETOOTH;
+        break;
+    case SCREEN_USAGE_ANTIG:
         next = SCREEN_BLUETOOTH;
         break;
     case SCREEN_BLUETOOTH:

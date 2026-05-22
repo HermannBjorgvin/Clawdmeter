@@ -19,4 +19,15 @@ struct UsageData {
     float codex_weekly_pct;
     int   codex_weekly_reset_mins;
     bool  codex_valid;        // true once first Codex payload received
+
+    // Antigravity (Google's agent IDE) — monthly prompt + flow credits
+    // pulled from the local language_server's GetUserStatus RPC.
+    float antig_session_pct;       // prompt-credit % used
+    int   antig_session_reset_mins;
+    float antig_weekly_pct;        // flow-credit % used
+    int   antig_weekly_reset_mins;
+    char  antig_plan[16];          // short plan name, e.g. "Ultra" / "Pro"
+    char  antig_prompt_count[24];  // pre-formatted "500/50K"
+    char  antig_flow_count[24];    // pre-formatted "100/150K"
+    bool  antig_valid;
 };

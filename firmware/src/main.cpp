@@ -113,6 +113,16 @@ static bool parse_json(const char* json, UsageData* out) {
         out->codex_weekly_reset_mins  = doc["cwr"] | -1;
         out->codex_valid = true;
     }
+    if (doc.containsKey("as") || doc.containsKey("aw")) {
+        out->antig_session_pct       = doc["as"]  | 0.0f;
+        out->antig_session_reset_mins = doc["asr"] | -1;
+        out->antig_weekly_pct        = doc["aw"]  | 0.0f;
+        out->antig_weekly_reset_mins  = doc["awr"] | -1;
+        strlcpy(out->antig_plan,         doc["apn"] | "", sizeof(out->antig_plan));
+        strlcpy(out->antig_prompt_count, doc["apf"] | "", sizeof(out->antig_prompt_count));
+        strlcpy(out->antig_flow_count,   doc["aff"] | "", sizeof(out->antig_flow_count));
+        out->antig_valid = true;
+    }
     return true;
 }
 
