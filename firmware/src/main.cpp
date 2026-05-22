@@ -102,6 +102,17 @@ static bool parse_json(const char* json, UsageData* out) {
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
     out->valid = true;
+
+    // Codex fields are optional — daemon may not have a Codex auth
+    // and the payload will omit them. -1 / 0.0 + codex_valid=false
+    // signals "no data" to the UI.
+    if (doc.containsKey("cs") || doc.containsKey("cw")) {
+        out->codex_session_pct      = doc["cs"]  | 0.0f;
+        out->codex_session_reset_mins = doc["csr"] | -1;
+        out->codex_weekly_pct       = doc["cw"]  | 0.0f;
+        out->codex_weekly_reset_mins  = doc["cwr"] | -1;
+        out->codex_valid = true;
+    }
     return true;
 }
 

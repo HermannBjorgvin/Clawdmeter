@@ -173,7 +173,7 @@ static void compute_layout(const BoardCaps& c) {
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
 
-// ---- Usage screen widgets ----
+// ---- Usage screen widgets (Claude) ----
 static lv_obj_t* usage_container;
 static lv_obj_t* lbl_title;
 static lv_obj_t* bar_session;
@@ -185,6 +185,20 @@ static lv_obj_t* lbl_weekly_pct;
 static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 static lv_obj_t* lbl_anim;
+
+// ---- Usage screen widgets (Codex) ----
+static lv_obj_t* codex_container;
+static lv_obj_t* lbl_codex_title;
+static lv_obj_t* bar_codex_session;
+static lv_obj_t* lbl_codex_session_pct;
+static lv_obj_t* lbl_codex_session_label;
+static lv_obj_t* lbl_codex_session_reset;
+static lv_obj_t* bar_codex_weekly;
+static lv_obj_t* lbl_codex_weekly_pct;
+static lv_obj_t* lbl_codex_weekly_label;
+static lv_obj_t* lbl_codex_weekly_reset;
+static lv_obj_t* lbl_codex_anim;
+static bool      have_codex_data = false;   // skip cycling to this screen until data arrives
 
 // ---- Bluetooth screen widgets ----
 static lv_obj_t* ble_container;
@@ -406,6 +420,44 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.usage_anim_offset_y);
 }
 
+// ======== Usage (Codex) Screen ========
+// Mirror of the Claude usage screen with a different title and a
+// separate widget set, populated from the codex_* fields of
+// UsageData. Cycled into rotation by ui_cycle_screen() only after the
+// daemon has sent at least one Codex payload (have_codex_data == true).
+static void init_usage_codex_screen(lv_obj_t* scr) {
+    codex_container = lv_obj_create(scr);
+    lv_obj_set_size(codex_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(codex_container, 0, 0);
+    lv_obj_set_style_bg_opa(codex_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(codex_container, 0, 0);
+    lv_obj_set_style_pad_all(codex_container, 0, 0);
+    lv_obj_clear_flag(codex_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(codex_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+
+    lbl_codex_title = lv_label_create(codex_container);
+    lv_label_set_text(lbl_codex_title, "Codex");
+    lv_obj_set_style_text_font(lbl_codex_title, L.usage_title_font, 0);
+    lv_obj_set_style_text_color(lbl_codex_title, COL_TEXT, 0);
+    lv_obj_align(lbl_codex_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+
+    make_usage_panel(codex_container, L.content_y, "5h",
+                     &lbl_codex_session_pct, &lbl_codex_session_label,
+                     &bar_codex_session, &lbl_codex_session_reset);
+    make_usage_panel(codex_container,
+                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "7d",
+                     &lbl_codex_weekly_pct, &lbl_codex_weekly_label,
+                     &bar_codex_weekly, &lbl_codex_weekly_reset);
+
+    lbl_codex_anim = lv_label_create(codex_container);
+    lv_label_set_text(lbl_codex_anim, "");
+    lv_obj_set_style_text_font(lbl_codex_anim, L.usage_anim_font, 0);
+    lv_obj_set_style_text_color(lbl_codex_anim, COL_ACCENT, 0);
+    lv_obj_align(lbl_codex_anim, LV_ALIGN_BOTTOM_MID, 0, L.usage_anim_offset_y);
+
+    lv_obj_add_flag(codex_container, LV_OBJ_FLAG_HIDDEN);
+}
+
 // ======== Bluetooth Screen ========
 
 static void init_bluetooth_screen(lv_obj_t* scr) {
@@ -516,6 +568,7 @@ void ui_init(void) {
     init_battery_icons();
 
     init_usage_screen(scr);
+    init_usage_codex_screen(scr);
     init_bluetooth_screen(scr);
     splash_init(scr);
 
@@ -560,10 +613,31 @@ void ui_update(const UsageData* data) {
 
     format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
     lv_label_set_text(lbl_weekly_reset, buf);
+
+    // Codex panel — only update if the daemon included Codex data in
+    // the payload. First time we get Codex data, flip have_codex_data
+    // so ui_cycle_screen() starts including the Codex screen.
+    if (data->codex_valid && codex_container) {
+        have_codex_data = true;
+
+        int cs = (int)(data->codex_session_pct + 0.5f);
+        lv_label_set_text_fmt(lbl_codex_session_pct, "%d%%", cs);
+        lv_bar_set_value(bar_codex_session, cs, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_codex_session, pct_color(data->codex_session_pct), LV_PART_INDICATOR);
+        format_reset_time(data->codex_session_reset_mins, buf, sizeof(buf));
+        lv_label_set_text(lbl_codex_session_reset, buf);
+
+        int cw = (int)(data->codex_weekly_pct + 0.5f);
+        lv_label_set_text_fmt(lbl_codex_weekly_pct, "%d%%", cw);
+        lv_bar_set_value(bar_codex_weekly, cw, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_codex_weekly, pct_color(data->codex_weekly_pct), LV_PART_INDICATOR);
+        format_reset_time(data->codex_weekly_reset_mins, buf, sizeof(buf));
+        lv_label_set_text(lbl_codex_weekly_reset, buf);
+    }
 }
 
 void ui_tick_anim(void) {
-    if (current_screen != SCREEN_USAGE) return;
+    if (current_screen != SCREEN_USAGE && current_screen != SCREEN_USAGE_CODEX) return;
 
     uint32_t now = lv_tick_get();
 
@@ -582,7 +656,9 @@ void ui_tick_anim(void) {
         snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6",
                  spinner_frames[anim_spinner_idx],
                  anim_messages[anim_msg_idx]);
-        lv_label_set_text(lbl_anim, buf);
+        lv_obj_t* target = (current_screen == SCREEN_USAGE_CODEX) ? lbl_codex_anim
+                                                                  : lbl_anim;
+        if (target) lv_label_set_text(target, buf);
     }
 }
 
@@ -609,13 +685,15 @@ static void ble_reset_click_cb(lv_event_t* e) {
 
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+    if (codex_container) lv_obj_add_flag(codex_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
-    case SCREEN_SPLASH:     splash_show(); break;
-    case SCREEN_USAGE:      lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
-    case SCREEN_BLUETOOTH:  lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_SPLASH:        splash_show(); break;
+    case SCREEN_USAGE:         lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_USAGE_CODEX:   lv_obj_clear_flag(codex_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_BLUETOOTH:     lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
     }
 
@@ -635,11 +713,24 @@ void ui_show_screen(screen_t screen) {
 }
 
 void ui_cycle_screen(void) {
+    // Cycle order: Usage(Claude) → Usage(Codex) → Bluetooth → Usage…
+    // The Codex screen is skipped until the daemon has actually sent a
+    // Codex payload (have_codex_data) — otherwise a Codex-less setup
+    // would show an empty "Codex" screen forever.
     screen_t next;
     switch (current_screen) {
-    case SCREEN_USAGE:     next = SCREEN_BLUETOOTH; break;
-    case SCREEN_BLUETOOTH: next = SCREEN_USAGE;     break;
-    default:               next = SCREEN_USAGE;     break;
+    case SCREEN_USAGE:
+        next = have_codex_data ? SCREEN_USAGE_CODEX : SCREEN_BLUETOOTH;
+        break;
+    case SCREEN_USAGE_CODEX:
+        next = SCREEN_BLUETOOTH;
+        break;
+    case SCREEN_BLUETOOTH:
+        next = SCREEN_USAGE;
+        break;
+    default:
+        next = SCREEN_USAGE;
+        break;
     }
     ui_show_screen(next);
 }

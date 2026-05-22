@@ -49,6 +49,27 @@ API_BODY = {
     "messages": [{"role": "user", "content": "hi"}],
 }
 
+# Codex / ChatGPT subscription usage. The Codex CLI hits
+# https://chatgpt.com/backend-api/codex/responses and the response
+# carries x-codex-primary-*-percent / -reset-after-seconds headers
+# that mirror Claude's anthropic-ratelimit-* family.
+CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
+CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
+CODEX_HEADERS_TEMPLATE = {
+    "Content-Type": "application/json",
+    "Accept": "text/event-stream",
+    "OpenAI-Beta": "responses=experimental",
+    "User-Agent": "clawdmeter-daemon/0.1",
+    "originator": "codex_cli_rs",
+}
+CODEX_BODY = {
+    "model": "gpt-5.5",
+    "instructions": "Reply with a single dot.",
+    "input": [{"role": "user", "content": [{"type": "input_text", "text": "."}]}],
+    "store": False,
+    "stream": True,
+}
+
 
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -200,6 +221,79 @@ async def poll_api(token: str) -> dict | None:
     return payload
 
 
+def load_codex_auth() -> tuple[str, str] | None:
+    """Return (access_token, account_id) from ~/.codex/auth.json, or
+    None if Codex CLI isn't logged in / not installed."""
+    if not CODEX_AUTH_PATH.exists():
+        return None
+    try:
+        data = json.loads(CODEX_AUTH_PATH.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        log(f"Codex auth read failed: {e}")
+        return None
+    tokens = data.get("tokens") or {}
+    access = tokens.get("access_token")
+    account = tokens.get("account_id") or ""
+    if not access:
+        return None
+    return access, account
+
+
+async def poll_codex() -> dict | None:
+    auth = load_codex_auth()
+    if not auth:
+        return None
+    access, account_id = auth
+
+    headers = dict(CODEX_HEADERS_TEMPLATE)
+    headers["Authorization"] = f"Bearer {access}"
+    if account_id:
+        headers["chatgpt-account-id"] = account_id
+    # Each call needs a fresh session id so the backend treats it as a
+    # distinct micro-request. Reuse the same UUID-shape for stability.
+    headers["session_id"] = "00000000-0000-0000-0000-000000000001"
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            # We only need the response headers — abort the SSE stream
+            # the moment the rate-limit headers land.
+            async with http.stream("POST", CODEX_URL, headers=headers, json=CODEX_BODY) as resp:
+                if resp.status_code >= 400:
+                    log(f"Codex HTTP {resp.status_code}")
+                    return None
+                rh = resp.headers
+                # Drain only enough to get headers; we don't need the body.
+                async for _ in resp.aiter_raw():
+                    break
+    except httpx.HTTPError as e:
+        log(f"Codex call failed: {e}")
+        return None
+
+    def hdr(name: str, default: str = "0") -> str:
+        return rh.get(name, default)
+
+    def pct(s: str) -> int:
+        try: return int(round(float(s)))
+        except (TypeError, ValueError): return 0
+
+    def reset_minutes_secs(s: str) -> int:
+        try: secs = float(s)
+        except (TypeError, ValueError): return 0
+        return int(round(secs / 60.0)) if secs > 0 else 0
+
+    primary_pct = hdr("x-codex-primary-used-percent")
+    if not primary_pct:
+        # Headers absent → likely a plan that doesn't expose them.
+        return None
+
+    return {
+        "cs":  pct(primary_pct),
+        "csr": reset_minutes_secs(hdr("x-codex-primary-reset-after-seconds")),
+        "cw":  pct(hdr("x-codex-secondary-used-percent")),
+        "cwr": reset_minutes_secs(hdr("x-codex-secondary-reset-after-seconds")),
+    }
+
+
 class Session:
     def __init__(self, client: BleakClient) -> None:
         self.client = client
@@ -263,6 +357,10 @@ async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
                 else:
                     payload = await poll_api(token)
                     if payload is not None:
+                        codex = await poll_codex()
+                        if codex is not None:
+                            payload.update(codex)
+                            log(f"Codex usage: cs={codex['cs']}% cw={codex['cw']}%")
                         if await session.write_payload(payload):
                             last_poll = time.time()
                             used_successfully = True
