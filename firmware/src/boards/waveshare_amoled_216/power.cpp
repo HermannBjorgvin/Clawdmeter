@@ -72,3 +72,8 @@ bool power_hal_pwr_pressed(void) {
     }
     return false;
 }
+
+// 2.16 board has no audio, so the mute toggle has no consumer. Could be
+// wired to the AXP2101 PKEY long IRQ later if a different long-press
+// gesture comes along.
+bool power_hal_pwr_long_pressed(void) { return false; }

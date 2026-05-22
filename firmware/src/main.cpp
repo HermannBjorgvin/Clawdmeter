@@ -3,6 +3,7 @@
 #include <lvgl.h>
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
+#include <Preferences.h>
 
 #include "data.h"
 #include "ui.h"
@@ -18,8 +19,10 @@
 #include "hal/input_hal.h"
 #include "hal/power_hal.h"
 #include "hal/imu_hal.h"
+#include "hal/audio_hal.h"
 
 static UsageData usage = {};
+static ActivityData activity = {};
 
 // ---- LVGL draw buffers (PSRAM, partial render mode) ----
 #define BUF_LINES 40
@@ -86,8 +89,11 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 }
 
-// Parse a JSON line into UsageData.
-static bool parse_json(const char* json, UsageData* out) {
+// Parse a JSON line into UsageData and (optionally) ActivityData. The
+// daemon sends both in the same payload; the activity portion is absent
+// when no hook events have fired recently — in that case act_out is
+// updated to "no sessions" so the Activity screen renders a placeholder.
+static bool parse_json(const char* json, UsageData* out, ActivityData* act_out) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
@@ -101,7 +107,42 @@ static bool parse_json(const char* json, UsageData* out) {
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
+    out->chime = (doc["c"] | 0) != 0;
     out->valid = true;
+
+    if (!act_out) return true;
+    act_out->session_count = 0;
+    JsonArrayConst sessions = doc["sessions"].as<JsonArrayConst>();
+    if (!sessions.isNull()) {
+        for (JsonVariantConst sv : sessions) {
+            if (act_out->session_count >= MAX_SESSIONS) break;
+            SessionData& s = act_out->sessions[act_out->session_count];
+            strlcpy(s.project,      sv["p"] | "", sizeof(s.project));
+            strlcpy(s.model,        sv["m"] | "", sizeof(s.model));
+            strlcpy(s.last_prompt,        sv["u"]  | "", sizeof(s.last_prompt));
+            strlcpy(s.current_tool,       sv["t"]  | "", sizeof(s.current_tool));
+            strlcpy(s.current_tool_args,  sv["ta"] | "", sizeof(s.current_tool_args));
+            s.phase = ((int)(sv["ph"] | 0)) == 1 ? PHASE_RUNNING : PHASE_IDLE;
+            s.last_active_secs = sv["la"] | 0;
+            s.todo_count = 0;
+            JsonArrayConst td = sv["td"].as<JsonArrayConst>();
+            if (!td.isNull()) {
+                for (JsonVariantConst tv : td) {
+                    if (s.todo_count >= MAX_TODOS_PER_SESSION) break;
+                    TodoItem& t = s.todos[s.todo_count];
+                    strlcpy(t.content, tv["c"] | "", sizeof(t.content));
+                    strlcpy(t.active_form, tv["a"] | "", sizeof(t.active_form));
+                    int sn = tv["s"] | 0;
+                    if      (sn == 1) t.status = TODO_IN_PROGRESS;
+                    else if (sn == 2) t.status = TODO_COMPLETED;
+                    else              t.status = TODO_PENDING;
+                    s.todo_count++;
+                }
+            }
+            act_out->session_count++;
+        }
+    }
+    act_out->valid = true;
     return true;
 }
 
@@ -147,6 +188,14 @@ static void check_serial_cmd() {
         if (c == '\n' || c == '\r') {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
+            else if (strcmp(cmd_buf, "chime") == 0) {
+                if (board_caps().has_audio) {
+                    Serial.println("chime: triggering");
+                    audio_hal_play_chime();
+                } else {
+                    Serial.println("chime: board has no audio");
+                }
+            }
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -198,11 +247,28 @@ void setup() {
 
     ble_init();
     input_hal_init();
+    if (board_caps().has_audio) {
+        audio_hal_init();
+        // Mute preference persists across reboots in NVS namespace "clawd".
+        // Default false → chimes ring out of the box; user mutes via PWR
+        // long-press (handled below). Open RW (not RO) so the namespace
+        // is auto-created on first boot — avoids a NOT_FOUND error log
+        // on every boot until the user first toggles mute.
+        Preferences prefs;
+        if (prefs.begin("clawd", false)) {
+            if (!prefs.isKey("muted")) prefs.putBool("muted", false);
+            bool muted = prefs.getBool("muted", false);
+            prefs.end();
+            audio_hal_set_muted(muted);
+            ui_set_mute_indicator(muted);
+            Serial.printf("mute: loaded from NVS, muted=%d\n", (int)muted);
+        }
+    }
 
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
-    ui_show_screen(SCREEN_SPLASH);
+    ui_show_screen(SCREEN_SPLASH);  // morphs to Activity automatically when sessions arrive
 
     Serial.printf("Dashboard ready (%s, %dx%d), waiting for data on BLE...\n",
         board_caps().name, W, H);
@@ -268,6 +334,24 @@ void loop() {
                 else                                          ui_cycle_screen();
             }
         }
+
+        if (board_caps().has_audio && power_hal_pwr_long_pressed()) {
+            // Toggle the chime mute. Save to NVS so the preference sticks
+            // across reboots; flash a toast + the persistent indicator.
+            bool now_muted = !audio_hal_is_muted();
+            Serial.printf("mute: long-press PWR -> muted=%d\n", (int)now_muted);
+            audio_hal_set_muted(now_muted);
+            Preferences prefs;
+            if (prefs.begin("clawd", false)) {
+                prefs.putBool("muted", now_muted);
+                prefs.end();
+            }
+            ui_set_mute_indicator(now_muted);
+            ui_flash_mute_toast(now_muted);
+            // Audible confirmation on unmute — feels natural, and proves
+            // the audio path still works after toggling.
+            if (!now_muted) audio_hal_play_chime();
+        }
     }
 
     ble_state_t bs = ble_get_state();
@@ -289,7 +373,7 @@ void loop() {
     check_serial_cmd();
 
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
+        if (parse_json(ble_get_data(), &usage, &activity)) {
             int g_before = usage_rate_group();
             usage_rate_sample(usage.session_pct);
             int g_after = usage_rate_group();
@@ -299,6 +383,14 @@ void loop() {
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
             ui_update(&usage);
+            ui_update_activity(&activity);
+            // Daemon sets `c` on exactly one payload after any session
+            // transitions running→idle. audio_hal_play_chime() coalesces
+            // and respects the mute flag.
+            if (board_caps().has_audio && usage.chime) {
+                Serial.println("chime: BLE payload carries c=1, playing");
+                audio_hal_play_chime();
+            }
             ble_send_ack();
         } else {
             ble_send_nack();

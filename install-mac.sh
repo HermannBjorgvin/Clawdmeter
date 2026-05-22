@@ -51,6 +51,55 @@ sed \
 echo "  Installed: $PLIST_DST"
 echo ""
 
+echo "[3b/5] Registering Claude Code hook (~/.claude/settings.json)..."
+echo "  This wires daemon/clawdmeter_hook.py into Claude Code as a hook"
+echo "  on TodoWrite / Stop / UserPromptSubmit etc., so the Activity"
+echo "  screen shows live session state. Skip if you only want the"
+echo "  5h/7d usage panels without the per-session view."
+echo ""
+read -r -p "Register the Claude Code hook? [Y/n] " hook_ans
+if [[ "$hook_ans" =~ ^[Nn]$ ]]; then
+    echo "  Skipped. Re-run this installer later if you change your mind."
+    echo ""
+else
+CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+HOOK_CMD="$PYTHON_BIN $SCRIPT_DIR/daemon/clawdmeter_hook.py"
+mkdir -p "$HOME/.claude"
+"$PYTHON_BIN" - "$CLAUDE_SETTINGS" "$HOOK_CMD" << 'PYEOF'
+import json, sys, os
+path, hook_cmd = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f: data = json.load(f)
+    if not isinstance(data, dict): data = {}
+except (FileNotFoundError, json.JSONDecodeError):
+    data = {}
+hooks = data.setdefault("hooks", {})
+# Subscribe to events that move session state: tool-use boundaries and Stop.
+# UserPromptSubmit gives us a session lifecycle anchor when the user first
+# engages even before any tool fires.
+EVENTS = ["PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit", "SessionStart"]
+for event in EVENTS:
+    rules = hooks.setdefault(event, [])
+    if not isinstance(rules, list): rules = []
+    already = any(
+        any(h.get("command") == hook_cmd for h in r.get("hooks", []) if isinstance(h, dict))
+        for r in rules if isinstance(r, dict)
+    )
+    if already: continue
+    rules.append({
+        "matcher": "",  # all tools / all prompts
+        "hooks": [{"type": "command", "command": hook_cmd}],
+    })
+    hooks[event] = rules
+data["hooks"] = hooks
+tmp = path + ".tmp"
+with open(tmp, "w") as f: json.dump(data, f, indent=2)
+os.replace(tmp, path)
+print(f"  Wrote {path}")
+PYEOF
+echo ""
+fi
+
 echo "[4/5] Bluetooth permission check..."
 echo "  On first run the daemon will trigger a Bluetooth permission prompt."
 echo "  macOS only prompts for foreground processes — so we'll run it"
