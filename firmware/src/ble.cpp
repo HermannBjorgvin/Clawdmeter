@@ -91,8 +91,16 @@ static void start_advertising() {
     adv->setScanResponseData(scanResp);
     adv->enableScanResponse(true);
     bool ok = adv->start();
-    state = BLE_STATE_ADVERTISING;
-    Serial.printf("BLE: advertising start=%s\n", ok ? "OK" : "FAILED");
+    // Only reflect ADVERTISING in the UI state when no client is connected.
+    // With MAX_CONNECTIONS=2, onConnect re-advertises to fill the second slot;
+    // without this guard the UI would flip CONNECTED → ADVERTISING on every
+    // first connect and never come back until a second client arrived.
+    if (!server || server->getConnectedCount() == 0) {
+        state = BLE_STATE_ADVERTISING;
+    }
+    Serial.printf("BLE: advertising start=%s (connected=%u)\n",
+        ok ? "OK" : "FAILED",
+        server ? (unsigned)server->getConnectedCount() : 0);
 }
 
 class ServerCallbacks : public NimBLEServerCallbacks {

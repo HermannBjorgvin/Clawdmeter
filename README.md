@@ -25,9 +25,17 @@ While the splash is up, the middle button cycles animations instead of screens. 
 
 ## Hardware
 
-- [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) - ESP32-S3R8, 2.16" 480×480 AMOLED (CO5300 QSPI), CST9220 cap touch, AXP2101 PMU + Li-Po battery, QMI8658 IMU
+Two boards are supported out of the box:
+
+- [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) — ESP32-S3R8, 2.16" 480×480 AMOLED (CO5300 QSPI), CST9220 cap touch, AXP2101 PMU + Li-Po battery, QMI8658 IMU. Three side buttons, IMU auto-rotation. Build env: `waveshare_amoled_216`.
+- [Waveshare ESP32-S3-Touch-AMOLED-1.8](https://www.waveshare.com/esp32-s3-touch-amoled-1.8.htm) — ESP32-S3R8, 1.8" 368×448 portrait AMOLED (SH8601 QSPI), FT3168 cap touch, AXP2101 PMU, QMI8658 IMU, XCA9554 IO expander, 16 MB flash. Two buttons (BOOT + PWR), fixed orientation. Build env: `waveshare_amoled_18`.
+
+Plus per board:
+
 - USB-C cable for flashing firmware and charging
 - 3.7V Li-Po battery (MX1.25 2-pin connector, optional)
+
+**Porting to another board:** the firmware is a thin HAL with per-board folders under `firmware/src/boards/`. Drop in a new folder and a new PlatformIO env — `main.cpp`, `ui.cpp`, and `splash.cpp` never need to change. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md) for the walk-through and [`docs/porting/hal-contract.md`](docs/porting/hal-contract.md) for the interfaces a port must implement.
 
 ## Prerequisites
 
@@ -187,6 +195,31 @@ lv_font_conv --font assets/DejaVuSansMono.ttf \
 4. Add `.fallback = NULL`, `.user_data = NULL` to the font struct
 
 Without these patches, fonts compile but render as invisible.
+
+### CJK support
+
+`firmware/src/font_cjk_16.c` covers the full CJK Unified Ideographs basic
+block (U+4E00–U+9FFF, ~20k glyphs) plus ASCII, CJK punctuation, and
+halfwidth/fullwidth forms. Generated from [Noto Sans CJK SC](https://github.com/notofonts/noto-cjk)
+(SIL OFL 1.1) at 16px, 2bpp:
+
+```bash
+lv_font_conv --font NotoSansCJKsc-Regular.otf --size 16 --bpp 2 \
+  --no-compress --format lvgl --lv-include 'lvgl.h' \
+  -r '0x20-0x7E,0xB7,0x2014,0x2018-0x2019,0x201C-0x201D,0x2026,0x3000-0x303F,0x4E00-0x9FFF,0xFF00-0xFFEF' \
+  -o firmware/src/font_cjk_16.c
+```
+
+Then apply the four LVGL 9 patches above. Because the font has >65k of
+glyph bitmap data, the build needs `-DLV_FONT_FMT_TXT_LARGE=1` in
+`platformio.ini` build flags so font descriptor offsets switch from
+16-bit to 32-bit.
+
+The CJK font is used for the Activity screen's user-prompt row and todo
+content rows. The headline (28pt Styrene B) and titles stay ASCII-only
+to preserve the brand font — Chinese text in those slots renders as
+empty boxes. Add a `font_cjk_28.c` if full coverage is needed (~1MB
+more flash).
 
 ## Converting Lucide icons
 

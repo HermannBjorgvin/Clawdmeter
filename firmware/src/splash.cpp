@@ -2,15 +2,18 @@
 #include "splash_animations.h"
 #include "theme.h"
 #include "usage_rate.h"
+#include "hal/board_caps.h"
 #include <Arduino.h>
 #include <string.h>
 #include <esp_heap_caps.h>
 
-// 20x20 grid scaled 24x to fill 480x480
+// 20×20 grid. CELL sized so the canvas fits the smaller display dimension —
+// the canvas is square and centered, so on portrait or letterboxed panels
+// it leaves vertical margin rather than cropping.
 #define GRID         20
-#define CELL         24
-#define CANVAS_W     (GRID * CELL)
-#define CANVAS_H     (GRID * CELL)
+static int  cell      = 24;        // recomputed in splash_init()
+static int  canvas_w  = GRID * 24;
+static int  canvas_h  = GRID * 24;
 
 // Background fallback when palette is missing
 #define COL_EMPTY    0x0000  // true black (matches THEME_BG)
@@ -68,17 +71,19 @@ static void resolve_group_lists(void) {
     }
 }
 
+static uint16_t *row_buf = NULL;   // scratch row, sized to canvas_w
+
 static void render_frame(const uint8_t *cells, const uint16_t *palette) {
+    if (!row_buf || !canvas_buf) return;
     for (int gy = 0; gy < GRID; gy++) {
-        uint16_t row[CANVAS_W];
         for (int gx = 0; gx < GRID; gx++) {
             uint8_t code = cells[gy * GRID + gx];
             uint16_t color = (palette && code < SPLASH_PALETTE_SIZE) ? palette[code] : COL_EMPTY;
-            uint16_t *p = &row[gx * CELL];
-            for (int i = 0; i < CELL; i++) p[i] = color;
+            uint16_t *p = &row_buf[gx * cell];
+            for (int i = 0; i < cell; i++) p[i] = color;
         }
-        for (int dy = 0; dy < CELL; dy++) {
-            memcpy(&canvas_buf[(gy * CELL + dy) * CANVAS_W], row, CANVAS_W * 2);
+        for (int dy = 0; dy < cell; dy++) {
+            memcpy(&canvas_buf[(gy * cell + dy) * canvas_w], row_buf, canvas_w * 2);
         }
     }
     if (canvas) lv_obj_invalidate(canvas);
@@ -86,20 +91,30 @@ static void render_frame(const uint8_t *cells, const uint16_t *palette) {
 
 static void show_placeholder() {
     // Solid dark background + centered status label.
-    for (int i = 0; i < CANVAS_W * CANVAS_H; i++) canvas_buf[i] = COL_EMPTY;
+    if (canvas_buf) {
+        for (int i = 0; i < canvas_w * canvas_h; i++) canvas_buf[i] = COL_EMPTY;
+    }
     if (canvas) lv_obj_invalidate(canvas);
     if (label_status) lv_obj_clear_flag(label_status, LV_OBJ_FLAG_HIDDEN);
 }
 
 void splash_init(lv_obj_t *parent) {
-    canvas_buf = (uint16_t*)heap_caps_malloc(CANVAS_W * CANVAS_H * 2, MALLOC_CAP_SPIRAM);
-    if (!canvas_buf) {
+    const BoardCaps& c = board_caps();
+    int min_dim = (c.width < c.height) ? c.width : c.height;
+    cell     = min_dim / GRID;       // fits within the smaller display dimension
+    if (cell < 4) cell = 4;
+    canvas_w = GRID * cell;
+    canvas_h = GRID * cell;
+
+    canvas_buf = (uint16_t*)heap_caps_malloc(canvas_w * canvas_h * 2, MALLOC_CAP_SPIRAM);
+    row_buf    = (uint16_t*)heap_caps_malloc(canvas_w * 2,             MALLOC_CAP_SPIRAM);
+    if (!canvas_buf || !row_buf) {
         Serial.println("splash: failed to alloc canvas buffer");
         return;
     }
 
     splash_container = lv_obj_create(parent);
-    lv_obj_set_size(splash_container, 480, 480);
+    lv_obj_set_size(splash_container, c.width, c.height);
     lv_obj_set_pos(splash_container, 0, 0);
     lv_obj_set_style_bg_color(splash_container, THEME_BG, 0);
     lv_obj_set_style_bg_opa(splash_container, LV_OPA_COVER, 0);
@@ -108,7 +123,7 @@ void splash_init(lv_obj_t *parent) {
     lv_obj_clear_flag(splash_container, LV_OBJ_FLAG_SCROLLABLE);
 
     canvas = lv_canvas_create(splash_container);
-    lv_canvas_set_buffer(canvas, canvas_buf, CANVAS_W, CANVAS_H, LV_COLOR_FORMAT_RGB565);
+    lv_canvas_set_buffer(canvas, canvas_buf, canvas_w, canvas_h, LV_COLOR_FORMAT_RGB565);
     lv_obj_center(canvas);
 
     // Placeholder label (visible only when no animations are loaded)
