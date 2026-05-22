@@ -55,6 +55,8 @@ struct Layout {
     const lv_font_t* bt_device_font;
     const lv_font_t* bt_credit_1_font;
     const lv_font_t* bt_credit_2_font;
+    bool    bt_show_icons;       // 48×48 BT + trash icons fit on big panels only
+    bool    bt_show_credits;     // footer credit lines (off on tiny)
 };
 static Layout L = {};
 
@@ -92,6 +94,8 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_28;
         L.bt_credit_1_font = &font_styrene_24;
         L.bt_credit_2_font = &font_styrene_20;
+        L.bt_show_icons = true;
+        L.bt_show_credits = true;
     } else if (c.height >= 280) {
         // Compact layout — tuned for 368x448 (AMOLED-1.8).
         L.margin = 20;
@@ -118,6 +122,8 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_20;
         L.bt_credit_1_font = &font_styrene_16;
         L.bt_credit_2_font = &font_styrene_14;
+        L.bt_show_icons = true;
+        L.bt_show_credits = true;
     } else {
         // Tiny layout — tuned for 284x240 (Xingzhi Cube 1.83).
         // Two stacked usage panels in ~180 px of vertical space below
@@ -148,6 +154,8 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_14;
         L.bt_credit_1_font = &font_styrene_12;
         L.bt_credit_2_font = &font_styrene_12;
+        L.bt_show_icons = false;       // 48×48 icons overrun the 284×240 panel
+        L.bt_show_credits = false;     // no room for 2-line footer
     }
 
     L.content_w = L.scr_w - 2 * L.margin;
@@ -419,32 +427,40 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_t* p_info = make_panel(ble_container, L.margin, L.content_y,
                                   L.content_w, L.bt_info_panel_h);
 
-    static lv_image_dsc_t icon_bt_dsc;
-    init_icon_dsc(&icon_bt_dsc, ICON_BLUETOOTH_W, ICON_BLUETOOTH_H, icon_bluetooth_data);
-
-    lv_obj_t* bt_img = lv_image_create(p_info);
-    lv_image_set_src(bt_img, &icon_bt_dsc);
-    lv_obj_set_pos(bt_img, 0, 0);
+    // Optional bluetooth glyph at the top-left of the info panel — too
+    // big (48×48) to fit on tiny screens, so layouts can disable it.
+    const int status_x = L.bt_show_icons ? 56 : 0;
+    if (L.bt_show_icons) {
+        static lv_image_dsc_t icon_bt_dsc;
+        init_icon_dsc(&icon_bt_dsc, ICON_BLUETOOTH_W, ICON_BLUETOOTH_H, icon_bluetooth_data);
+        lv_obj_t* bt_img = lv_image_create(p_info);
+        lv_image_set_src(bt_img, &icon_bt_dsc);
+        lv_obj_set_pos(bt_img, 0, 0);
+    }
 
     lbl_ble_status = lv_label_create(p_info);
     lv_label_set_text(lbl_ble_status, "Initializing...");
     lv_obj_set_style_text_font(lbl_ble_status, L.bt_status_font, 0);
     lv_obj_set_style_text_color(lbl_ble_status, COL_DIM, 0);
-    lv_obj_set_pos(lbl_ble_status, 56, 2);
+    lv_obj_set_pos(lbl_ble_status, status_x, 2);
 
+    // Compact vertical rhythm: status takes the top row, device + MAC
+    // stack beneath. Spacing tightens on tiny screens where every
+    // ~16 px counts.
+    const int row_h = L.bt_show_icons ? 32 : 26;
     lbl_ble_device = lv_label_create(p_info);
     lv_label_set_text(lbl_ble_device, "Device: ---");
     lv_obj_set_style_text_font(lbl_ble_device, L.bt_device_font, 0);
     lv_obj_set_style_text_color(lbl_ble_device, COL_DIM, 0);
-    lv_obj_set_pos(lbl_ble_device, 0, 64);
+    lv_obj_set_pos(lbl_ble_device, 0, 2 + 2 * row_h);
 
     lbl_ble_mac = lv_label_create(p_info);
     lv_label_set_text(lbl_ble_mac, "Address: ---");
     lv_obj_set_style_text_font(lbl_ble_mac, L.bt_device_font, 0);
     lv_obj_set_style_text_color(lbl_ble_mac, COL_DIM, 0);
-    lv_obj_set_pos(lbl_ble_mac, 0, 100);
+    lv_obj_set_pos(lbl_ble_mac, 0, 2 + 3 * row_h);
 
-    int reset_y = L.content_y + L.bt_info_panel_h + 16;
+    int reset_y = L.content_y + L.bt_info_panel_h + (L.bt_show_credits ? 16 : 8);
     lv_obj_t* reset_zone = lv_obj_create(ble_container);
     lv_obj_set_pos(reset_zone, L.margin, reset_y);
     lv_obj_set_size(reset_zone, L.content_w, L.bt_reset_zone_h);
@@ -458,27 +474,31 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(reset_zone, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(reset_zone, ble_reset_click_cb, LV_EVENT_CLICKED, NULL);
 
-    static lv_image_dsc_t icon_trash_dsc;
-    init_icon_dsc(&icon_trash_dsc, ICON_TRASH2_W, ICON_TRASH2_H, icon_trash2_data);
-    lv_obj_t* trash_img = lv_image_create(reset_zone);
-    lv_image_set_src(trash_img, &icon_trash_dsc);
+    if (L.bt_show_icons) {
+        static lv_image_dsc_t icon_trash_dsc;
+        init_icon_dsc(&icon_trash_dsc, ICON_TRASH2_W, ICON_TRASH2_H, icon_trash2_data);
+        lv_obj_t* trash_img = lv_image_create(reset_zone);
+        lv_image_set_src(trash_img, &icon_trash_dsc);
+    }
 
     lv_obj_t* reset_lbl = lv_label_create(reset_zone);
     lv_label_set_text(reset_lbl, "Reset Bluetooth");
     lv_obj_set_style_text_font(reset_lbl, L.bt_device_font, 0);
     lv_obj_set_style_text_color(reset_lbl, COL_DIM, 0);
 
-    lv_obj_t* lbl_credit = lv_label_create(ble_container);
-    lv_label_set_text(lbl_credit, "Built by @hermannbjorgvin");
-    lv_obj_set_style_text_font(lbl_credit, L.bt_credit_1_font, 0);
-    lv_obj_set_style_text_color(lbl_credit, COL_DIM, 0);
-    lv_obj_align(lbl_credit, LV_ALIGN_BOTTOM_MID, 0, -46);
+    if (L.bt_show_credits) {
+        lv_obj_t* lbl_credit = lv_label_create(ble_container);
+        lv_label_set_text(lbl_credit, "Built by @hermannbjorgvin");
+        lv_obj_set_style_text_font(lbl_credit, L.bt_credit_1_font, 0);
+        lv_obj_set_style_text_color(lbl_credit, COL_DIM, 0);
+        lv_obj_align(lbl_credit, LV_ALIGN_BOTTOM_MID, 0, -46);
 
-    lv_obj_t* lbl_credit2 = lv_label_create(ble_container);
-    lv_label_set_text(lbl_credit2, "Clawd animation by @amaanbuilds");
-    lv_obj_set_style_text_font(lbl_credit2, L.bt_credit_2_font, 0);
-    lv_obj_set_style_text_color(lbl_credit2, COL_DIM, 0);
-    lv_obj_align(lbl_credit2, LV_ALIGN_BOTTOM_MID, 0, -20);
+        lv_obj_t* lbl_credit2 = lv_label_create(ble_container);
+        lv_label_set_text(lbl_credit2, "Clawd animation by @amaanbuilds");
+        lv_obj_set_style_text_font(lbl_credit2, L.bt_credit_2_font, 0);
+        lv_obj_set_style_text_color(lbl_credit2, COL_DIM, 0);
+        lv_obj_align(lbl_credit2, LV_ALIGN_BOTTOM_MID, 0, -20);
+    }
 
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
 }
