@@ -167,6 +167,19 @@ CURRENT_TOOL_MAX = 24
 TOOL_ARGS_MAX = 60
 
 
+_previous_phase: dict[str, str] = {}
+
+
+def _record_phase_and_chime(sid: str, cur_phase: str) -> None:
+    """Update the session's tracked phase; if the transition is
+    running→idle, arm the pending chime flag for the next payload."""
+    global _pending_idle_chime
+    prev = _previous_phase.get(sid)
+    if prev == "running" and cur_phase == "idle":
+        _pending_idle_chime = True
+    _previous_phase[sid] = cur_phase
+
+
 def load_activity_sessions() -> list[dict]:
     """Read state.json written by the hook script and project it into the
     compact session schema the firmware expects.
@@ -174,6 +187,11 @@ def load_activity_sessions() -> list[dict]:
     Returns up to MAX_SESSIONS entries, sorted most-recently-active first,
     each with a head-truncated todos list. activeForm is included only on
     the in-progress item — every other state would never display it.
+
+    A `"c": 1` flag is set on the single payload immediately following a
+    session's `running → idle` transition; firmware uses it to fire the
+    idle chime. Detection is daemon-side (not firmware-side) so a daemon
+    reconnect doesn't spuriously chime for every already-idle session.
     """
     try:
         state = json.loads(STATE_FILE.read_text())
@@ -191,10 +209,17 @@ def load_activity_sessions() -> list[dict]:
         age = now - la_ts
         if age > SESSION_STALE_SECONDS:
             continue
-        fresh.append((la_ts, s))
+        fresh.append((la_ts, sid, s))
     fresh.sort(key=lambda x: x[0], reverse=True)
+    # Prune previous-phase entries whose sessions are no longer fresh so
+    # the dict can't grow unbounded across daemon uptime. Done before the
+    # transition check so we don't accidentally mark a re-emerging session
+    # as a chime trigger using stale state.
+    live_sids = {sid for _la, sid, _s in fresh}
+    for stale_sid in [k for k in _previous_phase if k not in live_sids]:
+        del _previous_phase[stale_sid]
     out = []
-    for la_ts, s in fresh[:MAX_SESSIONS]:
+    for la_ts, sid, s in fresh[:MAX_SESSIONS]:
         todos = s.get("todos") or []
         compact_todos = []
         for t in todos[:MAX_TODOS_PER_SESSION]:
@@ -210,11 +235,12 @@ def load_activity_sessions() -> list[dict]:
                 if af:
                     entry["a"] = af
             compact_todos.append(entry)
+        cur_phase = str(s.get("phase", "idle"))
         entry = {
             "p": str(s.get("project", ""))[:24],
             "m": str(s.get("model", ""))[:24],
             "la": max(0, int(now - la_ts)),
-            "ph": _PHASE_NUM.get(str(s.get("phase", "idle")), 0),
+            "ph": _PHASE_NUM.get(cur_phase, 0),
             "td": compact_todos,
         }
         ct = str(s.get("current_tool", ""))[:CURRENT_TOOL_MAX]
@@ -226,8 +252,27 @@ def load_activity_sessions() -> list[dict]:
         up = str(s.get("last_user_prompt", ""))[:USER_PROMPT_MAX]
         if up:
             entry["u"] = up
+        _record_phase_and_chime(sid, cur_phase)
         out.append(entry)
     return out
+
+
+def consume_idle_transition() -> bool:
+    """Returns True iff at least one session transitioned running→idle
+    since the previous call. Drains the transition flag — the next call
+    after a true return is false until the next legitimate transition.
+
+    Hoisted out of load_activity_sessions() so we can surface the chime
+    trigger as a top-level payload field, where it survives the BLE-budget
+    trim loop even if every session has to be dropped.
+    """
+    global _pending_idle_chime
+    fired = _pending_idle_chime
+    _pending_idle_chime = False
+    return fired
+
+
+_pending_idle_chime = False
 
 
 def state_file_mtime() -> float:
@@ -438,6 +483,12 @@ async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
                 sessions = load_activity_sessions()
                 if sessions:
                     payload["sessions"] = sessions
+                # Hoisted out of `sessions` so the chime trigger survives
+                # even if every session gets trimmed for the BLE budget.
+                # consume_idle_transition() drains the flag — exactly one
+                # payload following a transition carries c=1.
+                if consume_idle_transition():
+                    payload["c"] = 1
                 if await session.write_payload(payload):
                     last_state_mtime = state_mtime
                     used_successfully = True

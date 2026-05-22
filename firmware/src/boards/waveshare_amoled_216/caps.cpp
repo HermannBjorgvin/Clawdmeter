@@ -9,6 +9,7 @@ static const BoardCaps caps = {
     .has_rotation = true,
     .has_battery = true,
     .has_imu = true,
+    .has_audio = false,    // no codec or speaker on this board
 };
 
 const BoardCaps& board_caps(void) { return caps; }

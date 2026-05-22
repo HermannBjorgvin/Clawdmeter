@@ -38,8 +38,22 @@
 #define XCA9554_ADDR         0x20
 #define IOX_PIN_TP_RST       0     // EXIO0 → touch reset (active LOW)
 #define IOX_PIN_LCD_RST      1     // EXIO1 → display reset (active LOW)
-#define IOX_PIN_PA_EN        2     // EXIO2 → audio amp enable
+#define IOX_PIN_PA_EN        2     // EXIO2 → audio amp enable (held HIGH by io_expander_init)
 #define IOX_PIN_PWR_BTN      4     // EXIO4 → PWR button input, active HIGH
+
+// ---- Audio (ES8311 codec + onboard speaker via PA) ----
+// Pin map follows Waveshare's reference demo for this SKU
+// (examples/Arduino-v3.3.5/examples/15_ES8311). The codec is clocked from
+// the ESP32; MCLK = sample_rate * 256.
+#define ES8311_I2C_ADDR      0x18
+#define I2S_MCLK_GPIO        16
+#define I2S_BCLK_GPIO        9
+#define I2S_LRCK_GPIO        45
+#define I2S_DOUT_GPIO        8     // MCU → codec (playback)
+#define I2S_DIN_GPIO         10    // codec → MCU (mic; unused here)
+// Vendor demo drives PA as a direct GPIO; IOX_PIN_PA_EN is also asserted
+// HIGH at boot (see io_expander.cpp), so amp power is on regardless.
+#define PA_CTRL_GPIO         46
 
 // ---- Buttons ----
 #define BTN_BACK_GPIO        0     // BOOT — primary, Space (PTT)
@@ -51,3 +65,4 @@
 #define BOARD_HAS_IMU              1    // present + initialized, but rotation off
 #define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      1
+#define BOARD_HAS_AUDIO            1

@@ -11,17 +11,21 @@
 #define BATTERY_POLL_MS  2000
 #define CHARGING_POLL_MS 500
 #define PWR_POLL_MS      50
+#define PWR_LONG_MS      1000   // >= 1 s held = long press
 
 static XPowersPMU pmu;
 
-static int      cached_pct       = -1;
-static bool     cached_charging  = false;
-static bool     cached_vbus      = false;
-static bool     pwr_pressed_flag = false;
-static bool     last_pwr_state   = false;   // edge detector for EXIO4
-static uint32_t last_battery_ms  = 0;
-static uint32_t last_charging_ms = 0;
-static uint32_t last_pwr_ms      = 0;
+static int      cached_pct            = -1;
+static bool     cached_charging       = false;
+static bool     cached_vbus           = false;
+static bool     pwr_pressed_flag      = false;
+static bool     pwr_long_pressed_flag = false;
+static bool     last_pwr_state        = false;   // edge detector for EXIO4
+static uint32_t pwr_press_started_ms  = 0;       // 0 = not currently pressed
+static bool     pwr_long_consumed     = false;   // suppresses short on release
+static uint32_t last_battery_ms       = 0;
+static uint32_t last_charging_ms      = 0;
+static uint32_t last_pwr_ms           = 0;
 
 void power_hal_init(void) {
     if (!pmu.begin(Wire, AXP2101_ADDR, IIC_SDA, IIC_SCL)) {
@@ -55,7 +59,22 @@ void power_hal_tick(void) {
         last_pwr_ms = now;
         bool pwr_now = io_expander_get(IOX_PIN_PWR_BTN);
         if (pwr_now && !last_pwr_state) {
-            pwr_pressed_flag = true;
+            // press-down
+            pwr_press_started_ms = now;
+            pwr_long_consumed = false;
+        } else if (pwr_now && last_pwr_state) {
+            // held — fire the long-press event the moment we cross the
+            // threshold so the UI can respond before the user releases.
+            if (!pwr_long_consumed && pwr_press_started_ms != 0 &&
+                now - pwr_press_started_ms >= PWR_LONG_MS) {
+                pwr_long_pressed_flag = true;
+                pwr_long_consumed = true;
+            }
+        } else if (!pwr_now && last_pwr_state) {
+            // release — only count as a short press if we didn't already
+            // fire the long event.
+            if (!pwr_long_consumed) pwr_pressed_flag = true;
+            pwr_press_started_ms = 0;
         }
         last_pwr_state = pwr_now;
     }
@@ -68,6 +87,14 @@ bool power_hal_is_vbus_in(void)  { return cached_vbus; }
 bool power_hal_pwr_pressed(void) {
     if (pwr_pressed_flag) {
         pwr_pressed_flag = false;
+        return true;
+    }
+    return false;
+}
+
+bool power_hal_pwr_long_pressed(void) {
+    if (pwr_long_pressed_flag) {
+        pwr_long_pressed_flag = false;
         return true;
     }
     return false;

@@ -3,6 +3,7 @@
 #include <lvgl.h>
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
+#include <Preferences.h>
 
 #include "data.h"
 #include "ui.h"
@@ -18,6 +19,7 @@
 #include "hal/input_hal.h"
 #include "hal/power_hal.h"
 #include "hal/imu_hal.h"
+#include "hal/audio_hal.h"
 
 static UsageData usage = {};
 static ActivityData activity = {};
@@ -105,6 +107,7 @@ static bool parse_json(const char* json, UsageData* out, ActivityData* act_out) 
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
+    out->chime = (doc["c"] | 0) != 0;
     out->valid = true;
 
     if (!act_out) return true;
@@ -236,6 +239,19 @@ void setup() {
 
     ble_init();
     input_hal_init();
+    if (board_caps().has_audio) {
+        audio_hal_init();
+        // Mute preference persists across reboots in NVS namespace "clawd".
+        // Default false → chimes ring out of the box; user mutes via PWR
+        // long-press (handled below).
+        Preferences prefs;
+        if (prefs.begin("clawd", true)) {
+            bool muted = prefs.getBool("muted", false);
+            prefs.end();
+            audio_hal_set_muted(muted);
+            ui_set_mute_indicator(muted);
+        }
+    }
 
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
@@ -306,6 +322,23 @@ void loop() {
                 else                                          ui_cycle_screen();
             }
         }
+
+        if (board_caps().has_audio && power_hal_pwr_long_pressed()) {
+            // Toggle the chime mute. Save to NVS so the preference sticks
+            // across reboots; flash a toast + the persistent indicator.
+            bool now_muted = !audio_hal_is_muted();
+            audio_hal_set_muted(now_muted);
+            Preferences prefs;
+            if (prefs.begin("clawd", false)) {
+                prefs.putBool("muted", now_muted);
+                prefs.end();
+            }
+            ui_set_mute_indicator(now_muted);
+            ui_flash_mute_toast(now_muted);
+            // Audible confirmation on unmute — feels natural, and proves
+            // the audio path still works after toggling.
+            if (!now_muted) audio_hal_play_chime();
+        }
     }
 
     ble_state_t bs = ble_get_state();
@@ -338,6 +371,12 @@ void loop() {
             }
             ui_update(&usage);
             ui_update_activity(&activity);
+            // Daemon sets `c` on exactly one payload after any session
+            // transitions running→idle. audio_hal_play_chime() coalesces
+            // and respects the mute flag.
+            if (board_caps().has_audio && usage.chime) {
+                audio_hal_play_chime();
+            }
             ble_send_ack();
         } else {
             ble_send_nack();

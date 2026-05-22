@@ -23,3 +23,12 @@ void ui_toggle_splash(void);
 screen_t ui_get_current_screen(void);
 void ui_update_ble_status(ble_state_t state, const char* name, const char* mac);
 void ui_update_battery(int percent, bool charging);
+
+// Mute indicator on the Activity title row. Pass `visible=true` to render
+// a small "muted" glyph; pass `false` to hide. Cheap — safe to call from
+// any context; idempotent.
+void ui_set_mute_indicator(bool visible);
+
+// Brief on-screen toast (1.5s) confirming a mute toggle. Renders over
+// whatever screen is currently active.
+void ui_flash_mute_toast(bool now_muted);

@@ -16,4 +16,9 @@ bool power_hal_is_charging(void);
 bool power_hal_is_vbus_in(void);   // USB cable present (true even without a battery)
 
 // Edge-triggered: returns true once per PWR short-press, then clears.
+// A press that exceeds the long-press threshold (~1s) DOES NOT also fire
+// this — it surfaces via power_hal_pwr_long_pressed() instead. Boards
+// without a long-press capable input source always return false from
+// power_hal_pwr_long_pressed().
 bool power_hal_pwr_pressed(void);
+bool power_hal_pwr_long_pressed(void);

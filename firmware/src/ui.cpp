@@ -161,8 +161,13 @@ static lv_obj_t* lbl_act_in_progress;    // ">> Reworking UI layout"
 static lv_obj_t* act_todo_panel;         // rounded card wrapping progress + list
 static lv_obj_t* lbl_act_progress;       // "5/12 done" — header inside the panel
 static lv_obj_t* act_list;               // scrollable flex container of todo rows
+static lv_obj_t* lbl_act_mute;           // small 🔇 glyph next to counter when chimes are muted
 static ActivityData cached_activity = {};
 static uint8_t current_session_idx = 0;
+
+// ---- Mute toast (transient overlay) ----
+static lv_obj_t* mute_toast = nullptr;
+static uint32_t  mute_toast_until_ms = 0;
 
 // ---- Bluetooth screen widgets ----
 static lv_obj_t* ble_container;
@@ -512,6 +517,15 @@ static void init_activity_screen(lv_obj_t* scr) {
     // Shifted left of the battery icon (which sits at L.scr_w - 48 - L.margin).
     lv_obj_align(lbl_act_counter, LV_ALIGN_TOP_RIGHT, -ACT_COUNTER_RIGHT, ACT_TITLE_Y);
 
+    // Mute indicator — sits to the LEFT of the counter, hidden by default.
+    // Only ever shown on boards with has_audio; main wires the visibility.
+    lbl_act_mute = lv_label_create(activity_container);
+    lv_label_set_text(lbl_act_mute, LV_SYMBOL_MUTE);
+    lv_obj_set_style_text_font(lbl_act_mute, &ACT_MODEL_FONT, 0);
+    lv_obj_set_style_text_color(lbl_act_mute, COL_DIM, 0);
+    lv_obj_align(lbl_act_mute, LV_ALIGN_TOP_RIGHT, -(ACT_COUNTER_RIGHT + 60), ACT_TITLE_Y + 4);
+    lv_obj_add_flag(lbl_act_mute, LV_OBJ_FLAG_HIDDEN);
+
     lbl_act_title = lv_label_create(activity_container);
     lv_label_set_text(lbl_act_title, "");
     lv_obj_set_style_text_font(lbl_act_title, &ACT_TITLE_FONT, 0);
@@ -837,6 +851,14 @@ void ui_update(const UsageData* data) {
 }
 
 void ui_tick_anim(void) {
+    // Tear down the mute toast after its display window. Done here rather
+    // than via lv_timer_create so the toast lifetime is trivially correct
+    // even if LVGL drops a timer tick during a heavy redraw.
+    if (mute_toast && lv_tick_get() >= mute_toast_until_ms) {
+        lv_obj_delete(mute_toast);
+        mute_toast = nullptr;
+    }
+
     if (current_screen != SCREEN_USAGE) return;
 
     uint32_t now = lv_tick_get();
@@ -1046,4 +1068,34 @@ void ui_update_battery(int percent, bool charging) {
     }
     lv_image_set_src(battery_img, &battery_dscs[idx]);
     apply_battery_visibility();
+}
+
+void ui_set_mute_indicator(bool visible) {
+    if (!lbl_act_mute) return;
+    if (visible) lv_obj_clear_flag(lbl_act_mute, LV_OBJ_FLAG_HIDDEN);
+    else         lv_obj_add_flag(lbl_act_mute, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_flash_mute_toast(bool now_muted) {
+    if (mute_toast) {
+        lv_obj_delete(mute_toast);
+        mute_toast = nullptr;
+    }
+    lv_obj_t* scr = lv_screen_active();
+    mute_toast = lv_obj_create(scr);
+    lv_obj_remove_style_all(mute_toast);
+    lv_obj_set_style_bg_color(mute_toast, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(mute_toast, LV_OPA_80, 0);
+    lv_obj_set_style_radius(mute_toast, 14, 0);
+    lv_obj_set_style_pad_all(mute_toast, 16, 0);
+    lv_obj_set_size(mute_toast, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_center(mute_toast);
+
+    lv_obj_t* lbl = lv_label_create(mute_toast);
+    lv_label_set_text(lbl, now_muted ? LV_SYMBOL_MUTE "  Muted"
+                                     : LV_SYMBOL_VOLUME_MAX "  Chime on");
+    lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
+    lv_obj_set_style_text_font(lbl, &ACT_TITLE_FONT, 0);
+
+    mute_toast_until_ms = lv_tick_get() + 1500;
 }

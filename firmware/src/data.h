@@ -9,6 +9,7 @@ struct UsageData {
     char status[16];         // "allowed" or "limited"
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
+    bool chime;              // top-level "c": 1 — daemon signals running→idle transition
 };
 
 // Activity / TodoWrite mirror — populated from the BLE "sessions" array
