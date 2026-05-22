@@ -518,9 +518,11 @@ static void init_activity_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_act_counter, LV_ALIGN_TOP_RIGHT, -ACT_COUNTER_RIGHT, ACT_TITLE_Y);
 
     // Mute indicator — sits to the LEFT of the counter, hidden by default.
-    // Only ever shown on boards with has_audio; main wires the visibility.
+    // Only shown on boards with has_audio; main wires the visibility.
+    // Plain text rather than LV_SYMBOL_MUTE because our custom Tiempos /
+    // Styrene fonts don't carry FontAwesome glyphs.
     lbl_act_mute = lv_label_create(activity_container);
-    lv_label_set_text(lbl_act_mute, LV_SYMBOL_MUTE);
+    lv_label_set_text(lbl_act_mute, "MUTE");
     lv_obj_set_style_text_font(lbl_act_mute, &ACT_MODEL_FONT, 0);
     lv_obj_set_style_text_color(lbl_act_mute, COL_DIM, 0);
     lv_obj_align(lbl_act_mute, LV_ALIGN_TOP_RIGHT, -(ACT_COUNTER_RIGHT + 60), ACT_TITLE_Y + 4);
@@ -1092,8 +1094,8 @@ void ui_flash_mute_toast(bool now_muted) {
     lv_obj_center(mute_toast);
 
     lv_obj_t* lbl = lv_label_create(mute_toast);
-    lv_label_set_text(lbl, now_muted ? LV_SYMBOL_MUTE "  Muted"
-                                     : LV_SYMBOL_VOLUME_MAX "  Chime on");
+    // Plain text — custom fonts don't include LV_SYMBOL_* glyphs.
+    lv_label_set_text(lbl, now_muted ? "Muted" : "Chime on");
     lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
     lv_obj_set_style_text_font(lbl, &ACT_TITLE_FONT, 0);
 

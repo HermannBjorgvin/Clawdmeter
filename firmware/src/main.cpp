@@ -261,6 +261,7 @@ void setup() {
             prefs.end();
             audio_hal_set_muted(muted);
             ui_set_mute_indicator(muted);
+            Serial.printf("mute: loaded from NVS, muted=%d\n", (int)muted);
         }
     }
 
@@ -338,6 +339,7 @@ void loop() {
             // Toggle the chime mute. Save to NVS so the preference sticks
             // across reboots; flash a toast + the persistent indicator.
             bool now_muted = !audio_hal_is_muted();
+            Serial.printf("mute: long-press PWR -> muted=%d\n", (int)now_muted);
             audio_hal_set_muted(now_muted);
             Preferences prefs;
             if (prefs.begin("clawd", false)) {
@@ -386,6 +388,7 @@ void loop() {
             // transitions running→idle. audio_hal_play_chime() coalesces
             // and respects the mute flag.
             if (board_caps().has_audio && usage.chime) {
+                Serial.println("chime: BLE payload carries c=1, playing");
                 audio_hal_play_chime();
             }
             ble_send_ack();

@@ -25,7 +25,7 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac);
 void ui_update_battery(int percent, bool charging);
 
 // Mute indicator on the Activity title row. Pass `visible=true` to render
-// a small "muted" glyph; pass `false` to hide. Cheap — safe to call from
+// a small "MUTE" tag; pass `false` to hide. Cheap — safe to call from
 // any context; idempotent.
 void ui_set_mute_indicator(bool visible);
 
