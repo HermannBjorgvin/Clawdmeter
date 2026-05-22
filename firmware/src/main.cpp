@@ -264,8 +264,16 @@ void loop() {
 
         if (power_hal_pwr_pressed()) {
             if (!idle_consume_wake_press()) {
-                if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
-                else                                          ui_cycle_screen();
+                if (ui_get_current_screen() == SCREEN_SPLASH) {
+                    // With touch, PWR cycles animations on the splash and
+                    // a tap is what leaves it. Without touch, the user has
+                    // no other way out — route PWR straight to the
+                    // splash<->usage toggle.
+                    if (board_caps().has_touch) splash_next();
+                    else                        ui_toggle_splash();
+                } else {
+                    ui_cycle_screen();
+                }
             }
         }
     }

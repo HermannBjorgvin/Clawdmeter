@@ -9,6 +9,7 @@ static const BoardCaps caps = {
     .has_rotation = false,
     .has_battery = true,
     .has_imu = false,
+    .has_touch = false,       // no touchscreen — PWR drives splash exit
 };
 
 const BoardCaps& board_caps(void) { return caps; }

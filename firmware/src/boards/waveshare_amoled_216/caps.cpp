@@ -9,6 +9,7 @@ static const BoardCaps caps = {
     .has_rotation = true,
     .has_battery = true,
     .has_imu = true,
+    .has_touch = true,    // CST9220 cap touch
 };
 
 const BoardCaps& board_caps(void) { return caps; }
