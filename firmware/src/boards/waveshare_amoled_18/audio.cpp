@@ -9,10 +9,12 @@
 //   audio_hal_init()        — configures the codec + I2S DMA + spawns a
 //                             playback task that waits on a semaphore.
 //   audio_hal_play_chime()  — gives the semaphore; the task synthesizes
-//                             a 3-note ascending arpeggio (C5/E5/G5) into
-//                             a stack buffer, drives PA enable HIGH,
-//                             writes to I2S (blocking on DMA), then drops
-//                             PA enable LOW to silence the amp.
+//                             two short G6 beeps (180 ms each, 70 ms
+//                             gap) into a heap buffer, drives PA enable
+//                             HIGH, writes to I2S, then drops PA enable
+//                             LOW to silence the amp. Frequencies +
+//                             timings live in NOTE_FREQS_HZ / *_MS so
+//                             tweaking the chime is a one-line edit.
 //
 // The codec runs in slave mode; the ESP32 generates BCLK + LRCK + MCLK.
 // Sample rate is fixed at 16 kHz, 16-bit mono — plenty for a chime, keeps
@@ -33,12 +35,16 @@
 // All hard-coded here rather than in a header because nothing else needs
 // them; calibrate on hardware then commit the final values.
 static constexpr uint32_t SAMPLE_RATE_HZ   = 16000;
-static constexpr uint32_t NOTE_DURATION_MS = 90;     // per note
-static constexpr uint16_t NUM_NOTES        = 3;
-static constexpr float    NOTE_FREQS_HZ[NUM_NOTES] = { 523.25f, 659.25f, 783.99f }; // C5, E5, G5
-static constexpr float    PEAK_AMPLITUDE   = 0.45f;  // fraction of int16 range
-static constexpr uint32_t ATTACK_SAMPLES   = SAMPLE_RATE_HZ * 4 / 1000;   // 4 ms ramp in
-static constexpr uint32_t RELEASE_SAMPLES  = SAMPLE_RATE_HZ * 12 / 1000;  // 12 ms ramp out
+static constexpr uint32_t NOTE_DURATION_MS = 180;    // tone-on per note
+static constexpr uint32_t GAP_MS           = 70;     // silence between notes
+static constexpr uint16_t NUM_NOTES        = 2;
+// Two beeps at G6 — minimal, recognizably "ding-ding", not pretending to
+// be a melody. Same frequency keeps the codec/speaker firmly in its
+// comfortable range.
+static constexpr float    NOTE_FREQS_HZ[NUM_NOTES] = { 1567.98f, 1567.98f };
+static constexpr float    PEAK_AMPLITUDE   = 0.65f;  // fraction of int16 range
+static constexpr uint32_t ATTACK_SAMPLES   = SAMPLE_RATE_HZ * 6 / 1000;   // 6 ms ramp in
+static constexpr uint32_t RELEASE_SAMPLES  = SAMPLE_RATE_HZ * 22 / 1000;  // 22 ms ramp out
 
 // ----- ES8311 register addresses (subset; full map in datasheet) -----
 static constexpr uint8_t ES8311_REG00 = 0x00;  // reset
@@ -128,42 +134,41 @@ static bool es8311_init_codec(void) {
 }
 
 static void synthesize_and_play(void) {
-    // Build the chime in one contiguous buffer so we can hand the whole
-    // thing to I2S in a single write() and let DMA do the rest.
-    const uint32_t samples_per_note = SAMPLE_RATE_HZ * NOTE_DURATION_MS / 1000;
-    const uint32_t total_samples = samples_per_note * NUM_NOTES;
+    // Per-note slot = tone + silence. Building one contiguous buffer lets
+    // us hand the whole chime to I2S in a single write — DMA handles the
+    // rest. Silence between notes is what makes the three pitches
+    // perceptible as separate steps rather than blurring into one tone.
+    const uint32_t samples_per_tone = SAMPLE_RATE_HZ * NOTE_DURATION_MS / 1000;
+    const uint32_t samples_per_gap  = SAMPLE_RATE_HZ * GAP_MS / 1000;
+    const uint32_t samples_per_slot = samples_per_tone + samples_per_gap;
+    const uint32_t total_samples = samples_per_slot * NUM_NOTES;
     int16_t* buf = (int16_t*)heap_caps_malloc(total_samples * sizeof(int16_t), MALLOC_CAP_DEFAULT);
     if (!buf) {
         Serial.println("chime: heap alloc failed");
         return;
     }
+    memset(buf, 0, total_samples * sizeof(int16_t));
     const float two_pi_over_sr = 2.0f * (float)M_PI / (float)SAMPLE_RATE_HZ;
     for (uint16_t n = 0; n < NUM_NOTES; n++) {
         const float w = NOTE_FREQS_HZ[n] * two_pi_over_sr;
-        for (uint32_t i = 0; i < samples_per_note; i++) {
-            // Linear attack / linear release envelope. Sounds cleaner than
-            // a hard gate; avoids the click you'd get from clipping the
-            // sine mid-cycle. Keep the release short enough that the next
-            // note still feels staccato.
+        const uint32_t base = n * samples_per_slot;
+        for (uint32_t i = 0; i < samples_per_tone; i++) {
+            // Linear attack / linear release envelope. Avoids the click
+            // you'd get from a hard gate clipping the sine mid-cycle.
             float env = 1.0f;
             if (i < ATTACK_SAMPLES) env = (float)i / (float)ATTACK_SAMPLES;
-            else if (i + RELEASE_SAMPLES > samples_per_note)
-                env = (float)(samples_per_note - i) / (float)RELEASE_SAMPLES;
+            else if (i + RELEASE_SAMPLES > samples_per_tone)
+                env = (float)(samples_per_tone - i) / (float)RELEASE_SAMPLES;
             const float s = sinf(w * (float)i) * env * PEAK_AMPLITUDE;
-            buf[n * samples_per_note + i] = (int16_t)(s * 32767.0f);
+            buf[base + i] = (int16_t)(s * 32767.0f);
         }
+        // Trailing GAP_MS of the slot stays zero (memset above).
     }
-    // Gate the amp ON for the duration of playback, then OFF — keeps the
-    // background hiss out of an otherwise-silent device.
     digitalWrite(PA_CTRL_GPIO, HIGH);
-    delay(2);  // amp wake-up; documented at ~1 ms in Waveshare's demo
-    // I2SClass::write is blocking until the buffer is queued; with mono
-    // 16-bit samples at 16 kHz, the whole chime fits in DMA in <10 ms,
-    // so this returns long before the audio finishes playing.
+    delay(2);  // amp wake-up; ~1 ms in Waveshare's demo
     i2s.write((uint8_t*)buf, total_samples * sizeof(int16_t));
-    // Wait for DMA to drain before muting the amp. Slight over-estimate
-    // to avoid clipping the tail of the last note.
-    delay(NOTE_DURATION_MS * NUM_NOTES + 30);
+    // Hold PA on until DMA fully drains. Small over-estimate to be safe.
+    delay((NOTE_DURATION_MS + GAP_MS) * NUM_NOTES + 40);
     digitalWrite(PA_CTRL_GPIO, LOW);
     free(buf);
 }

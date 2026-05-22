@@ -188,6 +188,14 @@ static void check_serial_cmd() {
         if (c == '\n' || c == '\r') {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
+            else if (strcmp(cmd_buf, "chime") == 0) {
+                if (board_caps().has_audio) {
+                    Serial.println("chime: triggering");
+                    audio_hal_play_chime();
+                } else {
+                    Serial.println("chime: board has no audio");
+                }
+            }
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -243,9 +251,12 @@ void setup() {
         audio_hal_init();
         // Mute preference persists across reboots in NVS namespace "clawd".
         // Default false → chimes ring out of the box; user mutes via PWR
-        // long-press (handled below).
+        // long-press (handled below). Open RW (not RO) so the namespace
+        // is auto-created on first boot — avoids a NOT_FOUND error log
+        // on every boot until the user first toggles mute.
         Preferences prefs;
-        if (prefs.begin("clawd", true)) {
+        if (prefs.begin("clawd", false)) {
+            if (!prefs.isKey("muted")) prefs.putBool("muted", false);
             bool muted = prefs.getBool("muted", false);
             prefs.end();
             audio_hal_set_muted(muted);
