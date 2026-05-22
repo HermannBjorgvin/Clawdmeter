@@ -262,6 +262,8 @@ void loop() {
             }
         }
 
+        static uint32_t last_auto_cycle_ms = 0;
+
         if (power_hal_pwr_pressed()) {
             if (!idle_consume_wake_press()) {
                 if (ui_get_current_screen() == SCREEN_SPLASH) {
@@ -274,6 +276,20 @@ void loop() {
                 } else {
                     ui_cycle_screen();
                 }
+                last_auto_cycle_ms = millis();   // reset auto-cycle phase
+            }
+        }
+
+        // Optional auto-cycle Usage <-> Bluetooth at the cadence the board
+        // configured. Skips splash (user toggles in/out of it manually) and
+        // pauses while the display is asleep — no point cycling a dark panel.
+        if (board_caps().auto_cycle_ms > 0 && !idle_is_asleep()
+            && ui_get_current_screen() != SCREEN_SPLASH) {
+            uint32_t now = millis();
+            if (last_auto_cycle_ms == 0) last_auto_cycle_ms = now;
+            if (now - last_auto_cycle_ms >= board_caps().auto_cycle_ms) {
+                last_auto_cycle_ms = now;
+                ui_cycle_screen();
             }
         }
     }

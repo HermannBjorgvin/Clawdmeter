@@ -10,6 +10,7 @@ static const BoardCaps caps = {
     .has_battery = true,
     .has_imu = false,
     .has_touch = false,       // no touchscreen — PWR drives splash exit
+    .auto_cycle_ms = 5000,    // touchless → auto-cycle Usage <-> Bluetooth every 5 s
 };
 
 const BoardCaps& board_caps(void) { return caps; }

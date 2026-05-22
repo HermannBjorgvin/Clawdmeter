@@ -23,6 +23,12 @@ struct BoardCaps {
                              // the splash screen, so shared code routes
                              // splash-press to ui_toggle_splash() instead
                              // of splash_next().
+    uint16_t auto_cycle_ms;  // 0 = disabled (default). > 0 enables a
+                             // global timer in main.cpp that calls
+                             // ui_cycle_screen() this often, skipping
+                             // splash and pausing while the display is
+                             // idle/asleep. Useful on touchless boards
+                             // where the user can't tap-toggle.
 };
 
 const BoardCaps& board_caps(void);
