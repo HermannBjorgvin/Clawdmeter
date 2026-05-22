@@ -62,7 +62,15 @@ void power_hal_tick(void) {
 
 int  power_hal_battery_pct(void) { return cached_pct; }
 bool power_hal_is_charging(void) { return cached_charging; }
-bool power_hal_is_vbus_in(void)  { return cached_charging; }  // CHRG ~= USB power present
+// CHRG (GPIO38) only goes HIGH while the charger is actively pushing
+// current — drops back to LOW once the battery is full, and is
+// ambiguous when no battery is fitted. There's no dedicated VBUS-sense
+// pin on this kit, so we report "on USB power" unconditionally: the
+// Xingzhi is desk-bound and effectively always plugged in. This keeps
+// IDLE_SLEEP_WHEN_CHARGING=false behaving sanely — the screen never
+// blanks while USB is connected — at the cost of also not sleeping on
+// battery-only runs (which this kit isn't really designed for).
+bool power_hal_is_vbus_in(void)  { return true; }
 
 bool power_hal_pwr_pressed(void) {
     if (pwr_pressed_flag) {

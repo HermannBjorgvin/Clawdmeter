@@ -34,6 +34,7 @@ runtime hints to shared code. Set them directly in `caps.cpp`:
 |-------------------|---------|---------------|
 | `has_touch`       | `false` | Whether the board has a capacitive touchscreen. When `false`, shared code routes a PWR-button press on the splash screen to `ui_toggle_splash()` instead of `splash_next()`, so users without a touchscreen can still leave the splash. The AMOLED ports set `true`; the Xingzhi sets `false`. |
 | `auto_cycle_ms`   | `0`     | Optional global "rotate screens" timer in milliseconds. When `> 0`, `main.cpp` calls `ui_cycle_screen()` at that cadence (skipping splash + pausing on idle). Touchless boards typically set 5000 ms so the user doesn't have to mash buttons to see every screen; touch-capable boards leave it at 0. |
+| `cycle_skip_bluetooth` | `false` | When `true`, the Bluetooth screen is omitted from `ui_cycle_screen()`'s rotation — useful once first-time pairing is done and the screen has no day-to-day value. The Bluetooth screen is still reachable via a direct `ui_show_screen(SCREEN_BLUETOOTH)` call, so a long-press / dedicated button can be wired up later if needed. |
 
 ## Future capabilities
 

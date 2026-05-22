@@ -29,6 +29,12 @@ struct BoardCaps {
                              // splash and pausing while the display is
                              // idle/asleep. Useful on touchless boards
                              // where the user can't tap-toggle.
+    bool    cycle_skip_bluetooth; // When true, the Bluetooth screen is
+                             // omitted from ui_cycle_screen()'s loop —
+                             // useful after first-time pairing where
+                             // the screen has no day-to-day value.
+                             // Still reachable via a direct
+                             // ui_show_screen(SCREEN_BLUETOOTH) call.
 };
 
 const BoardCaps& board_caps(void);

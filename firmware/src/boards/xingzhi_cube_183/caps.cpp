@@ -11,6 +11,9 @@ static const BoardCaps caps = {
     .has_imu = false,
     .has_touch = false,       // no touchscreen — PWR drives splash exit
     .auto_cycle_ms = 5000,    // touchless → auto-cycle Usage <-> Bluetooth every 5 s
+    .cycle_skip_bluetooth = true, // after first pairing the BT screen
+                                  // isn't useful day-to-day; skip it
+                                  // from the auto-rotation.
 };
 
 const BoardCaps& board_caps(void) { return caps; }

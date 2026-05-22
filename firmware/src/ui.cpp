@@ -887,26 +887,34 @@ void ui_show_screen(screen_t screen) {
 }
 
 void ui_cycle_screen(void) {
-    // Cycle order: Usage(Claude) → Usage(Codex) → Usage(Antigravity) →
-    // Bluetooth → Usage… Each "extra" Usage screen is only inserted
-    // once we've seen real data for it, so a Claude-only setup just
-    // pings Usage ↔ Bluetooth and never visits empty placeholder
-    // screens.
+    // Cycle order: Usage(Claude) → Usage(Codex) → Usage(Antig credits)
+    // → Usage(Antig models) → Bluetooth → Usage… Each "extra" Usage
+    // screen is only inserted once we've seen real data for it, so a
+    // Claude-only setup just pings Usage ↔ Bluetooth and never visits
+    // empty placeholder screens.
+    //
+    // Boards that set BoardCaps.cycle_skip_bluetooth replace the
+    // Bluetooth step with a return to SCREEN_USAGE — the user has
+    // already paired and doesn't need to revisit the BT screen on
+    // every rotation (manual button presses still reach it).
+    const screen_t after_extras = board_caps().cycle_skip_bluetooth
+        ? SCREEN_USAGE : SCREEN_BLUETOOTH;
+
     screen_t next;
     switch (current_screen) {
     case SCREEN_USAGE:
         if (have_codex_data)      next = SCREEN_USAGE_CODEX;
         else if (have_antig_data) next = SCREEN_USAGE_ANTIG;
-        else                       next = SCREEN_BLUETOOTH;
+        else                       next = after_extras;
         break;
     case SCREEN_USAGE_CODEX:
-        next = have_antig_data ? SCREEN_USAGE_ANTIG : SCREEN_BLUETOOTH;
+        next = have_antig_data ? SCREEN_USAGE_ANTIG : after_extras;
         break;
     case SCREEN_USAGE_ANTIG:
         next = SCREEN_USAGE_ANTIG_MODELS;
         break;
     case SCREEN_USAGE_ANTIG_MODELS:
-        next = SCREEN_BLUETOOTH;
+        next = after_extras;
         break;
     case SCREEN_BLUETOOTH:
         next = SCREEN_USAGE;
