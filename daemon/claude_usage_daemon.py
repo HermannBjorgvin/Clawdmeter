@@ -447,6 +447,44 @@ async def poll_antigravity() -> dict | None:
     # Trim verbose tier names like "Google AI Ultra" -> "Ultra".
     short_plan = plan.replace("Google AI ", "").replace("Google ", "")[:12]
 
+    # Per-model quota list. Format each as "Name | status" — "ok" when
+    # we have full quota left, otherwise a compact reset string like
+    # "47m" or "5d". The firmware renders up to 8 rows.
+    def short_name(s: str) -> str:
+        s = s.replace("(Thinking)", "").replace("(Medium)", "M") \
+             .replace("(High)", "H").replace("(Low)", "L") \
+             .replace("Claude ", "").replace("Gemini ", "G") \
+             .strip()
+        return s[:14]
+
+    def short_eta(rt: str) -> str:
+        if not rt: return ""
+        try:
+            t = datetime.fromisoformat(rt.replace("Z", "+00:00"))
+            secs = int((t - datetime.now(timezone.utc)).total_seconds())
+            if secs <= 0: return "now"
+            mins = secs // 60
+            if mins < 60: return f"{mins}m"
+            hours = mins // 60
+            if hours < 24: return f"{hours}h"
+            return f"{hours // 24}d"
+        except Exception:
+            return ""
+
+    aml = []
+    for cfg in cfgs[:8]:
+        name = short_name(cfg.get("label", ""))
+        q = cfg.get("quotaInfo", {}) or {}
+        rem = q.get("remainingFraction")
+        if rem is None or rem >= 0.99:
+            status = "ok"
+        elif rem <= 0.01:
+            status = short_eta(q.get("resetTime")) or "low"
+        else:
+            status = f"{int(rem * 100)}%"
+        if name:
+            aml.append(f"{name}|{status}")
+
     return {
         "as":  pct_used(prompt_avail, prompt_total),
         "asr": reset_mins,
@@ -457,6 +495,7 @@ async def poll_antigravity() -> dict | None:
         "apn": short_plan,
         "apf": f"{fmt_count(prompt_avail)}/{fmt_count(prompt_total)}",
         "aff": f"{fmt_count(flow_avail)}/{fmt_count(flow_total)}",
+        "aml": aml,
     }
 
 

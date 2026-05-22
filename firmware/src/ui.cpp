@@ -214,6 +214,11 @@ static lv_obj_t* lbl_antig_weekly_reset;
 static lv_obj_t* lbl_antig_anim;
 static bool      have_antig_data = false;
 
+// ---- Usage screen widgets (Antigravity per-model list) ----
+static lv_obj_t* antig_models_container;
+static lv_obj_t* lbl_antig_models_title;
+static lv_obj_t* lbl_antig_model_lines[8];
+
 // ---- Bluetooth screen widgets ----
 static lv_obj_t* ble_container;
 static lv_obj_t* lbl_ble_status;
@@ -510,6 +515,42 @@ static void init_usage_antig_screen(lv_obj_t* scr) {
     lv_obj_add_flag(antig_container, LV_OBJ_FLAG_HIDDEN);
 }
 
+// ======== Usage (Antigravity per-model list) Screen ========
+// Compact 8-row list of "Model | status" entries pre-formatted by
+// the daemon. Lines come from data->antig_model_lines.
+static void init_usage_antig_models_screen(lv_obj_t* scr) {
+    antig_models_container = lv_obj_create(scr);
+    lv_obj_set_size(antig_models_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(antig_models_container, 0, 0);
+    lv_obj_set_style_bg_opa(antig_models_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(antig_models_container, 0, 0);
+    lv_obj_set_style_pad_all(antig_models_container, 0, 0);
+    lv_obj_clear_flag(antig_models_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(antig_models_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+
+    lbl_antig_models_title = lv_label_create(antig_models_container);
+    lv_label_set_text(lbl_antig_models_title, "Antig Models");
+    lv_obj_set_style_text_font(lbl_antig_models_title, L.usage_title_font, 0);
+    lv_obj_set_style_text_color(lbl_antig_models_title, COL_TEXT, 0);
+    lv_obj_align(lbl_antig_models_title, LV_ALIGN_TOP_MID, 0, L.title_y);
+
+    // 8 lines starting just below the title. Use the small reset font
+    // (~14-20 px depending on layout) for compact rows.
+    int line_h = (L.scr_h - L.content_y - 6) / 8;
+    if (line_h < 18) line_h = 18;
+    for (int i = 0; i < 8; i++) {
+        lbl_antig_model_lines[i] = lv_label_create(antig_models_container);
+        lv_label_set_text(lbl_antig_model_lines[i], "");
+        lv_obj_set_style_text_font(lbl_antig_model_lines[i], L.usage_reset_font, 0);
+        lv_obj_set_style_text_color(lbl_antig_model_lines[i], COL_TEXT, 0);
+        lv_obj_set_pos(lbl_antig_model_lines[i],
+                       L.margin, L.content_y + i * line_h);
+        lv_obj_set_width(lbl_antig_model_lines[i], L.content_w);
+    }
+
+    lv_obj_add_flag(antig_models_container, LV_OBJ_FLAG_HIDDEN);
+}
+
 // ======== Bluetooth Screen ========
 
 static void init_bluetooth_screen(lv_obj_t* scr) {
@@ -622,6 +663,7 @@ void ui_init(void) {
     init_usage_screen(scr);
     init_usage_codex_screen(scr);
     init_usage_antig_screen(scr);
+    init_usage_antig_models_screen(scr);
     init_bluetooth_screen(scr);
     splash_init(scr);
 
@@ -722,6 +764,18 @@ void ui_update(const UsageData* data) {
             format_reset_time(data->antig_weekly_reset_mins, buf, sizeof(buf));
             lv_label_set_text(lbl_antig_weekly_reset, buf);
         }
+
+        // Per-model list. Each label is "Name | status" — render
+        // available rows, hide unused slots.
+        for (int i = 0; i < 8; i++) {
+            if (!lbl_antig_model_lines[i]) continue;
+            if (i < data->antig_model_count && data->antig_model_lines[i][0]) {
+                lv_label_set_text(lbl_antig_model_lines[i], data->antig_model_lines[i]);
+                lv_obj_clear_flag(lbl_antig_model_lines[i], LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(lbl_antig_model_lines[i], LV_OBJ_FLAG_HIDDEN);
+            }
+        }
     }
 }
 
@@ -776,17 +830,19 @@ static void ble_reset_click_cb(lv_event_t* e) {
 
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
-    if (codex_container) lv_obj_add_flag(codex_container, LV_OBJ_FLAG_HIDDEN);
-    if (antig_container) lv_obj_add_flag(antig_container, LV_OBJ_FLAG_HIDDEN);
+    if (codex_container)         lv_obj_add_flag(codex_container, LV_OBJ_FLAG_HIDDEN);
+    if (antig_container)         lv_obj_add_flag(antig_container, LV_OBJ_FLAG_HIDDEN);
+    if (antig_models_container)  lv_obj_add_flag(antig_models_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
-    case SCREEN_SPLASH:        splash_show(); break;
-    case SCREEN_USAGE:         lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
-    case SCREEN_USAGE_CODEX:   lv_obj_clear_flag(codex_container, LV_OBJ_FLAG_HIDDEN); break;
-    case SCREEN_USAGE_ANTIG:   lv_obj_clear_flag(antig_container, LV_OBJ_FLAG_HIDDEN); break;
-    case SCREEN_BLUETOOTH:     lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_SPLASH:               splash_show(); break;
+    case SCREEN_USAGE:                lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_USAGE_CODEX:          lv_obj_clear_flag(codex_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_USAGE_ANTIG:          lv_obj_clear_flag(antig_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_USAGE_ANTIG_MODELS:   lv_obj_clear_flag(antig_models_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_BLUETOOTH:            lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
     }
 
@@ -822,6 +878,9 @@ void ui_cycle_screen(void) {
         next = have_antig_data ? SCREEN_USAGE_ANTIG : SCREEN_BLUETOOTH;
         break;
     case SCREEN_USAGE_ANTIG:
+        next = SCREEN_USAGE_ANTIG_MODELS;
+        break;
+    case SCREEN_USAGE_ANTIG_MODELS:
         next = SCREEN_BLUETOOTH;
         break;
     case SCREEN_BLUETOOTH:

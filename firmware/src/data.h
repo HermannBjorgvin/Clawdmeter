@@ -30,4 +30,10 @@ struct UsageData {
     char  antig_prompt_count[24];  // pre-formatted "500/50K"
     char  antig_flow_count[24];    // pre-formatted "100/150K"
     bool  antig_valid;
+
+    // Per-model quota lines — daemon pre-formats each entry as
+    // "Model Name|status" e.g. "Claude Sonnet|ok" or "Gemini 3.5 H|47m".
+    // Up to 8 models. Empty strings mark unused slots.
+    char  antig_model_lines[8][32];
+    uint8_t antig_model_count;
 };

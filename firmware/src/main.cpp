@@ -122,6 +122,20 @@ static bool parse_json(const char* json, UsageData* out) {
         strlcpy(out->antig_prompt_count, doc["apf"] | "", sizeof(out->antig_prompt_count));
         strlcpy(out->antig_flow_count,   doc["aff"] | "", sizeof(out->antig_flow_count));
         out->antig_valid = true;
+
+        // Per-model lines from `aml` array. Daemon already formats each
+        // as "Name|status" — we just store the strings.
+        out->antig_model_count = 0;
+        if (doc["aml"].is<JsonArrayConst>()) {
+            for (JsonVariantConst v : doc["aml"].as<JsonArrayConst>()) {
+                if (out->antig_model_count >= 8) break;
+                strlcpy(out->antig_model_lines[out->antig_model_count],
+                        v.as<const char*>() ? v.as<const char*>() : "",
+                        sizeof(out->antig_model_lines[0]));
+                if (out->antig_model_lines[out->antig_model_count][0])
+                    out->antig_model_count++;
+            }
+        }
     }
     return true;
 }
