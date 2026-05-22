@@ -24,6 +24,17 @@ Keep the two in sync. The pattern in `caps.cpp` does this for you:
 | `BOARD_HAS_BATTERY`            | 0       | Whether PMU battery measurement is meaningful on this board. UI hides the battery indicator when false. |
 | `BOARD_HAS_IO_EXPANDER`        | 0       | Whether an IO expander gates display / touch reset lines. Doesn't directly gate any code path — but signals to the porter that `board_init()` must release the expander before `display_hal_init()`. |
 
+## Runtime-only BoardCaps fields
+
+A few `BoardCaps` fields don't have a matching `BOARD_HAS_*` macro
+because no per-board source needs to dead-strip code on them — they're
+runtime hints to shared code. Set them directly in `caps.cpp`:
+
+| Field             | Default | What it gates |
+|-------------------|---------|---------------|
+| `has_touch`       | `false` | Whether the board has a capacitive touchscreen. When `false`, shared code routes a PWR-button press on the splash screen to `ui_toggle_splash()` instead of `splash_next()`, so users without a touchscreen can still leave the splash. The AMOLED ports set `true`; the Xingzhi sets `false`. |
+| `auto_cycle_ms`   | `0`     | Optional global "rotate screens" timer in milliseconds. When `> 0`, `main.cpp` calls `ui_cycle_screen()` at that cadence (skipping splash + pausing on idle). Touchless boards typically set 5000 ms so the user doesn't have to mash buttons to see every screen; touch-capable boards leave it at 0. |
+
 ## Future capabilities
 
 Add a new flag when:

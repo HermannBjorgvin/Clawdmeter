@@ -26,6 +26,7 @@ sync with the compile-time `BOARD_HAS_*` flags in `board.h`.
 | `display_hal_draw_bitmap`   | Push a w×h RGB565 strip at (x, y). If the panel can't rotate natively, apply CPU rotation here before pushing — `imu_hal_rotation_quadrant()` returns the current orientation. **Must complete inside LVGL's render budget** (a few ms at typical strip sizes). |
 | `display_hal_tick`          | Per-loop housekeeping — used by rotation-aware boards to blank the panel + ramp brightness during a rotation transition. No-op on boards without rotation. |
 | `display_hal_round_area`    | LVGL invalidate-area hook. Most QSPI AMOLED drivers expect even-aligned flush regions; apply `& ~1` / `| 1` to coordinates. |
+| `display_hal_lv_color_format` | Return the `lv_color_format_t` LVGL should write into the framebuffer. Most ports return `LV_COLOR_FORMAT_RGB565` (host-endian, default). MIPI-SPI controllers that consume pixels in big-endian byte order (e.g. NV3023) can return `LV_COLOR_FORMAT_RGB565_SWAPPED` so LVGL pre-swaps each pixel and `draw_bitmap` can stream the buffer verbatim. |
 
 ## `touch_hal.h`
 
@@ -75,7 +76,12 @@ Boards with no PMU and no PWR button can return zero/false from all five
 and `.height`. The current breakpoints are:
 
 - **`height >= 460`** → "large" layout, tuned for 480×480.
-- **otherwise** → "compact" layout, tuned for 368×448.
+- **`height >= 280`** → "compact" layout, tuned for 368×448.
+- **otherwise** → "tiny" layout, tuned for 284×240. Hides the 80×80
+  logo and 48×48 battery / bluetooth / trash icons (`show_chrome=false`
+  + `bt_show_icons=false`) so the title + content row fit in 240
+  vertical pixels, and uses styrene_12/14/20/24 + mono_18 instead of
+  styrene_28/48 + tiempos_56/mono_32.
 
 A new screen size lands on the closer breakpoint and renders correctly
 without pixel-perfect alignment. If you want polish, add another branch

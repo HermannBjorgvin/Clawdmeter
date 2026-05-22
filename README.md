@@ -25,10 +25,11 @@ While the splash is up, the middle button cycles animations instead of screens. 
 
 ## Hardware
 
-Two boards are supported out of the box:
+Three boards are supported out of the box:
 
 - [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) — ESP32-S3R8, 2.16" 480×480 AMOLED (CO5300 QSPI), CST9220 cap touch, AXP2101 PMU + Li-Po battery, QMI8658 IMU. Three side buttons, IMU auto-rotation. Build env: `waveshare_amoled_216`.
 - [Waveshare ESP32-S3-Touch-AMOLED-1.8](https://www.waveshare.com/esp32-s3-touch-amoled-1.8.htm?&aff_id=149786) — ESP32-S3R8, 1.8" 368×448 portrait AMOLED (SH8601 QSPI), FT3168 cap touch, AXP2101 PMU, QMI8658 IMU, XCA9554 IO expander, 16 MB flash. Two buttons (BOOT + PWR), fixed orientation. Build env: `waveshare_amoled_18`.
+- **Xingzhi Cube 1.83" TFT WiFi (2-mic)** — ESP32-S3-N16R8, 1.83" 284×240 landscape NV3023 panel (over plain SPI, hand-rolled driver), no touch, no PMU, bare Li-Po + ADC voltage divider for battery. Three buttons (BOOT + VOL_UP + VOL_DOWN). Build env: `xingzhi_cube_183`. See [`firmware/src/boards/xingzhi_cube_183/README.md`](firmware/src/boards/xingzhi_cube_183/README.md) for the panel-quirks story (it's labelled ST7789 everywhere but isn't).
 
 Plus per board:
 
