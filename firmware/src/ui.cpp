@@ -217,7 +217,9 @@ static bool      have_antig_data = false;
 // ---- Usage screen widgets (Antigravity per-model list) ----
 static lv_obj_t* antig_models_container;
 static lv_obj_t* lbl_antig_models_title;
-static lv_obj_t* lbl_antig_model_lines[8];
+static lv_obj_t* lbl_antig_model_name[8];     // left-aligned model name
+static lv_obj_t* lbl_antig_model_status[8];   // right-aligned status
+static lv_obj_t* lbl_antig_model_lines[8];    // legacy fallback (unused after split)
 
 // ---- Bluetooth screen widgets ----
 static lv_obj_t* ble_container;
@@ -534,18 +536,25 @@ static void init_usage_antig_models_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_color(lbl_antig_models_title, COL_TEXT, 0);
     lv_obj_align(lbl_antig_models_title, LV_ALIGN_TOP_MID, 0, L.title_y);
 
-    // 8 lines starting just below the title. Use the small reset font
-    // (~14-20 px depending on layout) for compact rows.
+    // 8 rows: model name on the left, status on the right. The status
+    // label is anchored to the right edge so all status values line up
+    // vertically regardless of name length.
     int line_h = (L.scr_h - L.content_y - 6) / 8;
     if (line_h < 18) line_h = 18;
     for (int i = 0; i < 8; i++) {
-        lbl_antig_model_lines[i] = lv_label_create(antig_models_container);
-        lv_label_set_text(lbl_antig_model_lines[i], "");
-        lv_obj_set_style_text_font(lbl_antig_model_lines[i], L.usage_reset_font, 0);
-        lv_obj_set_style_text_color(lbl_antig_model_lines[i], COL_TEXT, 0);
-        lv_obj_set_pos(lbl_antig_model_lines[i],
-                       L.margin, L.content_y + i * line_h);
-        lv_obj_set_width(lbl_antig_model_lines[i], L.content_w);
+        int row_y = L.content_y + i * line_h;
+
+        lbl_antig_model_name[i] = lv_label_create(antig_models_container);
+        lv_label_set_text(lbl_antig_model_name[i], "");
+        lv_obj_set_style_text_font(lbl_antig_model_name[i], L.usage_reset_font, 0);
+        lv_obj_set_style_text_color(lbl_antig_model_name[i], COL_TEXT, 0);
+        lv_obj_set_pos(lbl_antig_model_name[i], L.margin, row_y);
+
+        lbl_antig_model_status[i] = lv_label_create(antig_models_container);
+        lv_label_set_text(lbl_antig_model_status[i], "");
+        lv_obj_set_style_text_font(lbl_antig_model_status[i], L.usage_reset_font, 0);
+        lv_obj_set_style_text_color(lbl_antig_model_status[i], COL_DIM, 0);
+        lv_obj_align(lbl_antig_model_status[i], LV_ALIGN_TOP_RIGHT, -L.margin, row_y);
     }
 
     lv_obj_add_flag(antig_models_container, LV_OBJ_FLAG_HIDDEN);
@@ -765,15 +774,31 @@ void ui_update(const UsageData* data) {
             lv_label_set_text(lbl_antig_weekly_reset, buf);
         }
 
-        // Per-model list. Each label is "Name | status" — render
-        // available rows, hide unused slots.
+        // Per-model rows: split "Name|status" into two labels so the
+        // status column right-aligns cleanly across all rows.
         for (int i = 0; i < 8; i++) {
-            if (!lbl_antig_model_lines[i]) continue;
+            if (!lbl_antig_model_name[i]) continue;
             if (i < data->antig_model_count && data->antig_model_lines[i][0]) {
-                lv_label_set_text(lbl_antig_model_lines[i], data->antig_model_lines[i]);
-                lv_obj_clear_flag(lbl_antig_model_lines[i], LV_OBJ_FLAG_HIDDEN);
+                const char* raw = data->antig_model_lines[i];
+                const char* sep = strchr(raw, '|');
+                char name_buf[28] = {0};
+                const char* status_buf = "";
+                if (sep) {
+                    size_t name_len = (size_t)(sep - raw);
+                    if (name_len >= sizeof(name_buf)) name_len = sizeof(name_buf) - 1;
+                    memcpy(name_buf, raw, name_len);
+                    name_buf[name_len] = '\0';
+                    status_buf = sep + 1;
+                } else {
+                    strlcpy(name_buf, raw, sizeof(name_buf));
+                }
+                lv_label_set_text(lbl_antig_model_name[i], name_buf);
+                lv_label_set_text(lbl_antig_model_status[i], status_buf);
+                lv_obj_clear_flag(lbl_antig_model_name[i],   LV_OBJ_FLAG_HIDDEN);
+                lv_obj_clear_flag(lbl_antig_model_status[i], LV_OBJ_FLAG_HIDDEN);
             } else {
-                lv_obj_add_flag(lbl_antig_model_lines[i], LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(lbl_antig_model_name[i],   LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(lbl_antig_model_status[i], LV_OBJ_FLAG_HIDDEN);
             }
         }
     }
