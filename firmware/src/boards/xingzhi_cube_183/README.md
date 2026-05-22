@@ -1,12 +1,19 @@
 # Xingzhi Cube 1.83" TFT WiFi (2mic) — port
 
-## Status: working ✓
+## Status: working ✓ (high-contrast monochrome render)
 
-The firmware boots, advertises BLE, drives the NV3023 panel, renders the
-LVGL UI at correct geometry, and shows recognizable colors. Anti-aliased
-mid-tones (e.g. Clawd's salmon body) appear slightly desaturated as
-"warm brown" rather than salmon-pink — panel-specific saturation
-characteristic, acceptable for a status display.
+The firmware boots, advertises BLE, drives the NV3023 panel, and
+renders the LVGL UI at correct geometry. Because this specific panel
+exhibits stubborn color polarity quirks that standard `INVOFF` /
+`MADCTL` knobs don't fix, `display_hal_draw_bitmap` runs every pixel
+through a per-pixel monochrome threshold: bright pixels resolve to
+white, dark pixels to black, with the final output pre-inverted to
+land white-on-panel where LVGL wrote a bright color. The result is a
+crisp black-and-white silhouette — Clawd reads cleanly as white-on-
+black and all text stays sharp.
+
+To experiment with native (slightly-off) colors instead, comment out
+`#define MONOCHROME_RENDER` in `display.cpp`.
 
 ## Key finding: panel is NV3023, not ST7789
 
@@ -26,9 +33,10 @@ both `fillScreen` and LVGL anti-aliased rendering is:
 |---------------------|----------------------------------|
 | LVGL color format   | `LV_COLOR_FORMAT_RGB565_SWAPPED` |
 | MADCTL (0x36)       | `0xA0` (MY + MV, no BGR bit)     |
-| INVON (0x21)        | **not sent**                     |
+| INVOFF (0x20)       | sent explicitly                  |
 | COLMOD (0x3A)       | `0x55` (RGB565)                  |
 | Column offset       | 36                               |
+| Render mode         | Monochrome threshold + invert    |
 
 LVGL's SWAPPED format writes pixels in MSB-first byte order, which
 matches the byte order the NV3023 expects over SPI. `draw_bitmap`

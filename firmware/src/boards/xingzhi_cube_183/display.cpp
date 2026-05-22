@@ -120,8 +120,9 @@ static const InitCmd init_seq[] = {
     {0x35, 1, d_35, 0},
     {0x36, 1, d_36, 0},                    // MADCTL — orientation + BGR
     {0x3A, 1, d_3A, 0},                    // COLMOD — RGB565
-    // INVON commented out — testing whether LVGL SWAPPED removes the need.
-    // {0x21, 0, nullptr, 0},
+    {0x20, 0, nullptr, 0},                 // INVOFF — explicitly disable inversion
+                                            // (one of the chip-specific init regs above
+                                            //  appears to leave the panel inverted).
     {0x11, 0, nullptr, 200},               // SLPOUT, wait 200ms
     {0x29, 0, nullptr, 10},                // DISPON, wait 10ms
 };
@@ -221,20 +222,60 @@ void display_hal_fill_screen(uint16_t color) {
     spi->endTransaction();
 }
 
+// Per-pixel monochrome render. The NV3023 on this board renders
+// anti-aliased mid-tones with a desaturated cast (Clawd's salmon body
+// comes out warm brown), so the firmware ships a high-contrast mode:
+// any pixel whose brightest channel exceeds MONO_THRESHOLD is pushed
+// as pure white, everything dimmer as pure black. UI elements stay
+// perfectly readable and the splash creature reads as a crisp
+// silhouette. Comment out MONOCHROME_RENDER to fall back to native
+// (slightly-off) colors.
+#define MONOCHROME_RENDER
+#define MONO_THRESHOLD 150         // 0..255 on the brightest channel
+                                    // Tuned so the splash palette's dark-purple
+                                    // background falls to black while salmon /
+                                    // orange Clawd bodies still resolve to white.
+
+#ifdef MONOCHROME_RENDER
+static inline uint16_t to_mono(uint16_t rgb565) {
+    int r = ((rgb565 >> 11) & 0x1F) << 3;
+    int g = ((rgb565 >> 5)  & 0x3F) << 2;
+    int b = ( rgb565        & 0x1F) << 3;
+    int max_c = r > g ? r : g;
+    if (b > max_c) max_c = b;
+    // Panel inverts output polarity for reasons we can't disable via
+    // standard INVOFF — emit pre-inverted values so bright LVGL pixels
+    // end up white on screen.
+    return (max_c > MONO_THRESHOLD) ? 0x0000 : 0xFFFF;
+}
+#endif
+
 void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
                              const uint16_t* pixels) {
-    // LVGL stores RGB565 in host-endian (little-endian on ESP32-S3).
-    // NV3023 expects bytes MSB-first over SPI. Swap each pixel into a
-    // row buffer before streaming so the panel sees the same byte
-    // order that fillScreen produces.
+    // LVGL is set to RGB565_SWAPPED → each uint16_t in memory is
+    // already laid out MSB-first byte-wise, which is what NV3023
+    // wants on SPI. We still need to byte-swap inside the CPU word
+    // to read the actual RGB565 value for any pixel-domain work
+    // (monochrome thresholding here).
     static uint16_t row_buf[284];
     spi->beginTransaction(spi_settings);
     cs_lo();
     set_addr_window(x, y, w, h);
-    // Stream LVGL pixels verbatim — no byte swap, no channel swap.
-    // Empirically determine the right transform from what shows up.
-    (void)row_buf;
-    spi_write_data_bytes((const uint8_t*)pixels, (size_t)w * (size_t)h * 2);
+    for (int32_t row = 0; row < h; row++) {
+        const uint16_t* src = pixels + row * w;
+        for (int32_t i = 0; i < w; i++) {
+            uint16_t p = src[i];
+            uint16_t rgb565 = (uint16_t)((p << 8) | (p >> 8));
+#ifdef MONOCHROME_RENDER
+            uint16_t out = to_mono(rgb565);
+#else
+            uint16_t out = rgb565;
+#endif
+            // Store SWAPPED so SPI streams MSB-first.
+            row_buf[i] = (uint16_t)((out << 8) | (out >> 8));
+        }
+        spi_write_data_bytes((const uint8_t*)row_buf, (size_t)w * 2);
+    }
     cs_hi();
     spi->endTransaction();
 }
