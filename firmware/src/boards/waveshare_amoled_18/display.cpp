@@ -46,6 +46,10 @@ void display_hal_tick(void) {
 
 // SH8601 driver doesn't strictly require even alignment in source, but the
 // rounder is harmless and keeps behavior consistent with the CO5300 port.
+lv_color_format_t display_hal_lv_color_format(void) {
+    return LV_COLOR_FORMAT_RGB565;
+}
+
 void display_hal_round_area(int32_t* x1, int32_t* y1, int32_t* x2, int32_t* y2) {
     *x1 = *x1 & ~1;
     *y1 = *y1 & ~1;
