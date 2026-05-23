@@ -6,10 +6,11 @@ via PlatformIO's `build_src_filter`. Adding a board means dropping in a new
 folder + a new `[env:...]` block — `main.cpp`, `ui.cpp`, and `splash.cpp`
 never see board-specific code. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md).
 
-Two reference ports today:
+Three reference ports today:
 
 - `boards/waveshare_amoled_216/` — original Waveshare ESP32-S3-Touch-AMOLED-2.16 (CO5300, 480×480 square, CST9220 touch, IMU rotation). Build env: `waveshare_amoled_216`.
 - `boards/waveshare_amoled_18/` — Waveshare ESP32-S3-Touch-AMOLED-1.8 (SH8601, 368×448 portrait, FT3168 touch, XCA9554 IO expander). Build env: `waveshare_amoled_18`.
+- `boards/waveshare_amoled_206/` — Waveshare ESP32-S3-Touch-AMOLED-2.06 (CO5300, 410×502 watch form factor, FT3168 touch, no IO expander, 32 MB flash, PCF85063 RTC, ES8311 codec). Build env: `waveshare_amoled_206`.
 
 The shared code calls a small HAL (`firmware/src/hal/`) that each board implements: display, touch, input, power, IMU. Optional features are guarded by `BoardCaps` (runtime) and `BOARD_HAS_*` (compile-time) rather than `#ifdef BOARD_*`.
 
@@ -33,6 +34,17 @@ Connects to a host daemon over BLE; daemon polls Anthropic API for usage data. T
 - Orientation: **fixed at 0°**. IMU auto-rotation is disabled; `rotate_strip()` / `handle_rotation_change()` are excluded via `#ifndef BOARD_AMOLED_18`.
 - Buttons: GPIO 0 (BOOT → Space/voice-mode), XCA9554 EXIO4 (PWR → cycle screens; on splash → cycle animations). **No third button** (GPIO 18 button doesn't exist on this board).
 
+### AMOLED-2.06 (watch form factor)
+- Display: **CO5300** AMOLED via QSPI (CS=12, **SCLK=11** ← same as 1.8, SDIO0..3=4..7, RST=8 direct GPIO). 410×502 portrait. Requires **`col_offset1 = 23`** in the Arduino_CO5300 constructor — the panel's visible viewport sits at a 22–23 column offset inside the controller's internal RAM. Without it, a vertical strip of stale/garbage content shows through on the right edge (we picked 23 empirically; Waveshare's reference library uses 22).
+- Touch: **FT3168** via I2C (SDA=15, SCL=14, **INT=38, RST=9** direct GPIO, addr=0x38). Same inline reader vendored from the 1.8 port (no GPLv3 dependency). Coordinates verified end-to-end with the BLE reset zone.
+- PMU: AXP2101 @ 0x34 (same chip as 2.16/1.8 — `XPowersLib` reused). PWR button routes through AXP PKEY short-press IRQ (no IO expander).
+- IMU: QMI8658 @ 0x6B (initialized for I2C bus health; rotation logic disabled — fixed watch enclosure orientation).
+- RTC: **PCF85063** on the same I2C bus, powered through AXP2101 for retention. Not currently used by Clawdmeter but present for future features.
+- Audio codec: **ES8311** + ES7210 ADC on the same I2C bus. Unused by Clawdmeter; just don't accidentally clash with their I2C addresses.
+- **No IO expander** despite the Waveshare wiki FAQ implying one. The schematic shows Key3/PWR wires directly to AXP2101 PWRON; touch reset and display reset are direct GPIOs. `board_init()` pulses LCD_RESET (GPIO 8) and TP_RESET (GPIO 9) before display/touch HAL init.
+- Buttons: GPIO 0 (BOOT → Space/voice-mode), AXP PKEY (PWR → cycle screens). **No third button**.
+- Flash: 32 MB. Uses `default_32MB.csv` partition table.
+
 ## Architecture
 
 ```text
@@ -47,6 +59,7 @@ firmware/src/
   boards/
     waveshare_amoled_216/   — CO5300 + CST9220 + AXP PKEY + QMI8658 rotation
     waveshare_amoled_18/    — SH8601 + FT3168 + AXP + XCA9554 (PWR via EXIO4), no rotation
+    waveshare_amoled_206/   — CO5300 + FT3168 + AXP PKEY, no IO expander, 32 MB, no rotation
     template/               — copy this to bootstrap a new port
   main.cpp                  — setup() + loop(): HAL calls only, zero #ifdef BOARD_*
   ui.{h,cpp}                — 3-screen UI (splash, usage, bluetooth). compute_layout() picks fonts/positions from board_caps() (responsive — current breakpoint: H >= 460 → large, else compact)
@@ -70,9 +83,11 @@ PlatformIO's `build_src_filter` includes shared code + one board's folder per en
 
 ```bash
 pio run -d firmware -e waveshare_amoled_216                                     # build 2.16 (default original)
-pio run -d firmware -e waveshare_amoled_18                                      # build 1.8 (new port)
-pio run -d firmware -e waveshare_amoled_18 -t upload --upload-port /dev/cu.usbmodem101   # flash 1.8 on macOS
-pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0         # flash 2.16 on Linux
+pio run -d firmware -e waveshare_amoled_18                                      # build 1.8 (newer port)
+pio run -d firmware -e waveshare_amoled_206                                     # build 2.06 (watch port)
+pio run -d firmware -e waveshare_amoled_18 -t upload --upload-port /dev/cu.usbmodem101    # flash 1.8 on macOS
+pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0          # flash 2.16 on Linux
+pio run -d firmware -e waveshare_amoled_206 -t upload --upload-port /dev/cu.usbmodem101   # flash 2.06 on macOS
 ```
 
 If `pio` isn't on PATH: try `~/.platformio/penv/bin/pio` (Linux/macOS pio install) or `brew install platformio` on macOS.

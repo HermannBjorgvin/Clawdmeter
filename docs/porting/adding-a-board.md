@@ -97,7 +97,16 @@ Optional:
   in platformio.ini (check `board_build.arduino.memory_type = qio_opi`);
   IO expander not released before `gfx->begin()` (run `io_expander_init()`
   from `board_init()`); GFX library version too old to know about your
-  panel chip.
+  panel chip; reset line not pulsed before `gfx->begin()` (do it in
+  `board_init()` for direct-GPIO resets, or via the IO expander otherwise).
+- **Display works but a vertical strip of garbage/stale content shows on
+  one edge.** CO5300-based panels expose their visible viewport at a
+  horizontal offset inside the controller's internal RAM, and the offset
+  varies per physical panel size. The 2.16" port uses `col_offset1 = 0`,
+  the 2.06" uses `col_offset1 = 23`. When adding a new CO5300 board,
+  grab Waveshare's reference value from their `Mylibrary/pin_config.h`
+  (or equivalent) and fine-tune ±1 if centering looks off. SH8601 panels
+  don't have this issue.
 - **Touch reads zeros / wrong coordinates.** The HAL hands LVGL whatever
   the controller reports — apply any axis swap / mirror inside your
   `touch.cpp`. CST9220 needs `setSwapXY(true)` + `setMirrorXY(true,
