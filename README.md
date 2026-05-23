@@ -120,53 +120,35 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 
 ## Windows installation
 
-The Windows host pieces share the cross-platform Python daemon with macOS but
-use a Startup-folder shortcut instead of LaunchAgents. Run the PowerShell
-scripts from the repo root.
-
 ### Flash the firmware
 
 ```powershell
 .\flash-windows.ps1                              # auto-detects the ESP32-S3 COM port
 .\flash-windows.ps1 COM7                         # or pass an explicit port
-.\flash-windows.ps1 -Env waveshare_amoled_18     # different board
+.\flash-windows.ps1 -Env waveshare_amoled_18     # or pass a non-default board env
 ```
 
 ### Pair the device
 
-Windows requires an OS-level pairing before `bleak` can connect (unlike macOS,
-which can pair on first connect).
-
-1. Power on the device.
-2. **Settings → Bluetooth & devices → Add device → Bluetooth**.
-3. Pick **"Claude Controller"** and confirm pairing.
-
-The MAC address is also shown on the device's Bluetooth screen — press the
-middle (PWR) button to cycle to it.
+After flashing, open **Settings → Bluetooth & devices → Add device → Bluetooth** and pick "Claude Controller". The daemon will discover it on its next scan (~30 s).
 
 ### Install the daemon
 
-The daemon reads your Claude OAuth token from
-`%USERPROFILE%\.claude\.credentials.json`, polls usage every 60 s, and pushes
-it to the display over BLE.
+The daemon reads your Claude OAuth token from `%USERPROFILE%\.claude\.credentials.json`, polls usage every 60 s, and pushes it to the display over BLE.
 
 ```powershell
 .\install-windows.ps1
 ```
 
-The installer creates a Python venv in `daemon\.venv\`, installs `bleak` and
-`httpx`, renders a launcher wrapper at `daemon\start-daemon.cmd`, drops a
-shortcut into your Startup folder so the daemon comes up at every login, and
-launches it once immediately. Logs go to
-`%APPDATA%\claude-usage-monitor\daemon.log`.
+The installer creates a Python venv in `daemon\.venv\`, installs `bleak` and `httpx`, renders a launcher at `daemon\start-daemon.cmd`, and drops a shortcut into your Startup folder so the daemon comes up at every login. Logs go to `%APPDATA%\claude-usage-monitor\daemon.log`.
 
-Useful commands (PowerShell):
+Useful commands:
 
 ```powershell
-Get-Process pythonw                                                              # check it's running
-Get-Content -Wait "$env:APPDATA\claude-usage-monitor\daemon.log"                 # live logs
-Stop-Process -Name pythonw -Force                                                # stop
-& "$PWD\daemon\start-daemon.cmd"                                                 # start again
+Get-Process pythonw                                                                             # check it's running
+Get-Content -Wait "$env:APPDATA\claude-usage-monitor\daemon.log"                                # live logs
+Stop-Process -Name pythonw -Force                                                               # stop
+& "$PWD\daemon\start-daemon.cmd"                                                                # start again
 Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Clawdmeter Daemon.lnk"  # disable autostart
 ```
 
