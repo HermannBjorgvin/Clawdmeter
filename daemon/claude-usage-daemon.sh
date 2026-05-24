@@ -13,6 +13,9 @@ RX_CHAR_UUID="4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID="4c41555a-4465-7669-6365-000000000004"
 POLL_INTERVAL=60
 TICK=5
+# Exponential backoff cap on consecutive poll failures (e.g. when the
+# /api/oauth/usage endpoint returns 429). Backoff doubles from POLL_INTERVAL.
+MAX_BACKOFF_INTERVAL=300
 SAVED_MAC_FILE="$HOME/.config/claude-usage-monitor/ble-address"
 REFRESH_FLAG="/tmp/claude-usage-refresh-$$"
 DBUS_DEST="org.bluez"
@@ -302,14 +305,41 @@ while true; do
     # Poll loop: tick every $TICK seconds. Poll Anthropic when the
     # interval has elapsed OR when the ESP requested a refresh.
     LAST_POLL=0
+    FAILURES=0
     while is_connected; do
         NOW=$(date +%s)
-        if [ -f "$REFRESH_FLAG" ] || (( NOW - LAST_POLL >= POLL_INTERVAL )); then
+        ELAPSED=$((NOW - LAST_POLL))
+        # Exponential backoff on consecutive failures: 60s, 120s, 240s,
+        # capped at MAX_BACKOFF_INTERVAL. Resets on success.
+        EFFECTIVE=$((POLL_INTERVAL << FAILURES))
+        (( EFFECTIVE > MAX_BACKOFF_INTERVAL )) && EFFECTIVE=$MAX_BACKOFF_INTERVAL
+
+        PERIODIC_DUE=0
+        (( ELAPSED >= EFFECTIVE )) && PERIODIC_DUE=1
+        # Refresh bypasses POLL_INTERVAL during steady state, but respects
+        # backoff — bypassing it on a rate-limited API would just keep
+        # tripping the same 429.
+        REFRESH_DUE=0
+        if [ -f "$REFRESH_FLAG" ] && (( FAILURES == 0 )); then
+            REFRESH_DUE=1
+        fi
+
+        if (( PERIODIC_DUE || REFRESH_DUE )); then
             if [ -f "$REFRESH_FLAG" ]; then
                 log "Refresh requested by device"
                 rm -f "$REFRESH_FLAG"
             fi
-            poll && LAST_POLL=$NOW
+            if poll; then
+                FAILURES=0
+            else
+                # Cap shift count to prevent integer overflow on long-running
+                # failures; the value is already pinned to MAX_BACKOFF_INTERVAL.
+                (( FAILURES < 10 )) && FAILURES=$((FAILURES + 1))
+                NEXT=$((POLL_INTERVAL << FAILURES))
+                (( NEXT > MAX_BACKOFF_INTERVAL )) && NEXT=$MAX_BACKOFF_INTERVAL
+                log "Poll failed (#$FAILURES); next attempt in ${NEXT}s"
+            fi
+            LAST_POLL=$NOW
         fi
         sleep "$TICK"
     done

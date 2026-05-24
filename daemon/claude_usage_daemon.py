@@ -31,6 +31,9 @@ REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 POLL_INTERVAL = 60
 TICK = 5
 SCAN_TIMEOUT = 8.0
+# Exponential backoff cap on consecutive poll failures (e.g. when the
+# /api/oauth/usage endpoint returns 429). Backoff doubles from POLL_INTERVAL.
+MAX_BACKOFF_INTERVAL = 300
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
@@ -264,27 +267,49 @@ async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
     await session.setup_refresh_subscription()
 
     last_poll = 0.0
+    failures = 0
     used_successfully = False
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
             elapsed = now - last_poll
-            if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
+            # Exponential backoff on consecutive failures: 60s, 120s, 240s,
+            # capped at MAX_BACKOFF_INTERVAL. Resets on success.
+            effective_interval = min(POLL_INTERVAL * (2**failures), MAX_BACKOFF_INTERVAL)
+            periodic_due = elapsed >= effective_interval
+            # Refresh (device boot signal) bypasses POLL_INTERVAL during the
+            # success steady state, but respects backoff — bypassing it on a
+            # rate-limited API would just keep tripping the same 429.
+            refresh_due = session.refresh_requested.is_set() and failures == 0
+
+            if periodic_due or refresh_due:
                 session.refresh_requested.clear()
                 token = read_token()
+                last_poll = time.time()
                 if not token:
                     log("No token; skipping poll")
                 else:
                     payload = await poll_api(token)
-                    if payload is not None:
+                    if payload is None:
+                        failures += 1
+                        next_in = min(POLL_INTERVAL * (2**failures), MAX_BACKOFF_INTERVAL)
+                        log(f"Poll failed (#{failures}); next attempt in {next_in}s")
+                    else:
                         if await session.write_payload(payload):
-                            last_poll = time.time()
                             used_successfully = True
+                        failures = 0
 
-            try:
-                await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
-            except asyncio.TimeoutError:
-                pass
+            # Wake on refresh only when not in backoff; otherwise the event
+            # stays set during the backoff window and would tight-loop the
+            # wait/check cycle. Plain sleep during backoff is fine — the
+            # event will be picked up on the next iteration after the window.
+            if failures == 0:
+                try:
+                    await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                await asyncio.sleep(TICK)
     finally:
         try:
             await client.disconnect()
