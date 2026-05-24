@@ -20,7 +20,13 @@ static uint32_t candidate_since    = 0;
 static uint32_t last_poll_ms       = 0;
 static bool     imu_ok             = false;
 
+// The QMI8658 on the 2.06 watch board is mounted in a different physical
+// orientation than the 2.16's QMI8658 — empirically the y-axis sign is
+// inverted (rotating CW yielded upside-down landscape with the unmodified
+// 2.16 mapping). Negating ay before the quadrant lookup swaps quadrants
+// 1 and 3, which fixes the upside-down landscape view.
 static uint8_t accel_to_rotation(float ax, float ay) {
+    ay = -ay;  // 2.06 watch IMU y-axis is inverted vs the 2.16 reference
     float abs_ax = fabsf(ax);
     float abs_ay = fabsf(ay);
     if (abs_ax < TILT_THRESHOLD && abs_ay < TILT_THRESHOLD) {

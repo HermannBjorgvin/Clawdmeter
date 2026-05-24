@@ -24,11 +24,18 @@ static bool rotation_change_pending = false;
 void display_hal_init(void) {
     bus = new Arduino_ESP32QSPI(
         LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
-    // CO5300 constructor: (bus, rst, rotation, w, h, col_offset1..2, row_offset1..2)
+    // CO5300 constructor: (bus, rst, rotation, w, h, col_offset1, row_offset1, col_offset2, row_offset2)
     // LCD_RESET is a direct GPIO on this board (no IO expander).
+    //
+    // col_offset = 22: the 410-px visible panel sits at controller column
+    // 22..431 (out of 432 RAM columns). Without this offset the rightmost
+    // 22 panel columns show stale/uninitialised content (a green strip on
+    // AMOLED). Confirmed from the official ESP-IDF BSP, which sends
+    // `2A 00 16 01 AF` (column window 22..431) and `2B 00 00 01 F5` (row
+    // window 0..501) at init.
     gfx = new Arduino_CO5300(
         bus, LCD_RESET, 0 /* rotation handled in software */,
-        LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
+        LCD_WIDTH, LCD_HEIGHT, 22, 0, 22, 0);
 }
 
 void display_hal_begin(void) {

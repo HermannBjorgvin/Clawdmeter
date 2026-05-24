@@ -15,6 +15,10 @@ tools/package-lock.json
 # Mac daemon venv
 daemon/.venv/
 
+# Windows daemon launcher rendered from start-daemon.cmd.template by install-windows.ps1
+# (absolute paths are machine-specific; the template is the source of truth).
+daemon/start-daemon.cmd
+
 # Python bytecode cache
 __pycache__/
 *.pyc
