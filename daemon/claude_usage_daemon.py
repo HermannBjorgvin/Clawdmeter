@@ -34,7 +34,7 @@ SCAN_TIMEOUT = 8.0
 
 SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
 CONFIG_PATH = Path(__file__).with_name("config.toml")
-VALID_PROVIDERS = {"claude", "codex"}
+VALID_PROVIDERS = {"claude", "codex", "both"}
 
 
 def log(msg: str) -> None:
@@ -82,6 +82,10 @@ def usage_to_payload(usage: Usage) -> dict:
     }
 
 
+def failed_usage(status: str) -> Usage:
+    return Usage(0, 0, 0, 0, status, False)
+
+
 def load_config_provider() -> str | None:
     try:
         raw = CONFIG_PATH.read_text()
@@ -127,10 +131,44 @@ def resolve_provider_name(args: argparse.Namespace) -> tuple[str, str]:
     return "claude", "default"
 
 
-def build_provider(name: str) -> Provider:
+def build_providers(name: str) -> list[Provider]:
+    if name == "both":
+        return [ClaudeProvider(log), CodexProvider(log)]
     if name == "codex":
-        return CodexProvider(log)
-    return ClaudeProvider(log)
+        return [CodexProvider(log)]
+    return [ClaudeProvider(log)]
+
+
+async def fetch_usage_payload(providers: list[Provider]) -> dict | None:
+    if len(providers) == 1:
+        usage = await providers[0].fetch_usage()
+        if usage is None:
+            return None
+        payload = usage_to_payload(usage)
+        payload["p"] = providers[0].name
+        return payload
+
+    results = await asyncio.gather(
+        *(provider.fetch_usage() for provider in providers),
+        return_exceptions=True,
+    )
+    by_name: dict[str, Usage] = {}
+    for provider, result in zip(providers, results):
+        if isinstance(result, Exception):
+            log(f"{provider.name} usage fetch failed: {result}")
+            by_name[provider.name] = failed_usage(f"{provider.name}_error")
+        elif result is None:
+            by_name[provider.name] = failed_usage(f"{provider.name}_error")
+        else:
+            by_name[provider.name] = result
+
+    claude_usage = by_name.get("claude", failed_usage("claude_missing"))
+    codex_usage = by_name.get("codex", failed_usage("codex_missing"))
+    payload = usage_to_payload(claude_usage)
+    payload["p"] = "both"
+    payload["c"] = usage_to_payload(claude_usage)
+    payload["x"] = usage_to_payload(codex_usage)
+    return payload
 
 
 class Session:
@@ -162,7 +200,7 @@ class Session:
 async def connect_and_run(
     address: str,
     stop_event: asyncio.Event,
-    provider: Provider,
+    providers: list[Provider],
 ) -> bool:
     """Connect to a known address and poll until disconnected or stopped.
 
@@ -194,12 +232,10 @@ async def connect_and_run(
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
-                usage = await provider.fetch_usage()
-                if usage is not None:
-                    payload = usage_to_payload(usage)
-                    if await session.write_payload(payload):
-                        last_poll = time.time()
-                        used_successfully = True
+                payload = await fetch_usage_payload(providers)
+                if payload is not None and await session.write_payload(payload):
+                    last_poll = time.time()
+                    used_successfully = True
 
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
@@ -231,7 +267,7 @@ async def main(argv: list[str] | None = None) -> None:
             signal.signal(sig, _stop)
 
     provider_name, provider_source = resolve_provider_name(args)
-    provider = build_provider(provider_name)
+    providers = build_providers(provider_name)
 
     log("=== Clawdmeter Usage Tracker Daemon (BLE, macOS) ===")
     log(f"Provider: {provider_name} ({provider_source})")
@@ -253,7 +289,7 @@ async def main(argv: list[str] | None = None) -> None:
                 backoff = min(backoff * 2, 60)
                 continue
 
-        ok = await connect_and_run(address, stop_event, provider)
+        ok = await connect_and_run(address, stop_event, providers)
         if not ok:
             log("Invalidating cached address")
             SAVED_ADDR_FILE.unlink(missing_ok=True)

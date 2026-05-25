@@ -8,8 +8,8 @@ SERVICE_LABEL="com.user.claude-usage-daemon"
 PLIST="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
 PROVIDER="${1:-}"
 
-if [[ "$PROVIDER" != "claude" && "$PROVIDER" != "codex" ]]; then
-    echo "Usage: $0 <claude|codex>"
+if [[ "$PROVIDER" != "claude" && "$PROVIDER" != "codex" && "$PROVIDER" != "both" ]]; then
+    echo "Usage: $0 <claude|codex|both>"
     exit 1
 fi
 

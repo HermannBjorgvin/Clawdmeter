@@ -95,7 +95,53 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 }
 
-// Parse a JSON line into UsageData.
+static void reset_provider_usage(ProviderUsageData* out) {
+    out->session_pct = 0.0f;
+    out->session_reset_mins = -1;
+    out->weekly_pct = 0.0f;
+    out->weekly_reset_mins = -1;
+    strlcpy(out->status, "waiting", sizeof(out->status));
+    out->ok = false;
+    out->valid = false;
+}
+
+static void reset_usage(UsageData* out) {
+    for (int i = 0; i < USAGE_PROVIDER_COUNT; i++) {
+        reset_provider_usage(&out->providers[i]);
+    }
+    out->primary_provider = USAGE_PROVIDER_CLAUDE;
+    out->dual = false;
+    out->valid = false;
+}
+
+static UsageProvider provider_from_name(const char* name, UsageProvider fallback) {
+    if (name && strcmp(name, "codex") == 0) return USAGE_PROVIDER_CODEX;
+    if (name && strcmp(name, "claude") == 0) return USAGE_PROVIDER_CLAUDE;
+    return fallback;
+}
+
+static bool parse_provider_usage(JsonVariantConst src, ProviderUsageData* out) {
+    if (src.isNull()) return false;
+    out->session_pct = src["s"] | 0.0f;
+    out->session_reset_mins = src["sr"] | -1;
+    out->weekly_pct = src["w"] | 0.0f;
+    out->weekly_reset_mins = src["wr"] | -1;
+    strlcpy(out->status, src["st"] | "unknown", sizeof(out->status));
+    out->ok = src["ok"] | false;
+    out->valid = true;
+    return true;
+}
+
+static const ProviderUsageData* primary_usage(const UsageData* data) {
+    UsageProvider provider = data->primary_provider;
+    if (provider >= USAGE_PROVIDER_COUNT) provider = USAGE_PROVIDER_CLAUDE;
+    const ProviderUsageData* usage = &data->providers[provider];
+    if (usage->valid) return usage;
+    return &data->providers[USAGE_PROVIDER_CLAUDE];
+}
+
+// Parse a JSON line into UsageData. Supports the legacy single-provider
+// payload and the extended dual payload with "c" (Claude) and "x" (Codex).
 static bool parse_json(const char* json, UsageData* out) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
@@ -104,14 +150,30 @@ static bool parse_json(const char* json, UsageData* out) {
         return false;
     }
 
-    out->session_pct = doc["s"] | 0.0f;
-    out->session_reset_mins = doc["sr"] | -1;
-    out->weekly_pct = doc["w"] | 0.0f;
-    out->weekly_reset_mins = doc["wr"] | -1;
-    strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
-    out->ok = doc["ok"] | false;
-    out->valid = true;
-    return true;
+    reset_usage(out);
+
+    const char* provider_name = doc["p"] | "claude";
+    const bool has_claude = !doc["c"].isNull();
+    const bool has_codex = !doc["x"].isNull();
+    out->dual = has_claude || has_codex || strcmp(provider_name, "both") == 0;
+
+    if (out->dual) {
+        bool parsed = false;
+        parsed |= parse_provider_usage(doc["c"], &out->providers[USAGE_PROVIDER_CLAUDE]);
+        parsed |= parse_provider_usage(doc["x"], &out->providers[USAGE_PROVIDER_CODEX]);
+        if (!parsed) {
+            parsed = parse_provider_usage(doc.as<JsonVariantConst>(),
+                                          &out->providers[USAGE_PROVIDER_CLAUDE]);
+        }
+        out->primary_provider = USAGE_PROVIDER_CLAUDE;
+        out->valid = parsed;
+        return parsed;
+    }
+
+    UsageProvider provider = provider_from_name(provider_name, USAGE_PROVIDER_CLAUDE);
+    out->primary_provider = provider;
+    out->valid = parse_provider_usage(doc.as<JsonVariantConst>(), &out->providers[provider]);
+    return out->valid;
 }
 
 // ---- Serial command buffer ----
@@ -306,12 +368,13 @@ void loop() {
 
     if (ble_has_data()) {
         if (parse_json(ble_get_data(), &usage)) {
+            const ProviderUsageData* sample = primary_usage(&usage);
             int g_before = usage_rate_group();
-            usage_rate_sample(usage.session_pct);
+            usage_rate_sample(sample->session_pct);
             int g_after = usage_rate_group();
             if (g_after != g_before) {
                 Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
+                    g_before, g_after, sample->session_pct);
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
             ui_update(&usage);

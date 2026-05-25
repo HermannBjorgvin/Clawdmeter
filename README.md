@@ -62,7 +62,7 @@ After flashing, open **System Settings → Bluetooth** and click *Connect* next 
 
 ### Install the daemon
 
-The daemon reads the selected provider's OAuth token, polls usage every 60 s, and pushes it to the display over BLE. The default provider is Claude.
+The daemon reads the selected provider OAuth tokens, polls usage every 60 s, and pushes it to the display over BLE. The default provider is `both`, which shows Claude and Codex together on the Usage screen.
 
 ```bash
 ./install-mac.sh
@@ -70,11 +70,12 @@ The daemon reads the selected provider's OAuth token, polls usage every 60 s, an
 
 The installer creates a Python venv in `daemon/.venv/`, installs `bleak` and `httpx`, creates `daemon/config.toml` if it does not exist, renders a LaunchAgent into `~/Library/LaunchAgents/com.user.claude-usage-daemon.plist`, and loads it. The first run is launched interactively so macOS prompts for Bluetooth permission.
 
-### Switch between Claude and Codex
+### Show Claude, Codex, or both
 
-The firmware BLE JSON schema stays the same, so switching providers does not require reflashing the device.
+The firmware accepts the original single-provider BLE JSON and an extended dual-provider payload. New firmware shows Claude and Codex together when the provider is `both`.
 
 ```bash
+./switch-provider.sh both
 ./switch-provider.sh claude
 ./switch-provider.sh codex
 ```
@@ -83,11 +84,11 @@ The script updates `daemon/config.toml` and reloads the LaunchAgent. The setting
 
 Provider selection priority:
 
-1. CLI flag: `daemon/.venv/bin/python daemon/claude_usage_daemon.py --provider codex`
-2. Environment variable: `CLAWDMETER_PROVIDER=codex`
+1. CLI flag: `daemon/.venv/bin/python daemon/claude_usage_daemon.py --provider both`
+2. Environment variable: `CLAWDMETER_PROVIDER=both`
 3. Config file: `daemon/config.toml`
 
-Claude uses the existing Claude Code OAuth credential store. Codex uses ChatGPT OAuth credentials from `~/.codex/auth.json` or the Codex keychain store (`Codex Auth`). Codex API-key mode does not have 5-hour/weekly subscription limits, so the daemon reports an unavailable status instead of fabricating values.
+Claude uses the existing Claude Code OAuth credential store. Codex uses ChatGPT OAuth credentials from `~/.codex/auth.json` or the Codex keychain store (`Codex Auth`). Codex API-key mode does not have 5-hour/weekly subscription limits, so the daemon reports an unavailable status instead of fabricating values. In `both` mode the daemon sends legacy top-level Claude fields plus compact nested `c` (Claude) and `x` (Codex) fields for the dual UI.
 
 Useful commands:
 
