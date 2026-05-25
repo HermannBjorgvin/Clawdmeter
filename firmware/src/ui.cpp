@@ -123,8 +123,9 @@ static void compute_layout(const BoardCaps& c) {
 #define COL_BAR_BG    THEME_BAR_BG
 
 // ---- Usage screen widgets ----
-static lv_obj_t* usage_container;
-static lv_obj_t* lbl_title;
+static lv_obj_t* usage_dual_container;
+static lv_obj_t* usage_claude_container;
+static lv_obj_t* usage_codex_container;
 static lv_obj_t* lbl_anim;
 
 struct ProviderUsageWidgets {
@@ -141,7 +142,8 @@ struct ProviderUsageWidgets {
     lv_obj_t* weekly_bar;
     lv_obj_t* weekly_reset;
 };
-static ProviderUsageWidgets provider_widgets[USAGE_PROVIDER_COUNT];
+static ProviderUsageWidgets dual_widgets[USAGE_PROVIDER_COUNT];
+static ProviderUsageWidgets single_widgets[USAGE_PROVIDER_COUNT];
 
 // ---- Bluetooth screen widgets ----
 static lv_obj_t* ble_container;
@@ -231,6 +233,12 @@ static void format_reset_short(int mins, char* buf, size_t len) {
     }
 }
 
+static bool is_usage_screen(screen_t screen) {
+    return screen == SCREEN_USAGE ||
+           screen == SCREEN_USAGE_CLAUDE ||
+           screen == SCREEN_USAGE_CODEX;
+}
+
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
 static void ble_reset_click_cb(lv_event_t* e);
@@ -305,32 +313,37 @@ static void make_claude_mark(lv_obj_t* panel, ProviderUsageWidgets* widgets) {
     lv_obj_t* mark = lv_obj_create(panel);
     lv_obj_set_size(mark, L.usage_icon_size, L.usage_icon_size);
     lv_obj_set_pos(mark, 0, 0);
-    lv_obj_set_style_bg_color(mark, COL_BAR_BG, 0);
-    lv_obj_set_style_bg_opa(mark, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(mark, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(mark, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(mark, 0, 0);
+    lv_obj_set_style_pad_all(mark, 0, 0);
     lv_obj_clear_flag(mark, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t* letter = lv_label_create(mark);
-    lv_label_set_text(letter, "C");
-    lv_obj_set_style_text_font(letter, &font_styrene_20, 0);
-    lv_obj_set_style_text_color(letter, COL_TEXT, 0);
-    lv_obj_center(letter);
+    lv_obj_t* img = lv_image_create(mark);
+    lv_image_set_src(img, &logo_dsc);
+    lv_image_set_scale(img, (uint32_t)L.usage_icon_size * 256 / LOGO_WIDTH);
+    lv_obj_center(img);
     widgets->mark = mark;
 }
 
 static void make_codex_mark(lv_obj_t* panel, ProviderUsageWidgets* widgets) {
-    lv_obj_t* img = lv_image_create(panel);
+    lv_obj_t* mark = lv_obj_create(panel);
+    lv_obj_set_size(mark, L.usage_icon_size, L.usage_icon_size);
+    lv_obj_set_pos(mark, 0, 0);
+    lv_obj_set_style_bg_opa(mark, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(mark, 0, 0);
+    lv_obj_set_style_pad_all(mark, 0, 0);
+    lv_obj_clear_flag(mark, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* img = lv_image_create(mark);
     lv_image_set_src(img, &codex_icon_dsc);
-    lv_obj_set_pos(img, (L.usage_icon_size - ICON_CODEX_W) / 2,
-                   (L.usage_icon_size - ICON_CODEX_H) / 2);
-    widgets->mark = img;
+    lv_obj_center(img);
+    widgets->mark = mark;
 }
 
-static void make_provider_usage_panel(lv_obj_t* parent, UsageProvider provider,
-                                      int y, const char* name) {
-    ProviderUsageWidgets* widgets = &provider_widgets[provider];
-    widgets->panel = make_panel(parent, L.margin, y, L.content_w, L.usage_panel_h);
+static void make_provider_usage_panel(lv_obj_t* parent, ProviderUsageWidgets* widgets,
+                                      UsageProvider provider, int y, int h,
+                                      const char* name, bool spacious) {
+    widgets->panel = make_panel(parent, L.margin, y, L.content_w, h);
     const int inner_w = L.content_w - 32;
 
     if (provider == USAGE_PROVIDER_CODEX) make_codex_mark(widgets->panel, widgets);
@@ -351,70 +364,95 @@ static void make_provider_usage_panel(lv_obj_t* parent, UsageProvider provider,
     const int gap = 14;
     const int col_w = (inner_w - gap) / 2;
     const int col2 = col_w + gap;
+    const int metric_y = spacious ? 82 : L.usage_metric_y;
+    const int pct_y = metric_y + (spacious ? 22 : 14);
+    const int bar_y = spacious ? h - 72 : L.usage_bar_y;
+    const int reset_y = spacious ? h - 50 : L.usage_reset_y;
 
     widgets->session_label = lv_label_create(widgets->panel);
     style_metric_label(widgets->session_label, "5h");
-    lv_obj_set_pos(widgets->session_label, 0, L.usage_metric_y);
+    lv_obj_set_pos(widgets->session_label, 0, metric_y);
 
     widgets->weekly_label = lv_label_create(widgets->panel);
     style_metric_label(widgets->weekly_label, "Week");
-    lv_obj_set_pos(widgets->weekly_label, col2, L.usage_metric_y);
+    lv_obj_set_pos(widgets->weekly_label, col2, metric_y);
 
     widgets->session_pct = lv_label_create(widgets->panel);
     lv_label_set_text(widgets->session_pct, "--%");
     lv_obj_set_style_text_font(widgets->session_pct, L.usage_pct_font, 0);
     lv_obj_set_style_text_color(widgets->session_pct, COL_TEXT, 0);
-    lv_obj_set_pos(widgets->session_pct, 0, L.usage_metric_y + 14);
+    lv_obj_set_pos(widgets->session_pct, 0, pct_y);
 
     widgets->weekly_pct = lv_label_create(widgets->panel);
     lv_label_set_text(widgets->weekly_pct, "--%");
     lv_obj_set_style_text_font(widgets->weekly_pct, L.usage_pct_font, 0);
     lv_obj_set_style_text_color(widgets->weekly_pct, COL_TEXT, 0);
-    lv_obj_set_pos(widgets->weekly_pct, col2, L.usage_metric_y + 14);
+    lv_obj_set_pos(widgets->weekly_pct, col2, pct_y);
 
-    widgets->session_bar = make_bar(widgets->panel, 0, L.usage_bar_y, col_w, 12);
-    widgets->weekly_bar = make_bar(widgets->panel, col2, L.usage_bar_y, col_w, 12);
+    widgets->session_bar = make_bar(widgets->panel, 0, bar_y, col_w, 12);
+    widgets->weekly_bar = make_bar(widgets->panel, col2, bar_y, col_w, 12);
 
     widgets->session_reset = lv_label_create(widgets->panel);
     lv_label_set_text(widgets->session_reset, "--");
     lv_obj_set_style_text_font(widgets->session_reset, L.usage_reset_font, 0);
     lv_obj_set_style_text_color(widgets->session_reset, COL_DIM, 0);
-    lv_obj_set_pos(widgets->session_reset, 0, L.usage_reset_y);
+    lv_obj_set_pos(widgets->session_reset, 0, reset_y);
 
     widgets->weekly_reset = lv_label_create(widgets->panel);
     lv_label_set_text(widgets->weekly_reset, "--");
     lv_obj_set_style_text_font(widgets->weekly_reset, L.usage_reset_font, 0);
     lv_obj_set_style_text_color(widgets->weekly_reset, COL_DIM, 0);
-    lv_obj_set_pos(widgets->weekly_reset, col2, L.usage_reset_y);
+    lv_obj_set_pos(widgets->weekly_reset, col2, reset_y);
+}
+
+static lv_obj_t* make_usage_root(lv_obj_t* scr, const char* title) {
+    lv_obj_t* root = lv_obj_create(scr);
+    lv_obj_set_size(root, L.scr_w, L.scr_h);
+    lv_obj_set_pos(root, 0, 0);
+    lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(root, 0, 0);
+    lv_obj_set_style_pad_all(root, 0, 0);
+    lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(root, global_click_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* lbl_title = lv_label_create(root);
+    lv_label_set_text(lbl_title, title);
+    lv_obj_set_style_text_font(lbl_title, L.usage_title_font, 0);
+    lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, L.title_y);
+    return root;
 }
 
 static void init_usage_screen(lv_obj_t* scr) {
-    usage_container = lv_obj_create(scr);
-    lv_obj_set_size(usage_container, L.scr_w, L.scr_h);
-    lv_obj_set_pos(usage_container, 0, 0);
-    lv_obj_set_style_bg_opa(usage_container, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(usage_container, 0, 0);
-    lv_obj_set_style_pad_all(usage_container, 0, 0);
-    lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
-
-    lbl_title = lv_label_create(usage_container);
-    lv_label_set_text(lbl_title, "Usage");
-    lv_obj_set_style_text_font(lbl_title, L.usage_title_font, 0);
-    lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
-
-    make_provider_usage_panel(usage_container, USAGE_PROVIDER_CLAUDE,
-                              L.content_y, "Claude");
-    make_provider_usage_panel(usage_container, USAGE_PROVIDER_CODEX,
+    usage_dual_container = make_usage_root(scr, "Usage");
+    make_provider_usage_panel(usage_dual_container, &dual_widgets[USAGE_PROVIDER_CLAUDE],
+                              USAGE_PROVIDER_CLAUDE, L.content_y,
+                              L.usage_panel_h, "Claude", false);
+    make_provider_usage_panel(usage_dual_container, &dual_widgets[USAGE_PROVIDER_CODEX],
+                              USAGE_PROVIDER_CODEX,
                               L.content_y + L.usage_panel_h + L.usage_panel_gap,
-                              "Codex");
+                              L.usage_panel_h, "Codex", false);
 
-    lbl_anim = lv_label_create(usage_container);
+    lbl_anim = lv_label_create(usage_dual_container);
     lv_label_set_text(lbl_anim, "");
     lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+
+    const int single_y = L.content_y + (L.scr_h >= 460 ? 20 : 12);
+    const int single_h = L.scr_h - single_y - (L.scr_h >= 460 ? 86 : 78);
+
+    usage_claude_container = make_usage_root(scr, "Claude");
+    make_provider_usage_panel(usage_claude_container, &single_widgets[USAGE_PROVIDER_CLAUDE],
+                              USAGE_PROVIDER_CLAUDE, single_y, single_h,
+                              "Claude", true);
+    lv_obj_add_flag(usage_claude_container, LV_OBJ_FLAG_HIDDEN);
+
+    usage_codex_container = make_usage_root(scr, "Codex");
+    make_provider_usage_panel(usage_codex_container, &single_widgets[USAGE_PROVIDER_CODEX],
+                              USAGE_PROVIDER_CODEX, single_y, single_h,
+                              "Codex", true);
+    lv_obj_add_flag(usage_codex_container, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ======== Bluetooth Screen ========
@@ -537,40 +575,48 @@ void ui_update(const UsageData* data) {
 
     for (int i = 0; i < USAGE_PROVIDER_COUNT; i++) {
         const ProviderUsageData* usage = &data->providers[i];
-        ProviderUsageWidgets* widgets = &provider_widgets[i];
-        if (!usage->valid) {
-            lv_label_set_text(widgets->status, "waiting");
-            lv_obj_set_style_text_color(widgets->status, COL_DIM, 0);
-            lv_label_set_text(widgets->session_pct, "--%");
-            lv_label_set_text(widgets->weekly_pct, "--%");
-            lv_label_set_text(widgets->session_reset, "--");
-            lv_label_set_text(widgets->weekly_reset, "--");
-            lv_bar_set_value(widgets->session_bar, 0, LV_ANIM_ON);
-            lv_bar_set_value(widgets->weekly_bar, 0, LV_ANIM_ON);
-            lv_obj_set_style_bg_color(widgets->session_bar, COL_DIM, LV_PART_INDICATOR);
-            lv_obj_set_style_bg_color(widgets->weekly_bar, COL_DIM, LV_PART_INDICATOR);
-            continue;
+        ProviderUsageWidgets* targets[2] = {
+            &dual_widgets[i],
+            &single_widgets[i],
+        };
+
+        for (int j = 0; j < 2; j++) {
+            ProviderUsageWidgets* widgets = targets[j];
+            if (!widgets->panel) continue;
+            if (!usage->valid) {
+                lv_label_set_text(widgets->status, "waiting");
+                lv_obj_set_style_text_color(widgets->status, COL_DIM, 0);
+                lv_label_set_text(widgets->session_pct, "--%");
+                lv_label_set_text(widgets->weekly_pct, "--%");
+                lv_label_set_text(widgets->session_reset, "--");
+                lv_label_set_text(widgets->weekly_reset, "--");
+                lv_bar_set_value(widgets->session_bar, 0, LV_ANIM_ON);
+                lv_bar_set_value(widgets->weekly_bar, 0, LV_ANIM_ON);
+                lv_obj_set_style_bg_color(widgets->session_bar, COL_DIM, LV_PART_INDICATOR);
+                lv_obj_set_style_bg_color(widgets->weekly_bar, COL_DIM, LV_PART_INDICATOR);
+                continue;
+            }
+
+            int s_pct = (int)(usage->session_pct + 0.5f);
+            int w_pct = (int)(usage->weekly_pct + 0.5f);
+            lv_label_set_text_fmt(widgets->session_pct, "%d%%", s_pct);
+            lv_label_set_text_fmt(widgets->weekly_pct, "%d%%", w_pct);
+            lv_bar_set_value(widgets->session_bar, s_pct, LV_ANIM_ON);
+            lv_bar_set_value(widgets->weekly_bar, w_pct, LV_ANIM_ON);
+            lv_obj_set_style_bg_color(widgets->session_bar, pct_color(usage->session_pct),
+                                      LV_PART_INDICATOR);
+            lv_obj_set_style_bg_color(widgets->weekly_bar, pct_color(usage->weekly_pct),
+                                      LV_PART_INDICATOR);
+
+            char buf[24];
+            format_reset_short(usage->session_reset_mins, buf, sizeof(buf));
+            lv_label_set_text(widgets->session_reset, buf);
+            format_reset_short(usage->weekly_reset_mins, buf, sizeof(buf));
+            lv_label_set_text(widgets->weekly_reset, buf);
+
+            lv_label_set_text(widgets->status, usage->ok ? usage->status : "error");
+            lv_obj_set_style_text_color(widgets->status, usage->ok ? COL_GREEN : COL_RED, 0);
         }
-
-        int s_pct = (int)(usage->session_pct + 0.5f);
-        int w_pct = (int)(usage->weekly_pct + 0.5f);
-        lv_label_set_text_fmt(widgets->session_pct, "%d%%", s_pct);
-        lv_label_set_text_fmt(widgets->weekly_pct, "%d%%", w_pct);
-        lv_bar_set_value(widgets->session_bar, s_pct, LV_ANIM_ON);
-        lv_bar_set_value(widgets->weekly_bar, w_pct, LV_ANIM_ON);
-        lv_obj_set_style_bg_color(widgets->session_bar, pct_color(usage->session_pct),
-                                  LV_PART_INDICATOR);
-        lv_obj_set_style_bg_color(widgets->weekly_bar, pct_color(usage->weekly_pct),
-                                  LV_PART_INDICATOR);
-
-        char buf[24];
-        format_reset_short(usage->session_reset_mins, buf, sizeof(buf));
-        lv_label_set_text(widgets->session_reset, buf);
-        format_reset_short(usage->weekly_reset_mins, buf, sizeof(buf));
-        lv_label_set_text(widgets->weekly_reset, buf);
-
-        lv_label_set_text(widgets->status, usage->ok ? usage->status : "error");
-        lv_obj_set_style_text_color(widgets->status, usage->ok ? COL_GREEN : COL_RED, 0);
     }
 }
 
@@ -617,20 +663,27 @@ static void ble_reset_click_cb(lv_event_t* e) {
 }
 
 void ui_show_screen(screen_t screen) {
-    lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(usage_dual_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(usage_claude_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(usage_codex_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
-    case SCREEN_SPLASH:     splash_show(); break;
-    case SCREEN_USAGE:      lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
-    case SCREEN_BLUETOOTH:  lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_SPLASH:       splash_show(); break;
+    case SCREEN_USAGE:        lv_obj_clear_flag(usage_dual_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_USAGE_CLAUDE: lv_obj_clear_flag(usage_claude_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_USAGE_CODEX:  lv_obj_clear_flag(usage_codex_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_BLUETOOTH:    lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
     }
 
     if (logo_img) {
-        if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        if (screen == SCREEN_SPLASH || is_usage_screen(screen)) {
+            lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
@@ -641,9 +694,10 @@ void ui_show_screen(screen_t screen) {
 void ui_cycle_screen(void) {
     screen_t next;
     switch (current_screen) {
-    case SCREEN_USAGE:     next = SCREEN_BLUETOOTH; break;
-    case SCREEN_BLUETOOTH: next = SCREEN_USAGE;     break;
-    default:               next = SCREEN_USAGE;     break;
+    case SCREEN_USAGE:        next = SCREEN_USAGE_CLAUDE; break;
+    case SCREEN_USAGE_CLAUDE: next = SCREEN_USAGE_CODEX;  break;
+    case SCREEN_USAGE_CODEX:  next = SCREEN_USAGE;        break;
+    default:                  next = SCREEN_USAGE;        break;
     }
     ui_show_screen(next);
 }

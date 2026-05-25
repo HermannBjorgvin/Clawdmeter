@@ -225,6 +225,12 @@ static void handle_serial_cmd(const char* cmd) {
     } else if (strcmp(cmd, "usage") == 0 || strcmp(cmd, "screen usage") == 0) {
         ui_show_screen(SCREEN_USAGE);
         Serial.println("SCREEN_OK usage");
+    } else if (strcmp(cmd, "claude") == 0 || strcmp(cmd, "screen claude") == 0) {
+        ui_show_screen(SCREEN_USAGE_CLAUDE);
+        Serial.println("SCREEN_OK claude");
+    } else if (strcmp(cmd, "codex") == 0 || strcmp(cmd, "screen codex") == 0) {
+        ui_show_screen(SCREEN_USAGE_CODEX);
+        Serial.println("SCREEN_OK codex");
     } else if (strcmp(cmd, "splash") == 0 || strcmp(cmd, "screen splash") == 0) {
         ui_show_screen(SCREEN_SPLASH);
         Serial.println("SCREEN_OK splash");
