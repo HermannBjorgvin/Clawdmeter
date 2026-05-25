@@ -779,7 +779,8 @@ void ui_cycle_screen(void) {
     switch (current_screen) {
     case SCREEN_USAGE:        next = SCREEN_USAGE_CLAUDE; break;
     case SCREEN_USAGE_CLAUDE: next = SCREEN_USAGE_CODEX;  break;
-    case SCREEN_USAGE_CODEX:  next = SCREEN_USAGE;        break;
+    case SCREEN_USAGE_CODEX:  next = SCREEN_BLUETOOTH;    break;
+    case SCREEN_BLUETOOTH:    next = SCREEN_USAGE;        break;
     default:                  next = SCREEN_USAGE;        break;
     }
     ui_show_screen(next);
