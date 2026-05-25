@@ -163,12 +163,13 @@ static lv_obj_t* lbl_ble_mac;
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
-static lv_obj_t* logo_img;
+static lv_obj_t* header_icon_img;
 static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 
 // ---- Shared ----
 static lv_image_dsc_t logo_dsc;
 static lv_image_dsc_t codex_icon_dsc;
+static lv_image_dsc_t bluetooth_icon_dsc;
 static screen_t current_screen = SCREEN_USAGE;
 
 // Animation state
@@ -243,10 +244,19 @@ static void format_reset_short(int mins, char* buf, size_t len) {
     }
 }
 
-static bool is_usage_screen(screen_t screen) {
-    return screen == SCREEN_USAGE ||
-           screen == SCREEN_USAGE_CLAUDE ||
-           screen == SCREEN_USAGE_CODEX;
+static void set_header_icon(const lv_image_dsc_t* dsc) {
+    if (!header_icon_img) return;
+    if (!dsc) {
+        lv_obj_add_flag(header_icon_img, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    const int slot = LOGO_WIDTH;
+    lv_image_set_src(header_icon_img, dsc);
+    lv_obj_set_pos(header_icon_img,
+                   L.margin + (slot - (int)dsc->header.w) / 2,
+                   L.title_y - 10 + (slot - (int)dsc->header.h) / 2);
+    lv_obj_clear_flag(header_icon_img, LV_OBJ_FLAG_HIDDEN);
 }
 
 // Forward decls — callbacks defined near ui_show_screen below
@@ -538,11 +548,8 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_t* p_info = make_panel(ble_container, L.margin, L.content_y,
                                   L.content_w, L.bt_info_panel_h);
 
-    static lv_image_dsc_t icon_bt_dsc;
-    init_icon_dsc(&icon_bt_dsc, ICON_BLUETOOTH_W, ICON_BLUETOOTH_H, icon_bluetooth_data);
-
     lv_obj_t* bt_img = lv_image_create(p_info);
-    lv_image_set_src(bt_img, &icon_bt_dsc);
+    lv_image_set_src(bt_img, &bluetooth_icon_dsc);
     lv_obj_set_pos(bt_img, 0, 0);
 
     lbl_ble_status = lv_label_create(p_info);
@@ -613,6 +620,7 @@ void ui_init(void) {
 
     init_icon_dsc_rgb565a8(&logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data);
     init_icon_dsc_rgb565a8(&codex_icon_dsc, ICON_CODEX_W, ICON_CODEX_H, icon_codex_data);
+    init_icon_dsc(&bluetooth_icon_dsc, ICON_BLUETOOTH_W, ICON_BLUETOOTH_H, icon_bluetooth_data);
     init_battery_icons();
 
     init_usage_screen(scr);
@@ -623,9 +631,9 @@ void ui_init(void) {
         lv_obj_add_event_cb(splash_get_root(), global_click_cb, LV_EVENT_CLICKED, NULL);
     }
 
-    logo_img = lv_image_create(scr);
-    lv_image_set_src(logo_img, &logo_dsc);
-    lv_obj_set_pos(logo_img, L.margin, L.title_y - 10);
+    header_icon_img = lv_image_create(scr);
+    lv_image_set_src(header_icon_img, &logo_dsc);
+    lv_obj_set_pos(header_icon_img, L.margin, L.title_y - 10);
 
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
@@ -761,12 +769,19 @@ void ui_show_screen(screen_t screen) {
     default: break;
     }
 
-    if (logo_img) {
-        if (screen == SCREEN_SPLASH || is_usage_screen(screen)) {
-            lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        }
+    switch (screen) {
+    case SCREEN_USAGE_CLAUDE:
+        set_header_icon(&logo_dsc);
+        break;
+    case SCREEN_USAGE_CODEX:
+        set_header_icon(&codex_icon_dsc);
+        break;
+    case SCREEN_BLUETOOTH:
+        set_header_icon(&bluetooth_icon_dsc);
+        break;
+    default:
+        set_header_icon(nullptr);
+        break;
     }
 
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
