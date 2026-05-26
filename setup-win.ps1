@@ -91,18 +91,24 @@ function Step-PlatformIO {
 
 # ---------- Step 2: Wait for board ----------
 function Find-Esp32Port {
+    # Match by USB VID, not by driver Caption strings. Caption is localized
+    # (NL Windows shows "Serieel USB-apparaat (COM3)" instead of "USB Serial
+    # Device") and Microsoft's generic usbser driver fills Manufacturer with
+    # "Microsoft" instead of "Espressif", so the previous English-only
+    # caption regex missed ESP32-S3 USB JTAG devices on non-English Windows.
+    # VIDs covered:
+    #   303A = Espressif Systems (ESP32-S3 USB JTAG, ESP32-S2 native CDC)
+    #   10C4 = Silicon Labs (CP210x family)
+    #   1A86 = WCH (CH340/CH341/CH9102)
+    #   0403 = FTDI (FT232R/FT232H/FT231X)
     Get-CimInstance -ClassName Win32_PnPEntity |
         Where-Object {
-            $_.Caption -match 'COM\d+' -and (
-                $_.Caption -match 'USB JTAG' -or
-                $_.Caption -match 'USB Serial' -or
-                $_.Caption -match 'CP210' -or
-                $_.Caption -match 'CH340' -or
-                $_.Manufacturer -match 'Espressif'
-            )
+            $_.PNPDeviceID -match 'VID_(303A|10C4|1A86|0403)' -and
+            ($_.Caption -match '\(COM\d+\)' -or $_.Name -match '\(COM\d+\)')
         } |
         ForEach-Object {
-            if ($_.Caption -match '\((COM\d+)\)') { $Matches[1] }
+            $label = if ($_.Caption -match '\(COM\d+\)') { $_.Caption } else { $_.Name }
+            if ($label -match '\((COM\d+)\)') { $Matches[1] }
         } |
         Sort-Object -Unique |
         Select-Object -First 1
