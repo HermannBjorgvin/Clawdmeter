@@ -168,6 +168,25 @@ Get-Content "$env:LOCALAPPDATA\Clawdmeter\daemon.out.log" -Tail 30 -Wait    # li
 .\uninstall-win.ps1 -RemoveVenv -RemoveLogs                                 # full teardown
 ```
 
+### Troubleshooting: daemon stuck in "Device not found" loop
+
+If `daemon.out.log` loops with `Device not found, retrying...` for a board that previously connected fine (especially after a firmware reflash), Windows has likely cached an aggressive BLE auto-connect for the device and is occupying the GATT slot before the daemon can. Confirm with:
+
+```powershell
+Get-PnpDevice -Class Bluetooth | Where-Object FriendlyName -eq 'Claude Controller'
+```
+
+If the device shows up with `Status: OK` even though you never explicitly paired it through Settings, that's the auto-claim. Remove it (run PowerShell **as administrator**):
+
+```powershell
+$inst = (Get-PnpDevice -Class Bluetooth | Where-Object FriendlyName -eq 'Claude Controller').InstanceId
+pnputil /remove-device "$inst"
+```
+
+Then restart the daemon task: `Stop-ScheduledTask -TaskName 'Clawdmeter Daemon'; Start-ScheduledTask -TaskName 'Clawdmeter Daemon'`.
+
+If the entry comes back immediately after the next board boot, a deeper bond-key under `HKLM\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Keys` is still active — `pnputil` and `Restart-Service bthserv` don't reach those. A Windows reboot flushes the in-memory bond table cleanly and is the most reliable cure.
+
 ## How it works
 
 1. The daemon reads your Claude Code OAuth token from `~/.claude/.credentials.json`.
