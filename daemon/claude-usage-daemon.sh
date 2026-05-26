@@ -1,8 +1,10 @@
 #!/bin/bash
 # Claude Usage Tracker Daemon (BLE)
-# Reads Claude Code OAuth token, polls usage via API, sends to ESP32 over BLE GATT.
+# Reads Claude Code OAuth token, polls usage via the OAuth usage endpoint
+# (api.anthropic.com/api/oauth/usage — same one `claude /usage` uses, costs
+# zero tokens), sends results to the ESP32 over BLE GATT.
 # Auto-connects and reconnects to the Claude Controller BLE device.
-# Dependencies: curl, awk, bluetoothctl
+# Dependencies: curl, awk, python3, bluetoothctl
 
 DEVICE_NAME="Claude Controller"
 DEVICE_MAC="${DEVICE_MAC:-}"  # auto-discovered if empty
@@ -11,6 +13,11 @@ RX_CHAR_UUID="4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID="4c41555a-4465-7669-6365-000000000004"
 POLL_INTERVAL=60
 TICK=5
+# Exponential backoff cap on consecutive poll failures (e.g. when the
+# /api/oauth/usage endpoint returns 429). Backoff doubles from POLL_INTERVAL.
+# 1h cap because the OAuth usage endpoint has aggressive rate limiting and
+# the firmware surfaces the error state, so silent rapid retries add no value.
+MAX_BACKOFF_INTERVAL=3600
 SAVED_MAC_FILE="$HOME/.config/claude-usage-monitor/ble-address"
 REFRESH_FLAG="/tmp/claude-usage-refresh-$$"
 DBUS_DEST="org.bluez"
@@ -191,45 +198,101 @@ write_gatt() {
         WriteValue "aya{sv}" "$count" $bytes 0 2>/dev/null
 }
 
+# Send a short error payload to the firmware so the device can surface the
+# failure mode in place of the rotating spinner caption. Messages stay under
+# 30 chars to fit the on-device label budget. Silently best-effort: a write
+# failure here is logged in write_gatt but doesn't change poll's return code.
+send_err() {
+    local msg="$1"
+    local payload
+    payload=$(printf '{"ok":false,"err":"%s"}' "$msg")
+    log "Sending error: $payload"
+    write_gatt "$RX_CHAR_PATH" "$payload" >/dev/null 2>&1
+}
+
 poll() {
     local token
-    token=$(read_token) || { log "Error: could not read token"; return 1; }
-    local now
-    now=$(date +%s)
+    token=$(read_token) || { log "Error: could not read token"; send_err "No auth token"; return 1; }
 
-    local headers
-    headers=$(curl -s -D - -o /dev/null \
-        "https://api.anthropic.com/v1/messages" \
+    # Capture both body and HTTP status. curl -w appends "\n<code>" so we
+    # split on the trailing newline. curl's own exit code distinguishes a
+    # network/DNS failure (non-zero) from an HTTP error (always exit 0 with
+    # -s, no --fail).
+    local response http_code body curl_exit
+    response=$(curl -s -w $'\n%{http_code}' \
+        "https://api.anthropic.com/api/oauth/usage" \
         -H "Authorization: Bearer $token" \
-        -H "anthropic-version: 2023-06-01" \
         -H "anthropic-beta: oauth-2025-04-20" \
-        -H "Content-Type: application/json" \
+        -H "Accept: application/json" \
         -H "User-Agent: claude-code/2.1.5" \
-        -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
-        2>/dev/null) || { log "Error: API call failed"; return 1; }
+        2>/dev/null)
+    curl_exit=$?
+    if (( curl_exit != 0 )); then
+        log "Error: curl exit $curl_exit (network failure)"
+        send_err "No internet"
+        return 1
+    fi
+    http_code="${response##*$'\n'}"
+    body="${response%$'\n'*}"
 
-    local s5h_util s5h_reset s7d_util s7d_reset status
-    s5h_util=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-5h-utilization" | tr -d '\r' | awk '{print $2}')
-    s5h_reset=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-5h-reset" | tr -d '\r' | awk '{print $2}')
-    s7d_util=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-7d-utilization" | tr -d '\r' | awk '{print $2}')
-    s7d_reset=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-7d-reset" | tr -d '\r' | awk '{print $2}')
-    status=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-5h-status" | tr -d '\r' | awk '{print $2}')
-
-    s5h_util=${s5h_util:-0}
-    s5h_reset=${s5h_reset:-0}
-    s7d_util=${s7d_util:-0}
-    s7d_reset=${s7d_reset:-0}
-    status=${status:-unknown}
+    if (( http_code == 401 )); then
+        log "API HTTP 401: $body"
+        send_err "Auth expired"
+        return 1
+    elif (( http_code == 429 )); then
+        log "API HTTP 429: $body"
+        send_err "Rate limited"
+        return 1
+    elif (( http_code >= 500 )); then
+        log "API HTTP $http_code: $body"
+        send_err "Anthropic API down"
+        return 1
+    elif (( http_code != 200 )); then
+        log "API HTTP $http_code: $body"
+        send_err "API error $http_code"
+        return 1
+    fi
 
     local payload
-    payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$status" -v now="$now" \
-        'BEGIN {
-            sp = sprintf("%.0f", u5 * 100);
-            sr = (r5 - now) / 60; sr = sr > 0 ? sprintf("%.0f", sr) : 0;
-            wp = sprintf("%.0f", u7 * 100);
-            wr = (r7 - now) / 60; wr = wr > 0 ? sprintf("%.0f", wr) : 0;
-            printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"ok\":true}", sp, sr, wp, wr, st;
-        }')
+    payload=$(python3 -c '
+import datetime, json, sys, time
+
+try:
+    data = json.loads(sys.stdin.read())
+except json.JSONDecodeError:
+    sys.exit(1)
+
+def pct(w):
+    if not isinstance(w, dict):
+        return 0
+    u = w.get("utilization")
+    return int(round(u)) if isinstance(u, (int, float)) else 0
+
+def reset_mins(w):
+    if not isinstance(w, dict):
+        return -1
+    s = w.get("resets_at")
+    if not isinstance(s, str):
+        return -1
+    try:
+        ts = datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return -1
+    m = (ts - time.time()) / 60.0
+    return int(round(m)) if m > 0 else 0
+
+fh = data.get("five_hour")
+sd = data.get("seven_day")
+s = pct(fh)
+print(json.dumps({
+    "s": s,
+    "sr": reset_mins(fh),
+    "w": pct(sd),
+    "wr": reset_mins(sd),
+    "st": "limited" if s >= 100 else "allowed",
+    "ok": True,
+}, separators=(",", ":")))
+' <<< "$body") || { log "Error: failed to parse usage JSON"; send_err "Bad API response"; return 1; }
 
     log "Sending: $payload"
     write_gatt "$RX_CHAR_PATH" "$payload" || { log "Write failed"; return 1; }
@@ -286,14 +349,41 @@ while true; do
     # Poll loop: tick every $TICK seconds. Poll Anthropic when the
     # interval has elapsed OR when the ESP requested a refresh.
     LAST_POLL=0
+    FAILURES=0
     while is_connected; do
         NOW=$(date +%s)
-        if [ -f "$REFRESH_FLAG" ] || (( NOW - LAST_POLL >= POLL_INTERVAL )); then
+        ELAPSED=$((NOW - LAST_POLL))
+        # Exponential backoff on consecutive failures: 60s, 120s, 240s,
+        # capped at MAX_BACKOFF_INTERVAL. Resets on success.
+        EFFECTIVE=$((POLL_INTERVAL << FAILURES))
+        (( EFFECTIVE > MAX_BACKOFF_INTERVAL )) && EFFECTIVE=$MAX_BACKOFF_INTERVAL
+
+        PERIODIC_DUE=0
+        (( ELAPSED >= EFFECTIVE )) && PERIODIC_DUE=1
+        # Refresh bypasses POLL_INTERVAL during steady state, but respects
+        # backoff — bypassing it on a rate-limited API would just keep
+        # tripping the same 429.
+        REFRESH_DUE=0
+        if [ -f "$REFRESH_FLAG" ] && (( FAILURES == 0 )); then
+            REFRESH_DUE=1
+        fi
+
+        if (( PERIODIC_DUE || REFRESH_DUE )); then
             if [ -f "$REFRESH_FLAG" ]; then
                 log "Refresh requested by device"
                 rm -f "$REFRESH_FLAG"
             fi
-            poll && LAST_POLL=$NOW
+            if poll; then
+                FAILURES=0
+            else
+                # Cap shift count to prevent integer overflow on long-running
+                # failures; the value is already pinned to MAX_BACKOFF_INTERVAL.
+                (( FAILURES < 10 )) && FAILURES=$((FAILURES + 1))
+                NEXT=$((POLL_INTERVAL << FAILURES))
+                (( NEXT > MAX_BACKOFF_INTERVAL )) && NEXT=$MAX_BACKOFF_INTERVAL
+                log "Poll failed (#$FAILURES); next attempt in ${NEXT}s"
+            fi
+            LAST_POLL=$NOW
         fi
         sleep "$TICK"
     done

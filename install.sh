@@ -11,7 +11,7 @@ echo ""
 
 # Check dependencies
 echo "[1/3] Checking dependencies..."
-for cmd in curl awk bluetoothctl busctl; do
+for cmd in curl awk python3 bluetoothctl busctl; do
     command -v "$cmd" >/dev/null || { echo "Error: $cmd is required but not installed"; exit 1; }
 done
 echo "  All dependencies found"

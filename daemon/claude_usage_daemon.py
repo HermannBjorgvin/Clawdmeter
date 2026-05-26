@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Claude Usage Tracker Daemon (BLE) — macOS port of claude-usage-daemon.sh.
 
-Polls Claude API rate-limit headers and writes a JSON payload to the
-ESP32 "Claude Controller" peripheral over a custom GATT service. Uses
-bleak (CoreBluetooth backend on macOS).
+Polls the Claude OAuth usage endpoint (the same one Claude Code's `/usage`
+command uses) and writes a JSON payload to the ESP32 "Claude Controller"
+peripheral over a custom GATT service. Uses bleak (CoreBluetooth backend
+on macOS).
 """
 
 import asyncio
@@ -15,6 +16,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -29,6 +31,9 @@ REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 POLL_INTERVAL = 60
 TICK = 5
 SCAN_TIMEOUT = 8.0
+# Exponential backoff cap on consecutive poll failures (e.g. when the
+# /api/oauth/usage endpoint returns 429). Backoff doubles from POLL_INTERVAL.
+MAX_BACKOFF_INTERVAL = 300
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
@@ -36,17 +41,11 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
 
-API_URL = "https://api.anthropic.com/v1/messages"
+API_URL = "https://api.anthropic.com/api/oauth/usage"
 API_HEADERS_TEMPLATE = {
-    "anthropic-version": "2023-06-01",
     "anthropic-beta": "oauth-2025-04-20",
-    "Content-Type": "application/json",
+    "Accept": "application/json",
     "User-Agent": "claude-code/2.1.5",
-}
-API_BODY = {
-    "model": "claude-haiku-4-5-20251001",
-    "max_tokens": 1,
-    "messages": [{"role": "user", "content": "hi"}],
 }
 
 
@@ -157,12 +156,40 @@ async def scan_for_device() -> str | None:
     return None
 
 
+def _parse_iso8601(s: object) -> float | None:
+    if not isinstance(s, str) or not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _window_pct(window: object) -> int:
+    if not isinstance(window, dict):
+        return 0
+    util = window.get("utilization")
+    if not isinstance(util, (int, float)):
+        return 0
+    return int(round(float(util)))
+
+
+def _window_reset_mins(window: object, now: float) -> int:
+    if not isinstance(window, dict):
+        return -1
+    ts = _parse_iso8601(window.get("resets_at"))
+    if ts is None:
+        return -1
+    mins = (ts - now) / 60.0
+    return int(round(mins)) if mins > 0 else 0
+
+
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
     try:
         async with httpx.AsyncClient(timeout=20.0) as http:
-            resp = await http.post(API_URL, headers=headers, json=API_BODY)
+            resp = await http.get(API_URL, headers=headers)
     except httpx.HTTPError as e:
         log(f"API call failed: {e}")
         return None
@@ -170,34 +197,24 @@ async def poll_api(token: str) -> dict | None:
         log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
         return None
 
-    def hdr(name: str, default: str = "0") -> str:
-        return resp.headers.get(name, default)
+    try:
+        body = resp.json()
+    except json.JSONDecodeError as e:
+        log(f"API returned non-JSON: {e}")
+        return None
 
     now = time.time()
-
-    def reset_minutes(reset_ts: str) -> int:
-        try:
-            r = float(reset_ts)
-        except ValueError:
-            return 0
-        mins = (r - now) / 60.0
-        return int(round(mins)) if mins > 0 else 0
-
-    def pct(util: str) -> int:
-        try:
-            return int(round(float(util) * 100))
-        except ValueError:
-            return 0
-
-    payload = {
-        "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
-        "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
-        "w": pct(hdr("anthropic-ratelimit-unified-7d-utilization")),
-        "wr": reset_minutes(hdr("anthropic-ratelimit-unified-7d-reset")),
-        "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
+    five_hour = body.get("five_hour")
+    seven_day = body.get("seven_day")
+    s_pct = _window_pct(five_hour)
+    return {
+        "s": s_pct,
+        "sr": _window_reset_mins(five_hour, now),
+        "w": _window_pct(seven_day),
+        "wr": _window_reset_mins(seven_day, now),
+        "st": "limited" if s_pct >= 100 else "allowed",
         "ok": True,
     }
-    return payload
 
 
 class Session:
@@ -250,27 +267,49 @@ async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
     await session.setup_refresh_subscription()
 
     last_poll = 0.0
+    failures = 0
     used_successfully = False
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
             elapsed = now - last_poll
-            if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
+            # Exponential backoff on consecutive failures: 60s, 120s, 240s,
+            # capped at MAX_BACKOFF_INTERVAL. Resets on success.
+            effective_interval = min(POLL_INTERVAL * (2**failures), MAX_BACKOFF_INTERVAL)
+            periodic_due = elapsed >= effective_interval
+            # Refresh (device boot signal) bypasses POLL_INTERVAL during the
+            # success steady state, but respects backoff — bypassing it on a
+            # rate-limited API would just keep tripping the same 429.
+            refresh_due = session.refresh_requested.is_set() and failures == 0
+
+            if periodic_due or refresh_due:
                 session.refresh_requested.clear()
                 token = read_token()
+                last_poll = time.time()
                 if not token:
                     log("No token; skipping poll")
                 else:
                     payload = await poll_api(token)
-                    if payload is not None:
+                    if payload is None:
+                        failures += 1
+                        next_in = min(POLL_INTERVAL * (2**failures), MAX_BACKOFF_INTERVAL)
+                        log(f"Poll failed (#{failures}); next attempt in {next_in}s")
+                    else:
                         if await session.write_payload(payload):
-                            last_poll = time.time()
                             used_successfully = True
+                        failures = 0
 
-            try:
-                await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
-            except asyncio.TimeoutError:
-                pass
+            # Wake on refresh only when not in backoff; otherwise the event
+            # stays set during the backoff window and would tight-loop the
+            # wait/check cycle. Plain sleep during backoff is fine — the
+            # event will be picked up on the next iteration after the window.
+            if failures == 0:
+                try:
+                    await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                await asyncio.sleep(TICK)
     finally:
         try:
             await client.disconnect()

@@ -104,12 +104,23 @@ static bool parse_json(const char* json, UsageData* out) {
         return false;
     }
 
-    out->session_pct = doc["s"] | 0.0f;
-    out->session_reset_mins = doc["sr"] | -1;
-    out->weekly_pct = doc["w"] | 0.0f;
-    out->weekly_reset_mins = doc["wr"] | -1;
-    strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
+    if (out->ok) {
+        // Success payload: numeric fields are authoritative, clear any
+        // prior error so the UI returns to the rotating caption.
+        out->session_pct = doc["s"] | 0.0f;
+        out->session_reset_mins = doc["sr"] | -1;
+        out->weekly_pct = doc["w"] | 0.0f;
+        out->weekly_reset_mins = doc["wr"] | -1;
+        strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
+        out->err[0] = '\0';
+    } else {
+        // Error payload: keep last known numeric values so the user can
+        // still read the most recent percentages while seeing why they're
+        // stale. err[] drives the UI caption override.
+        strlcpy(out->err, doc["err"] | "Unknown error", sizeof(out->err));
+    }
+    out->last_msg_ms = millis();
     out->valid = true;
     return true;
 }
@@ -318,6 +329,20 @@ void loop() {
             ble_send_ack();
         } else {
             ble_send_nack();
+        }
+    }
+
+    // Synthesize "Daemon offline" when no BLE message has arrived in longer
+    // than the daemon's worst-case backoff (1h MAX_BACKOFF_INTERVAL + slack).
+    // A daemon that's alive but failing API calls still sends an err payload
+    // every backoff cycle, so it won't trip this path. Edge-triggered to
+    // avoid spamming ui_update.
+    static const uint32_t DAEMON_OFFLINE_MS = 70UL * 60UL * 1000UL;
+    if (usage.valid && (millis() - usage.last_msg_ms) > DAEMON_OFFLINE_MS) {
+        if (strcmp(usage.err, "Daemon offline") != 0) {
+            strlcpy(usage.err, "Daemon offline", sizeof(usage.err));
+            usage.ok = false;
+            ui_update(&usage);
         }
     }
 
