@@ -135,14 +135,18 @@ From the repo root in PowerShell:
 
 `pio device list` shows candidate ports if auto-detect picks the wrong one.
 
+> **If the screen stays blank after flashing**, unplug USB-C, wait 2 seconds, and re-plug. Some Waveshare AMOLED boards (e.g. AMOLED-2.16) don't wire `RTS` to `CHIP_PU`, so esptool's "Hard resetting via RTS pin" at the end of `pio upload` doesn't actually reset the board — a manual power-cycle does. The firmware itself flashed fine; it just hasn't booted yet.
+
 ### Pair the device
 
-After flashing, the board advertises as **Claude Controller**. `bleak`'s WinRT backend requires the device to be paired in Windows Settings before the daemon can connect:
+After flashing, the board advertises as **Claude Controller**. To use the optional HID keyboard feature (where the device sends a `Space` key to your Claude Code prompt) you need to pair it once via Windows Settings:
 
 1. Open `Settings` → `Bluetooth & devices` → `Add device` → `Bluetooth`
 2. Pick `Claude Controller`, click `Done`
 
-The daemon caches the resolved BLE address at `%USERPROFILE%\.config\claude-usage-monitor\ble-address` after the first scan.
+> **If `Claude Controller` doesn't appear in the device picker**, that's a Windows Settings UI quirk — it sometimes filters BLE devices that combine HID + custom service advertisements. **You can skip pairing entirely**: the daemon's data service has no encryption requirement, so `bleak` will scan-and-connect to the unpaired device directly. Only the HID Space-key feature stops working without pairing; the usage display itself works without it.
+
+The daemon caches the resolved BLE address at `%USERPROFILE%\.config\claude-usage-monitor\ble-address` after the first scan, so subsequent restarts skip the discovery phase.
 
 ### Install the daemon
 
