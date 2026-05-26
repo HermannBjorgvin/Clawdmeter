@@ -135,6 +135,10 @@ static uint8_t anim_msg_idx = 0;
 static uint32_t anim_msg_start = 0;
 #define ANIM_MSG_MS     4000
 
+// When the daemon reports a failure (or the firmware synthesizes one for a
+// dead daemon), the err string replaces the rotating caption. Empty = normal.
+static char current_err[32] = {0};
+
 static const char* const spinner_frames[] = {
     "\xC2\xB7", "\xE2\x9C\xBB", "\xE2\x9C\xBD",
     "\xE2\x9C\xB6", "\xE2\x9C\xB3", "\xE2\x9C\xA2",
@@ -449,6 +453,8 @@ void ui_init(void) {
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
 
+    strlcpy(current_err, data->err, sizeof(current_err));
+
     int s_pct = (int)(data->session_pct + 0.5f);
 
     lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
@@ -484,10 +490,18 @@ void ui_tick_anim(void) {
         anim_spinner_idx = (anim_phase < SPINNER_COUNT) ? anim_phase
                                                         : (SPINNER_PHASES - anim_phase);
 
+        // Error caption (e.g. "Rate limited", "Auth expired", "Daemon offline")
+        // replaces the playful rotating verb. Spinner keeps animating so the
+        // device still looks alive; trailing ellipsis is dropped because the
+        // error message is a state, not an in-progress action.
+        const char* caption = current_err[0] ? current_err : anim_messages[anim_msg_idx];
+        const char* suffix  = current_err[0] ? "" : "\xE2\x80\xA6";
+
         static char buf[80];
-        snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6",
+        snprintf(buf, sizeof(buf), "%s %s%s",
                  spinner_frames[anim_spinner_idx],
-                 anim_messages[anim_msg_idx]);
+                 caption,
+                 suffix);
         lv_label_set_text(lbl_anim, buf);
     }
 }

@@ -159,7 +159,25 @@ JSON payload format (written to RX):
 { "s": 45, "sr": 120, "w": 28, "wr": 7200, "st": "allowed", "ok": true }
 ```
 
-Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
+On failure the daemon instead writes a short error payload, which the firmware surfaces in place of the rotating caption on the usage screen:
+
+```json
+{ "ok": false, "err": "Rate limited" }
+```
+
+Field keys are kept short to fit in a single BLE write (ATT MTU is tight):
+
+| Key   | Type    | Meaning                                          | Range / values                                            |
+| ----- | ------- | ------------------------------------------------ | --------------------------------------------------------- |
+| `s`   | int     | Session utilization (5-hour window)              | `0`–`100` (percent)                                       |
+| `sr`  | int     | Minutes until the session window resets          | `0`+ minutes; `-1` if unknown                             |
+| `w`   | int     | Weekly utilization (7-day window)                | `0`–`100` (percent)                                       |
+| `wr`  | int     | Minutes until the weekly window resets           | `0`+ minutes; `-1` if unknown                             |
+| `st`  | string  | Account status from the API                      | `"allowed"`, `"limited"` (set to `"limited"` when `s≥100`)|
+| `ok`  | bool    | Daemon-side success flag for this poll           | `true` on a clean parse, `false` on any failure           |
+| `err` | string  | Short error message shown on-device when `!ok`   | e.g. `"Auth expired"`, `"Rate limited"`, `"No internet"`, `"Anthropic API down"`, `"Bad API response"` (≤30 chars) |
+
+Defaults if a key is missing: `s`/`w` → `0`, `sr`/`wr` → `-1`, `st` → `"unknown"`, `ok` → `false`, `err` → `""` (see `parse_json` in `firmware/src/main.cpp`). On an `ok: false` payload the firmware keeps the last-known percentages on screen and only swaps the caption — so the user still sees the most recent numbers next to the reason they're stale. If no BLE message arrives for more than ~70 minutes (longer than the daemon's worst-case backoff), the firmware synthesizes `err: "Daemon offline"` locally.
 
 ## Recompiling fonts
 

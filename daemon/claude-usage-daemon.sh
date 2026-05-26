@@ -15,7 +15,9 @@ POLL_INTERVAL=60
 TICK=5
 # Exponential backoff cap on consecutive poll failures (e.g. when the
 # /api/oauth/usage endpoint returns 429). Backoff doubles from POLL_INTERVAL.
-MAX_BACKOFF_INTERVAL=300
+# 1h cap because the OAuth usage endpoint has aggressive rate limiting and
+# the firmware surfaces the error state, so silent rapid retries add no value.
+MAX_BACKOFF_INTERVAL=3600
 SAVED_MAC_FILE="$HOME/.config/claude-usage-monitor/ble-address"
 REFRESH_FLAG="/tmp/claude-usage-refresh-$$"
 DBUS_DEST="org.bluez"
@@ -196,18 +198,60 @@ write_gatt() {
         WriteValue "aya{sv}" "$count" $bytes 0 2>/dev/null
 }
 
+# Send a short error payload to the firmware so the device can surface the
+# failure mode in place of the rotating spinner caption. Messages stay under
+# 30 chars to fit the on-device label budget. Silently best-effort: a write
+# failure here is logged in write_gatt but doesn't change poll's return code.
+send_err() {
+    local msg="$1"
+    local payload
+    payload=$(printf '{"ok":false,"err":"%s"}' "$msg")
+    log "Sending error: $payload"
+    write_gatt "$RX_CHAR_PATH" "$payload" >/dev/null 2>&1
+}
+
 poll() {
     local token
-    token=$(read_token) || { log "Error: could not read token"; return 1; }
+    token=$(read_token) || { log "Error: could not read token"; send_err "No auth token"; return 1; }
 
-    local body
-    body=$(curl -s \
+    # Capture both body and HTTP status. curl -w appends "\n<code>" so we
+    # split on the trailing newline. curl's own exit code distinguishes a
+    # network/DNS failure (non-zero) from an HTTP error (always exit 0 with
+    # -s, no --fail).
+    local response http_code body curl_exit
+    response=$(curl -s -w $'\n%{http_code}' \
         "https://api.anthropic.com/api/oauth/usage" \
         -H "Authorization: Bearer $token" \
         -H "anthropic-beta: oauth-2025-04-20" \
         -H "Accept: application/json" \
         -H "User-Agent: claude-code/2.1.5" \
-        2>/dev/null) || { log "Error: API call failed"; return 1; }
+        2>/dev/null)
+    curl_exit=$?
+    if (( curl_exit != 0 )); then
+        log "Error: curl exit $curl_exit (network failure)"
+        send_err "No internet"
+        return 1
+    fi
+    http_code="${response##*$'\n'}"
+    body="${response%$'\n'*}"
+
+    if (( http_code == 401 )); then
+        log "API HTTP 401: $body"
+        send_err "Auth expired"
+        return 1
+    elif (( http_code == 429 )); then
+        log "API HTTP 429: $body"
+        send_err "Rate limited"
+        return 1
+    elif (( http_code >= 500 )); then
+        log "API HTTP $http_code: $body"
+        send_err "Anthropic API down"
+        return 1
+    elif (( http_code != 200 )); then
+        log "API HTTP $http_code: $body"
+        send_err "API error $http_code"
+        return 1
+    fi
 
     local payload
     payload=$(python3 -c '
@@ -248,7 +292,7 @@ print(json.dumps({
     "st": "limited" if s >= 100 else "allowed",
     "ok": True,
 }, separators=(",", ":")))
-' <<< "$body") || { log "Error: failed to parse usage JSON"; return 1; }
+' <<< "$body") || { log "Error: failed to parse usage JSON"; send_err "Bad API response"; return 1; }
 
     log "Sending: $payload"
     write_gatt "$RX_CHAR_PATH" "$payload" || { log "Write failed"; return 1; }
