@@ -32,6 +32,15 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Force UTF-8 stdio for child Python processes. On a cp1252 console (default
+# on non-English Windows) PlatformIO + Python 3.14 crashes its output-reader
+# thread on the first non-ASCII byte from esptool's progress output, which
+# silently hangs the flash mid-erase. Setting these env vars is harmless on
+# English consoles where stdout is already utf-8 or cp437.
+if (-not $env:PYTHONIOENCODING) { $env:PYTHONIOENCODING = 'utf-8' }
+if (-not $env:PYTHONUTF8)       { $env:PYTHONUTF8       = '1' }
+
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 function Write-Step {

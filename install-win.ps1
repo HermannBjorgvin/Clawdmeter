@@ -24,6 +24,14 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Force UTF-8 stdio for child Python processes. Mirrors the same hardening in
+# flash-win.ps1: on a cp1252 console (default on non-English Windows) any
+# non-ASCII byte from a child pip/python subprocess can crash that process's
+# stdout-encoder thread. Harmless on English consoles.
+if (-not $env:PYTHONIOENCODING) { $env:PYTHONIOENCODING = 'utf-8' }
+if (-not $env:PYTHONUTF8)       { $env:PYTHONUTF8       = '1' }
+
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DaemonDir = Join-Path $ScriptDir 'daemon'
 $VenvDir   = Join-Path $DaemonDir '.venv'
