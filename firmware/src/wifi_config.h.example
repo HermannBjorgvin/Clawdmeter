@@ -1,0 +1,17 @@
+#pragma once
+
+// Local WiFi credentials + bridge URL.
+// Copy this file to wifi_config.h (which is in .gitignore) and fill in
+// your own values. Do NOT commit wifi_config.h.
+
+#define WIFI_SSID          "your-ssid-here"
+#define WIFI_PASSWORD      "your-wifi-password-here"
+
+// LAN host + port the daemon's HTTP bridge listens on. The daemon prints
+// this URL at startup when CLAWDMETER_HTTP=1 is set.
+#define BRIDGE_HOST        "192.168.2.1"
+#define BRIDGE_PORT        8787
+
+// Bearer token shown by the daemon at startup. Lives in
+// ~/.clawdmeter/wifi_token on the host machine.
+#define BRIDGE_TOKEN       "paste-token-from-daemon-startup-log"

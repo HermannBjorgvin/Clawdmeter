@@ -31,5 +31,9 @@ if (-not (Test-Path $Python)) {
     exit 1
 }
 
+# Enable the WiFi-bridge HTTP server alongside USB CDC. Harmless on USB-only
+# setups — the server starts but no firmware client connects.
+$env:CLAWDMETER_HTTP = '1'
+
 & $Python -u $Script *>> $LogOut 2>> $LogErr
 exit $LASTEXITCODE

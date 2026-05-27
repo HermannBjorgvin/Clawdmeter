@@ -4,7 +4,31 @@
 #include "display_cfg.h"
 #include "data.h"
 #include "ui.h"
-#include "serial_link.h"
+// ---- Transport selector ----
+// Default: USB CDC (PR #26's `serial_link`). Set -DCLAWDMETER_TRANSPORT_WIFI
+// in platformio.ini build_flags to use the WiFi/HTTP bridge instead. Both
+// transports expose the same API — only the function names differ.
+#ifdef CLAWDMETER_TRANSPORT_WIFI
+  #include "wifi_link.h"
+  #define link_init            wifi_link_init
+  #define link_tick            wifi_link_tick
+  #define link_get_state       wifi_link_get_state
+  #define link_get_port_name   wifi_link_get_port_name
+  #define link_has_data        wifi_link_has_data
+  #define link_get_data        wifi_link_get_data
+  #define link_send_ack        wifi_link_send_ack
+  #define link_send_nack       wifi_link_send_nack
+#else
+  #include "serial_link.h"
+  #define link_init            serial_link_init
+  #define link_tick            serial_link_tick
+  #define link_get_state       serial_link_get_state
+  #define link_get_port_name   serial_link_get_port_name
+  #define link_has_data        serial_link_has_data
+  #define link_get_data        serial_link_get_data
+  #define link_send_ack        serial_link_send_ack
+  #define link_send_nack       serial_link_send_nack
+#endif
 #include "power.h"
 #include "imu.h"
 #include "splash.h"
@@ -251,7 +275,7 @@ static bool parse_json(const char* json, UsageData* out, ActivityData* act_out =
 void setup() {
     // Bump RX buffer before begin() so HWCDC honors it. Default ~256 bytes
     // truncates multi-session Activity payloads (~700-1000 bytes) between
-    // serial_link_tick() calls.
+    // link_tick() calls.
     Serial.setRxBufferSize(4096);
     Serial.begin(115200);
     delay(300);
@@ -308,7 +332,7 @@ void setup() {
     lv_indev_set_read_cb(indev, my_touch_cb);
 
     // Init USB CDC data channel
-    serial_link_init();
+    link_init();
 
     // Physical buttons: back (GPIO 0) and forward (GPIO 18)
     pinMode(BTN_BACK, INPUT_PULLUP);
@@ -318,7 +342,7 @@ void setup() {
     ui_init();
 
     // Show initial link status on Link screen
-    ui_update_link_status(serial_link_get_state(), serial_link_get_port_name());
+    ui_update_link_status(link_get_state(), link_get_port_name());
 
     // Show initial battery status
     ui_update_battery(power_battery_pct(), power_is_charging());
@@ -363,7 +387,7 @@ void loop() {
     touch_read();
     lv_timer_handler();
     ui_tick_anim();
-    serial_link_tick();
+    link_tick();
     power_tick();
     imu_tick();
     splash_tick();
@@ -395,10 +419,10 @@ void loop() {
     handle_rotation_change();
 
     // Update link status on screen when state changes
-    link_state_t ls = serial_link_get_state();
+    link_state_t ls = link_get_state();
     if (ls != last_link_state) {
         last_link_state = ls;
-        ui_update_link_status(ls, serial_link_get_port_name());
+        ui_update_link_status(ls, link_get_port_name());
     }
 
     // Update battery indicator
@@ -413,9 +437,9 @@ void loop() {
     }
 
     // Process incoming serial data (screenshot cmd handled inside the tick)
-    if (serial_link_has_data()) {
+    if (link_has_data()) {
         static ActivityData activity = {};
-        if (parse_json(serial_link_get_data(), &usage, &activity)) {
+        if (parse_json(link_get_data(), &usage, &activity)) {
             int g_before = usage_rate_group();
             usage_rate_sample(usage.session_pct);
             int g_after = usage_rate_group();
@@ -426,9 +450,9 @@ void loop() {
             }
             ui_update(&usage);
             ui_update_activity(&activity);
-            serial_link_send_ack();
+            link_send_ack();
         } else {
-            serial_link_send_nack();
+            link_send_nack();
         }
     }
 

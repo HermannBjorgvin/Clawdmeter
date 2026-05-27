@@ -15,12 +15,16 @@ Why /dev/cu.usbmodem* and not /dev/tty.usbmodem*?
 import asyncio
 import getpass
 import glob
+import http.server
 import json
 import os
 import re
+import secrets
 import signal
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -59,6 +63,19 @@ SESSION_STALE_SECONDS = 10 * 60
 
 _STATUS_NUM = {"pending": 0, "in_progress": 1, "completed": 2}
 _PHASE_NUM = {"idle": 0, "running": 1}
+
+# ---- WiFi-bridge mode: HTTP server that the firmware can poll over the LAN ----
+# Disabled by default to keep behaviour identical to PR #26 when the user
+# only wants USB CDC. Set CLAWDMETER_HTTP=1 in the environment to enable.
+HTTP_ENABLE = os.environ.get("CLAWDMETER_HTTP", "0") == "1"
+HTTP_PORT = int(os.environ.get("CLAWDMETER_HTTP_PORT", "8787"))
+HTTP_TOKEN_FILE = Path.home() / ".clawdmeter" / "wifi_token"
+
+# Shared between the asyncio main loop and the synchronous HTTP server thread.
+# Holds the most-recently-assembled wire payload so any GET /payload reply is
+# instant — no API call or state.json read in the request hot path.
+_http_payload_lock = threading.Lock()
+_http_payload: dict = {}
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
@@ -221,6 +238,100 @@ def state_file_mtime() -> float:
         return STATE_FILE.stat().st_mtime
     except OSError:
         return 0.0
+
+
+# ---- HTTP server (WiFi-bridge mode) ----------------------------------------
+
+def ensure_http_token() -> str:
+    """Return a persistent bearer token. Generated once, stored in the
+    user-home `.clawdmeter` directory. Firmware must be provisioned with the
+    same value via captive portal or build flag.
+    """
+    HTTP_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if HTTP_TOKEN_FILE.exists():
+        existing = HTTP_TOKEN_FILE.read_text().strip()
+        if existing:
+            return existing
+    token = secrets.token_urlsafe(32)
+    HTTP_TOKEN_FILE.write_text(token)
+    # POSIX file-permission tightening; harmless on Windows.
+    try:
+        os.chmod(HTTP_TOKEN_FILE, 0o600)
+    except OSError:
+        pass
+    return token
+
+
+def lan_ip() -> str:
+    """Best-effort discovery of the IP address the firmware should hit.
+    Doesn't actually open a connection — just asks the OS routing table
+    which interface would carry traffic to a public host.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def update_http_payload(payload: dict) -> None:
+    """Called whenever the main loop assembles a fresh payload — both the
+    USB-CDC writer and the HTTP server end up serving the same thing."""
+    with _http_payload_lock:
+        _http_payload.clear()
+        _http_payload.update(payload)
+
+
+class _PayloadHandler(http.server.BaseHTTPRequestHandler):
+    expected_token: str = ""
+
+    def _send_json(self, status: int, body: dict) -> None:
+        data = json.dumps(body).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _check_auth(self) -> bool:
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            return False
+        return secrets.compare_digest(auth[7:].strip(), self.expected_token)
+
+    def do_GET(self) -> None:
+        if self.path == "/health":
+            self._send_json(200, {"ok": True})
+            return
+        if self.path != "/payload":
+            self._send_json(404, {"err": "not found"})
+            return
+        if not self._check_auth():
+            self._send_json(401, {"err": "unauthorized"})
+            return
+        with _http_payload_lock:
+            payload = dict(_http_payload)
+        if not payload:
+            self._send_json(503, {"err": "no payload yet"})
+            return
+        self._send_json(200, payload)
+
+    def log_message(self, fmt, *args) -> None:
+        # Quiet the default access log noise — daemon log already captures
+        # high-level activity at log() granularity.
+        return
+
+
+def start_http_server(token: str) -> None:
+    _PayloadHandler.expected_token = token
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), _PayloadHandler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    log(f"HTTP bridge listening on http://{lan_ip()}:{HTTP_PORT}/payload")
 
 
 def find_port() -> str | None:
@@ -414,6 +525,10 @@ async def run_session(port_path: str, stop_event: asyncio.Event) -> None:
                 sessions = load_activity_sessions()
                 if sessions:
                     payload["sessions"] = sessions
+                # Update the HTTP-bridge cache unconditionally — even if the
+                # USB CDC write below fails, GET /payload still serves the
+                # latest assembled data. The two transports are independent.
+                update_http_payload(payload)
                 if await write_payload(ser, payload):
                     last_state_mtime = state_mtime
                     write_fails = 0
@@ -439,6 +554,53 @@ async def run_session(port_path: str, stop_event: asyncio.Event) -> None:
             pass
 
 
+async def run_session_no_port(stop_event: asyncio.Event) -> None:
+    """HTTP-only session loop — no serial port, no ACK/NACK round-trip.
+
+    Keeps the API poll + state.json watcher running so the HTTP cache stays
+    fresh. Used when CLAWDMETER_HTTP=1 is set and no USB CDC port is found,
+    or when the user simply prefers WiFi as the only transport.
+    """
+    log("HTTP-only mode (no USB CDC port)")
+    last_poll = 0.0
+    last_state_mtime = -1.0
+    cached_api: dict | None = None
+    while not stop_event.is_set():
+        now = time.time()
+        api_due = (
+            (now - last_poll) >= POLL_INTERVAL
+            or cached_api is None
+        )
+        state_mtime = state_file_mtime()
+        state_changed = state_mtime != last_state_mtime
+
+        if api_due:
+            token = read_token()
+            if token:
+                fresh = await poll_api(token)
+                if fresh is not None:
+                    cached_api = fresh
+                    last_poll = time.time()
+            else:
+                log("No token; skipping API poll")
+
+        if api_due or state_changed:
+            payload = dict(cached_api) if cached_api else {
+                "s": 0, "sr": 0, "w": 0, "wr": 0,
+                "st": "unknown", "ok": False,
+            }
+            sessions = load_activity_sessions()
+            if sessions:
+                payload["sessions"] = sessions
+            update_http_payload(payload)
+            last_state_mtime = state_mtime
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=TICK)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def main() -> None:
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -456,10 +618,26 @@ async def main() -> None:
     log("=== Claude Usage Tracker Daemon (USB CDC, macOS) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
 
+    if HTTP_ENABLE:
+        token = ensure_http_token()
+        log(f"WiFi-bridge token: {token}")
+        log(f"WiFi-bridge token file: {HTTP_TOKEN_FILE}")
+        start_http_server(token)
+    else:
+        # Still drive the periodic poll loop even if there's no USB port,
+        # so the HTTP cache stays current when WiFi mode is added later.
+        pass
+
     backoff = 1
     while not stop_event.is_set():
         port = find_port()
         if not port:
+            # In HTTP-only mode (no USB port and HTTP enabled) we still want
+            # to keep polling the API + state.json so the HTTP cache stays
+            # fresh. Run a port-less session loop in that case.
+            if HTTP_ENABLE:
+                await run_session_no_port(stop_event)
+                continue
             log(f"No USB CDC port found, retrying in {backoff}s...")
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=backoff)

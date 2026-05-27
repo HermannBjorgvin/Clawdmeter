@@ -1,6 +1,13 @@
 #pragma once
 #include "data.h"
-#include "serial_link.h"
+
+// Pull in the active transport's link_state_t — both transports define an
+// identically-named enum so the rest of ui.h doesn't care which one is in use.
+#ifdef CLAWDMETER_TRANSPORT_WIFI
+  #include "wifi_link.h"
+#else
+  #include "serial_link.h"
+#endif
 
 enum screen_t {
     SCREEN_SPLASH,
