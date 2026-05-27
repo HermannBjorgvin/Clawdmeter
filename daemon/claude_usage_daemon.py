@@ -148,12 +148,30 @@ def save_address(addr: str) -> None:
 
 
 async def scan_for_device() -> str | None:
+    # Passive watcher (detection_callback) instead of active discover(): on
+    # WinRT this catches more advertising windows for sporadic-advertise
+    # peripherals like the ESP32, and wins the race against Windows' own
+    # aggressive HID auto-connect that otherwise occupies the GATT slot
+    # before our active scan completes.
     log(f"Scanning for '{DEVICE_NAME}' ({SCAN_TIMEOUT}s)...")
-    devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
-    for d in devices:
-        if d.name == DEVICE_NAME:
-            log(f"Found: {d.address}")
-            return d.address
+    found: dict[str, str] = {}
+
+    def on_advert(device, adv_data):
+        name = device.name or adv_data.local_name
+        if name == DEVICE_NAME and device.address not in found:
+            found[device.address] = name
+
+    scanner = BleakScanner(detection_callback=on_advert)
+    await scanner.start()
+    deadline = time.time() + SCAN_TIMEOUT
+    while time.time() < deadline and not found:
+        await asyncio.sleep(0.2)
+    await scanner.stop()
+
+    if found:
+        addr = next(iter(found))
+        log(f"Found: {addr}")
+        return addr
     return None
 
 
