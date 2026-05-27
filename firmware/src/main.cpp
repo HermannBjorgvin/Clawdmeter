@@ -156,12 +156,40 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 }
 
-// Parse a JSON line into UsageData
-static bool parse_json(const char* json, UsageData* out) {
+// Status string lookup for todo_status_t — daemon sends integer codes
+// (0=pending, 1=in_progress, 2=completed) per the PR #22 wire schema.
+static todo_status_t todo_status_from_int(int s) {
+    if (s == 1) return TODO_IN_PROGRESS;
+    if (s == 2) return TODO_COMPLETED;
+    return TODO_PENDING;
+}
+
+// Parse a JSON line into UsageData (always) and optionally ActivityData
+// from the "sessions" array. The act_out parameter may be null when the
+// caller doesn't care about activity.
+//
+// Two-pass design for robustness:
+//   1. Filtered parse that extracts only the Usage scalars. Even if the
+//      full payload is malformed/oversized/unicode-laden, the small
+//      filtered doc parses reliably.
+//   2. Best-effort full parse for the sessions array. A failure here leaves
+//      ActivityData empty but Usage is still valid and we still ACK the
+//      payload upstream.
+static bool parse_json(const char* json, UsageData* out, ActivityData* act_out = nullptr) {
+    // ---- Pass 1: filtered Usage-only parse (tiny doc, always succeeds) ----
+    JsonDocument filter;
+    filter["s"] = true;
+    filter["sr"] = true;
+    filter["w"] = true;
+    filter["wr"] = true;
+    filter["st"] = true;
+    filter["ok"] = true;
+
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, json);
+    DeserializationError err = deserializeJson(doc, json,
+        DeserializationOption::Filter(filter));
     if (err) {
-        Serial.printf("JSON parse error: %s\n", err.c_str());
+        Serial.printf("JSON parse error (usage): %s (len=%d)\n", err.c_str(), (int)strlen(json));
         return false;
     }
 
@@ -172,10 +200,59 @@ static bool parse_json(const char* json, UsageData* out) {
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
     out->valid = true;
+
+    // ---- Pass 2: best-effort sessions parse ----
+    if (act_out) {
+        memset(act_out, 0, sizeof(*act_out));
+        act_out->valid = true;
+
+        JsonDocument sess_doc;
+        DeserializationError sess_err = deserializeJson(sess_doc, json);
+        if (sess_err) {
+            Serial.printf("Sessions parse skipped: %s\n", sess_err.c_str());
+            return true;  // Usage still valid -> caller will ACK
+        }
+
+        JsonArrayConst sessions = sess_doc["sessions"];
+        if (!sessions.isNull()) {
+            uint8_t s_idx = 0;
+            for (JsonObjectConst s : sessions) {
+                if (s_idx >= MAX_SESSIONS) break;
+                SessionData& sd = act_out->sessions[s_idx];
+                strlcpy(sd.project,           s["p"]  | "", sizeof(sd.project));
+                strlcpy(sd.model,             s["m"]  | "", sizeof(sd.model));
+                strlcpy(sd.last_prompt,       s["u"]  | "", sizeof(sd.last_prompt));
+                strlcpy(sd.current_tool,      s["t"]  | "", sizeof(sd.current_tool));
+                strlcpy(sd.current_tool_args, s["ta"] | "", sizeof(sd.current_tool_args));
+                sd.phase            = (s["ph"] | 0) == 1 ? PHASE_RUNNING : PHASE_IDLE;
+                sd.last_active_secs = s["la"] | 0;
+
+                JsonArrayConst todos = s["td"];
+                uint8_t t_idx = 0;
+                if (!todos.isNull()) {
+                    for (JsonObjectConst t : todos) {
+                        if (t_idx >= MAX_TODOS_PER_SESSION) break;
+                        TodoItem& ti = sd.todos[t_idx];
+                        strlcpy(ti.content,     t["c"] | "", sizeof(ti.content));
+                        strlcpy(ti.active_form, t["a"] | "", sizeof(ti.active_form));
+                        ti.status = todo_status_from_int(t["s"] | 0);
+                        t_idx++;
+                    }
+                }
+                sd.todo_count = t_idx;
+                s_idx++;
+            }
+            act_out->session_count = s_idx;
+        }
+    }
     return true;
 }
 
 void setup() {
+    // Bump RX buffer before begin() so HWCDC honors it. Default ~256 bytes
+    // truncates multi-session Activity payloads (~700-1000 bytes) between
+    // serial_link_tick() calls.
+    Serial.setRxBufferSize(4096);
     Serial.begin(115200);
     delay(300);
     Serial.println("{\"ready\":true}");
@@ -337,7 +414,8 @@ void loop() {
 
     // Process incoming serial data (screenshot cmd handled inside the tick)
     if (serial_link_has_data()) {
-        if (parse_json(serial_link_get_data(), &usage)) {
+        static ActivityData activity = {};
+        if (parse_json(serial_link_get_data(), &usage, &activity)) {
             int g_before = usage_rate_group();
             usage_rate_sample(usage.session_pct);
             int g_after = usage_rate_group();
@@ -347,6 +425,7 @@ void loop() {
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
             ui_update(&usage);
+            ui_update_activity(&activity);
             serial_link_send_ack();
         } else {
             serial_link_send_nack();

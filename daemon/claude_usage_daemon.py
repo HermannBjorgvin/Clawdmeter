@@ -21,12 +21,18 @@ import re
 import signal
 import subprocess
 import sys
-import termios
 import time
 from pathlib import Path
 
 import httpx
 import serial  # pyserial
+from serial.tools import list_ports
+
+# termios is Unix-only — used for HUPCL clear on macOS/Linux. Skipped on Windows
+# where the kernel doesn't toggle DTR-on-close the same way; pyserial's
+# dsrdtr=False covers the open-side case sufficiently.
+if sys.platform != "win32":
+    import termios
 
 POLL_INTERVAL = 60
 TICK = 5
@@ -36,6 +42,23 @@ PORT_GLOBS = (
     "/dev/ttyACM*",        # Linux fallback (rarely useful — the bash daemon handles Linux)
 )
 ENV_PORT = os.environ.get("DEVICE_PORT")  # explicit override wins
+
+# Activity / hook state — written by daemon/clawdmeter_hook.py on every
+# Claude Code hook event, read here on every tick. The wire schema is the
+# same compact form PR #22 uses over BLE; USB CDC has no MTU budget so we
+# don't enforce a payload cap.
+STATE_FILE = Path.home() / ".clawdmeter" / "state.json"
+MAX_SESSIONS = 3
+MAX_TODOS_PER_SESSION = 10
+TODO_CONTENT_MAX = 50
+TODO_ACTIVEFORM_MAX = 40
+USER_PROMPT_MAX = 60
+CURRENT_TOOL_MAX = 24
+TOOL_ARGS_MAX = 60
+SESSION_STALE_SECONDS = 10 * 60
+
+_STATUS_NUM = {"pending": 0, "in_progress": 1, "completed": 2}
+_PHASE_NUM = {"idle": 0, "running": 1}
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
@@ -130,9 +153,92 @@ def read_token() -> str | None:
     return _read_token_file()
 
 
+def load_activity_sessions() -> list[dict]:
+    """Read state.json written by the hook script and project it into the
+    compact session schema the firmware expects.
+
+    Returns up to MAX_SESSIONS entries, sorted most-recently-active first,
+    each with a head-truncated todos list. activeForm is included only on
+    the in-progress item — every other state would never display it.
+    """
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    sessions = state.get("sessions") or {}
+    if not isinstance(sessions, dict):
+        return []
+    now = time.time()
+    fresh = []
+    for sid, s in sessions.items():
+        if not isinstance(s, dict):
+            continue
+        la_ts = s.get("last_active_ts") or 0
+        age = now - la_ts
+        if age > SESSION_STALE_SECONDS:
+            continue
+        fresh.append((la_ts, s))
+    fresh.sort(key=lambda x: x[0], reverse=True)
+    out = []
+    for la_ts, s in fresh[:MAX_SESSIONS]:
+        todos = s.get("todos") or []
+        compact_todos = []
+        for t in todos[:MAX_TODOS_PER_SESSION]:
+            if not isinstance(t, dict):
+                continue
+            sn = _STATUS_NUM.get(str(t.get("status", "pending")), 0)
+            entry = {
+                "c": str(t.get("content", ""))[:TODO_CONTENT_MAX],
+                "s": sn,
+            }
+            if sn == 1:
+                af = str(t.get("activeForm", ""))[:TODO_ACTIVEFORM_MAX]
+                if af:
+                    entry["a"] = af
+            compact_todos.append(entry)
+        entry = {
+            "p": str(s.get("project", ""))[:24],
+            "m": str(s.get("model", ""))[:24],
+            "la": max(0, int(now - la_ts)),
+            "ph": _PHASE_NUM.get(str(s.get("phase", "idle")), 0),
+            "td": compact_todos,
+        }
+        ct = str(s.get("current_tool", ""))[:CURRENT_TOOL_MAX]
+        if ct:
+            entry["t"] = ct
+        ta = str(s.get("current_tool_args", ""))[:TOOL_ARGS_MAX]
+        if ta:
+            entry["ta"] = ta
+        up = str(s.get("last_user_prompt", ""))[:USER_PROMPT_MAX]
+        if up:
+            entry["u"] = up
+        out.append(entry)
+    return out
+
+
+def state_file_mtime() -> float:
+    try:
+        return STATE_FILE.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def find_port() -> str | None:
-    if ENV_PORT and os.path.exists(ENV_PORT):
-        return ENV_PORT
+    if ENV_PORT:
+        # On Windows ENV_PORT will be a COM name like 'COM3' which doesn't
+        # exist as a filesystem path, so trust the user input directly.
+        if sys.platform == "win32" or os.path.exists(ENV_PORT):
+            return ENV_PORT
+    if sys.platform == "win32":
+        # Match by USB VID using pyserial's list_ports. Same VID list as
+        # flash-win.ps1's auto-detect — Espressif, Silicon Labs CP210x,
+        # WCH CH340/CH341, FTDI. This is locale-independent so it works
+        # on non-English Windows where driver captions are translated.
+        wanted_vids = {0x303A, 0x10C4, 0x1A86, 0x0403}
+        for p in sorted(list_ports.comports(), key=lambda x: x.device):
+            if p.vid in wanted_vids:
+                return p.device  # e.g. 'COM3'
+        return None
     for pattern in PORT_GLOBS:
         matches = sorted(glob.glob(pattern))
         if matches:
@@ -141,12 +247,13 @@ def find_port() -> str | None:
 
 
 def open_port(path: str) -> serial.Serial:
-    """Open the CDC port with HUPCL cleared.
+    """Open the CDC port with DTR-on-open suppressed.
 
-    pyserial's `dsrdtr=False` covers the obvious DTR-on-open case, but on
-    some kernels HUPCL still drops DTR when the file descriptor closes,
-    which the firmware sees as a reset on every reconnect. Stomp it
-    explicitly via termios after open.
+    pyserial's `dsrdtr=False` covers the obvious DTR-on-open case on all
+    platforms. On macOS/Linux we additionally clear HUPCL via termios because
+    some kernels still drop DTR when the file descriptor closes, which the
+    firmware sees as a reset on every reconnect. Windows handles this
+    differently — no termios available, dsrdtr=False is sufficient.
     """
     ser = serial.Serial(
         path,
@@ -157,14 +264,15 @@ def open_port(path: str) -> serial.Serial:
         rtscts=False,
         xonxoff=False,
     )
-    try:
-        fd = ser.fileno()
-        attrs = termios.tcgetattr(fd)
-        # cflag is index 2; HUPCL is in cflag.
-        attrs[2] &= ~termios.HUPCL
-        termios.tcsetattr(fd, termios.TCSANOW, attrs)
-    except (termios.error, OSError) as e:
-        log(f"HUPCL clear failed (non-fatal): {e}")
+    if sys.platform != "win32":
+        try:
+            fd = ser.fileno()
+            attrs = termios.tcgetattr(fd)
+            # cflag is index 2; HUPCL is in cflag.
+            attrs[2] &= ~termios.HUPCL
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        except (termios.error, OSError) as e:
+            log(f"HUPCL clear failed (non-fatal): {e}")
     return ser
 
 
@@ -236,7 +344,13 @@ async def reader_task(ser: serial.Serial, refresh_event: asyncio.Event,
 
 
 async def write_payload(ser: serial.Serial, payload: dict) -> bool:
-    data = (json.dumps(payload, separators=(",", ":")) + "\n").encode()
+    # ensure_ascii=False keeps multi-byte UTF-8 chars raw instead of expanding
+    # them to 6-byte \uXXXX escapes. Two reasons: (1) smaller payloads — em-dashes
+    # and accents would otherwise multiply payload size; (2) ArduinoJson on the
+    # firmware parses raw UTF-8 transparently but can struggle with escape
+    # sequences in long payloads (we saw "JSON parse error: InvalidInput" on the
+    # ~700-byte multi-session form before this fix).
+    data = (json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
     log(f"Sending: {data.decode().rstrip()}")
     try:
         await asyncio.get_running_loop().run_in_executor(
@@ -262,28 +376,52 @@ async def run_session(port_path: str, stop_event: asyncio.Event) -> None:
     reader = asyncio.create_task(reader_task(ser, refresh_event, stop_event))
 
     last_poll = 0.0
+    last_state_mtime = -1.0
+    cached_api: dict | None = None
     write_fails = 0
     try:
         while not stop_event.is_set():
             now = time.time()
-            if refresh_event.is_set() or (now - last_poll) >= POLL_INTERVAL:
+            api_due = (
+                refresh_event.is_set()
+                or (now - last_poll) >= POLL_INTERVAL
+                or cached_api is None
+            )
+            state_mtime = state_file_mtime()
+            state_changed = state_mtime != last_state_mtime
+
+            if api_due:
                 if refresh_event.is_set():
                     log("Refresh requested by device")
                     refresh_event.clear()
                 token = read_token()
                 if not token:
-                    log("No token; skipping poll")
+                    log("No token; skipping API poll")
                 else:
-                    payload = await poll_api(token)
-                    if payload is not None:
-                        if await write_payload(ser, payload):
-                            last_poll = time.time()
-                            write_fails = 0
-                        else:
-                            write_fails += 1
-                            if write_fails >= 2:
-                                log(f"Write failed {write_fails}x, recycling port")
-                                break
+                    fresh = await poll_api(token)
+                    if fresh is not None:
+                        cached_api = fresh
+                        last_poll = time.time()
+
+            if api_due or state_changed:
+                payload = dict(cached_api) if cached_api else {
+                    "s": 0, "sr": 0, "w": 0, "wr": 0,
+                    "st": "unknown", "ok": False,
+                }
+                # Sessions data — firmware's parse_json is now two-pass
+                # (filtered Usage first, sessions best-effort second), so
+                # malformed/oversized session arrays no longer break Usage.
+                sessions = load_activity_sessions()
+                if sessions:
+                    payload["sessions"] = sessions
+                if await write_payload(ser, payload):
+                    last_state_mtime = state_mtime
+                    write_fails = 0
+                else:
+                    write_fails += 1
+                    if write_fails >= 2:
+                        log(f"Write failed {write_fails}x, recycling port")
+                        break
 
             try:
                 await asyncio.wait_for(refresh_event.wait(), timeout=TICK)

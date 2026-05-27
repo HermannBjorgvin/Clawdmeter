@@ -16,8 +16,11 @@
 #include <lvgl.h>
 #include "display_cfg.h"
 
-#define LINE_BUF_SIZE   192
-#define DATA_BUF_SIZE   192
+// Sized for PR #22 Activity payload (~500-700 bytes worst case with 3
+// sessions x multiple todos). PR #26 default of 192 was tuned for Usage-only
+// payloads (~120 bytes); anything larger silently dropped.
+#define LINE_BUF_SIZE   4096
+#define DATA_BUF_SIZE   4096
 #define LINK_STALE_MS   5000   // mark link stale if no data for this long
 
 static char     line_buf[LINE_BUF_SIZE];
