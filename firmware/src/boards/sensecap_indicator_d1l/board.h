@@ -1,5 +1,9 @@
 #pragma once
 
+// Seeed Studio SenseCap Indicator D1L
+// 480x480 ST7701S RGB parallel + FT6x36 touch + PCA9535 expander.
+// ESP32-S3 with OPI PSRAM. No PMU, no battery, no IMU.
+
 #define BOARD_NAME  "SenseCap Indicator D1L"
 
 #define LCD_WIDTH   480
