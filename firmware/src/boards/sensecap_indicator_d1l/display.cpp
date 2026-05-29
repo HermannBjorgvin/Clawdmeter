@@ -105,7 +105,9 @@ static const uint8_t st7701_init_ops[] = {
     WRITE_COMMAND_8, 0xFF,
     WRITE_BYTES, 5, 0x77, 0x01, 0x00, 0x00, 0x00,
 
-    WRITE_C8_D8, 0x3A, 0x60,   // COLMOD=0x60 (RGB666, matches RP2040 boot config)
+    WRITE_C8_D8, 0x3A, 0x60,   // COLMOD: upper nibble 0x6 = 18-bit DPI mode; preserved from
+                               // Seeed RP2040 vendor firmware. Bus is physically 5+6+5 (RGB565);
+                               // panel auto-converts. Do not change to 0x55.
 
     WRITE_COMMAND_8, 0x11,     // Sleep Out
     END_WRITE,

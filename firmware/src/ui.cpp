@@ -220,6 +220,7 @@ static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_set_style_pad_bottom(panel, 12, 0);
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(panel, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(panel, LV_OBJ_FLAG_GESTURE_BUBBLE);
     return panel;
 }
 
