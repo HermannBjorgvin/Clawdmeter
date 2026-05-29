@@ -41,7 +41,10 @@ bool io_expander_init(void) {
         return false;
     }
     output_state = IOX_OUTPUT_DEFAULT;
-    write_reg(IOX_REG_OUTPUT, output_state);
+    if (!write_reg(IOX_REG_OUTPUT, output_state)) {
+        Serial.println("PCA9535 init failed (output)");
+        return false;
+    }
     Serial.println("PCA9535 init OK");
     return true;
 }
