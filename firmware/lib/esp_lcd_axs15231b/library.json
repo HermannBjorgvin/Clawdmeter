@@ -1,0 +1,11 @@
+{
+    "name": "esp_lcd_axs15231b",
+    "version": "1.0.0",
+    "description": "Waveshare ESP-IDF esp_lcd driver for AXS15231B QSPI panel + integrated touch (vendored from waveshareteam/ESP32-S3-Touch-LCD-3.49 Examples/Arduino/09_LVGL_V8_Test/src). Used by env waveshare_lcd_349_smoketest because Arduino_GFX's AXS15231B init bytes are incompatible with this panel revision.",
+    "frameworks": "arduino",
+    "platforms": "espressif32",
+    "build": {
+        "flags": ["-I src"],
+        "srcFilter": ["+<*>"]
+    }
+}
