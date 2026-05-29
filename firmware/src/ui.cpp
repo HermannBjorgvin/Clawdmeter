@@ -204,7 +204,7 @@ static void global_click_cb(lv_event_t* e);
 static void ble_reset_click_cb(lv_event_t* e);
 static void screen_swipe_cb(lv_event_t* e);
 
-static uint32_t last_gesture_ms = 0;
+static uint32_t last_gesture_ms = UINT32_MAX - 1000u;
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -393,6 +393,7 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_set_flex_flow(reset_zone, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(reset_zone, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(reset_zone, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(reset_zone, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_add_event_cb(reset_zone, ble_reset_click_cb, LV_EVENT_CLICKED, NULL);
 
     static lv_image_dsc_t icon_trash_dsc;
