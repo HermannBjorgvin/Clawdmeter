@@ -202,6 +202,9 @@ static void format_reset_time(int mins, char* buf, size_t len) {
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
 static void ble_reset_click_cb(lv_event_t* e);
+static void screen_swipe_cb(lv_event_t* e);
+
+static uint32_t last_gesture_ms = 0;
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -444,6 +447,13 @@ void ui_init(void) {
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
     lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
+
+    // Enable swipe-gesture navigation on all screens.
+    // Gesture events must bubble from containers up to the screen root.
+    lv_obj_add_flag(usage_container, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_flag(ble_container,   LV_OBJ_FLAG_GESTURE_BUBBLE);
+    if (splash_get_root()) lv_obj_add_flag(splash_get_root(), LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_event_cb(scr, screen_swipe_cb, LV_EVENT_GESTURE, NULL);
 }
 
 void ui_update(const UsageData* data) {
@@ -495,12 +505,16 @@ void ui_tick_anim(void) {
 static screen_t prev_non_splash_screen = SCREEN_USAGE;
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
-    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-    else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    if (!board_caps().has_battery || current_screen == SCREEN_SPLASH)
+        lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    else
+        lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void global_click_cb(lv_event_t* e) {
     (void)e;
+    // Suppress the spurious LV_EVENT_CLICKED that LVGL fires at the end of a swipe.
+    if (lv_tick_get() - last_gesture_ms < 400) return;
     if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
     else                                  ui_show_screen(SCREEN_SPLASH);
 }
@@ -508,6 +522,20 @@ static void global_click_cb(lv_event_t* e) {
 static void ble_reset_click_cb(lv_event_t* e) {
     (void)e;
     ble_clear_bonds();
+}
+
+static void screen_swipe_cb(lv_event_t* e) {
+    (void)e;
+    lv_indev_t* indev = lv_indev_active();
+    if (!indev) return;
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return;
+    last_gesture_ms = lv_tick_get();
+    if (current_screen == SCREEN_SPLASH) {
+        splash_next();
+    } else {
+        ui_cycle_screen();
+    }
 }
 
 void ui_show_screen(screen_t screen) {
