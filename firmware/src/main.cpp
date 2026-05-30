@@ -241,7 +241,7 @@ void loop() {
 
     // ---- Physical buttons ----
     //   PRIMARY   → HID Space  (Claude Code voice-mode PTT)
-    //   SECONDARY → HID Shift+Tab  (mode toggle; only if the board has one)
+    //   SECONDARY → toggle the brightness screen (only if the board has one)
     //   PWR       → cycle screens; on splash, cycle animations
     // First press from sleep is consumed as a wake-only event by
     // idle_consume_wake_press(); the normal action fires from the second
@@ -264,18 +264,13 @@ void loop() {
 
         if (board_caps().button_count >= 2) {
             static bool secondary_was = false;
-            static bool secondary_wake_swallowed = false;
             bool secondary_now = input_hal_is_held(INPUT_BTN_SECONDARY);
-            if (secondary_now != secondary_was) {
-                if (secondary_now) {
-                    if (idle_consume_wake_press()) secondary_wake_swallowed = true;
-                    else                            ble_keyboard_press(0x2B, 0x02);  // HID Tab + LEFT_SHIFT
-                } else {
-                    if (secondary_wake_swallowed) secondary_wake_swallowed = false;
-                    else                          ble_keyboard_release();
-                }
-                secondary_was = secondary_now;
+            if (secondary_now && !secondary_was) {
+                // Press edge: first press from sleep is consumed as wake-only;
+                // otherwise toggle the brightness screen in/out.
+                if (!idle_consume_wake_press()) ui_toggle_brightness();
             }
+            secondary_was = secondary_now;
         }
 
         if (power_hal_pwr_pressed()) {

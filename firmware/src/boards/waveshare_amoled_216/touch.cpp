@@ -1,4 +1,5 @@
 #include "../../hal/touch_hal.h"
+#include "../../hal/imu_hal.h"
 #include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
@@ -42,7 +43,18 @@ void touch_hal_read(uint16_t* x, uint16_t* y, bool* pressed) {
             touch_pressed = false;
         }
     }
-    *x = touch_x;
-    *y = touch_y;
+
+    // The panel is rotated in software (see display.cpp), so raw touches need
+    // the matching transform or taps miss their target when rotated. It isn't
+    // the clean inverse of the display rotation (controller swap/mirror
+    // calibration) — measured on-device as transform = 3 - quadrant.
+    const int S = LCD_WIDTH;  // square panel: width == height
+    uint16_t px = touch_x, py = touch_y;
+    switch (3 - (imu_hal_rotation_quadrant() & 3)) {
+    case 1: *x = S - 1 - py; *y = px;          break;
+    case 2: *x = S - 1 - px; *y = S - 1 - py;  break;
+    case 3: *x = py;         *y = S - 1 - px;  break;
+    default: *x = px;        *y = py;          break;
+    }
     *pressed = touch_pressed;
 }

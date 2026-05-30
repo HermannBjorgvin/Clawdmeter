@@ -14,6 +14,10 @@ static uint16_t* rot_buf = nullptr;
 static Arduino_DataBus* bus = nullptr;
 static Arduino_CO5300*  gfx = nullptr;
 
+// Last brightness idle asked for; the rotation ramp restores this instead of
+// jumping to full bright, so a dimmed screen stays dimmed across a rotate.
+static uint8_t target_brightness = 200;
+
 void display_hal_init(void) {
     bus = new Arduino_ESP32QSPI(
         LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
@@ -33,6 +37,7 @@ void display_hal_begin(void) {
 }
 
 void display_hal_set_brightness(uint8_t level) {
+    target_brightness = level;
     if (gfx) gfx->setBrightness(level);
 }
 
@@ -107,7 +112,7 @@ void display_hal_tick(void) {
 
     uint8_t rot = imu_hal_rotation_quadrant();
     if (rot != last_rotation) {
-        display_hal_set_brightness(0);
+        if (gfx) gfx->setBrightness(0);  // blank directly; keep target intact
         last_rotation = rot;
         lv_obj_invalidate(lv_screen_active());
         ramp_step = 1;
@@ -119,8 +124,9 @@ void display_hal_tick(void) {
     if (now - ramp_last < 25) return;
     ramp_last = now;
 
-    static const uint8_t levels[] = {60, 120, 170, 200};
-    display_hal_set_brightness(levels[ramp_step - 1]);
+    // Ramp 0 → target over 4 steps (scaled, so a dimmed screen stays dimmed).
+    static const uint8_t pct[] = {30, 60, 85, 100};
+    if (gfx) gfx->setBrightness((uint8_t)((uint16_t)target_brightness * pct[ramp_step - 1] / 100));
     if (ramp_step >= 4) ramp_step = 0;
     else                ramp_step++;
 }

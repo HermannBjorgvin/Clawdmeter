@@ -3,6 +3,7 @@
 #include <lvgl.h>
 #include "logo.h"
 #include "icons.h"
+#include "idle.h"
 #include "hal/board_caps.h"
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
@@ -118,6 +119,11 @@ static lv_obj_t* lbl_ble_status;
 static lv_obj_t* lbl_ble_device;
 static lv_obj_t* lbl_ble_mac;
 
+// ---- Brightness screen widgets ----
+static lv_obj_t* brightness_container;
+static lv_obj_t* lbl_brightness_pct;
+static lv_obj_t* bar_brightness;
+
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
 static lv_obj_t* logo_img;
@@ -202,6 +208,13 @@ static void format_reset_time(int mins, char* buf, size_t len) {
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
 static void ble_reset_click_cb(lv_event_t* e);
+static void brightness_minus_cb(lv_event_t* e);
+static void brightness_plus_cb(lv_event_t* e);
+static void ui_brightness_refresh(void);
+
+// Step 5%/tap; floor at 10% so the screen never goes fully dark.
+#define BRIGHTNESS_MIN_PCT  10
+#define BRIGHTNESS_STEP_PCT 5
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -417,6 +430,89 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
 }
 
+// ======== Brightness Screen ========
+
+static lv_obj_t* make_step_button(lv_obj_t* parent, const char* sym,
+                                  lv_event_cb_t cb, int w, int h) {
+    lv_obj_t* btn = lv_button_create(parent);
+    lv_obj_set_size(btn, w, h);
+    lv_obj_set_style_bg_color(btn, COL_PANEL, 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(btn, 12, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, sym);
+    lv_obj_set_style_text_font(lbl, &font_styrene_48, 0);
+    lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
+    lv_obj_center(lbl);
+    return btn;
+}
+
+static void init_brightness_screen(lv_obj_t* scr) {
+    brightness_container = lv_obj_create(scr);
+    lv_obj_set_size(brightness_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(brightness_container, 0, 0);
+    lv_obj_set_style_bg_opa(brightness_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(brightness_container, 0, 0);
+    lv_obj_set_style_pad_all(brightness_container, 0, 0);
+    lv_obj_clear_flag(brightness_container, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* title = lv_label_create(brightness_container);
+    lv_label_set_text(title, "Brightness");
+    lv_obj_set_style_text_font(title, L.bt_title_font, 0);
+    lv_obj_set_style_text_color(title, COL_TEXT, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 16, L.title_y);
+
+    lbl_brightness_pct = lv_label_create(brightness_container);
+    lv_label_set_text(lbl_brightness_pct, "---%");
+    lv_obj_set_style_text_font(lbl_brightness_pct, &font_styrene_48, 0);
+    lv_obj_set_style_text_color(lbl_brightness_pct, COL_TEXT, 0);
+    lv_obj_align(lbl_brightness_pct, LV_ALIGN_TOP_MID, 0, L.content_y + 10);
+
+    bar_brightness = make_bar(brightness_container, L.margin,
+                              L.content_y + 90, L.content_w, 24);
+    lv_obj_set_style_bg_color(bar_brightness, COL_ACCENT, LV_PART_INDICATOR);
+
+    int gap   = 16;
+    int btn_h = (L.scr_h >= 460) ? 120 : 96;
+    int btn_w = (L.content_w - gap) / 2;
+    int row_y = L.scr_h - L.margin - btn_h;
+
+    lv_obj_t* minus = make_step_button(brightness_container, "-",
+                                       brightness_minus_cb, btn_w, btn_h);
+    lv_obj_set_pos(minus, L.margin, row_y);
+
+    lv_obj_t* plus = make_step_button(brightness_container, "+",
+                                      brightness_plus_cb, btn_w, btn_h);
+    lv_obj_set_pos(plus, L.margin + btn_w + gap, row_y);
+
+    lv_obj_add_flag(brightness_container, LV_OBJ_FLAG_HIDDEN);
+}
+
+static int brightness_pct(void) {
+    return (idle_get_active_brightness() * 100 + 127) / 255;
+}
+
+static void ui_brightness_refresh(void) {
+    if (!brightness_container) return;
+    int pct = brightness_pct();
+    lv_label_set_text_fmt(lbl_brightness_pct, "%d%%", pct);
+    lv_bar_set_value(bar_brightness, pct, LV_ANIM_OFF);
+}
+
+static void brightness_step(int delta_pct) {
+    int pct = brightness_pct() + delta_pct;
+    if (pct < BRIGHTNESS_MIN_PCT) pct = BRIGHTNESS_MIN_PCT;
+    if (pct > 100)                pct = 100;
+    idle_set_active_brightness((uint8_t)((pct * 255 + 50) / 100));
+    ui_brightness_refresh();
+}
+
+static void brightness_minus_cb(lv_event_t* e) { (void)e; brightness_step(-BRIGHTNESS_STEP_PCT); }
+static void brightness_plus_cb(lv_event_t* e)  { (void)e; brightness_step(+BRIGHTNESS_STEP_PCT); }
+
 // ======== Public API ========
 
 void ui_init(void) {
@@ -431,6 +527,7 @@ void ui_init(void) {
 
     init_usage_screen(scr);
     init_bluetooth_screen(scr);
+    init_brightness_screen(scr);
     splash_init(scr);
 
     if (splash_get_root()) {
@@ -513,12 +610,17 @@ static void ble_reset_click_cb(lv_event_t* e) {
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(brightness_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
     case SCREEN_SPLASH:     splash_show(); break;
     case SCREEN_USAGE:      lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
     case SCREEN_BLUETOOTH:  lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_BRIGHTNESS:
+        ui_brightness_refresh();
+        lv_obj_clear_flag(brightness_container, LV_OBJ_FLAG_HIDDEN);
+        break;
     default: break;
     }
 
@@ -527,7 +629,10 @@ void ui_show_screen(screen_t screen) {
         else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
     }
 
-    if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
+    // Brightness is a transient overlay — don't let it become the screen
+    // splash returns to.
+    if (screen != SCREEN_SPLASH && screen != SCREEN_BRIGHTNESS)
+        prev_non_splash_screen = screen;
     current_screen = screen;
     apply_battery_visibility();
 }
@@ -545,6 +650,17 @@ void ui_cycle_screen(void) {
 void ui_toggle_splash(void) {
     if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
     else                                  ui_show_screen(SCREEN_SPLASH);
+}
+
+void ui_toggle_brightness(void) {
+    static screen_t before_brightness = SCREEN_USAGE;
+    if (current_screen == SCREEN_BRIGHTNESS) {
+        ui_show_screen(before_brightness);
+    } else {
+        before_brightness = (current_screen == SCREEN_SPLASH)
+                              ? prev_non_splash_screen : current_screen;
+        ui_show_screen(SCREEN_BRIGHTNESS);
+    }
 }
 
 screen_t ui_get_current_screen(void) {
