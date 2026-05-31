@@ -112,6 +112,15 @@ static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 static lv_obj_t* lbl_anim;
 
+// ---- Multi-account state + page indicator ----
+#define ACCOUNT_ROTATE_MS 5000     // auto-advance to the next account every 5s
+static UsageData ui_accounts[MAX_ACCOUNTS];
+static int ui_account_count = 0;   // 0 until first payload
+static int ui_account_idx = 0;     // which account the usage screen shows
+static uint32_t last_account_rotate_ms = 0;  // auto-rotate timer (lv_tick)
+static lv_obj_t* page_dots_cont;            // container, hidden when <2 accounts
+static lv_obj_t* page_dots[MAX_ACCOUNTS];   // one circle per account
+
 // ---- Bluetooth screen widgets ----
 static lv_obj_t* ble_container;
 static lv_obj_t* lbl_ble_status;
@@ -330,6 +339,30 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+
+    // Page indicator: a centered row of small dots, one per account. Drawn as
+    // LVGL circles (not glyphs) since the custom bitmap fonts lack ●/○. Hidden
+    // when there's a single account so the single-account UI is unchanged.
+    page_dots_cont = lv_obj_create(usage_container);
+    lv_obj_set_style_bg_opa(page_dots_cont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(page_dots_cont, 0, 0);
+    lv_obj_set_style_pad_all(page_dots_cont, 0, 0);
+    lv_obj_set_style_pad_column(page_dots_cont, 10, 0);
+    lv_obj_set_flex_flow(page_dots_cont, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(page_dots_cont, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(page_dots_cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(page_dots_cont, LV_SIZE_CONTENT, 18);
+    lv_obj_align(page_dots_cont, LV_ALIGN_BOTTOM_MID, 0, -58);
+    for (int i = 0; i < MAX_ACCOUNTS; i++) {
+        page_dots[i] = lv_obj_create(page_dots_cont);
+        lv_obj_set_size(page_dots[i], 12, 12);
+        lv_obj_set_style_radius(page_dots[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(page_dots[i], 0, 0);
+        lv_obj_set_style_bg_opa(page_dots[i], LV_OPA_COVER, 0);
+        lv_obj_clear_flag(page_dots[i], LV_OBJ_FLAG_SCROLLABLE);
+    }
+    lv_obj_add_flag(page_dots_cont, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ======== Bluetooth Screen ========
@@ -446,32 +479,100 @@ void ui_init(void) {
     lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
 }
 
-void ui_update(const UsageData* data) {
+// Recolor the page dots to reflect count + current index. Hidden for <2.
+static void update_page_dots(void) {
+    if (ui_account_count < 2) {
+        lv_obj_add_flag(page_dots_cont, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_clear_flag(page_dots_cont, LV_OBJ_FLAG_HIDDEN);
+    for (int i = 0; i < MAX_ACCOUNTS; i++) {
+        if (i < ui_account_count) {
+            lv_obj_clear_flag(page_dots[i], LV_OBJ_FLAG_HIDDEN);
+            bool cur = (i == ui_account_idx);
+            lv_obj_set_style_bg_color(page_dots[i], cur ? COL_TEXT : COL_DIM, 0);
+        } else {
+            lv_obj_add_flag(page_dots[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+// Render whichever account ui_account_idx points at onto the usage screen.
+static void render_current_account(void) {
+    if (ui_account_count <= 0) return;
+    if (ui_account_idx >= ui_account_count) ui_account_idx = 0;
+    const UsageData* data = &ui_accounts[ui_account_idx];
     if (!data->valid) return;
 
-    int s_pct = (int)(data->session_pct + 0.5f);
-
-    lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
-    lv_bar_set_value(bar_session, s_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
+    // Title shows the account name when there's more than one; otherwise the
+    // original "Usage" so single-account screens look exactly as before.
+    if (ui_account_count > 1 && data->name[0] != '\0')
+        lv_label_set_text(lbl_title, data->name);
+    else
+        lv_label_set_text(lbl_title, "Usage");
 
     char buf[48];
-    format_reset_time(data->session_reset_mins, buf, sizeof(buf));
-    lv_label_set_text(lbl_session_reset, buf);
 
-    int w_pct = (int)(data->weekly_pct + 0.5f);
-    lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
-    lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
+    if (data->ok) {
+        int s_pct = (int)(data->session_pct + 0.5f);
+        lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
+        lv_bar_set_value(bar_session, s_pct, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
+        format_reset_time(data->session_reset_mins, buf, sizeof(buf));
+        lv_label_set_text(lbl_session_reset, buf);
 
-    format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
-    lv_label_set_text(lbl_weekly_reset, buf);
+        int w_pct = (int)(data->weekly_pct + 0.5f);
+        lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
+        lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
+        format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
+        lv_label_set_text(lbl_weekly_reset, buf);
+    } else {
+        // Account failed to poll (e.g. logged out) — show it as offline
+        // instead of stale numbers.
+        lv_label_set_text(lbl_session_pct, "--%");
+        lv_bar_set_value(bar_session, 0, LV_ANIM_OFF);
+        lv_label_set_text(lbl_session_reset, "offline");
+        lv_label_set_text(lbl_weekly_pct, "--%");
+        lv_bar_set_value(bar_weekly, 0, LV_ANIM_OFF);
+        lv_label_set_text(lbl_weekly_reset, "offline");
+    }
+
+    update_page_dots();
+}
+
+void ui_update_accounts(const UsageData* accounts, int n) {
+    if (n < 0) n = 0;
+    if (n > MAX_ACCOUNTS) n = MAX_ACCOUNTS;
+    int prev_count = ui_account_count;
+    for (int i = 0; i < n; i++) ui_accounts[i] = accounts[i];
+    ui_account_count = n;
+    if (ui_account_idx >= n) ui_account_idx = 0;
+    // Give the shown account a full interval when multi-account rotation first
+    // becomes active (or the index was just clamped), so it can't be skipped
+    // on the very next tick by a stale timer.
+    if ((prev_count <= 1 && n > 1) || ui_account_idx == 0)
+        last_account_rotate_ms = lv_tick_get();
+    render_current_account();
+}
+
+void ui_update(const UsageData* data) {
+    ui_update_accounts(data, 1);
 }
 
 void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
 
     uint32_t now = lv_tick_get();
+
+    // Auto-rotate through accounts (loops the accounts only; the Bluetooth
+    // screen is reached manually). A manual cycle / screen entry resets the
+    // timer so the chosen account stays up for a full interval.
+    if (ui_account_count > 1 && now - last_account_rotate_ms >= ACCOUNT_ROTATE_MS) {
+        last_account_rotate_ms = now;
+        ui_account_idx = (ui_account_idx + 1) % ui_account_count;
+        render_current_account();
+    }
 
     if (now - anim_msg_start >= ANIM_MSG_MS) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
@@ -517,7 +618,10 @@ void ui_show_screen(screen_t screen) {
 
     switch (screen) {
     case SCREEN_SPLASH:     splash_show(); break;
-    case SCREEN_USAGE:      lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_USAGE:
+        lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+        last_account_rotate_ms = lv_tick_get();  // full interval on entry
+        break;
     case SCREEN_BLUETOOTH:  lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
     }
@@ -533,13 +637,24 @@ void ui_show_screen(screen_t screen) {
 }
 
 void ui_cycle_screen(void) {
-    screen_t next;
-    switch (current_screen) {
-    case SCREEN_USAGE:     next = SCREEN_BLUETOOTH; break;
-    case SCREEN_BLUETOOTH: next = SCREEN_USAGE;     break;
-    default:               next = SCREEN_USAGE;     break;
+    last_account_rotate_ms = lv_tick_get();  // manual nav resets auto-rotate
+    // On the usage screen, step through accounts first; only after the last
+    // account does the cycle advance to the Bluetooth screen. With a single
+    // account this collapses to the original USAGE <-> BLUETOOTH toggle.
+    if (current_screen == SCREEN_USAGE && ui_account_idx + 1 < ui_account_count) {
+        ui_account_idx++;
+        render_current_account();
+        return;
     }
-    ui_show_screen(next);
+
+    if (current_screen == SCREEN_USAGE) {
+        ui_account_idx = 0;  // wrap so the next return to USAGE starts at #0
+        ui_show_screen(SCREEN_BLUETOOTH);
+    } else {
+        ui_account_idx = 0;
+        render_current_account();
+        ui_show_screen(SCREEN_USAGE);
+    }
 }
 
 void ui_toggle_splash(void) {

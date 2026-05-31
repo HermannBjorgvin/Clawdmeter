@@ -19,7 +19,8 @@
 #include "hal/power_hal.h"
 #include "hal/imu_hal.h"
 
-static UsageData usage = {};
+static UsageData accounts[MAX_ACCOUNTS] = {};
+static int account_count = 0;
 
 // ---- LVGL draw buffers (partial render mode) ----
 // PSRAM-equipped boards (S3) can comfortably hold larger strips. PSRAM-free
@@ -95,23 +96,45 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 }
 
-// Parse a JSON line into UsageData.
-static bool parse_json(const char* json, UsageData* out) {
+// Fill one UsageData from a JSON account object {n,s,sr,w,wr,st,ok}.
+static void parse_account(JsonObjectConst o, UsageData* out) {
+    strlcpy(out->name, o["n"] | "", sizeof(out->name));
+    out->session_pct = o["s"] | 0.0f;
+    out->session_reset_mins = o["sr"] | -1;
+    out->weekly_pct = o["w"] | 0.0f;
+    out->weekly_reset_mins = o["wr"] | -1;
+    strlcpy(out->status, o["st"] | "unknown", sizeof(out->status));
+    // Default missing "ok" to true so legacy single-object payloads (which
+    // never carried "ok") render their numbers; only an explicit "ok":false
+    // (a daemon-reported failed poll) marks an account offline.
+    out->ok = o["ok"] | true;
+    out->valid = true;
+}
+
+// Parse a JSON line into the accounts[] array. Accepts the multi-account
+// array form {"a":[{...},...]} and, for backward compatibility, a single
+// bare object {...}. Returns the number of accounts parsed (0 on error).
+static int parse_json(const char* json, UsageData* out, int max_out) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
         Serial.printf("JSON parse error: %s\n", err.c_str());
-        return false;
+        return 0;
     }
 
-    out->session_pct = doc["s"] | 0.0f;
-    out->session_reset_mins = doc["sr"] | -1;
-    out->weekly_pct = doc["w"] | 0.0f;
-    out->weekly_reset_mins = doc["wr"] | -1;
-    strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
-    out->ok = doc["ok"] | false;
-    out->valid = true;
-    return true;
+    JsonArrayConst arr = doc["a"].as<JsonArrayConst>();
+    if (!arr.isNull()) {
+        int n = 0;
+        for (JsonObjectConst o : arr) {
+            if (n >= max_out) break;
+            parse_account(o, &out[n++]);
+        }
+        return n;
+    }
+
+    // Legacy single-object payload.
+    parse_account(doc.as<JsonObjectConst>(), &out[0]);
+    return 1;
 }
 
 // ---- Serial command buffer ----
@@ -305,16 +328,19 @@ void loop() {
     check_serial_cmd();
 
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
+        int n = parse_json(ble_get_data(), accounts, MAX_ACCOUNTS);
+        if (n > 0) {
+            account_count = n;
+            // Splash animation tracks the first (primary) account's rate.
             int g_before = usage_rate_group();
-            usage_rate_sample(usage.session_pct);
+            usage_rate_sample(accounts[0].session_pct);
             int g_after = usage_rate_group();
             if (g_after != g_before) {
                 Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
+                    g_before, g_after, accounts[0].session_pct);
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
-            ui_update(&usage);
+            ui_update_accounts(accounts, n);
             ble_send_ack();
         } else {
             ble_send_nack();
