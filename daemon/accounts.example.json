@@ -1,0 +1,13 @@
+{
+  "_comment": "Copy to ~/.config/claude-usage-monitor/accounts.json to show multiple Claude accounts on the device. Omit the file entirely to track just the default account (original single-account behavior).",
+  "accounts": [
+    {
+      "label": "main",
+      "config_dir": null
+    },
+    {
+      "label": "work",
+      "config_dir": "~/.claude-ux"
+    }
+  ]
+}
