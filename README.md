@@ -14,7 +14,7 @@ The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaa
 
 ## Screens
 
-The device boots into the splash and stays there until you press the middle (PWR) button, which cycles between Usage and Bluetooth. Tap the screen anywhere (except the Reset zone on the Bluetooth screen) to flip back to the splash; tap again to dismiss it.
+The device boots into the splash and stays there until you press the middle (PWR) button, which cycles between Usage and Bluetooth. With more than one account configured (see [Multiple accounts](#multiple-accounts)), the Usage screen auto-rotates through each account and the middle button steps through them before moving on to Bluetooth. Tap the screen anywhere (except the Reset zone on the Bluetooth screen) to flip back to the splash; tap again to dismiss it.
 
 |              Splash               |              Usage              |                Bluetooth                |
 | :-------------------------------: | :-----------------------------: | :-------------------------------------: |
@@ -128,6 +128,38 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 6. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.
 7. The two side buttons are independent of all of this — they send Space and Shift+Tab as BLE HID keyboard input to the paired host directly.
 
+## Multiple accounts
+
+If you run more than one Claude subscription (e.g. a personal login plus a
+work one under a separate `CLAUDE_CONFIG_DIR`), the daemon can track them all
+and the device rotates through them automatically — each account gets its own
+usage page, titled with its label, with a row of page dots showing how many
+there are. Pressing the middle (PWR) button steps through them manually.
+
+Create `~/.config/claude-usage-monitor/accounts.json` listing each account
+(see [`daemon/accounts.example.json`](daemon/accounts.example.json)):
+
+```json
+{
+  "accounts": [
+    { "label": "main", "config_dir": null },
+    { "label": "work", "config_dir": "~/.claude-ux" }
+  ]
+}
+```
+
+- `label` — short name shown on the device (≤ 12 chars).
+- `config_dir` — the account's Claude Code config dir. Use `null` for the
+  default profile; use the path you pass as `CLAUDE_CONFIG_DIR` for the others
+  (e.g. an alias like `alias claude-work='CLAUDE_CONFIG_DIR=~/.claude-ux claude'`).
+
+The daemon resolves each account's token from that profile — on macOS from its
+per-profile Keychain item (`Claude Code-credentials` for the default, or
+`Claude Code-credentials-<hash>` where `<hash>` is the first 8 hex of
+`sha256(<absolute config_dir>)`), and on Linux from `<config_dir>/.credentials.json`.
+Up to 8 accounts are supported (bounded by the BLE payload size). Omit the file
+entirely and the daemon tracks just the default account, exactly as before.
+
 ## Physical buttons
 
 The board has three side buttons. Left and right do the same thing on every screen; the middle button is screen-aware.
@@ -151,13 +183,13 @@ The device advertises a custom GATT service alongside the standard HID keyboard 
 | TX Characteristic (notify) | `4c41555a-4465-7669-6365-000000000003` |
 | **HID Service**            | `00001812-0000-1000-8000-00805f9b34fb` |
 
-JSON payload format (written to RX):
+JSON payload format (written to RX) — an array of accounts under `a`:
 
 ```json
-{ "s": 45, "sr": 120, "w": 28, "wr": 7200, "st": "allowed", "ok": true }
+{ "a": [ { "n": "main", "s": 45, "sr": 120, "w": 28, "wr": 7200, "st": "allowed", "ok": true } ] }
 ```
 
-Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
+Per-account fields: `n` = account label, `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag (an account that failed to poll is sent as `{ "n": "...", "ok": false }` and shown as offline). For backward compatibility the firmware also accepts a single bare object without the `a` wrapper.
 
 ## Recompiling fonts
 

@@ -10,7 +10,8 @@ enum screen_t {
 };
 
 void ui_init(void);
-void ui_update(const UsageData* data);
+void ui_update(const UsageData* data);                       // single-account (legacy)
+void ui_update_accounts(const UsageData* accounts, int n);   // multi-account
 void ui_tick_anim(void);
 void ui_show_screen(screen_t screen);
 void ui_cycle_screen(void);

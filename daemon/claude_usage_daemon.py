@@ -8,6 +8,7 @@ bleak (CoreBluetooth backend on macOS).
 
 import asyncio
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -30,11 +31,19 @@ POLL_INTERVAL = 60
 TICK = 5
 SCAN_TIMEOUT = 8.0
 
-# macOS: token lives in Keychain (service "Claude Code-credentials").
-# Linux: token lives in ~/.claude/.credentials.json.
-KEYCHAIN_SERVICE = "Claude Code-credentials"
-CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
-SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
+CONFIG_DIR = Path.home() / ".config" / "claude-usage-monitor"
+SAVED_ADDR_FILE = CONFIG_DIR / "ble-address"
+ACCOUNTS_FILE = CONFIG_DIR / "accounts.json"
+
+# Per-account label cap (keeps the BLE array payload inside BLE_BUF_SIZE=512
+# and the device's display width sane). Daemon truncates longer labels.
+LABEL_MAX = 12
+
+# Default Claude Code config dir (the profile used when CLAUDE_CONFIG_DIR is
+# unset). Its token lives in Keychain service "Claude Code-credentials"
+# (macOS) or ~/.claude/.credentials.json (Linux).
+DEFAULT_CONFIG_DIR = Path.home() / ".claude"
+KEYCHAIN_SERVICE_BASE = "Claude Code-credentials"
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
@@ -86,14 +95,35 @@ def _extract_access_token(blob: str) -> str | None:
     return None
 
 
-def _read_token_keychain() -> str | None:
+def keychain_service_for(config_dir: Path | None) -> str:
+    """Keychain service name for a Claude Code profile.
+
+    Claude Code namespaces the macOS Keychain item by config dir:
+      - default profile (CLAUDE_CONFIG_DIR unset): "Claude Code-credentials"
+      - a CLAUDE_CONFIG_DIR profile: that base + "-" + sha256(abspath)[:8]
+    Verified empirically (e.g. ~/.claude-ux -> ...-b8b10a65).
+    """
+    if config_dir is None:
+        return KEYCHAIN_SERVICE_BASE
+    abspath = str(config_dir.expanduser().resolve())
+    suffix = hashlib.sha256(abspath.encode()).hexdigest()[:8]
+    return f"{KEYCHAIN_SERVICE_BASE}-{suffix}"
+
+
+def credentials_path_for(config_dir: Path | None) -> Path:
+    """File-based credentials path for a profile (Linux / fallback)."""
+    base = config_dir.expanduser() if config_dir else DEFAULT_CONFIG_DIR
+    return base / ".credentials.json"
+
+
+def _read_token_keychain(service: str) -> str | None:
     try:
         out = subprocess.run(
             [
                 "security",
                 "find-generic-password",
                 "-s",
-                KEYCHAIN_SERVICE,
+                service,
                 "-a",
                 getpass.getuser(),
                 "-w",
@@ -104,7 +134,7 @@ def _read_token_keychain() -> str | None:
             timeout=10,
         )
     except subprocess.CalledProcessError as e:
-        log(f"Keychain read failed (rc={e.returncode}): {e.stderr.strip()}")
+        log(f"Keychain read failed for {service!r} (rc={e.returncode}): {e.stderr.strip()}")
         return None
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         log(f"Keychain access error: {e}")
@@ -112,19 +142,75 @@ def _read_token_keychain() -> str | None:
     return _extract_access_token(out.stdout)
 
 
-def _read_token_file() -> str | None:
+def _read_token_file(path: Path) -> str | None:
     try:
-        raw = CREDENTIALS_PATH.read_text()
+        raw = path.read_text()
     except OSError as e:
-        log(f"Error reading credentials: {e}")
+        log(f"Error reading credentials at {path}: {e}")
         return None
     return _extract_access_token(raw)
 
 
-def read_token() -> str | None:
+def read_token(account: dict) -> str | None:
+    """Resolve the OAuth token for one account.
+
+    ``account`` is {"label": str, "config_dir": Path|None}. On macOS the token
+    is read from the per-profile Keychain item; a file credential (if present)
+    is tried as a fallback. On other platforms the file is authoritative.
+    """
+    config_dir = account.get("config_dir")
     if sys.platform == "darwin":
-        return _read_token_keychain()
-    return _read_token_file()
+        tok = _read_token_keychain(keychain_service_for(config_dir))
+        if tok:
+            return tok
+        # Fallback: some setups still keep a file credential.
+        path = credentials_path_for(config_dir)
+        return _read_token_file(path) if path.exists() else None
+    return _read_token_file(credentials_path_for(config_dir))
+
+
+def load_accounts() -> list[dict]:
+    """Load the account list, or default to the single default profile.
+
+    Config file ~/.config/claude-usage-monitor/accounts.json:
+        {"accounts": [
+            {"label": "main"},                       # default profile
+            {"label": "ux", "config_dir": "~/.claude-ux"}
+        ]}
+
+    Absent/empty/malformed → one default account (backward compatible with the
+    original single-account daemon). ``config_dir`` may be null/omitted (the
+    default profile) or a path string (a CLAUDE_CONFIG_DIR profile).
+    """
+    default = [{"label": "claude", "config_dir": None}]
+    if not ACCOUNTS_FILE.exists():
+        return default
+    try:
+        data = json.loads(ACCOUNTS_FILE.read_text())
+        raw = data.get("accounts") if isinstance(data, dict) else data
+        if not isinstance(raw, list) or not raw:
+            raise ValueError("no accounts")
+    except (json.JSONDecodeError, OSError, ValueError) as e:
+        log(f"accounts.json unusable ({e}); using default single account")
+        return default
+
+    accounts = []
+    for i, entry in enumerate(raw):
+        if isinstance(entry, str):  # bare path or "default"
+            entry = {"config_dir": None if entry in ("", "default") else entry}
+        cd = entry.get("config_dir")
+        label = str(entry.get("label") or "").strip()
+        if not label:
+            # Derive from config_dir basename, else index.
+            label = Path(cd).name.lstrip(".") if cd else "claude"
+            label = label or f"acct{i+1}"
+        accounts.append(
+            {
+                "label": label[:LABEL_MAX],
+                "config_dir": Path(cd) if cd else None,
+            }
+        )
+    return accounts
 
 
 def load_cached_address() -> str | None:
@@ -271,18 +357,32 @@ async def discover_target(skip_addr: str | None = None):
     return address
 
 
-async def poll_api(token: str) -> dict | None:
+async def poll_api(account: dict) -> dict:
+    """Poll one account's rate-limit headers.
+
+    Always returns a per-account object carrying the label under "n". On any
+    failure (no token, network, HTTP error) returns {"n": label, "ok": false}
+    so the device can show the account as offline instead of dropping it.
+    """
+    label = account["label"]
+    offline = {"n": label, "ok": False}
+
+    token = read_token(account)
+    if not token:
+        log(f"[{label}] no token; marking offline")
+        return offline
+
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
     try:
         async with httpx.AsyncClient(timeout=20.0) as http:
             resp = await http.post(API_URL, headers=headers, json=API_BODY)
     except httpx.HTTPError as e:
-        log(f"API call failed: {e}")
-        return None
+        log(f"[{label}] API call failed: {e}")
+        return offline
     if resp.status_code >= 400:
-        log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
-        return None
+        log(f"[{label}] API HTTP {resp.status_code}: {resp.text[:160]}")
+        return offline
 
     def hdr(name: str, default: str = "0") -> str:
         return resp.headers.get(name, default)
@@ -303,7 +403,8 @@ async def poll_api(token: str) -> dict | None:
         except ValueError:
             return 0
 
-    payload = {
+    return {
+        "n": label,
         "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
         "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
         "w": pct(hdr("anthropic-ratelimit-unified-7d-utilization")),
@@ -311,7 +412,18 @@ async def poll_api(token: str) -> dict | None:
         "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
         "ok": True,
     }
-    return payload
+
+
+async def poll_all(accounts: list[dict]) -> dict | None:
+    """Poll every account concurrently and build the BLE array payload.
+
+    Returns {"a": [per-account, ...]} or None if there's nothing to send.
+    Accounts are polled in parallel; order is preserved to match the config.
+    """
+    if not accounts:
+        return None
+    results = await asyncio.gather(*(poll_api(a) for a in accounts))
+    return {"a": list(results)}
 
 
 class Session:
@@ -331,21 +443,29 @@ class Session:
 
     async def write_payload(self, payload: dict) -> bool:
         data = json.dumps(payload, separators=(",", ":")).encode()
-        log(f"Sending: {data.decode()}")
+        n = len(payload.get("a", [])) if isinstance(payload, dict) else 0
+        log(f"Sending ({len(data)}B, {n} acct): {data.decode()}")
+        if len(data) > 512:
+            log(f"WARNING: payload {len(data)}B exceeds device BLE_BUF_SIZE=512; "
+                "it will be truncated. Reduce accounts or label lengths.")
         try:
-            await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
+            # response=True (ATT write-with-response): CoreBluetooth performs a
+            # long write for payloads above the MTU, so multi-account arrays up
+            # to 512B arrive intact, and a clean return confirms delivery.
+            await self.client.write_gatt_char(RX_CHAR_UUID, data, response=True)
             return True
         except BleakError as e:
             log(f"Write failed: {e}")
             return False
 
 
-async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
+async def connect_and_run(target, accounts: list[dict], stop_event: asyncio.Event) -> bool:
     """Connect to a target and poll until disconnected or stopped.
 
     ``target`` is either an address string (Linux) or a BLEDevice carrying
-    live CoreBluetooth details (macOS). Returns True if the connection was
-    used successfully (so the caller keeps the cached address), False if the
+    live CoreBluetooth details (macOS). ``accounts`` is the list of Claude
+    profiles to poll each cycle. Returns True if the connection was used
+    successfully (so the caller keeps the cached address), False if the
     connection failed and the cache should be invalidated.
     """
     display = target if isinstance(target, str) else target.address
@@ -373,15 +493,11 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
-                token = read_token()
-                if not token:
-                    log("No token; skipping poll")
-                else:
-                    payload = await poll_api(token)
-                    if payload is not None:
-                        if await session.write_payload(payload):
-                            last_poll = time.time()
-                            used_successfully = True
+                payload = await poll_all(accounts)
+                if payload is not None:
+                    if await session.write_payload(payload):
+                        last_poll = time.time()
+                        used_successfully = True
 
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
@@ -414,6 +530,10 @@ async def main() -> None:
     log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
 
+    accounts = load_accounts()
+    log(f"Accounts ({len(accounts)}): " + ", ".join(
+        f"{a['label']}[{a['config_dir'] or 'default'}]" for a in accounts))
+
     backoff = 1
     skip_addr: str | None = None  # macOS: a peripheral to skip for one cycle
     while not stop_event.is_set():
@@ -431,7 +551,7 @@ async def main() -> None:
             continue
 
         addr = target if isinstance(target, str) else target.address
-        ok = await connect_and_run(target, stop_event)
+        ok = await connect_and_run(target, accounts, stop_event)
         if not ok:
             if sys.platform == "darwin":
                 # No string cache to drop; instead skip this stale handle on
