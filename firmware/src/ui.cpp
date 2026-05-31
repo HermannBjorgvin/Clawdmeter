@@ -375,10 +375,14 @@ static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
     lv_obj_set_style_text_font(lbl, L.usage_pill_font, 0);
-    // The pill is a dark COL_BAR_BG background (lum ~42) with light
-    // COL_TEXT (lum ~248) on top — a dim chip framing the label.
-    lv_obj_set_style_bg_color(lbl, COL_BAR_BG, 0);
-    lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
+    // AMOLED: a dim COL_BAR_BG chip with light COL_TEXT on top. On the
+    // tiny e-paper tier the 1bpp HAL inverts luminance, so a dark
+    // COL_BAR_BG fill would vanish into the white paper — invert the pill
+    // (light fill, dark text in LVGL) so it renders as a solid BLACK pill
+    // with WHITE "Current"/"Weekly" text on the panel.
+    const bool pill_invert = (L.scr_h < 250);
+    lv_obj_set_style_bg_color(lbl, pill_invert ? COL_TEXT : COL_BAR_BG, 0);
+    lv_obj_set_style_text_color(lbl, pill_invert ? COL_BG : COL_TEXT, 0);
     lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(lbl, LV_RADIUS_CIRCLE, 0);
     // Pill padding scales with the font: keep tight on the tiny tier so
