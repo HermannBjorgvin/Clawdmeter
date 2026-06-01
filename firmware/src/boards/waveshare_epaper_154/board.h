@@ -23,6 +23,22 @@
 // in our case).
 #define EPD_PWR              6
 
+// ---- Battery soft-power latch ----
+// On battery, the PWR side-button only MOMENTARILY applies the battery
+// rail. The MCU must immediately latch the rail ON by driving VBAT_PWR
+// HIGH, or power collapses the instant the button is released — the MCU
+// boots, writes one frame to the bistable e-paper, then dies, leaving a
+// frozen splash with no animation. (On USB the board is powered by VBUS
+// regardless, which is why it only fails on battery.)
+//
+// Verified against 07_BATT_PWR_Test/user_config.h + board_power_bsp.cpp:
+//   VBAT_PWR_PIN = GPIO_NUM_17, configured OUTPUT, VBAT_POWER_ON() drives
+//   it HIGH (active-HIGH, the OPPOSITE polarity of EPD_PWR). This must be
+//   asserted before any display activity (board_init runs before display
+//   init), matching the reference's user_app_init() ordering.
+#define VBAT_PWR_GPIO        17
+#define VBAT_PWR_ON_LEVEL    HIGH   // active-HIGH latch (per Waveshare BSP)
+
 // ---- Buttons ----
 #define BTN_BACK_GPIO        0     // BOOT — primary, Space (PTT)
 #define BTN_PWR_GPIO         18    // PWR side-button (verified V2)
