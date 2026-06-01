@@ -7,7 +7,7 @@ static const BoardCaps caps = {
     .height = LCD_HEIGHT,
     .button_count = 1,
     .has_rotation = false,
-    .has_battery = false,
+    .has_battery = true,
     .has_imu = false,
     .has_touch = false,
 };

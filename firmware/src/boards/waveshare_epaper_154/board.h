@@ -39,6 +39,18 @@
 #define VBAT_PWR_GPIO        17
 #define VBAT_PWR_ON_LEVEL    HIGH   // active-HIGH latch (per Waveshare BSP)
 
+// ---- Battery voltage sense (ADC) ----
+// GPIO4 = ESP32-S3 ADC1_CHANNEL_3, behind a 1:2 hardware divider, so the
+// firmware reconstructs the real pack voltage as (measured pin mV * 2).
+// Verified against Waveshare 02_Example/Arduino/01_ADC_Test/adc_bsp.cpp,
+// which reads ADC_UNIT_1/ADC_CHANNEL_3 at ADC_ATTEN_DB_12 and computes
+// `vol * 2`. GPIO4 is in the ADC1 bank (GPIO1..10), so it is radio-safe to
+// read while NimBLE is active (ADC2 on GPIO11..20 is not). GPIO4 is unused
+// elsewhere on this board. This is a SEPARATE net from VBAT_PWR (GPIO17),
+// which is the power-enable latch above, not a sense line.
+#define VBAT_ADC_GPIO        4
+#define VBAT_ADC_DIVIDER     2     // 1:2 divider — reconstruct Vbat = pin_mV * divider
+
 // ---- Buttons ----
 #define BTN_BACK_GPIO        0     // BOOT — primary, Space (PTT)
 #define BTN_PWR_GPIO         18    // PWR side-button (verified V2)
@@ -47,5 +59,5 @@
 #define BOARD_HAS_SECONDARY_BUTTON 0
 #define BOARD_HAS_ROTATION         0
 #define BOARD_HAS_IMU              0
-#define BOARD_HAS_BATTERY          0
+#define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      0
