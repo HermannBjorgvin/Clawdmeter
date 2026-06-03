@@ -128,31 +128,53 @@ async def poll_api(token: str) -> dict | None:
         log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
         return None
 
-    def hdr(name: str, default: str = "0") -> str:
-        return resp.headers.get(name, default)
+    H = "anthropic-ratelimit-unified-"
+
+    def raw(suffix: str) -> str | None:
+        """Exact header value, or None when the header is absent."""
+        return resp.headers.get(H + suffix)
 
     now = time.time()
 
-    def reset_minutes(reset_ts: str) -> int:
+    def reset_minutes(reset_ts: str | None) -> int:
         try:
             r = float(reset_ts)
-        except ValueError:
+        except (TypeError, ValueError):
             return 0
         mins = (r - now) / 60.0
         return int(round(mins)) if mins > 0 else 0
 
-    def pct(util: str) -> int:
+    def pct(util: str | None) -> int:
         try:
             return int(round(float(util) * 100))
-        except ValueError:
+        except (TypeError, ValueError):
             return 0
 
+    # Unified rate-limit schema: per-window utilization for the 5-hour (session)
+    # and 7-day (weekly) windows, with `representative-claim` naming the binding
+    # window (five_hour | seven_day | overage). Once the subscription allowance is
+    # spent the account enters OVERAGE mode: the API omits the -5h-/-7d- breakdown
+    # entirely, so reading only those windows yields all-zeros. Detect overage via
+    # `overage-in-use` and represent the spent subscription windows as full, rather
+    # than silently reporting 0%. Ref:
+    # https://github.com/anthropics/claude-code/issues/12829
+    s_util = raw("5h-utilization")
+    w_util = raw("7d-utilization")
+    # Overall status: prefer the unified headline; fall back to the per-window
+    # 5h-status for older responses that predate the unified-status header.
+    status = raw("status") or raw("5h-status") or "unknown"
+
+    if raw("overage-in-use") == "true" and s_util is None and w_util is None:
+        s_util = w_util = "1.0"   # subscription exhausted -> both windows full
+        status = "overage"
+
+    unified_reset = raw("reset")  # reset for the representative claim
     payload = {
-        "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
-        "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
-        "w": pct(hdr("anthropic-ratelimit-unified-7d-utilization")),
-        "wr": reset_minutes(hdr("anthropic-ratelimit-unified-7d-reset")),
-        "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
+        "s": pct(s_util),
+        "sr": reset_minutes(raw("5h-reset") or unified_reset),
+        "w": pct(w_util),
+        "wr": reset_minutes(raw("7d-reset") or unified_reset),
+        "st": status,
         "ok": True,
     }
     return payload
