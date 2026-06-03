@@ -208,18 +208,37 @@ poll() {
         -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
         2>/dev/null) || { log "Error: API call failed"; return 1; }
 
-    local s5h_util s5h_reset s7d_util s7d_reset status
-    s5h_util=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-5h-utilization" | tr -d '\r' | awk '{print $2}')
-    s5h_reset=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-5h-reset" | tr -d '\r' | awk '{print $2}')
-    s7d_util=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-7d-utilization" | tr -d '\r' | awk '{print $2}')
-    s7d_reset=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-7d-reset" | tr -d '\r' | awk '{print $2}')
-    status=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-5h-status" | tr -d '\r' | awk '{print $2}')
+    local s5h_util s5h_reset s7d_util s7d_reset s5h_status uni_status uni_reset overage_in_use status
+    # grep substrings are unambiguous: "unified-status" / "unified-reset" do not
+    # appear inside the "-5h-", "-7d-", or "-overage-" header names.
+    s5h_util=$(echo "$headers"   | grep -i "anthropic-ratelimit-unified-5h-utilization" | tr -d '\r' | awk '{print $2}')
+    s5h_reset=$(echo "$headers"  | grep -i "anthropic-ratelimit-unified-5h-reset"       | tr -d '\r' | awk '{print $2}')
+    s7d_util=$(echo "$headers"   | grep -i "anthropic-ratelimit-unified-7d-utilization" | tr -d '\r' | awk '{print $2}')
+    s7d_reset=$(echo "$headers"  | grep -i "anthropic-ratelimit-unified-7d-reset"       | tr -d '\r' | awk '{print $2}')
+    s5h_status=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-5h-status"      | tr -d '\r' | awk '{print $2}')
+    uni_status=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-status"         | tr -d '\r' | awk '{print $2}')
+    uni_reset=$(echo "$headers"  | grep -i "anthropic-ratelimit-unified-reset"          | tr -d '\r' | awk '{print $2}')
+    overage_in_use=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-overage-in-use" | tr -d '\r' | awk '{print $2}')
+
+    # Overall status: prefer the unified headline, fall back to the per-window 5h status.
+    status="${uni_status:-${s5h_status:-unknown}}"
+
+    # Overage mode: once the subscription allowance is spent the API drops the
+    # -5h-/-7d- breakdown (representative-claim == "overage"), so reading only those
+    # windows yields all-zeros. Represent the spent subscription windows as full.
+    # Ref: https://github.com/anthropics/claude-code/issues/12829
+    if [ "$overage_in_use" = "true" ] && [ -z "$s5h_util" ] && [ -z "$s7d_util" ]; then
+        s5h_util=1.0
+        s7d_util=1.0
+        s5h_reset="${s5h_reset:-$uni_reset}"
+        s7d_reset="${s7d_reset:-$uni_reset}"
+        status=overage
+    fi
 
     s5h_util=${s5h_util:-0}
     s5h_reset=${s5h_reset:-0}
     s7d_util=${s7d_util:-0}
     s7d_reset=${s7d_reset:-0}
-    status=${status:-unknown}
 
     local payload
     payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$status" -v now="$now" \
