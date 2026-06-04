@@ -49,6 +49,18 @@ API_BODY = {
     "messages": [{"role": "user", "content": "hi"}],
 }
 
+# OAuth refresh — endpoint and client id lifted from the Claude Code CLI so we
+# renew exactly the way it does. The access token lives ~8h; we refresh on
+# demand (on a 401/403) and proactively when it is within REFRESH_SKEW seconds
+# of expiry, so the device never sees a stale-token stall.
+OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+REFRESH_SKEW = 120
+
+
+class TokenExpired(Exception):
+    """Raised by poll_api on a 401/403 so the caller can refresh and retry."""
+
 
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -86,45 +98,228 @@ def _extract_access_token(blob: str) -> str | None:
     return None
 
 
-def _read_token_keychain() -> str | None:
-    try:
-        out = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-a",
-                getpass.getuser(),
-                "-w",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except subprocess.CalledProcessError as e:
-        log(f"Keychain read failed (rc={e.returncode}): {e.stderr.strip()}")
-        return None
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        log(f"Keychain access error: {e}")
-        return None
-    return _extract_access_token(out.stdout)
+def _decode_keychain_blob(raw: str) -> str:
+    """Transparently decode a hex-dumped Keychain secret back to text.
+
+    ``security … -w`` prints the password as a continuous hex string whenever
+    the stored bytes aren't cleanly printable (e.g. an embedded newline). A
+    normal credentials blob is JSON, which is never valid hex (it contains
+    '{', '"', …), so all-hex detection is unambiguous and safe.
+    """
+    s = raw.strip()
+    if s and len(s) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", s):
+        try:
+            return bytes.fromhex(s).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return raw
+    return raw
 
 
-def _read_token_file() -> str | None:
+def _read_credentials_raw() -> str | None:
+    """Return the raw credentials blob (a JSON string) or None.
+
+    macOS: the Keychain generic-password item Claude Code writes.
+    Linux: the ~/.claude/.credentials.json file.
+    """
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                [
+                    "security",
+                    "find-generic-password",
+                    "-s",
+                    KEYCHAIN_SERVICE,
+                    "-a",
+                    getpass.getuser(),
+                    "-w",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except subprocess.CalledProcessError as e:
+            log(f"Keychain read failed (rc={e.returncode}): {e.stderr.strip()}")
+            return None
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            log(f"Keychain access error: {e}")
+            return None
+        return _decode_keychain_blob(out.stdout)
     try:
-        raw = CREDENTIALS_PATH.read_text()
+        return CREDENTIALS_PATH.read_text()
     except OSError as e:
         log(f"Error reading credentials: {e}")
         return None
-    return _extract_access_token(raw)
+
+
+def _write_credentials_raw(blob: str) -> bool:
+    """Persist an updated credentials blob back to the OS credential store.
+
+    Called only with a blob built from a *successful* token refresh, so the
+    store Claude Code reads stays in sync (the provider may rotate the refresh
+    token). A write failure is non-fatal — the refreshed access token still
+    works in-memory for this process — so we log and carry on.
+
+    Note: on macOS the blob is passed to ``security`` via argv (-w), so it is
+    briefly visible in ``ps`` to this same user. That is not a meaningful leak
+    here: any process of this user can already read the item out of the
+    unlocked login keychain without authorization.
+    """
+    if sys.platform == "darwin":
+        try:
+            subprocess.run(
+                [
+                    "security",
+                    "add-generic-password",
+                    "-U",  # update the existing item in place
+                    "-s",
+                    KEYCHAIN_SERVICE,
+                    "-a",
+                    getpass.getuser(),
+                    "-w",
+                    blob,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return True
+        except subprocess.CalledProcessError as e:
+            log(f"Keychain write failed (rc={e.returncode}): {e.stderr.strip()}")
+            return False
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            log(f"Keychain write error: {e}")
+            return False
+    try:
+        CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CREDENTIALS_PATH.write_text(blob)
+        os.chmod(CREDENTIALS_PATH, 0o600)
+        return True
+    except OSError as e:
+        log(f"Error writing credentials: {e}")
+        return False
 
 
 def read_token() -> str | None:
-    if sys.platform == "darwin":
-        return _read_token_keychain()
-    return _read_token_file()
+    raw = _read_credentials_raw()
+    return _extract_access_token(raw) if raw else None
+
+
+def _credentials_expiry_seconds(raw: str | None = None) -> float | None:
+    """Epoch-seconds at which the stored access token expires, or None.
+
+    Claude Code stores ``expiresAt`` as epoch milliseconds; normalize to
+    seconds so callers can compare against ``time.time()``.
+    """
+    if raw is None:
+        raw = _read_credentials_raw()
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    oauth = data.get("claudeAiOauth", data)
+    if not isinstance(oauth, dict):
+        oauth = data
+    exp = oauth.get("expiresAt", oauth.get("expires_at"))
+    try:
+        exp = float(exp)
+    except (TypeError, ValueError):
+        return None
+    return exp / 1000.0 if exp > 1e12 else exp
+
+
+def _apply_refresh_response(oauth: dict, tok: dict) -> str | None:
+    """Map an OAuth token response onto the stored credential dict in place.
+
+    Translates snake_case response fields (access_token / refresh_token /
+    expires_in) onto Claude Code's camelCase storage keys (accessToken /
+    refreshToken / expiresAt-in-ms). The refresh token is only overwritten if
+    the response rotates it. Returns the new access token, or None if absent.
+    """
+    new_access = tok.get("access_token")
+    if not new_access:
+        return None
+    oauth["accessToken"] = new_access
+    if tok.get("refresh_token"):
+        oauth["refreshToken"] = tok["refresh_token"]
+    if tok.get("expires_in"):
+        oauth["expiresAt"] = int((time.time() + float(tok["expires_in"])) * 1000)
+    return new_access
+
+
+async def refresh_access_token() -> str | None:
+    """Exchange the stored refresh token for a fresh access token.
+
+    Mirrors Claude Code's own OAuth refresh (client id + endpoint extracted
+    from the CLI). On success the renewed tokens are written back to the
+    shared credential store. On ANY failure nothing is written, so existing
+    credentials are left untouched.
+    """
+    raw = _read_credentials_raw()
+    if not raw:
+        log("Refresh: no credentials available")
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        log("Refresh: credentials are not JSON; cannot refresh")
+        return None
+
+    # Locate the dict that actually holds the tokens (top-level or nested
+    # under "claudeAiOauth") so we update in place and preserve every other
+    # field on write-back.
+    oauth = data
+    if isinstance(data, dict) and "accessToken" not in data:
+        for v in data.values():
+            if isinstance(v, dict) and "accessToken" in v:
+                oauth = v
+                break
+    refresh = oauth.get("refreshToken") or oauth.get("refresh_token")
+    if not refresh:
+        log("Refresh: no refresh token present — re-login required")
+        return None
+
+    body = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh,
+        "client_id": OAUTH_CLIENT_ID,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.post(
+                OAUTH_TOKEN_URL,
+                json=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": API_HEADERS_TEMPLATE["User-Agent"],
+                },
+            )
+    except httpx.HTTPError as e:
+        log(f"Refresh request failed: {e}")
+        return None
+    if resp.status_code != 200:
+        log(f"Refresh rejected HTTP {resp.status_code}: {resp.text[:200]}")
+        return None
+    try:
+        tok = resp.json()
+    except ValueError:
+        log("Refresh: response was not JSON")
+        return None
+    new_access = _apply_refresh_response(oauth, tok)
+    if not new_access:
+        log("Refresh: response contained no access_token")
+        return None
+
+    if _write_credentials_raw(json.dumps(data)):
+        log("Refresh: access token renewed and written back to credential store")
+    else:
+        log("Refresh: access token renewed (in-memory only; write-back failed)")
+    return new_access
 
 
 def load_cached_address() -> str | None:
@@ -280,6 +475,9 @@ async def poll_api(token: str) -> dict | None:
     except httpx.HTTPError as e:
         log(f"API call failed: {e}")
         return None
+    if resp.status_code in (401, 403):
+        log(f"API HTTP {resp.status_code} (token expired/invalid)")
+        raise TokenExpired()
     if resp.status_code >= 400:
         log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
         return None
@@ -374,10 +572,27 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
                 token = read_token()
+                # Proactively renew before the API would reject us, so a poll
+                # never has to fail-then-retry in the steady state.
+                exp = _credentials_expiry_seconds()
+                if token and exp is not None and exp - time.time() < REFRESH_SKEW:
+                    log("Access token near expiry; refreshing proactively")
+                    token = await refresh_access_token() or token
                 if not token:
                     log("No token; skipping poll")
                 else:
-                    payload = await poll_api(token)
+                    payload = None
+                    try:
+                        payload = await poll_api(token)
+                    except TokenExpired:
+                        # Token rejected despite our proactive check (e.g. it
+                        # was revoked). Refresh once and retry this poll.
+                        new = await refresh_access_token()
+                        if new:
+                            try:
+                                payload = await poll_api(new)
+                            except TokenExpired:
+                                log("Still rejected after refresh; re-login may be required")
                     if payload is not None:
                         if await session.write_payload(payload):
                             last_poll = time.time()
