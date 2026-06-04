@@ -373,6 +373,65 @@ def test_normal_mode_not_treated_as_overage_when_overage_not_in_use():
 
 
 # ---------------------------------------------------------------------------
+# Test: overage exposes the ACTUAL extra-usage figure (POLL-OVERAGE-02)
+# The device's overage screen relabels the second bar to "Extra Usage" and must
+# show the real overage utilization, not a faked 100%. The daemon therefore
+# carries it on the wire as "o" (overage util %) plus "or" (extra-usage reset
+# minutes, taken from the representative-claim's unified `reset`). The plan bar
+# stays 100% ("allowance spent"); only the extra bar reflects overage spend.
+# ---------------------------------------------------------------------------
+
+def test_overage_payload_carries_real_overage_utilization():
+    """In overage the payload exposes the true overage utilization as "o" (a
+    percentage), sourced from anthropic-ratelimit-unified-overage-utilization —
+    NOT the faked 100% that the plan bar uses."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-representative-claim": "overage",
+        "anthropic-ratelimit-unified-overage-in-use": "true",
+        "anthropic-ratelimit-unified-overage-utilization": "0.23",
+        "anthropic-ratelimit-unified-reset": str(now + 3600),
+        # 5h/7d omitted — the API drops them in overage.
+    })
+    assert payload["st"] == "overage"
+    assert payload["s"] == 100, "plan bar stays full (allowance spent)"
+    assert payload["o"] == 23, f"expected overage util 23%, got {payload.get('o')!r}"
+
+
+def test_overage_extra_reset_minutes_from_representative_claim():
+    """The extra-usage reset ("or") is the representative-claim reset — the
+    firmware's format_reset_time() then renders Xh Ym vs Xd Yh by magnitude."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-representative-claim": "overage",
+        "anthropic-ratelimit-unified-overage-in-use": "true",
+        "anthropic-ratelimit-unified-overage-utilization": "0.5",
+        "anthropic-ratelimit-unified-reset": str(now + 3600),  # 60 minutes out
+    })
+    assert abs(payload["or"] - 60) <= 1, f"expected ~60, got {payload.get('or')!r}"
+
+
+def test_normal_mode_reports_zero_overage():
+    """Outside overage the extra-usage figure is 0 so the device never shows a
+    phantom Extra Usage bar."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-representative-claim": "five_hour",
+        "anthropic-ratelimit-unified-overage-in-use": "false",
+        "anthropic-ratelimit-unified-overage-utilization": "0.0",
+        "anthropic-ratelimit-unified-5h-utilization": "0.30",
+        "anthropic-ratelimit-unified-5h-reset": str(now + 3600),
+        "anthropic-ratelimit-unified-7d-utilization": "0.74",
+        "anthropic-ratelimit-unified-7d-reset": str(now + 86400),
+    })
+    assert payload["o"] == 0
+    assert payload["st"] == "allowed"
+
+
+# ---------------------------------------------------------------------------
 # Test: poll_api returns None on HTTP >= 400
 # ---------------------------------------------------------------------------
 

@@ -66,6 +66,38 @@ def test_overage_mode_reports_full_subscription_and_overage_status():
     assert abs(payload["wr"] - 60) <= 1
 
 
+def test_overage_payload_carries_real_overage_utilization():
+    """The "o" field exposes the true overage spend (for the device's "Extra
+    Usage" bar), distinct from the faked 100% plan bar."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-representative-claim": "overage",
+        "anthropic-ratelimit-unified-overage-in-use": "true",
+        "anthropic-ratelimit-unified-overage-utilization": "0.23",
+        "anthropic-ratelimit-unified-reset": str(now + 3600),
+    })
+    assert payload["st"] == "overage"
+    assert payload["s"] == 100
+    assert payload["o"] == 23
+    assert abs(payload["or"] - 60) <= 1
+
+
+def test_normal_mode_reports_zero_overage():
+    """Outside overage the extra-usage figure is 0 (no phantom Extra Usage bar)."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-overage-utilization": "0.0",
+        "anthropic-ratelimit-unified-5h-utilization": "0.30",
+        "anthropic-ratelimit-unified-5h-reset": str(now + 3600),
+        "anthropic-ratelimit-unified-7d-utilization": "0.74",
+        "anthropic-ratelimit-unified-7d-reset": str(now + 86400),
+    })
+    assert payload["o"] == 0
+    assert payload["st"] == "allowed"
+
+
 def test_status_prefers_unified_over_per_window():
     now = time.time()
     payload = _poll_with_headers({

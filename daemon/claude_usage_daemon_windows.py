@@ -167,11 +167,17 @@ async def poll_api(token: str) -> dict | None:
         status = "overage"
 
     unified_reset = raw("reset")  # reset for the representative claim
+    # Extra-usage (overage) spend: the real figure the device's "Extra Usage" bar
+    # shows. Distinct from the plan bar, which reads 100% ("allowance spent") once
+    # the subscription is exhausted. Absent outside overage -> pct(None) == 0, so
+    # the device never renders a phantom Extra Usage bar.
     payload = {
         "s": pct(s_util),
         "sr": reset_minutes(raw("5h-reset") or unified_reset),
         "w": pct(w_util),
         "wr": reset_minutes(raw("7d-reset") or unified_reset),
+        "o": pct(raw("overage-utilization")),
+        "or": reset_minutes(unified_reset),
         "st": status,
         "ok": True,
     }

@@ -7,6 +7,7 @@
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
+LV_FONT_DECLARE(font_tiempos_48);
 LV_FONT_DECLARE(font_tiempos_34);
 LV_FONT_DECLARE(font_styrene_48);
 LV_FONT_DECLARE(font_styrene_28);
@@ -429,28 +430,60 @@ void ui_init(void) {
 
 }
 
+// Render one usage panel: big %, top-right pill, bar (value + color), sub-line.
+// Shared by the normal (Current/Weekly) and overage (Plan/Extra Usage) layouts
+// so the two modes can't drift in how a panel is drawn.
+static void render_panel(lv_obj_t* pct_lbl, lv_obj_t* pill, lv_obj_t* bar,
+                         lv_obj_t* reset_lbl, const char* pill_text,
+                         int pct, lv_color_t bar_color, const char* reset_text) {
+    lv_label_set_text_fmt(pct_lbl, "%d%%", pct);
+    lv_label_set_text(pill, pill_text);
+    lv_bar_set_value(bar, pct, LV_ANIM_ON);
+    lv_obj_set_style_bg_color(bar, bar_color, LV_PART_INDICATOR);
+    lv_label_set_text(reset_lbl, reset_text);
+}
+
+static void set_title(const char* text, const lv_font_t* font, lv_color_t color, int y_offset) {
+    lv_label_set_text(lbl_title, text);
+    lv_obj_set_style_text_font(lbl_title, font, 0);
+    lv_obj_set_style_text_color(lbl_title, color, 0);
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y + y_offset);  // re-center for new width
+}
+
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
     last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
     data_received = true;
 
-    int s_pct = (int)(data->session_pct + 0.5f);
-
-    lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
-    lv_bar_set_value(bar_session, s_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
-
     char buf[48];
+
+    if (strcmp(data->status, "overage") == 0) {
+        // Subscription allowance is spent; the device shows what's being consumed
+        // on top of the plan. Plan bar is full + red ("Allowance spent"); the
+        // second bar becomes "Extra Usage" driven by the real overage figure.
+        set_title("Extra Usage", &font_tiempos_48, COL_RED, 4);  // shorter cap-height sits high; nudge down
+
+        render_panel(lbl_session_pct, lbl_session_label, bar_session, lbl_session_reset,
+                     "Plan", 100, COL_RED, "Allowance spent");
+
+        int o_pct = (int)(data->overage_pct + 0.5f);
+        format_reset_time(data->overage_reset_mins, buf, sizeof(buf));
+        render_panel(lbl_weekly_pct, lbl_weekly_label, bar_weekly, lbl_weekly_reset,
+                     "Extra Usage", o_pct, pct_color(data->overage_pct), buf);
+        return;
+    }
+
+    set_title("Usage", &font_tiempos_56, COL_TEXT, 0);
+
+    int s_pct = (int)(data->session_pct + 0.5f);
     format_reset_time(data->session_reset_mins, buf, sizeof(buf));
-    lv_label_set_text(lbl_session_reset, buf);
+    render_panel(lbl_session_pct, lbl_session_label, bar_session, lbl_session_reset,
+                 "Current", s_pct, pct_color(data->session_pct), buf);
 
     int w_pct = (int)(data->weekly_pct + 0.5f);
-    lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
-    lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
-
     format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
-    lv_label_set_text(lbl_weekly_reset, buf);
+    render_panel(lbl_weekly_pct, lbl_weekly_label, bar_weekly, lbl_weekly_reset,
+                 "Weekly", w_pct, pct_color(data->weekly_pct), buf);
 }
 
 // Pick the usage-view sub-screen: pairing hint (BLE down), the idle "Zzz" screen
