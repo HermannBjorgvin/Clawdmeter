@@ -109,6 +109,8 @@ static bool parse_json(const char* json, UsageData* out) {
     out->session_reset_mins = doc["sr"] | -1;
     out->weekly_pct = doc["w"] | 0.0f;
     out->weekly_reset_mins = doc["wr"] | -1;
+    out->overage_pct = doc["o"] | 0.0f;
+    out->overage_reset_mins = doc["or"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
     out->valid = true;
