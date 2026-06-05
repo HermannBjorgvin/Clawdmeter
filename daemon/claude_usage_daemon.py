@@ -56,6 +56,12 @@ API_BODY = {
 OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 REFRESH_SKEW = 120
+# Hard floor between refresh ATTEMPTS (success or failure). A data-hungry device
+# fires a refresh request every few seconds; without this, an expired token whose
+# refresh is failing (e.g. a 429) drives the OAuth endpoint into a self-sustaining
+# rate-limit loop. Every attempt is gated to once per this window.
+REFRESH_COOLDOWN = 300
+_last_refresh_attempt = 0.0
 
 
 class TokenExpired(Exception):
@@ -259,7 +265,18 @@ async def refresh_access_token() -> str | None:
     from the CLI). On success the renewed tokens are written back to the
     shared credential store. On ANY failure nothing is written, so existing
     credentials are left untouched.
+
+    Gated by REFRESH_COOLDOWN: at most one attempt per window, no matter how
+    often callers fire — this is what prevents the rate-limit hammering loop.
     """
+    global _last_refresh_attempt
+    now = time.time()
+    waited = now - _last_refresh_attempt
+    if waited < REFRESH_COOLDOWN:
+        log(f"Refresh: skipping — cooldown ({int(REFRESH_COOLDOWN - waited)}s left)")
+        return None
+    _last_refresh_attempt = now
+
     raw = _read_credentials_raw()
     if not raw:
         log("Refresh: no credentials available")

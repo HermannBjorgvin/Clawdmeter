@@ -6,14 +6,17 @@ Covers the pure, side-effect-free helpers that back token renewal:
   - _credentials_expiry_seconds  (expiresAt ms -> seconds)
   - _apply_refresh_response (OAuth 200 body -> stored credential dict)
 
-Network (the actual POST) and Keychain I/O are intentionally NOT exercised
-here — those are validated manually against the live endpoint.
+Pure helpers are tested directly; the one test that drives
+refresh_access_token mocks httpx and the credential read, so the live network
+POST and real Keychain I/O are never hit.
 
 Run: python -m pytest daemon/tests/test_macos_refresh.py -x -q
 """
+import asyncio
 import json
 import time
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -117,3 +120,32 @@ def test_apply_result_serializes_cleanly():
 def test_extract_nested_shape():
     blob = (FIXTURES / "credentials_nested.json").read_text()
     assert _extract_access_token(blob) == "sk-ant-test-1234"
+
+
+# --- refresh cooldown (anti-hammering guard) --------------------------------
+
+def test_refresh_cooldown_blocks_rapid_reattempts(monkeypatch):
+    """Two refresh calls within REFRESH_COOLDOWN: the second is skipped with no
+    network call. This is the guard that stops a data-hungry device from driving
+    the OAuth endpoint into a 429 hammer loop."""
+    import daemon.claude_usage_daemon as mod
+
+    creds = json.dumps({"claudeAiOauth":
+                        {"accessToken": "OLD", "refreshToken": "R", "expiresAt": 1}})
+    monkeypatch.setattr(mod, "_read_credentials_raw", lambda: creds)
+    monkeypatch.setattr(mod, "_write_credentials_raw", lambda blob: True)
+    monkeypatch.setattr(mod, "_last_refresh_attempt", 0.0)  # let the first attempt through
+
+    resp = MagicMock(status_code=200)
+    resp.json = MagicMock(return_value={"access_token": "NEW", "expires_in": 28800})
+    client = AsyncMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    client.post = AsyncMock(return_value=resp)
+
+    with patch("httpx.AsyncClient", return_value=client):
+        first = asyncio.run(mod.refresh_access_token())    # allowed -> 200 -> "NEW"
+        second = asyncio.run(mod.refresh_access_token())   # within cooldown -> skipped
+    assert first == "NEW"
+    assert second is None
+    client.post.assert_awaited_once()  # exactly one network call despite two calls
