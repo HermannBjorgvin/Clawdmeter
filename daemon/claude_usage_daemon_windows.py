@@ -52,6 +52,21 @@ API_BODY = {
     "messages": [{"role": "user", "content": "hi"}],
 }
 
+# OAuth refresh — endpoint and client id lifted from the Claude Code CLI so we
+# renew exactly the way it does. The access token lives ~8h; we refresh on
+# demand (on a 401/403) and proactively when it is within REFRESH_SKEW seconds
+# of expiry, so the device never sees a stale-token stall (the ~8h freeze the
+# Windows daemon used to need a manual `claude login` to clear).
+OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+REFRESH_SKEW = 120
+# Hard floor between refresh ATTEMPTS (success or failure). A data-hungry device
+# fires a refresh request every few seconds; without this, an expired token whose
+# refresh is failing (e.g. a 429) drives the OAuth endpoint into a self-sustaining
+# rate-limit loop. Every attempt is gated to once per this window.
+REFRESH_COOLDOWN = 300
+_last_refresh_attempt = 0.0
+
 
 def _build_file_logger() -> logging.Logger | None:
     """Create a rotating file logger for field diagnostics, or None.
@@ -273,6 +288,181 @@ def read_token() -> str | None:
     return None
 
 
+def _read_credentials_blob() -> tuple[Path, str] | None:
+    """Return (path, raw_blob) for the first readable credential file, or None.
+
+    The path is returned alongside the contents so a refresh write-back lands
+    on the SAME file Claude Code read from. Candidate order is first-hit-wins
+    (see _windows_credential_candidates), so reading and writing must agree on
+    which file won — never read fallback #2 and write primary.
+    """
+    for path in _windows_credential_candidates():
+        try:
+            return path, path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return None
+
+
+def _write_credentials_blob(path: Path, blob: str) -> bool:
+    """Persist an updated credentials blob back to `path` (where it was read).
+
+    Called only with a blob built from a *successful* token refresh, so the
+    store Claude Code reads stays in sync (the provider may rotate the refresh
+    token). A write failure is non-fatal — the refreshed access token still
+    works in-memory for this process — so we log and carry on.
+
+    We write plaintext JSON, exactly as the read side (read_token / _read_expiry)
+    consumes it: Claude Code on Windows keeps .credentials.json as a plaintext
+    file (no DPAPI blob), so round-tripping it as plaintext is what keeps the
+    file readable by both Claude Code and us. Overwriting in place via
+    write_text() preserves the file's existing ACLs (it truncates rather than
+    recreating), so no extra permission hardening is needed here.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(blob, encoding="utf-8")
+        return True
+    except OSError as e:
+        log(f"Error writing credentials: {e}")
+        return False
+
+
+def _credentials_expiry_seconds(raw: str | None = None) -> float | None:
+    """Epoch-seconds at which the stored access token expires, or None.
+
+    Claude Code stores ``expiresAt`` as epoch milliseconds; normalize to
+    seconds so callers can compare against ``time.time()``. When ``raw`` is
+    None, read the live credential store. (``_read_expiry`` returns a
+    human-readable string for the tray; this returns a number for the
+    proactive-refresh comparison.)
+    """
+    if raw is None:
+        found = _read_credentials_blob()
+        raw = found[1] if found else None
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    oauth = data.get("claudeAiOauth", data)
+    if not isinstance(oauth, dict):
+        oauth = data
+    exp = oauth.get("expiresAt", oauth.get("expires_at"))
+    try:
+        exp = float(exp)
+    except (TypeError, ValueError):
+        return None
+    return exp / 1000.0 if exp > 1e12 else exp
+
+
+def _apply_refresh_response(oauth: dict, tok: dict) -> str | None:
+    """Map an OAuth token response onto the stored credential dict in place.
+
+    Translates snake_case response fields (access_token / refresh_token /
+    expires_in) onto Claude Code's camelCase storage keys (accessToken /
+    refreshToken / expiresAt-in-ms). The refresh token is only overwritten if
+    the response rotates it. Returns the new access token, or None if absent.
+    """
+    new_access = tok.get("access_token")
+    if not new_access:
+        return None
+    oauth["accessToken"] = new_access
+    if tok.get("refresh_token"):
+        oauth["refreshToken"] = tok["refresh_token"]
+    if tok.get("expires_in"):
+        oauth["expiresAt"] = int((time.time() + float(tok["expires_in"])) * 1000)
+    return new_access
+
+
+async def refresh_access_token() -> str | None:
+    """Exchange the stored refresh token for a fresh access token.
+
+    Mirrors Claude Code's own OAuth refresh (client id + endpoint extracted
+    from the CLI). On success the renewed tokens are written back to the same
+    credential file Claude Code reads. On ANY failure nothing is written, so
+    existing credentials are left untouched.
+
+    Gated by REFRESH_COOLDOWN: at most one attempt per window, no matter how
+    often callers fire — this is what prevents the rate-limit hammering loop.
+    """
+    global _last_refresh_attempt
+    now = time.time()
+    waited = now - _last_refresh_attempt
+    if waited < REFRESH_COOLDOWN:
+        log(f"Refresh: skipping — cooldown ({int(REFRESH_COOLDOWN - waited)}s left)")
+        return None
+    _last_refresh_attempt = now
+
+    found = _read_credentials_blob()
+    if not found:
+        log("Refresh: no credentials available")
+        return None
+    path, raw = found
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        log("Refresh: credentials are not JSON; cannot refresh")
+        return None
+
+    # Locate the dict that actually holds the tokens (top-level or nested
+    # under "claudeAiOauth") so we update in place and preserve every other
+    # field on write-back.
+    oauth = data
+    if isinstance(data, dict) and "accessToken" not in data:
+        for v in data.values():
+            if isinstance(v, dict) and "accessToken" in v:
+                oauth = v
+                break
+    if not isinstance(oauth, dict):
+        log("Refresh: credentials shape unexpected; cannot refresh")
+        return None
+    refresh = oauth.get("refreshToken") or oauth.get("refresh_token")
+    if not refresh:
+        log("Refresh: no refresh token present — re-login required")
+        return None
+
+    body = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh,
+        "client_id": OAUTH_CLIENT_ID,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.post(
+                OAUTH_TOKEN_URL,
+                json=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": API_HEADERS_TEMPLATE["User-Agent"],
+                },
+            )
+    except httpx.HTTPError as e:
+        log(f"Refresh request failed: {e}")
+        return None
+    if resp.status_code != 200:
+        log(f"Refresh rejected HTTP {resp.status_code}: {resp.text[:200]}")
+        return None
+    try:
+        tok = resp.json()
+    except ValueError:
+        log("Refresh: response was not JSON")
+        return None
+    new_access = _apply_refresh_response(oauth, tok)
+    if not new_access:
+        log("Refresh: response contained no access_token")
+        return None
+
+    if _write_credentials_blob(path, json.dumps(data)):
+        log("Refresh: access token renewed and written back to credential store")
+    else:
+        log("Refresh: access token renewed (in-memory only; write-back failed)")
+    return new_access
+
+
 def _read_expiry() -> str:
     """Return human-readable expiry from the first-hit credentials file.
 
@@ -380,18 +570,35 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
                 token = read_token()  # D-09: fresh each cycle
+                # Proactively renew before the API would reject us, so a poll
+                # never has to fail-then-retry in the steady state (this is what
+                # ends the ~8h freeze that used to need a manual `claude login`).
+                exp = _credentials_expiry_seconds()
+                if token and exp is not None and exp - time.time() < REFRESH_SKEW:
+                    log("Access token near expiry; refreshing proactively")
+                    token = await refresh_access_token() or token
                 if not token:
                     log("No token; skipping poll")
                     if tray_state:
                         tray_state.set_error("token expired — run claude login")
                 else:
+                    payload = None
                     try:
                         payload = await poll_api(token)
                     except AuthError:
-                        # Real 401/403 — token genuinely needs a refresh.
-                        if tray_state:
+                        # Token rejected despite our proactive check (e.g. it was
+                        # revoked server-side). Refresh once and retry this poll
+                        # before surfacing the actionable "run claude login" toast.
+                        new = await refresh_access_token()
+                        if new:
+                            try:
+                                payload = await poll_api(new)
+                            except AuthError:
+                                log("Still rejected after refresh; re-login may be required")
+                                if tray_state:
+                                    tray_state.set_error("token expired — run claude login")
+                        elif tray_state:
                             tray_state.set_error("token expired — run claude login")
-                        payload = None
                     if payload is not None:
                         if await session.write_payload(payload):
                             last_poll = time.time()
