@@ -621,9 +621,12 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                     log("Access token near expiry; refreshing proactively")
                     token = await refresh_access_token() or token
                 if not token:
-                    log("No token; skipping poll")
+                    log("No token; signalling no-data to device")
+                    await session.write_payload({"ok": False})
+                    last_poll = time.time()
                 else:
                     payload = None
+                    auth_failed = False
                     try:
                         payload = await poll_api(token)
                     except TokenExpired:
@@ -635,10 +638,23 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                                 payload = await poll_api(new)
                             except TokenExpired:
                                 log("Still rejected after refresh; re-login may be required")
+                                auth_failed = True
+                        else:
+                            log("Refresh failed; re-login may be required")
+                            auth_failed = True
                     if payload is not None:
                         if await session.write_payload(payload):
                             last_poll = time.time()
                             used_successfully = True
+                    elif auth_failed:
+                        # Genuine auth failure (token dead, refresh can't recover):
+                        # send a {"ok": false} "no-data" beat so the device shows its
+                        # idle screen now instead of holding stale numbers for the full
+                        # freshness window. Transient network/rate-limit misses fall
+                        # through silently and keep the existing retry behaviour.
+                        log("No data (auth); signalling idle to device")
+                        await session.write_payload({"ok": False})
+                        last_poll = time.time()
 
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)

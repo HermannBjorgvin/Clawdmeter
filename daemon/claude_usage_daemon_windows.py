@@ -603,11 +603,14 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                     log("Access token near expiry; refreshing proactively")
                     token = await refresh_access_token() or token
                 if not token:
-                    log("No token; skipping poll")
+                    log("No token; signalling no-data to device")
+                    await session.write_payload({"ok": False})
+                    last_poll = time.time()
                     if tray_state:
                         tray_state.set_error("token expired — run claude login")
                 else:
                     payload = None
+                    auth_failed = False
                     try:
                         payload = await poll_api(token)
                     except AuthError:
@@ -620,10 +623,13 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                                 payload = await poll_api(new)
                             except AuthError:
                                 log("Still rejected after refresh; re-login may be required")
+                                auth_failed = True
                                 if tray_state:
                                     tray_state.set_error("token expired — run claude login")
-                        elif tray_state:
-                            tray_state.set_error("token expired — run claude login")
+                        else:
+                            auth_failed = True
+                            if tray_state:
+                                tray_state.set_error("token expired — run claude login")
                     if payload is not None:
                         if await session.write_payload(payload):
                             last_poll = time.time()
@@ -639,6 +645,14 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                                     f" write failures); abandoning connection"
                                 )
                                 break
+                    elif auth_failed:
+                        # Genuine auth failure (token dead, refresh can't recover): send a
+                        # {"ok": false} "no-data" beat so the device shows its idle screen now
+                        # instead of holding stale numbers for the full freshness window.
+                        # Transient misses fall through silently below (no flicker).
+                        log("No data (auth); signalling idle to device")
+                        await session.write_payload({"ok": False})
+                        last_poll = time.time()
                     # else: payload is None from a TRANSIENT failure (network/DNS,
                     # timeout, rate-limit, 5xx). poll_api already logged it; do NOT
                     # toast "token expired" — that mislabeled a boot-time DNS blip
