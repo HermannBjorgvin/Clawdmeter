@@ -149,3 +149,54 @@ def test_refresh_cooldown_blocks_rapid_reattempts(monkeypatch):
     assert first == "NEW"
     assert second is None
     client.post.assert_awaited_once()  # exactly one network call despite two calls
+
+
+def _mock_oauth_client(status_code, json_body):
+    """An httpx.AsyncClient mock whose POST returns a canned OAuth response."""
+    resp = MagicMock(status_code=status_code)
+    resp.text = "mocked"
+    resp.json = MagicMock(return_value=json_body)
+    client = AsyncMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    client.post = AsyncMock(return_value=resp)
+    return client
+
+
+def test_refresh_backoff_grows_and_skips_within_window(monkeypatch):
+    """A failed (429) refresh increments the failure counter; the next call within
+    the now-doubled window is skipped without a second network call."""
+    import daemon.claude_usage_daemon as mod
+    creds = json.dumps({"claudeAiOauth": {"accessToken": "OLD", "refreshToken": "R", "expiresAt": 1}})
+    monkeypatch.setattr(mod, "_read_credentials_raw", lambda: creds)
+    monkeypatch.setattr(mod, "_write_credentials_raw", lambda b: True)
+    monkeypatch.setattr(mod, "_last_refresh_attempt", 0.0)
+    monkeypatch.setattr(mod, "_refresh_failures", 0)
+
+    client = _mock_oauth_client(429, {})
+    with patch("httpx.AsyncClient", return_value=client):
+        first = asyncio.run(mod.refresh_access_token())    # fires -> 429 -> failure
+    assert first is None
+    assert mod._refresh_failures == 1                       # counter grew
+
+    client.post.reset_mock()
+    with patch("httpx.AsyncClient", return_value=client):
+        second = asyncio.run(mod.refresh_access_token())   # within backoff -> skipped
+    assert second is None
+    client.post.assert_not_awaited()                        # no second hit on the endpoint
+
+
+def test_refresh_success_resets_backoff(monkeypatch):
+    """A 200 clears the accumulated failure count so the window returns to base."""
+    import daemon.claude_usage_daemon as mod
+    creds = json.dumps({"claudeAiOauth": {"accessToken": "OLD", "refreshToken": "R", "expiresAt": 1}})
+    monkeypatch.setattr(mod, "_read_credentials_raw", lambda: creds)
+    monkeypatch.setattr(mod, "_write_credentials_raw", lambda b: True)
+    monkeypatch.setattr(mod, "_last_refresh_attempt", 0.0)
+    monkeypatch.setattr(mod, "_refresh_failures", 3)        # pretend we've been failing a while
+
+    client = _mock_oauth_client(200, {"access_token": "NEW", "expires_in": 28800})
+    with patch("httpx.AsyncClient", return_value=client):
+        new = asyncio.run(mod.refresh_access_token())
+    assert new == "NEW"
+    assert mod._refresh_failures == 0                       # success cleared the backoff

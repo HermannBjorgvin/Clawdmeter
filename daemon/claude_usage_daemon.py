@@ -59,9 +59,14 @@ REFRESH_SKEW = 120
 # Hard floor between refresh ATTEMPTS (success or failure). A data-hungry device
 # fires a refresh request every few seconds; without this, an expired token whose
 # refresh is failing (e.g. a 429) drives the OAuth endpoint into a self-sustaining
-# rate-limit loop. Every attempt is gated to once per this window.
-REFRESH_COOLDOWN = 300
+# rate-limit loop. The base floor grows exponentially on consecutive failures
+# (REFRESH_COOLDOWN → 2× → … → REFRESH_BACKOFF_CAP) so a sustained rate-limit is
+# backed off rather than poked every cycle; a success resets it to the base.
+REFRESH_COOLDOWN = 300       # base floor between attempts
+REFRESH_BACKOFF_CAP = 1800   # backoff cap (30 min) under sustained failure
+REFRESH_GIVEUP_AFTER = 5     # consecutive failures before logging a "re-login needed" notice
 _last_refresh_attempt = 0.0
+_refresh_failures = 0        # consecutive refresh failures (drives backoff; reset on success)
 
 
 class TokenExpired(Exception):
@@ -258,6 +263,18 @@ def _apply_refresh_response(oauth: dict, tok: dict) -> str | None:
     return new_access
 
 
+def _note_refresh_failure(reason: str) -> None:
+    """Count a failed refresh so the backoff grows, and surface a one-time
+    'needs re-login' notice once failures pile up. (The device's amber status dot
+    is the user-facing signal; this log line explains why.)"""
+    global _refresh_failures
+    _refresh_failures += 1
+    if _refresh_failures == REFRESH_GIVEUP_AFTER:
+        log(f"Refresh: {_refresh_failures} consecutive failures ({reason}) — the "
+            f"refresh token is rate-limited or stale; run `claude login` to restore. "
+            f"Backing off to {REFRESH_BACKOFF_CAP // 60}-minute retries until then.")
+
+
 async def refresh_access_token() -> str | None:
     """Exchange the stored refresh token for a fresh access token.
 
@@ -266,14 +283,17 @@ async def refresh_access_token() -> str | None:
     shared credential store. On ANY failure nothing is written, so existing
     credentials are left untouched.
 
-    Gated by REFRESH_COOLDOWN: at most one attempt per window, no matter how
-    often callers fire — this is what prevents the rate-limit hammering loop.
+    Gated by an exponential backoff: one attempt per window, the window doubling
+    on each consecutive failure (REFRESH_COOLDOWN → REFRESH_BACKOFF_CAP) and
+    resetting on success — so a sustained rate-limit is backed off, not hammered.
     """
-    global _last_refresh_attempt
+    global _last_refresh_attempt, _refresh_failures
     now = time.time()
+    cooldown = min(REFRESH_COOLDOWN * (2 ** _refresh_failures), REFRESH_BACKOFF_CAP)
     waited = now - _last_refresh_attempt
-    if waited < REFRESH_COOLDOWN:
-        log(f"Refresh: skipping — cooldown ({int(REFRESH_COOLDOWN - waited)}s left)")
+    if waited < cooldown:
+        log(f"Refresh: skipping — backoff ({int(cooldown - waited)}s left, "
+            f"{_refresh_failures} consecutive failures)")
         return None
     _last_refresh_attempt = now
 
@@ -318,20 +338,25 @@ async def refresh_access_token() -> str | None:
             )
     except httpx.HTTPError as e:
         log(f"Refresh request failed: {e}")
+        _note_refresh_failure("request error")
         return None
     if resp.status_code != 200:
         log(f"Refresh rejected HTTP {resp.status_code}: {resp.text[:200]}")
+        _note_refresh_failure(f"HTTP {resp.status_code}")
         return None
     try:
         tok = resp.json()
     except ValueError:
         log("Refresh: response was not JSON")
+        _note_refresh_failure("bad response")
         return None
     new_access = _apply_refresh_response(oauth, tok)
     if not new_access:
         log("Refresh: response contained no access_token")
+        _note_refresh_failure("bad response")
         return None
 
+    _refresh_failures = 0   # success — clear the backoff
     if _write_credentials_raw(json.dumps(data)):
         log("Refresh: access token renewed and written back to credential store")
     else:
