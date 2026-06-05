@@ -41,10 +41,11 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 @pytest.fixture(autouse=True)
 def _reset_refresh_cooldown():
-    """Clear the module-level refresh cooldown before each test, so the
-    refresh-helper tests don't skip one another via the shared timestamp."""
+    """Clear the module-level refresh cooldown/backoff state before each test, so
+    the refresh-helper tests don't skip one another via the shared timestamp."""
     import daemon.claude_usage_daemon_windows as mod
     mod._last_refresh_attempt = 0.0
+    mod._refresh_failures = 0
     yield
 
 
@@ -283,6 +284,36 @@ def test_refresh_cooldown_blocks_rapid_reattempts(tmp_path, monkeypatch):
     assert first == "NEW"
     assert second is None
     client.post.assert_awaited_once()  # one network call despite two refresh calls
+
+
+def test_refresh_backoff_grows_and_skips_within_window(tmp_path, monkeypatch):
+    """A failed (429) refresh increments the failure counter; the next call within
+    the now-doubled window is skipped without a second network call."""
+    import daemon.claude_usage_daemon_windows as mod
+    _point_at(tmp_path, monkeypatch, json.dumps(
+        {"claudeAiOauth": {"accessToken": "OLD", "refreshToken": "R", "expiresAt": 1}}))
+    ctx, client = _mock_httpx(429, {})
+    with ctx:
+        first = asyncio.run(refresh_access_token())    # fires -> 429 -> failure
+        client.post.reset_mock()
+        second = asyncio.run(refresh_access_token())   # within backoff -> skipped
+    assert first is None
+    assert second is None
+    assert mod._refresh_failures == 1
+    client.post.assert_not_awaited()                   # no second hit on the endpoint
+
+
+def test_refresh_success_resets_backoff(tmp_path, monkeypatch):
+    """A 200 clears the accumulated failure count so the window returns to base."""
+    import daemon.claude_usage_daemon_windows as mod
+    _point_at(tmp_path, monkeypatch, json.dumps(
+        {"claudeAiOauth": {"accessToken": "OLD", "refreshToken": "R", "expiresAt": 1}}))
+    monkeypatch.setattr(mod, "_refresh_failures", 3)   # pretend we've been failing a while
+    ctx, _ = _mock_httpx(200, {"access_token": "NEW", "expires_in": 28800})
+    with ctx:
+        new = asyncio.run(refresh_access_token())
+    assert new == "NEW"
+    assert mod._refresh_failures == 0                  # success cleared the backoff
 
 
 # --- connect_and_run wiring: proactive + on-401 refresh-and-retry -----------
