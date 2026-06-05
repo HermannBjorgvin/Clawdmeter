@@ -316,11 +316,11 @@ def test_refresh_success_resets_backoff(tmp_path, monkeypatch):
     assert mod._refresh_failures == 0                  # success cleared the backoff
 
 
-# --- connect_and_run wiring: proactive + on-401 refresh-and-retry -----------
+# --- connect_and_run wiring: free-ride (no proactive refresh) + on-401 retry --
 #
-# These drive the REAL connect_and_run to prove the refresh is wired into the
-# poll loop (the headline fix: the device no longer freezes when the ~8h token
-# expires). The refresh helper itself is mocked here — its own behavior is
+# These drive the REAL connect_and_run to prove the loop free-rides on Claude
+# Code's token (never refreshing proactively) and only refreshes reactively when
+# a poll 401s. The refresh helper itself is mocked here — its own behavior is
 # covered above — so the assertions focus on the loop's control flow. Each test
 # overrides the conftest autouse defaults inside its own patch() block.
 
@@ -336,9 +336,10 @@ def _connected_client():
     return client
 
 
-def test_connect_proactive_refresh_swaps_token_before_poll():
-    """Within REFRESH_SKEW of expiry, the loop refreshes BEFORE polling and polls
-    with the refreshed token — so a poll never fails-then-retries in steady state."""
+def test_connect_no_proactive_refresh_uses_token_as_is():
+    """Free-ride: a still-valid (even near-expiry) token is used AS-IS — the loop does
+    NOT refresh before polling. Refresh happens only reactively (on a 401), so the
+    daemon never competes with the app's own refreshes / trips the token endpoint."""
     import daemon.claude_usage_daemon_windows as mod
 
     device = MagicMock()
@@ -363,8 +364,8 @@ def test_connect_proactive_refresh_swaps_token_before_poll():
             await mod.connect_and_run(device, stop_event)
 
     asyncio.run(go())
-    refresh.assert_awaited_once()
-    assert used_tokens == ["REFRESHED"]  # polled with the renewed token
+    refresh.assert_not_awaited()         # no proactive refresh — token used as-is
+    assert used_tokens == ["STALE"]      # polled with the token Claude Code currently holds
 
 
 def test_connect_auth_error_refreshes_and_retries_then_recovers():

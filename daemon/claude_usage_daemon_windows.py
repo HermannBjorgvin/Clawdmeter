@@ -53,13 +53,14 @@ API_BODY = {
 }
 
 # OAuth refresh — endpoint and client id lifted from the Claude Code CLI so we
-# renew exactly the way it does. The access token lives ~8h; we refresh on
-# demand (on a 401/403) and proactively when it is within REFRESH_SKEW seconds
-# of expiry, so the device never sees a stale-token stall (the ~8h freeze the
-# Windows daemon used to need a manual `claude login` to clear).
+# renew exactly the way it does. The access token lives ~8h; we refresh ONLY
+# reactively (on a 401/403), free-riding on Claude Code's own refreshes rather
+# than refreshing proactively. Proactive refresh competed with the app for the
+# same endpoint and tripped its rate limit (429); while you use Claude the app
+# keeps this token fresh and the daemon never has to touch the refresh endpoint.
 OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-REFRESH_SKEW = 120
+REFRESH_SKEW = 120  # retained for the expiry helper / tests; loop no longer refreshes proactively
 # Hard floor between refresh ATTEMPTS (success or failure). A data-hungry device
 # fires a refresh request every few seconds; without this, an expired token whose
 # refresh is failing (e.g. a 429) drives the OAuth endpoint into a self-sustaining
@@ -594,14 +595,13 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
+                # Free-ride on Claude Code's credential: use whatever access token it
+                # currently holds and refresh only reactively (on a 401), never
+                # proactively. Proactive refresh competed with the app's own refreshes
+                # and tripped the token endpoint's rate limit (429). While you use
+                # Claude / Claude Code, the app keeps this token fresh and the daemon
+                # never has to touch the refresh endpoint.
                 token = read_token()  # D-09: fresh each cycle
-                # Proactively renew before the API would reject us, so a poll
-                # never has to fail-then-retry in the steady state (this is what
-                # ends the ~8h freeze that used to need a manual `claude login`).
-                exp = _credentials_expiry_seconds()
-                if token and exp is not None and exp - time.time() < REFRESH_SKEW:
-                    log("Access token near expiry; refreshing proactively")
-                    token = await refresh_access_token() or token
                 if not token:
                     log("No token; signalling no-data to device")
                     await session.write_payload({"ok": False})
