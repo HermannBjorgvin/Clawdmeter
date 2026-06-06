@@ -200,3 +200,26 @@ def test_refresh_success_resets_backoff(monkeypatch):
         new = asyncio.run(mod.refresh_access_token())
     assert new == "NEW"
     assert mod._refresh_failures == 0                       # success cleared the backoff
+
+
+def test_note_poll_success_clears_backoff():
+    """A successful POLL clears the refresh-failure backoff. Under free-ride the daemon
+    recovers via Claude Code's own refresh (or a re-login), not its own refresh — so
+    without this the counter would stay pinned and the backoff would block the next
+    reactive refresh that might have succeeded."""
+    import daemon.claude_usage_daemon as mod
+    mod._refresh_failures = 9
+    mod._last_refresh_attempt = 123456.0
+    mod._note_poll_success()
+    assert mod._refresh_failures == 0
+    assert mod._last_refresh_attempt == 0.0
+
+
+def test_note_poll_success_noop_when_already_clear():
+    """No-op when there's no failure streak to clear (avoids a spurious log line)."""
+    import daemon.claude_usage_daemon as mod
+    mod._refresh_failures = 0
+    mod._last_refresh_attempt = 0.0
+    mod._note_poll_success()
+    assert mod._refresh_failures == 0
+    assert mod._last_refresh_attempt == 0.0

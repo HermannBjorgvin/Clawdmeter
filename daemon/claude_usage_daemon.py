@@ -277,6 +277,19 @@ def _note_refresh_failure(reason: str) -> None:
             f"Backing off to {REFRESH_BACKOFF_CAP // 60}-minute retries until then.")
 
 
+def _note_poll_success() -> None:
+    """A poll just succeeded, so the access token is valid — clear any refresh-failure
+    streak / backoff. Under free-ride the daemon recovers via Claude Code's own refresh
+    (or a re-login), not its own refresh, so without this the counter would never reset
+    and the backoff would stay pinned at the max retry interval (which then blocks the
+    very next reactive refresh that might have succeeded)."""
+    global _refresh_failures, _last_refresh_attempt
+    if _refresh_failures:
+        log(f"Poll OK — clearing {_refresh_failures}-failure refresh backoff")
+        _refresh_failures = 0
+        _last_refresh_attempt = 0.0
+
+
 async def refresh_access_token() -> str | None:
     """Exchange the stored refresh token for a fresh access token.
 
@@ -645,6 +658,7 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                             log("Refresh failed; re-login may be required")
                             auth_failed = True
                     if payload is not None:
+                        _note_poll_success()   # token works → clear any stale refresh backoff
                         if await session.write_payload(payload):
                             last_poll = time.time()
                             used_successfully = True
