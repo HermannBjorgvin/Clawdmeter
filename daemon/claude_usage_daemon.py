@@ -49,30 +49,11 @@ API_BODY = {
     "messages": [{"role": "user", "content": "hi"}],
 }
 
-# OAuth refresh — endpoint and client id lifted from the Claude Code CLI so we
-# renew exactly the way it does. The access token lives ~8h; we refresh ONLY
-# reactively (on a 401/403), free-riding on Claude Code's own refreshes rather
-# than refreshing proactively. Proactive refresh competed with the app for the
-# same endpoint and tripped its rate limit (429); while you use Claude the app
-# keeps this token fresh and the daemon never has to touch the refresh endpoint.
-OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-REFRESH_SKEW = 120  # retained for the expiry helper / tests; loop no longer refreshes proactively
-# Hard floor between refresh ATTEMPTS (success or failure). A data-hungry device
-# fires a refresh request every few seconds; without this, an expired token whose
-# refresh is failing (e.g. a 429) drives the OAuth endpoint into a self-sustaining
-# rate-limit loop. The base floor grows exponentially on consecutive failures
-# (REFRESH_COOLDOWN → 2× → … → REFRESH_BACKOFF_CAP) so a sustained rate-limit is
-# backed off rather than poked every cycle; a success resets it to the base.
-REFRESH_COOLDOWN = 300       # base floor between attempts
-REFRESH_BACKOFF_CAP = 1800   # backoff cap (30 min) under sustained failure
-REFRESH_GIVEUP_AFTER = 5     # consecutive failures before logging a "re-login needed" notice
-_last_refresh_attempt = 0.0
-_refresh_failures = 0        # consecutive refresh failures (drives backoff; reset on success)
-
 
 class TokenExpired(Exception):
-    """Raised by poll_api on a 401/403 so the caller can refresh and retry."""
+    """Raised by poll_api on a 401/403 — the access token is dead. The daemon never
+    refreshes (pure free-ride: Claude Code owns refreshing), so the caller just
+    signals "No data" to the device until the CLI re-seeds the token."""
 
 
 def log(msg: str) -> None:
@@ -165,218 +146,9 @@ def _read_credentials_raw() -> str | None:
         return None
 
 
-def _write_credentials_raw(blob: str) -> bool:
-    """Persist an updated credentials blob back to the OS credential store.
-
-    Called only with a blob built from a *successful* token refresh, so the
-    store Claude Code reads stays in sync (the provider may rotate the refresh
-    token). A write failure is non-fatal — the refreshed access token still
-    works in-memory for this process — so we log and carry on.
-
-    Note: on macOS the blob is passed to ``security`` via argv (-w), so it is
-    briefly visible in ``ps`` to this same user. That is not a meaningful leak
-    here: any process of this user can already read the item out of the
-    unlocked login keychain without authorization.
-    """
-    if sys.platform == "darwin":
-        try:
-            subprocess.run(
-                [
-                    "security",
-                    "add-generic-password",
-                    "-U",  # update the existing item in place
-                    "-s",
-                    KEYCHAIN_SERVICE,
-                    "-a",
-                    getpass.getuser(),
-                    "-w",
-                    blob,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            return True
-        except subprocess.CalledProcessError as e:
-            log(f"Keychain write failed (rc={e.returncode}): {e.stderr.strip()}")
-            return False
-        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            log(f"Keychain write error: {e}")
-            return False
-    try:
-        CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CREDENTIALS_PATH.write_text(blob)
-        os.chmod(CREDENTIALS_PATH, 0o600)
-        return True
-    except OSError as e:
-        log(f"Error writing credentials: {e}")
-        return False
-
-
 def read_token() -> str | None:
     raw = _read_credentials_raw()
     return _extract_access_token(raw) if raw else None
-
-
-def _credentials_expiry_seconds(raw: str | None = None) -> float | None:
-    """Epoch-seconds at which the stored access token expires, or None.
-
-    Claude Code stores ``expiresAt`` as epoch milliseconds; normalize to
-    seconds so callers can compare against ``time.time()``.
-    """
-    if raw is None:
-        raw = _read_credentials_raw()
-    if not raw:
-        return None
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    oauth = data.get("claudeAiOauth", data)
-    if not isinstance(oauth, dict):
-        oauth = data
-    exp = oauth.get("expiresAt", oauth.get("expires_at"))
-    try:
-        exp = float(exp)
-    except (TypeError, ValueError):
-        return None
-    return exp / 1000.0 if exp > 1e12 else exp
-
-
-def _apply_refresh_response(oauth: dict, tok: dict) -> str | None:
-    """Map an OAuth token response onto the stored credential dict in place.
-
-    Translates snake_case response fields (access_token / refresh_token /
-    expires_in) onto Claude Code's camelCase storage keys (accessToken /
-    refreshToken / expiresAt-in-ms). The refresh token is only overwritten if
-    the response rotates it. Returns the new access token, or None if absent.
-    """
-    new_access = tok.get("access_token")
-    if not new_access:
-        return None
-    oauth["accessToken"] = new_access
-    if tok.get("refresh_token"):
-        oauth["refreshToken"] = tok["refresh_token"]
-    if tok.get("expires_in"):
-        oauth["expiresAt"] = int((time.time() + float(tok["expires_in"])) * 1000)
-    return new_access
-
-
-def _note_refresh_failure(reason: str) -> None:
-    """Count a failed refresh so the backoff grows, and surface a one-time
-    'needs re-login' notice once failures pile up. (The device's amber status dot
-    is the user-facing signal; this log line explains why.)"""
-    global _refresh_failures
-    _refresh_failures += 1
-    if _refresh_failures == REFRESH_GIVEUP_AFTER:
-        log(f"Refresh: {_refresh_failures} consecutive failures ({reason}) — the "
-            f"refresh token is rate-limited or stale; run `claude login` to restore. "
-            f"Backing off to {REFRESH_BACKOFF_CAP // 60}-minute retries until then.")
-
-
-def _note_poll_success() -> None:
-    """A poll just succeeded, so the access token is valid — clear any refresh-failure
-    streak / backoff. Under free-ride the daemon recovers via Claude Code's own refresh
-    (or a re-login), not its own refresh, so without this the counter would never reset
-    and the backoff would stay pinned at the max retry interval (which then blocks the
-    very next reactive refresh that might have succeeded)."""
-    global _refresh_failures, _last_refresh_attempt
-    if _refresh_failures:
-        log(f"Poll OK — clearing {_refresh_failures}-failure refresh backoff")
-        _refresh_failures = 0
-        _last_refresh_attempt = 0.0
-
-
-async def refresh_access_token() -> str | None:
-    """Exchange the stored refresh token for a fresh access token.
-
-    Mirrors Claude Code's own OAuth refresh (client id + endpoint extracted
-    from the CLI). On success the renewed tokens are written back to the
-    shared credential store. On ANY failure nothing is written, so existing
-    credentials are left untouched.
-
-    Gated by an exponential backoff: one attempt per window, the window doubling
-    on each consecutive failure (REFRESH_COOLDOWN → REFRESH_BACKOFF_CAP) and
-    resetting on success — so a sustained rate-limit is backed off, not hammered.
-    """
-    global _last_refresh_attempt, _refresh_failures
-    now = time.time()
-    cooldown = min(REFRESH_COOLDOWN * (2 ** _refresh_failures), REFRESH_BACKOFF_CAP)
-    waited = now - _last_refresh_attempt
-    if waited < cooldown:
-        log(f"Refresh: skipping — backoff ({int(cooldown - waited)}s left, "
-            f"{_refresh_failures} consecutive failures)")
-        return None
-    _last_refresh_attempt = now
-
-    raw = _read_credentials_raw()
-    if not raw:
-        log("Refresh: no credentials available")
-        return None
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        log("Refresh: credentials are not JSON; cannot refresh")
-        return None
-
-    # Locate the dict that actually holds the tokens (top-level or nested
-    # under "claudeAiOauth") so we update in place and preserve every other
-    # field on write-back.
-    oauth = data
-    if isinstance(data, dict) and "accessToken" not in data:
-        for v in data.values():
-            if isinstance(v, dict) and "accessToken" in v:
-                oauth = v
-                break
-    refresh = oauth.get("refreshToken") or oauth.get("refresh_token")
-    if not refresh:
-        log("Refresh: no refresh token present — re-login required")
-        return None
-
-    body = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh,
-        "client_id": OAUTH_CLIENT_ID,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as http:
-            resp = await http.post(
-                OAUTH_TOKEN_URL,
-                json=body,
-                headers={
-                    "Content-Type": "application/json",
-                    "User-Agent": API_HEADERS_TEMPLATE["User-Agent"],
-                },
-            )
-    except httpx.HTTPError as e:
-        log(f"Refresh request failed: {e}")
-        _note_refresh_failure("request error")
-        return None
-    if resp.status_code != 200:
-        log(f"Refresh rejected HTTP {resp.status_code}: {resp.text[:200]}")
-        _note_refresh_failure(f"HTTP {resp.status_code}")
-        return None
-    try:
-        tok = resp.json()
-    except ValueError:
-        log("Refresh: response was not JSON")
-        _note_refresh_failure("bad response")
-        return None
-    new_access = _apply_refresh_response(oauth, tok)
-    if not new_access:
-        log("Refresh: response contained no access_token")
-        _note_refresh_failure("bad response")
-        return None
-
-    _refresh_failures = 0   # success — clear the backoff
-    if _write_credentials_raw(json.dumps(data)):
-        log("Refresh: access token renewed and written back to credential store")
-    else:
-        log("Refresh: access token renewed (in-memory only; write-back failed)")
-    return new_access
 
 
 def load_cached_address() -> str | None:
@@ -628,12 +400,11 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
-                # Free-ride on Claude Code's credential: use whatever access token it
-                # currently holds and refresh only reactively (on a 401), never
-                # proactively. Proactive refresh competed with the app's own refreshes
-                # and tripped the token endpoint's rate limit (429). While you use
-                # Claude / Claude Code, the app keeps this token fresh and the daemon
-                # never has to touch the refresh endpoint.
+                # Pure free-ride: read whatever access token Claude Code currently
+                # holds and NEVER refresh it ourselves. Claude Code (the token's owner)
+                # does all refreshing; refreshing here would race its rotation and feed
+                # the OAuth endpoint's rate limit (429). When the token is dead we just
+                # show "No data" until the CLI re-seeds it.
                 token = read_token()
                 if not token:
                     log("No token; signalling no-data to device")
@@ -641,34 +412,23 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                     last_poll = time.time()
                 else:
                     payload = None
-                    auth_failed = False
+                    expired = False
                     try:
                         payload = await poll_api(token)
                     except TokenExpired:
-                        # Token rejected despite our proactive check (e.g. it
-                        # was revoked). Refresh once and retry this poll.
-                        new = await refresh_access_token()
-                        if new:
-                            try:
-                                payload = await poll_api(new)
-                            except TokenExpired:
-                                log("Still rejected after refresh; re-login may be required")
-                                auth_failed = True
-                        else:
-                            log("Refresh failed; re-login may be required")
-                            auth_failed = True
+                        # Pure free-ride: we never refresh. A 401 means Claude Code's token
+                        # has expired and only Claude Code (its owner) can re-seed it.
+                        expired = True
+                        log("Token expired/invalid; signalling no-data — run `claude login` "
+                            "or use the CLI to let Claude Code renew it")
                     if payload is not None:
-                        _note_poll_success()   # token works → clear any stale refresh backoff
                         if await session.write_payload(payload):
                             last_poll = time.time()
                             used_successfully = True
-                    elif auth_failed:
-                        # Genuine auth failure (token dead, refresh can't recover):
-                        # send a {"ok": false} "no-data" beat so the device shows its
-                        # idle screen now instead of holding stale numbers for the full
-                        # freshness window. Transient network/rate-limit misses fall
-                        # through silently and keep the existing retry behaviour.
-                        log("No data (auth); signalling idle to device")
+                    elif expired:
+                        # Token genuinely dead -> show "No data" now instead of stale numbers.
+                        # Transient poll failures (payload None without expiry) stay silent
+                        # and just retry next tick.
                         await session.write_payload({"ok": False})
                         last_poll = time.time()
 
