@@ -1,6 +1,7 @@
 #include "ui.h"
 #include "splash.h"
 #include <lvgl.h>
+#include <esp_heap_caps.h>
 #include "logo.h"
 #include "icons.h"
 #include "hal/board_caps.h"
@@ -90,6 +91,8 @@ static void compute_layout(const BoardCaps& c) {
 
 // Anthropic brand palette — design tokens live in theme.h
 #include "theme.h"
+// Usage-screen styling toggles (e.g. the overage banner) live in ui_cfg.h
+#include "ui_cfg.h"
 #define COL_BG        THEME_BG
 #define COL_PANEL     THEME_PANEL
 #define COL_TEXT      THEME_TEXT
@@ -105,6 +108,8 @@ static lv_obj_t* usage_container;
 static lv_obj_t* lbl_title;
 static lv_obj_t* usage_group;   // the two usage panels — shown when connected
 static lv_obj_t* pair_group;    // pairing hint — shown when disconnected
+static lv_obj_t* panel_session; // panel backgrounds (captured so the Enterprise
+static lv_obj_t* panel_weekly;  // view can hide the weekly panel under the strip)
 static lv_obj_t* bar_session;
 static lv_obj_t* lbl_session_pct;
 static lv_obj_t* lbl_session_label;
@@ -114,6 +119,21 @@ static lv_obj_t* lbl_weekly_pct;
 static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
+
+// ---- Enterprise screen: a row of mini splash animations where pill 2 would be ----
+// Usage-based Enterprise accounts have no 5h/7d windows, so the second panel
+// carries decorative animations instead of a gauge. Buffers come from PSRAM when
+// present, else internal SRAM with smaller cells (like splash.cpp's canvas).
+#define ENT_STRIP_COUNT 4
+static lv_obj_t* ent_strip = nullptr;                 // panel over the weekly slot
+static lv_obj_t* ent_canvas[ENT_STRIP_COUNT] = {};
+static uint16_t* ent_buf[ENT_STRIP_COUNT] = {};
+static int       ent_cell = 0;                        // px per pixel-art cell
+static int       ent_anim_idx[ENT_STRIP_COUNT] = {};
+static int       ent_frame[ENT_STRIP_COUNT] = {};
+static uint32_t  ent_frame_started[ENT_STRIP_COUNT] = {};
+static bool      ent_strip_built = false;
+static bool      ent_active = false;
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
@@ -279,8 +299,10 @@ static void init_battery_icons(void) {
 
 static void make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
                              lv_obj_t** out_pct, lv_obj_t** out_pill,
-                             lv_obj_t** out_bar, lv_obj_t** out_reset) {
+                             lv_obj_t** out_bar, lv_obj_t** out_reset,
+                             lv_obj_t** out_panel) {
     lv_obj_t* panel = make_panel(parent, L.margin, y, L.content_w, L.usage_panel_h);
+    if (out_panel) *out_panel = panel;
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "---%");
@@ -298,6 +320,63 @@ static void make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
     lv_obj_set_style_text_font(*out_reset, &font_styrene_28, 0);
     lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
     lv_obj_set_pos(*out_reset, 0, L.usage_reset_y);
+}
+
+// Build the Enterprise animation strip — a row of ENT_STRIP_COUNT mini-canvases
+// occupying the weekly-panel slot. PSRAM-only: the buffers are sizeable, so on a
+// PSRAM-free board the strip is skipped and the weekly panel simply stays hidden
+// in the Enterprise view. Animation data stays owned by splash.cpp (we only pull
+// frames through splash_render_into), so it isn't duplicated into this module.
+static void build_enterprise_strip(lv_obj_t* parent) {
+    if (splash_anim_count() <= 0) return;
+
+#ifdef BOARD_HAS_PSRAM
+    const uint32_t buf_caps = MALLOC_CAP_SPIRAM;
+    const int      max_cell = 100;   // effectively unbounded; geometry decides
+#else
+    // No external PSRAM (e.g. ESP32-C6): allocate from internal SRAM, so keep the
+    // cells small. 4 × 60×60×2 ≈ 29 KB — like splash.cpp's no-PSRAM canvas cap.
+    const uint32_t buf_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    const int      max_cell = 3;
+#endif
+
+    const int y = L.content_y + L.usage_panel_h + L.usage_panel_gap;
+    ent_strip = make_panel(parent, L.margin, y, L.content_w, L.usage_panel_h);
+    lv_obj_add_flag(ent_strip, LV_OBJ_FLAG_HIDDEN);
+
+    // Inner content area (make_panel pads 16 L/R, 12 T/B). Size one pixel-art cell
+    // to fit ENT_STRIP_COUNT animations across, bounded by height and (no-PSRAM)
+    // the SRAM cap; min 3 px so the 20x20 art stays legible.
+    const int inner_w = L.content_w - 32;
+    const int inner_h = L.usage_panel_h - 24;
+    const int by_w = inner_w / (ENT_STRIP_COUNT * 20);
+    const int by_h = inner_h / 20;
+    ent_cell = (by_w < by_h) ? by_w : by_h;
+    if (ent_cell < 3) ent_cell = 3;
+    if (ent_cell > max_cell) ent_cell = max_cell;
+
+    const int side = ent_cell * 20;
+    int gap = (inner_w - ENT_STRIP_COUNT * side) / (ENT_STRIP_COUNT + 1);
+    if (gap < 0) gap = 0;
+    const int top = (inner_h - side) / 2;
+    const int count = splash_anim_count();
+
+    for (int i = 0; i < ENT_STRIP_COUNT; i++) {
+        ent_buf[i] = (uint16_t*)heap_caps_malloc(side * side * 2, buf_caps);
+        if (!ent_buf[i]) return;   // partial alloc -> leave strip unbuilt (false)
+        ent_canvas[i] = lv_canvas_create(ent_strip);
+        lv_canvas_set_buffer(ent_canvas[i], ent_buf[i], side, side, LV_COLOR_FORMAT_RGB565);
+        lv_obj_set_size(ent_canvas[i], side, side);   // be explicit, don't rely on set_buffer
+        lv_obj_set_pos(ent_canvas[i], gap + i * (side + gap), top);
+
+        // Spread picks across the catalog so the row isn't four identical loops.
+        ent_anim_idx[i] = (i * count / ENT_STRIP_COUNT) % count;
+        ent_frame[i] = 0;
+        ent_frame_started[i] = lv_tick_get();
+        splash_render_into(ent_anim_idx[i], 0, ent_buf[i], ent_cell);
+        lv_obj_invalidate(ent_canvas[i]);
+    }
+    ent_strip_built = true;
 }
 
 // Pairing hint — shown when disconnected so the screen isn't empty and the
@@ -384,11 +463,13 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     make_usage_panel(usage_group, L.content_y, "Current",
                      &lbl_session_pct, &lbl_session_label,
-                     &bar_session, &lbl_session_reset);
+                     &bar_session, &lbl_session_reset, &panel_session);
     make_usage_panel(usage_group,
                      L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
                      &lbl_weekly_pct, &lbl_weekly_label,
-                     &bar_weekly, &lbl_weekly_reset);
+                     &bar_weekly, &lbl_weekly_reset, &panel_weekly);
+
+    build_enterprise_strip(usage_group);
 
     build_pair_group(usage_container);
     build_idle_group(usage_container);
@@ -450,6 +531,60 @@ static void set_title(const char* text, const lv_font_t* font, lv_color_t color,
     lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y + y_offset);  // re-center for new width
 }
 
+// Draw the title inside a filled banner (overage view) or clear it back to plain
+// text (normal view). Toggled by UI_EXTRA_USAGE_BANNER in ui_cfg.h. Must be
+// cleared on the normal path or the fill would persist across screen switches.
+static void set_title_banner(bool on) {
+    if (on) {
+        lv_obj_set_style_bg_color(lbl_title, lv_color_hex(UI_EXTRA_USAGE_BANNER_COLOR), 0);
+        lv_obj_set_style_bg_opa(lbl_title, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(lbl_title, 8, 0);
+        lv_obj_set_style_pad_left(lbl_title, 13, 0);
+        lv_obj_set_style_pad_right(lbl_title, 13, 0);
+        lv_obj_set_style_pad_top(lbl_title, 4, 0);
+        lv_obj_set_style_pad_bottom(lbl_title, 2, 0);
+    } else {
+        lv_obj_set_style_bg_opa(lbl_title, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_pad_all(lbl_title, 0, 0);
+    }
+}
+
+// Toggle the Enterprise view: show the animation strip and hide the weekly panel
+// it replaces (or the reverse). Safe to call when the strip wasn't built (no
+// PSRAM) — the weekly panel still toggles so the slot is clean either way.
+static void set_enterprise_view(bool on) {
+    if (panel_weekly) {
+        if (on) lv_obj_add_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (ent_strip_built && ent_strip) {
+        if (on) {
+            lv_obj_clear_flag(ent_strip, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(ent_strip);   // ensure it's above the panels
+        } else {
+            lv_obj_add_flag(ent_strip, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    ent_active = on;
+}
+
+// Usage-based Enterprise: no 5h/7d windows exist. Panel 1 is the spend gauge
+// (overage-utilization); panel 2 is the animation strip.
+static void render_enterprise(const UsageData* data) {
+    char buf[48];
+    set_title_banner(false);
+    set_title("Enterprise", &font_tiempos_56, COL_TEXT, 0);
+
+    // o% is the fraction of the monthly dollar-spend limit, so the same
+    // green/amber/red ramp as the usage bars applies — red as you approach the cap.
+    int o_pct = (int)(data->overage_pct + 0.5f);
+    format_reset_time(data->overage_reset_mins, buf, sizeof(buf));
+    render_panel(lbl_session_pct, lbl_session_label, bar_session, lbl_session_reset,
+                 "Usage", o_pct, pct_color(data->overage_pct), buf);
+
+    set_enterprise_view(true);
+}
+
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
     last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
@@ -457,23 +592,27 @@ void ui_update(const UsageData* data) {
 
     char buf[48];
 
-    if (strcmp(data->status, "overage") == 0) {
-        // Subscription allowance is spent; the device shows what's being consumed
-        // on top of the plan. Plan bar is full + red ("Allowance spent"); the
-        // second bar becomes "Extra Usage" driven by the real overage figure.
-        set_title("Extra Usage", &font_tiempos_48, COL_RED, 4);  // shorter cap-height sits high; nudge down
-
-        render_panel(lbl_session_pct, lbl_session_label, bar_session, lbl_session_reset,
-                     "Plan", 100, COL_RED, "Allowance spent");
-
-        int o_pct = (int)(data->overage_pct + 0.5f);
-        format_reset_time(data->overage_reset_mins, buf, sizeof(buf));
-        render_panel(lbl_weekly_pct, lbl_weekly_label, bar_weekly, lbl_weekly_reset,
-                     "Extra Usage", o_pct, pct_color(data->overage_pct), buf);
+    // Account type drives screen choice (DEBT.md D-3). "ent" = usage-based
+    // Enterprise (no subscription windows) -> dedicated screen.
+    if (strcmp(data->acct, "ent") == 0) {
+        render_enterprise(data);
         return;
     }
 
-    set_title("Usage", &font_tiempos_56, COL_TEXT, 0);
+    // Pro/Max: the two normal pills. In overage the windows are still real
+    // (session genuinely spent, weekly real), so only the title flips to
+    // "Extra Usage" — pills and values are unchanged from the Usage screen.
+    set_enterprise_view(false);
+
+    if (data->overage_in_use) {
+        const bool banner = UI_EXTRA_USAGE_BANNER;
+        lv_color_t title_col = banner ? lv_color_hex(UI_EXTRA_USAGE_BANNER_TEXT) : COL_RED;
+        set_title("Extra Usage", &font_tiempos_48, title_col, 4);
+        set_title_banner(banner);
+    } else {
+        set_title_banner(false);  // clear any banner left from the overage view
+        set_title("Usage", &font_tiempos_56, COL_TEXT, 0);
+    }
 
     int s_pct = (int)(data->session_pct + 0.5f);
     format_reset_time(data->session_reset_mins, buf, sizeof(buf));
@@ -509,10 +648,29 @@ static void update_view_state(void) {
                       LV_OBJ_FLAG_HIDDEN);
 }
 
+// Advance each Enterprise mini-animation by its per-frame hold and redraw.
+static void tick_enterprise_strip(void) {
+    if (!ent_active || !ent_strip_built || !s_ble_connected) return;
+    uint32_t now = lv_tick_get();
+    for (int i = 0; i < ENT_STRIP_COUNT; i++) {
+        if (!ent_canvas[i] || !ent_buf[i]) continue;
+        uint16_t hold = splash_frame_hold(ent_anim_idx[i], ent_frame[i]);
+        if (hold == 0) hold = 500;
+        if (now - ent_frame_started[i] < hold) continue;
+        ent_frame[i]++;
+        ent_frame_started[i] = now;
+        int fc = splash_render_into(ent_anim_idx[i], ent_frame[i], ent_buf[i], ent_cell);
+        if (fc > 0) ent_frame[i] %= fc;
+        lv_obj_invalidate(ent_canvas[i]);
+    }
+}
+
 void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
     update_view_state();
     if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
+
+    tick_enterprise_strip();
 
     uint32_t now = lv_tick_get();
 

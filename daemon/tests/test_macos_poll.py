@@ -119,3 +119,56 @@ def test_missing_headers_default_to_zero_unknown():
     assert payload["w"] == 0
     assert payload["st"] == "unknown"
     assert payload["ok"] is True
+
+
+# Account-type discriminator ("acct") + overage-in-use flag ("oiu") — mirrors the
+# Windows daemon's POLL-ACCT-01 (DEBT.md D-3): 5h/7d present -> "pro-max";
+# windowless overage -> "ent"; neither -> "pro-max" (default).
+
+def test_acct_pro_max_when_subscription_windows_present():
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-5h-utilization": "0.30",
+        "anthropic-ratelimit-unified-5h-reset": str(now + 3600),
+        "anthropic-ratelimit-unified-7d-utilization": "0.10",
+        "anthropic-ratelimit-unified-7d-reset": str(now + 86400),
+        "anthropic-ratelimit-unified-status": "allowed",
+    })
+    assert payload["acct"] == "pro-max"
+    assert payload["oiu"] is False
+
+
+def test_oiu_true_with_windows_present_stays_pro_max():
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-5h-utilization": "1.0",
+        "anthropic-ratelimit-unified-5h-status": "rejected",
+        "anthropic-ratelimit-unified-5h-reset": str(now + 3600),
+        "anthropic-ratelimit-unified-7d-utilization": "0.11",
+        "anthropic-ratelimit-unified-7d-reset": str(now + 86400),
+        "anthropic-ratelimit-unified-overage-in-use": "true",
+        "anthropic-ratelimit-unified-representative-claim": "five_hour",
+        "anthropic-ratelimit-unified-status": "rejected",
+    })
+    assert payload["acct"] == "pro-max"
+    assert payload["oiu"] is True
+    assert payload["s"] == 100
+
+
+def test_acct_ent_when_windowless_overage():
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-representative-claim": "overage",
+        "anthropic-ratelimit-unified-overage-in-use": "true",
+        "anthropic-ratelimit-unified-overage-utilization": "0.54",
+        "anthropic-ratelimit-unified-reset": str(now + 3600),
+    })
+    assert payload["acct"] == "ent"
+    assert payload["oiu"] is True
+
+
+def test_acct_defaults_pro_max_when_no_recognisable_headers():
+    payload = _poll_with_headers({})
+    assert payload["acct"] == "pro-max"
+    assert payload["oiu"] is False
