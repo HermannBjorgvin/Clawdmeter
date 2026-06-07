@@ -221,6 +221,23 @@ poll() {
     overage_in_use=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-overage-in-use" | tr -d '\r' | awk '{print $2}')
     overage_util=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-overage-utilization" | tr -d '\r' | awk '{print $2}')
 
+    # Account type (DEBT.md D-3). Computed from the ORIGINAL window headers, before
+    # the overage block below synthesises s5h_util/s7d_util=1.0. 5h/7d present ->
+    # "pro-max" (Pro and Max share the 5h/7d model). No windows but overage in use
+    # -> "ent" (usage-based Enterprise: permanent dollar-spend overage). Default
+    # "pro-max" so a blank read keeps the normal Usage screen. "oiu" is the
+    # overage-in-use flag as a JSON bool; the device shows the "Extra Usage" title
+    # on pro-max when it is true.
+    local acct oiu_json
+    if [ -n "$s5h_util" ] || [ -n "$s7d_util" ]; then
+        acct="pro-max"
+    elif [ "$overage_in_use" = "true" ]; then
+        acct="ent"
+    else
+        acct="pro-max"
+    fi
+    if [ "$overage_in_use" = "true" ]; then oiu_json="true"; else oiu_json="false"; fi
+
     # Overall status: prefer the unified headline, fall back to the per-window 5h status.
     status="${uni_status:-${s5h_status:-unknown}}"
 
@@ -249,6 +266,7 @@ poll() {
     local payload
     payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" \
         -v ou="$overage_util" -v ur="$uni_reset" -v st="$status" -v now="$now" \
+        -v oiu="$oiu_json" -v acct="$acct" \
         'BEGIN {
             sp = sprintf("%.0f", u5 * 100);
             sr = (r5 - now) / 60; sr = sr > 0 ? sprintf("%.0f", sr) : 0;
@@ -256,7 +274,7 @@ poll() {
             wr = (r7 - now) / 60; wr = wr > 0 ? sprintf("%.0f", wr) : 0;
             op = sprintf("%.0f", ou * 100);
             ores = (ur - now) / 60; ores = ores > 0 ? sprintf("%.0f", ores) : 0;  # "or" is an awk keyword
-            printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"o\":%s,\"or\":%s,\"st\":\"%s\",\"ok\":true}", sp, sr, wp, wr, op, ores, st;
+            printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"o\":%s,\"or\":%s,\"oiu\":%s,\"acct\":\"%s\",\"st\":\"%s\",\"ok\":true}", sp, sr, wp, wr, op, ores, oiu, acct, st;
         }')
 
     log "Sending: $payload"

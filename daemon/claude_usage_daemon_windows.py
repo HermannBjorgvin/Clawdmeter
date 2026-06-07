@@ -160,13 +160,24 @@ async def poll_api(token: str) -> dict | None:
     # https://github.com/anthropics/claude-code/issues/12829
     s_util = raw("5h-utilization")
     w_util = raw("7d-utilization")
+    # Capture window presence BEFORE the overage block below synthesises s/w=100,
+    # because acct keys on whether the API sent any 5h/7d family at all.
+    has_windows = s_util is not None or w_util is not None
+    overage_in_use = raw("overage-in-use") == "true"
     # Overall status: prefer the unified headline; fall back to the per-window
     # 5h-status for older responses that predate the unified-status header.
     status = raw("status") or raw("5h-status") or "unknown"
 
-    if raw("overage-in-use") == "true" and s_util is None and w_util is None:
+    if overage_in_use and s_util is None and w_util is None:
         s_util = w_util = "1.0"   # subscription exhausted -> both windows full
         status = "overage"
+
+    # Account type (DEBT.md D-3). 5h/7d present -> "pro-max" (Pro and Max share
+    # the 5h/7d subscription model). No windows but overage in use -> "ent"
+    # (usage-based Enterprise: permanent dollar-spend overage, no windows). Default
+    # "pro-max" so a blank/unrecognised read keeps the normal Usage screen rather
+    # than the Enterprise spend gauge. The device branches screens on this.
+    acct = "pro-max" if has_windows else ("ent" if overage_in_use else "pro-max")
 
     unified_reset = raw("reset")  # reset for the representative claim
     # Extra-usage (overage) spend: the real figure the device's "Extra Usage" bar
@@ -180,6 +191,8 @@ async def poll_api(token: str) -> dict | None:
         "wr": reset_minutes(raw("7d-reset") or unified_reset),
         "o": pct(raw("overage-utilization")),
         "or": reset_minutes(unified_reset),
+        "oiu": overage_in_use,
+        "acct": acct,
         "st": status,
         "ok": True,
     }

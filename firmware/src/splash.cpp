@@ -214,6 +214,35 @@ void splash_pick_for_current_rate(void) {
     render_frame(a->frames[0], a->palette);
 }
 
+int splash_anim_count(void) { return SPLASH_ANIM_COUNT; }
+
+int splash_render_into(int idx, int frame, uint16_t *dst, int mcell) {
+    if (idx < 0 || idx >= SPLASH_ANIM_COUNT || !dst || mcell <= 0) return 0;
+    const splash_anim_def_t *a = &splash_anims[idx];
+    if (a->frame_count == 0) return 0;
+    const uint8_t *cells = a->frames[frame % a->frame_count];
+    const uint16_t *palette = a->palette;
+    const int w = GRID * mcell;
+    for (int gy = 0; gy < GRID; gy++) {
+        for (int gx = 0; gx < GRID; gx++) {
+            uint8_t code = cells[gy * GRID + gx];
+            uint16_t color = (palette && code < SPLASH_PALETTE_SIZE) ? palette[code] : COL_EMPTY;
+            for (int dy = 0; dy < mcell; dy++) {
+                uint16_t *p = &dst[(gy * mcell + dy) * w + gx * mcell];
+                for (int dx = 0; dx < mcell; dx++) p[dx] = color;
+            }
+        }
+    }
+    return a->frame_count;
+}
+
+uint16_t splash_frame_hold(int idx, int frame) {
+    if (idx < 0 || idx >= SPLASH_ANIM_COUNT) return 0;
+    const splash_anim_def_t *a = &splash_anims[idx];
+    if (a->frame_count == 0) return 0;
+    return a->holds[frame % a->frame_count];
+}
+
 bool splash_is_active(void) { return active; }
 
 void splash_show(void) {

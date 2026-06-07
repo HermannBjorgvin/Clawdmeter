@@ -26,3 +26,18 @@ bool splash_is_active(void);
 
 // Root container (so ui.cpp can attach a click event).
 lv_obj_t* splash_get_root(void);
+
+// ---- Mini-animation rendering (reused by the Enterprise screen) ----
+// These let other screens draw the 20x20 pixel-art animations at a small size
+// without duplicating the (large, static) animation tables into another module.
+
+// Number of animations available in the catalog.
+int splash_anim_count(void);
+
+// Render animation `idx`, frame `frame` (wrapped to the animation's frame_count)
+// into `dst` — an RGB565 buffer sized (20*cell) x (20*cell). Returns that
+// animation's frame_count (0 if idx is out of range or dst is null).
+int splash_render_into(int idx, int frame, uint16_t* dst, int cell);
+
+// Hold time in ms for animation `idx`, frame `frame` (wrapped). 0 if invalid.
+uint16_t splash_frame_hold(int idx, int frame);

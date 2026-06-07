@@ -589,3 +589,70 @@ def test_poll_api_does_not_log_token(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert secret_token not in captured.out, "Token leaked to stdout (T-02-01 violation)"
     assert secret_token not in captured.err, "Token leaked to stderr (T-02-01 violation)"
+
+
+# ---------------------------------------------------------------------------
+# Account-type discriminator ("acct") + overage-in-use flag ("oiu") — POLL-ACCT-01
+# The device branches screens on these: pro-max with oiu -> "Extra Usage" title
+# over the normal pills; ent -> a dedicated Enterprise spend screen. Both derive
+# purely from which header families are present (DEBT.md D-3):
+#   5h/7d present              -> acct "pro-max" (Pro & Max share the 5h/7d model)
+#   no 5h/7d but overage-in-use-> acct "ent"     (usage-based, permanent overage)
+#   neither                    -> acct "pro-max" (default; keep normal Usage)
+# ---------------------------------------------------------------------------
+
+def test_acct_pro_max_when_subscription_windows_present():
+    """Type 1 State 1 (normal): 5h/7d present, no overage -> pro-max, oiu false."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-5h-utilization": "0.30",
+        "anthropic-ratelimit-unified-5h-reset": str(now + 3600),
+        "anthropic-ratelimit-unified-7d-utilization": "0.10",
+        "anthropic-ratelimit-unified-7d-reset": str(now + 86400),
+        "anthropic-ratelimit-unified-status": "allowed",
+    })
+    assert payload["acct"] == "pro-max"
+    assert payload["oiu"] is False
+
+
+def test_oiu_true_with_windows_present_stays_pro_max():
+    """Type 1 State 2 (overage active): 5h spent but 5h/7d STILL present and
+    overage-in-use true. acct stays pro-max; oiu flips true so the device shows
+    the 'Extra Usage' title over the normal pills (windows are still real)."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-5h-utilization": "1.0",
+        "anthropic-ratelimit-unified-5h-status": "rejected",
+        "anthropic-ratelimit-unified-5h-reset": str(now + 3600),
+        "anthropic-ratelimit-unified-7d-utilization": "0.11",
+        "anthropic-ratelimit-unified-7d-reset": str(now + 86400),
+        "anthropic-ratelimit-unified-overage-in-use": "true",
+        "anthropic-ratelimit-unified-representative-claim": "five_hour",
+        "anthropic-ratelimit-unified-status": "rejected",
+    })
+    assert payload["acct"] == "pro-max"
+    assert payload["oiu"] is True
+    assert payload["s"] == 100
+
+
+def test_acct_ent_when_windowless_overage():
+    """Type 2 (usage-based Enterprise): no 5h/7d family, overage-in-use true,
+    representative-claim overage -> acct 'ent', oiu true."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-representative-claim": "overage",
+        "anthropic-ratelimit-unified-overage-in-use": "true",
+        "anthropic-ratelimit-unified-overage-utilization": "0.54",
+        "anthropic-ratelimit-unified-reset": str(now + 3600),
+    })
+    assert payload["acct"] == "ent"
+    assert payload["oiu"] is True
+
+
+def test_acct_defaults_pro_max_when_no_recognisable_headers():
+    """A blank/unrecognised response defaults to pro-max (normal Usage screen),
+    never 'ent' — we don't show the Enterprise spend gauge on an empty read."""
+    payload = _poll_with_headers({})
+    assert payload["acct"] == "pro-max"
+    assert payload["oiu"] is False
