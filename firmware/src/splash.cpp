@@ -31,6 +31,14 @@ static uint32_t frame_started_ms = 0;
 static uint32_t last_pick_ms = 0;
 static bool active = false;
 
+// Working-mode state: while Claude Code runs, "home" to the "work coding"
+// animation; allow a temporary manual cycle that snaps back after a few seconds.
+static bool     working_mode    = false;
+static uint32_t last_manual_ms  = 0;
+static bool     manual_override = false;   // user cycled away from "work coding"
+static int      work_coding_idx = -1;      // resolved once in splash_init()
+#define SPLASH_WORK_REVERT_MS 5000
+
 // While splash is showing, auto-cycle to the next animation in the current
 // rate-driven group every this many ms.
 #define SPLASH_ROTATE_INTERVAL_MS 20000
@@ -90,63 +98,61 @@ static void render_frame(const uint8_t *cells, const uint16_t *palette) {
 }
 
 // ---- Mini creature: a small animated creature for embedding in other screens
-//      (e.g. the idle "sleeping" indicator). Self-contained — its own canvas and
-//      buffer, independent of the full-screen splash above. ----
-static lv_obj_t  *mini_canvas = NULL;
-static uint16_t  *mini_buf = NULL;
-static int        mini_cell = 0;
-static int        mini_w = 0;
-static const splash_anim_def_t *mini_anim = NULL;
-static uint16_t   mini_frame = 0;
-static uint32_t   mini_started = 0;
-
-static void mini_render(void) {
-    if (!mini_buf || !mini_anim) return;
-    const uint8_t *cells = mini_anim->frames[mini_frame];
-    const uint16_t *pal = mini_anim->palette;
+//      (e.g. the idle "sleeping" indicator, or a "working" badge on the usage
+//      meter). Each instance is caller-owned (splash_mini_t) so several can run
+//      at once, independent of the full-screen splash above. ----
+static void mini_render(splash_mini_t *m) {
+    if (!m->buf || m->anim_idx < 0) return;
+    const splash_anim_def_t *a = &splash_anims[m->anim_idx];
+    const uint8_t *cells = a->frames[m->frame];
+    const uint16_t *pal = a->palette;
     for (int gy = 0; gy < GRID; gy++) {
         for (int gx = 0; gx < GRID; gx++) {
             uint8_t code = cells[gy * GRID + gx];
             uint16_t color = (pal && code < SPLASH_PALETTE_SIZE) ? pal[code] : COL_EMPTY;
-            for (int dy = 0; dy < mini_cell; dy++) {
-                uint16_t *dst = &mini_buf[(gy * mini_cell + dy) * mini_w + gx * mini_cell];
-                for (int dx = 0; dx < mini_cell; dx++) dst[dx] = color;
+            for (int dy = 0; dy < m->cell; dy++) {
+                uint16_t *dst = &m->buf[(gy * m->cell + dy) * m->w + gx * m->cell];
+                for (int dx = 0; dx < m->cell; dx++) dst[dx] = color;
             }
         }
     }
-    if (mini_canvas) lv_obj_invalidate(mini_canvas);
+    if (m->canvas) lv_obj_invalidate(m->canvas);
 }
 
-lv_obj_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px) {
-    mini_anim = NULL;
+lv_obj_t* splash_mini_create(splash_mini_t *m, lv_obj_t *parent, const char *anim_name, int px) {
+    m->anim_idx = -1;
+    m->buf = NULL;
+    m->canvas = NULL;
+    m->frame = 0;
     for (int i = 0; i < SPLASH_ANIM_COUNT; i++) {
-        if (strcmp(splash_anims[i].name, anim_name) == 0) { mini_anim = &splash_anims[i]; break; }
+        if (strcmp(splash_anims[i].name, anim_name) == 0) { m->anim_idx = i; break; }
     }
-    if (!mini_anim) return NULL;
-    mini_cell = px / GRID;
-    if (mini_cell < 1) mini_cell = 1;
-    mini_w = GRID * mini_cell;
+    if (m->anim_idx < 0) return NULL;
+    m->cell = px / GRID;
+    if (m->cell < 1) m->cell = 1;
+    m->w = GRID * m->cell;
 #ifdef BOARD_HAS_PSRAM
     const uint32_t caps = MALLOC_CAP_SPIRAM;
 #else
     const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 #endif
-    mini_buf = (uint16_t*)heap_caps_malloc(mini_w * mini_w * 2, caps);
-    if (!mini_buf) return NULL;
-    mini_canvas = lv_canvas_create(parent);
-    lv_canvas_set_buffer(mini_canvas, mini_buf, mini_w, mini_w, LV_COLOR_FORMAT_RGB565);
-    mini_frame = 0;
-    mini_started = millis();
-    mini_render();
-    return mini_canvas;
+    m->buf = (uint16_t*)heap_caps_malloc(m->w * m->w * 2, caps);
+    if (!m->buf) { m->anim_idx = -1; return NULL; }
+    m->canvas = lv_canvas_create(parent);
+    lv_canvas_set_buffer(m->canvas, m->buf, m->w, m->w, LV_COLOR_FORMAT_RGB565);
+    m->started = millis();
+    mini_render(m);
+    return m->canvas;
 }
 
-void splash_mini_tick(void) {
-    if (!mini_buf || !mini_anim || mini_anim->frame_count == 0) return;
-    if (millis() - mini_started < mini_anim->holds[mini_frame]) return;
-    mini_started = millis();
-    mini_frame = (mini_frame + 1) % mini_anim->frame_count;
-    mini_render();
+void splash_mini_tick(splash_mini_t *m) {
+    if (!m->buf || m->anim_idx < 0) return;
+    const splash_anim_def_t *a = &splash_anims[m->anim_idx];
+    if (a->frame_count == 0) return;
+    if (millis() - m->started < a->holds[m->frame]) return;
+    m->started = millis();
+    m->frame = (m->frame + 1) % a->frame_count;
+    mini_render(m);
 }
 
 static void show_placeholder() {
@@ -213,6 +219,11 @@ void splash_init(lv_obj_t *parent) {
 
     resolve_group_lists();
 
+    work_coding_idx = -1;
+    for (int i = 0; i < SPLASH_ANIM_COUNT; i++) {
+        if (strcmp(splash_anims[i].name, "work coding") == 0) { work_coding_idx = i; break; }
+    }
+
     if (SPLASH_ANIM_COUNT == 0) {
         show_placeholder();
     } else {
@@ -225,11 +236,28 @@ void splash_init(lv_obj_t *parent) {
     lv_obj_add_flag(splash_container, LV_OBJ_FLAG_HIDDEN);
 }
 
+// Force a specific animation by catalog index (used by working-mode).
+static void splash_show_index(int idx) {
+    if (idx < 0 || idx >= SPLASH_ANIM_COUNT) return;
+    cur_anim = (uint16_t)idx;
+    cur_frame = 0;
+    frame_started_ms = millis();
+    last_pick_ms = frame_started_ms;
+    const splash_anim_def_t *a = &splash_anims[cur_anim];
+    render_frame(a->frames[0], a->palette);
+}
+
 void splash_tick(void) {
     if (!active || SPLASH_ANIM_COUNT == 0) return;
 
-    // Auto-rotate to the next animation in the current group.
-    if (millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
+    if (working_mode) {
+        // Stay on "work coding"; a manual PWR cycle is allowed but snaps back.
+        if (manual_override && (millis() - last_manual_ms >= SPLASH_WORK_REVERT_MS)) {
+            manual_override = false;
+            if (work_coding_idx >= 0) splash_show_index(work_coding_idx);
+        }
+    } else if (millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
+        // Auto-rotate to the next animation in the current rate group.
         splash_pick_for_current_rate();
     }
 
@@ -253,6 +281,7 @@ void splash_next(void) {
     const splash_anim_def_t *a = &splash_anims[cur_anim];
     render_frame(a->frames[0], a->palette);
     Serial.printf("splash: -> %s\n", a->name);
+    splash_note_manual();
 }
 
 void splash_pick_for_current_rate(void) {
@@ -277,7 +306,12 @@ void splash_pick_for_current_rate(void) {
 bool splash_is_active(void) { return active; }
 
 void splash_show(void) {
-    splash_pick_for_current_rate();
+    if (working_mode && work_coding_idx >= 0) {
+        splash_show_index(work_coding_idx);
+        manual_override = false;
+    } else {
+        splash_pick_for_current_rate();
+    }
     if (splash_container) lv_obj_clear_flag(splash_container, LV_OBJ_FLAG_HIDDEN);
     active = true;
 }
@@ -290,3 +324,22 @@ void splash_hide(void) {
 lv_obj_t* splash_get_root(void) {
     return splash_container;
 }
+
+void splash_set_working(bool working) {
+    if (working == working_mode) return;
+    working_mode = working;
+    manual_override = false;
+    if (working) {
+        if (active && work_coding_idx >= 0) splash_show_index(work_coding_idx);
+    } else {
+        last_pick_ms = millis();  // don't instantly auto-rotate when resuming
+    }
+}
+
+void splash_note_manual(void) {
+    if (!working_mode) return;
+    manual_override = true;
+    last_manual_ms = millis();
+}
+
+bool splash_get_working(void) { return working_mode; }

@@ -11,7 +11,7 @@
 #define TX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000003"  // device ack/nack notifies
 #define REQ_CHAR_UUID       "4c41555a-4465-7669-6365-000000000004"  // device-initiated refresh request
 
-#define BLE_BUF_SIZE 512
+#define BLE_BUF_SIZE 1024
 
 // HID keyboard report descriptor (standard 6-KRO boot-protocol-compatible).
 // Includes the LED output report (Num/Caps/Scroll Lock indicators) — without
@@ -148,6 +148,9 @@ class ReqCallbacks : public NimBLECharacteristicCallbacks {
 
 void ble_init(void) {
     NimBLEDevice::init(DEVICE_NAME);
+    // Request a large ATT MTU so the host can deliver the activity payload
+    // (usage + per-session list, up to ~450 bytes) in a single write.
+    NimBLEDevice::setMTU(517);
     NimBLEDevice::setSecurityAuth(true, false, true);  // bonding, no MITM, SC
 
     // Format MAC address

@@ -41,6 +41,12 @@ struct Layout {
     const lv_font_t* bt_device_font;
     const lv_font_t* bt_credit_1_font;
     const lv_font_t* bt_credit_2_font;
+
+    // Activity screen
+    int16_t act_row_h;
+    int16_t act_row_gap;
+    const lv_font_t* act_proj_font;
+    const lv_font_t* act_meta_font;
 };
 static Layout L = {};
 
@@ -68,6 +74,10 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_28;
         L.bt_credit_1_font = &font_styrene_24;
         L.bt_credit_2_font = &font_styrene_20;
+        L.act_row_h = 78;
+        L.act_row_gap = 10;
+        L.act_proj_font = &font_styrene_24;
+        L.act_meta_font = &font_styrene_16;
     } else {
         // Compact layout — tuned for 368x448 (AMOLED-1.8).
         L.content_y = 85;
@@ -82,6 +92,10 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_20;
         L.bt_credit_1_font = &font_styrene_16;
         L.bt_credit_2_font = &font_styrene_14;
+        L.act_row_h = 64;
+        L.act_row_gap = 8;
+        L.act_proj_font = &font_styrene_20;
+        L.act_meta_font = &font_styrene_14;
     }
 
     L.content_w = L.scr_w - 2 * L.margin;
@@ -128,6 +142,24 @@ static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage upd
 static bool      data_received = false; // any valid update since boot
 static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage
 static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within this window (daemon sends ~60s)
+
+// Mini creatures: the idle "Zzz" sleeper, and a top-left "work coding" badge
+// shown while Claude Code is actively running.
+static splash_mini_t s_idle_mini = {};
+static splash_mini_t s_work_mini = {};
+static lv_obj_t* work_mini_canvas = nullptr;
+static bool      s_working = false;
+
+// ---- Activity screen widgets (scrolling list of live Claude Code sessions) ----
+static lv_obj_t* activity_container = nullptr;
+static lv_obj_t* activity_list = nullptr;       // scrollable flex column
+static lv_obj_t* activity_empty = nullptr;      // "No active sessions" placeholder
+static lv_obj_t* row_panel[MAX_SESSIONS];
+static lv_obj_t* row_proj[MAX_SESSIONS];
+static lv_obj_t* row_model[MAX_SESSIONS];
+static lv_obj_t* row_bar[MAX_SESSIONS];
+static lv_obj_t* row_pct[MAX_SESSIONS];
+static lv_obj_t* row_dot[MAX_SESSIONS];
 
 // ---- Shared ----
 static lv_image_dsc_t logo_dsc;
@@ -348,7 +380,7 @@ static void build_idle_group(lv_obj_t* parent) {
     // A shrunk-down sleeping creature (reused claudepix "expression sleep" art)
     // sits between the header and the status line; the animated "Listening…"
     // status line carries the words, so no extra text is needed here.
-    lv_obj_t* creature = splash_mini_create(idle_group, "expression sleep", 160);
+    lv_obj_t* creature = splash_mini_create(&s_idle_mini, idle_group, "expression sleep", 160);
     if (creature) lv_obj_align(creature, LV_ALIGN_CENTER, 0, -20);
 
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
@@ -398,6 +430,106 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+
+    // Top-left "working" badge: a small "work coding" Clawd shown only while
+    // Claude Code is actively running (swaps in for the logo). Hidden by default.
+    work_mini_canvas = splash_mini_create(&s_work_mini, usage_container, "work coding", 60);
+    if (work_mini_canvas) {
+        lv_obj_set_pos(work_mini_canvas, L.margin, L.title_y - 10);
+        lv_obj_add_flag(work_mini_canvas, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// ======== Activity Screen ========
+// A vertical scrolling list of the user's live Claude Code sessions. Each row:
+// project (top-left) · orange dot when running (top-right) · model + context-%
+// bar + NN% (bottom). Tap cycles screens; drag scrolls the list.
+
+static void build_activity_screen(lv_obj_t* scr) {
+    activity_container = lv_obj_create(scr);
+    lv_obj_set_size(activity_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(activity_container, 0, 0);
+    lv_obj_set_style_bg_opa(activity_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(activity_container, 0, 0);
+    lv_obj_set_style_pad_all(activity_container, 0, 0);
+    lv_obj_clear_flag(activity_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(activity_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* title = lv_label_create(activity_container);
+    lv_label_set_text(title, "Activity");
+    lv_obj_set_style_text_font(title, L.bt_title_font, 0);
+    lv_obj_set_style_text_color(title, COL_TEXT, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 16, L.title_y);
+
+    // Scrollable vertical list. Children stack via flex; hidden rows collapse.
+    activity_list = lv_obj_create(activity_container);
+    lv_obj_set_pos(activity_list, 0, L.content_y);
+    lv_obj_set_size(activity_list, L.scr_w, L.scr_h - L.content_y);
+    lv_obj_set_style_bg_opa(activity_list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(activity_list, 0, 0);
+    lv_obj_set_style_pad_left(activity_list, L.margin, 0);
+    lv_obj_set_style_pad_right(activity_list, L.margin, 0);
+    lv_obj_set_style_pad_top(activity_list, 0, 0);
+    lv_obj_set_style_pad_bottom(activity_list, L.margin, 0);
+    lv_obj_set_style_pad_row(activity_list, L.act_row_gap, 0);
+    lv_obj_set_flex_flow(activity_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(activity_list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(activity_list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_flag(activity_list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(activity_list, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    const int inner_w = L.content_w - 32;  // row inner width (panel has 16px L/R pad)
+
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        lv_obj_t* p = make_panel(activity_list, 0, 0, L.content_w, L.act_row_h);
+
+        row_proj[i] = lv_label_create(p);
+        lv_label_set_long_mode(row_proj[i], LV_LABEL_LONG_DOT);
+        lv_obj_set_width(row_proj[i], inner_w - 26);  // leave room for the dot
+        lv_obj_set_style_text_font(row_proj[i], L.act_proj_font, 0);
+        lv_obj_set_style_text_color(row_proj[i], COL_TEXT, 0);
+        lv_label_set_text(row_proj[i], "");
+        lv_obj_align(row_proj[i], LV_ALIGN_TOP_LEFT, 0, 0);
+
+        row_dot[i] = lv_obj_create(p);
+        lv_obj_set_size(row_dot[i], 14, 14);
+        lv_obj_set_style_radius(row_dot[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(row_dot[i], COL_ACCENT, 0);
+        lv_obj_set_style_bg_opa(row_dot[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(row_dot[i], 0, 0);
+        lv_obj_clear_flag(row_dot[i], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(row_dot[i], LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_align(row_dot[i], LV_ALIGN_TOP_RIGHT, 0, 2);
+
+        row_model[i] = lv_label_create(p);
+        lv_obj_set_style_text_font(row_model[i], L.act_meta_font, 0);
+        lv_obj_set_style_text_color(row_model[i], COL_DIM, 0);
+        lv_label_set_text(row_model[i], "");
+        lv_obj_align(row_model[i], LV_ALIGN_BOTTOM_LEFT, 0, 0);
+
+        row_bar[i] = make_bar(p, 0, 0, (int)(inner_w * 0.40f), 10);
+        lv_obj_align(row_bar[i], LV_ALIGN_BOTTOM_RIGHT, 0, -3);
+
+        row_pct[i] = lv_label_create(p);
+        lv_obj_set_width(row_pct[i], 56);  // fixed width + right-align so it never overlaps the bar
+        lv_obj_set_style_text_align(row_pct[i], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_style_text_font(row_pct[i], L.act_meta_font, 0);
+        lv_obj_set_style_text_color(row_pct[i], COL_TEXT, 0);
+        lv_label_set_text(row_pct[i], "");
+        lv_obj_align_to(row_pct[i], row_bar[i], LV_ALIGN_OUT_LEFT_MID, -6, 0);
+
+        lv_obj_add_flag(p, LV_OBJ_FLAG_HIDDEN);
+        row_panel[i] = p;
+    }
+
+    activity_empty = lv_label_create(activity_container);
+    lv_label_set_text(activity_empty, "No active sessions");
+    lv_obj_set_style_text_font(activity_empty, L.bt_device_font, 0);
+    lv_obj_set_style_text_color(activity_empty, COL_DIM, 0);
+    lv_obj_align(activity_empty, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(activity_empty, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_add_flag(activity_container, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ======== Public API ========
@@ -413,6 +545,7 @@ void ui_init(void) {
     init_battery_icons();
 
     init_usage_screen(scr);
+    build_activity_screen(scr);
     splash_init(scr);
 
     if (splash_get_root()) {
@@ -453,6 +586,30 @@ void ui_update(const UsageData* data) {
     lv_label_set_text(lbl_weekly_reset, buf);
 }
 
+void ui_update_activity(const ActivityData* data) {
+    if (!activity_list) return;
+    int n = (data && data->valid) ? data->count : 0;
+    if (n > MAX_SESSIONS) n = MAX_SESSIONS;
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (i < n) {
+            const SessionData& s = data->sessions[i];
+            lv_label_set_text(row_proj[i], s.project[0] ? s.project : "(session)");
+            lv_label_set_text(row_model[i], s.model);
+            int p = s.ctx_pct; if (p < 0) p = 0; if (p > 100) p = 100;
+            lv_bar_set_value(row_bar[i], p, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(row_bar[i], pct_color((float)p), LV_PART_INDICATOR);
+            lv_label_set_text_fmt(row_pct[i], "%d%%", p);
+            if (s.working) lv_obj_clear_flag(row_dot[i], LV_OBJ_FLAG_HIDDEN);
+            else           lv_obj_add_flag(row_dot[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(row_panel[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(row_panel[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (n == 0) lv_obj_clear_flag(activity_empty, LV_OBJ_FLAG_HIDDEN);
+    else        lv_obj_add_flag(activity_empty, LV_OBJ_FLAG_HIDDEN);
+}
+
 // Pick the usage-view sub-screen: pairing hint (BLE down), the idle "Zzz" screen
 // (connected but data has gone stale), or the live usage panels. Only re-lays-out
 // on an actual change. The animated status line stays visible everywhere — it
@@ -479,7 +636,8 @@ static void update_view_state(void) {
 void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
     update_view_state();
-    if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
+    if (view_state == 1) splash_mini_tick(&s_idle_mini);   // animate the sleeping creature on the idle screen
+    if (s_working)       splash_mini_tick(&s_work_mini);   // animate the top-left "working" badge
 
     uint32_t now = lv_tick_get();
 
@@ -520,35 +678,62 @@ static void apply_battery_visibility(void) {
     else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
+// Logo shows on non-splash screens, EXCEPT while working (the work-coding badge
+// takes its top-left spot). The badge lives inside usage_container, so it's
+// naturally hidden whenever the splash screen is up.
+static void apply_logo_visibility(void) {
+    if (!logo_img) return;
+    bool show = (current_screen != SCREEN_SPLASH) && !s_working;
+    if (show) lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+    else      lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void apply_work_mini_visibility(void) {
+    if (!work_mini_canvas) return;
+    if (s_working) lv_obj_clear_flag(work_mini_canvas, LV_OBJ_FLAG_HIDDEN);
+    else           lv_obj_add_flag(work_mini_canvas, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void global_click_cb(lv_event_t* e) {
     (void)e;
-    if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
-    else                                  ui_show_screen(SCREEN_SPLASH);
+    // Tap cycles SPLASH -> USAGE -> ACTIVITY -> SPLASH.
+    switch (current_screen) {
+        case SCREEN_SPLASH:   ui_show_screen(SCREEN_USAGE);    break;
+        case SCREEN_USAGE:    ui_show_screen(SCREEN_ACTIVITY); break;
+        case SCREEN_ACTIVITY: ui_show_screen(SCREEN_SPLASH);   break;
+        default:              ui_show_screen(SCREEN_SPLASH);   break;
+    }
 }
 
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+    if (activity_container) lv_obj_add_flag(activity_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
-    case SCREEN_SPLASH:  splash_show(); break;
-    case SCREEN_USAGE:   lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_SPLASH:   splash_show(); break;
+    case SCREEN_USAGE:    lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_ACTIVITY: if (activity_container) lv_obj_clear_flag(activity_container, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
-    }
-
-    if (logo_img) {
-        if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
     }
 
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
     current_screen = screen;
+    apply_logo_visibility();
+    apply_work_mini_visibility();
     apply_battery_visibility();
 }
 
 void ui_toggle_splash(void) {
     if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
     else                                  ui_show_screen(SCREEN_SPLASH);
+}
+
+void ui_set_working(bool working) {
+    if (working == s_working) return;
+    s_working = working;
+    apply_logo_visibility();
+    apply_work_mini_visibility();
 }
 
 screen_t ui_get_current_screen(void) {

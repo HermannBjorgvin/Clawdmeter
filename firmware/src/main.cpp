@@ -21,6 +21,7 @@
 #include "hal/imu_hal.h"
 
 static UsageData usage = {};
+static ActivityData activity = {};
 
 // ---- LVGL draw buffers (partial render mode) ----
 // PSRAM-equipped boards (S3) can comfortably hold larger strips. PSRAM-free
@@ -97,7 +98,7 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
 }
 
 // Parse a JSON line into UsageData.
-static bool parse_json(const char* json, UsageData* out) {
+static bool parse_json(const char* json, UsageData* out, ActivityData* act) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
@@ -111,7 +112,24 @@ static bool parse_json(const char* json, UsageData* out) {
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
+    out->working = doc["working"] | false;
     out->valid = true;
+
+    // Optional per-session activity list (Activity screen). Absent → empty.
+    act->count = 0;
+    JsonArray sessions = doc["sessions"].as<JsonArray>();
+    if (!sessions.isNull()) {
+        for (JsonObject s : sessions) {
+            if (act->count >= MAX_SESSIONS) break;
+            SessionData& sd = act->sessions[act->count];
+            strlcpy(sd.project, s["p"] | "", sizeof(sd.project));
+            strlcpy(sd.model,   s["m"] | "", sizeof(sd.model));
+            sd.ctx_pct = s["c"] | 0;
+            sd.working = ((int)(s["w"] | 0)) != 0;
+            act->count++;
+        }
+    }
+    act->valid = true;
     return true;
 }
 
@@ -275,6 +293,7 @@ static void pair_tick(void) {
 }
 
 void loop() {
+    if (splash_get_working()) idle_note_activity();  // keep the panel awake while Claude works
     idle_tick();
     lv_timer_handler();
     ui_tick_anim();
@@ -358,7 +377,7 @@ void loop() {
     check_serial_cmd();
 
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
+        if (parse_json(ble_get_data(), &usage, &activity)) {
             int g_before = usage_rate_group();
             usage_rate_sample(usage.session_pct);
             int g_after = usage_rate_group();
@@ -368,6 +387,15 @@ void loop() {
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
             ui_update(&usage);
+            ui_update_activity(&activity);
+
+            static bool last_working = false;
+            if (usage.working != last_working) {
+                last_working = usage.working;
+                splash_set_working(usage.working);
+                ui_set_working(usage.working);
+            }
+
             ble_send_ack();
         } else {
             ble_send_nack();

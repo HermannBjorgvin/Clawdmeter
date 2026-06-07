@@ -35,6 +35,10 @@ SCAN_TIMEOUT = 8.0
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
+STATE_FILE = Path.home() / ".clawdmeter" / "state.json"  # written by clawdmeter_hook.py
+WORKING_STALE_SECONDS = 120  # ignore a session's phase=="running" older than this (missed-Stop guard)
+MAX_SESSIONS = 5             # cap the Activity-screen list sent over BLE
+MAX_BLE_PAYLOAD = 480        # keep under NimBLE's 512-byte attribute cap
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
@@ -125,6 +129,61 @@ def read_token() -> str | None:
     if sys.platform == "darwin":
         return _read_token_keychain()
     return _read_token_file()
+
+
+def state_mtime() -> float:
+    try:
+        return STATE_FILE.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def read_working() -> bool:
+    """True if any Claude Code session is phase=='running' and recently active.
+
+    Reads ~/.clawdmeter/state.json written by clawdmeter_hook.py. The staleness
+    guard means a missed Stop hook (e.g. a crash) clears 'working' within
+    WORKING_STALE_SECONDS rather than sticking on forever.
+    """
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    now = time.time()
+    for s in state.get("sessions", {}).values():
+        if s.get("phase") == "running" and (now - s.get("last_active_ts", 0)) < WORKING_STALE_SECONDS:
+            return True
+    return False
+
+
+def read_sessions() -> list:
+    """Compact per-session activity list for the device's Activity screen.
+
+    Reads ~/.clawdmeter/state.json, keeps sessions active within
+    WORKING_STALE_SECONDS, sorts most-recently-active first, caps at
+    MAX_SESSIONS, and emits short keys to keep the BLE payload small:
+      p=project, m=model, c=context-%, w=running flag.
+    """
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    sessions = state.get("sessions", {})
+    if not isinstance(sessions, dict):
+        return []
+    now = time.time()
+    fresh = [s for s in sessions.values()
+             if isinstance(s, dict) and (now - s.get("last_active_ts", 0)) < WORKING_STALE_SECONDS]
+    fresh.sort(key=lambda s: s.get("last_active_ts", 0), reverse=True)
+    out = []
+    for s in fresh[:MAX_SESSIONS]:
+        out.append({
+            "p": (s.get("project") or "")[:23],
+            "m": (s.get("model") or "")[:15],
+            "c": int(s.get("ctx_pct", 0) or 0),
+            "w": 1 if s.get("phase") == "running" else 0,
+        })
+    return out
 
 
 def load_cached_address() -> str | None:
@@ -333,7 +392,7 @@ class Session:
         data = json.dumps(payload, separators=(",", ":")).encode()
         log(f"Sending: {data.decode()}")
         try:
-            await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
+            await self.client.write_gatt_char(RX_CHAR_UUID, data, response=True)
             return True
         except BleakError as e:
             log(f"Write failed: {e}")
@@ -366,22 +425,51 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     await session.setup_refresh_subscription()
 
     last_poll = 0.0
+    last_payload: dict | None = None
+    last_state_mtime = state_mtime()
     used_successfully = False
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
             elapsed = now - last_poll
-            if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
+            do_poll = session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL
+            if do_poll:
                 session.refresh_requested.clear()
                 token = read_token()
                 if not token:
                     log("No token; skipping poll")
                 else:
-                    payload = await poll_api(token)
-                    if payload is not None:
-                        if await session.write_payload(payload):
+                    p = await poll_api(token)
+                    if p is not None:
+                        last_payload = p
+
+            # "working" flag from the Claude Code hook's state.json. Push the
+            # cached payload immediately on a state change (no extra API call);
+            # otherwise it rides the regular API poll above.
+            mt = state_mtime()
+            state_changed = mt != last_state_mtime
+            last_state_mtime = mt
+            if last_payload is not None:
+                working = read_working()
+                sessions = read_sessions()
+                # Keep the payload under the BLE attribute cap: test the size and
+                # drop the oldest sessions until it fits.
+                candidate = dict(last_payload)
+                candidate["working"] = working
+                candidate["sessions"] = sessions
+                while sessions and len(json.dumps(candidate, separators=(",", ":"))) > MAX_BLE_PAYLOAD:
+                    sessions = sessions[:-1]
+                    candidate["sessions"] = sessions
+                push = do_poll or (state_changed and (
+                    last_payload.get("working") != working
+                    or last_payload.get("sessions") != sessions))
+                last_payload["working"] = working
+                last_payload["sessions"] = sessions
+                if push:
+                    if await session.write_payload(last_payload):
+                        used_successfully = True
+                        if do_poll:
                             last_poll = time.time()
-                            used_successfully = True
 
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)

@@ -27,10 +27,29 @@ bool splash_is_active(void);
 // Root container (so ui.cpp can attach a click event).
 lv_obj_t* splash_get_root(void);
 
-// Mini animated creature for embedding elsewhere (e.g. the idle screen).
-// Renders the named claudepix animation (e.g. "expression sleep") at ~px×px
-// inside `parent`; returns the canvas object (position it with lv_obj_align) or
-// NULL if the animation isn't found / allocation fails. Drive it with
-// splash_mini_tick(). One mini creature at a time.
-lv_obj_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px);
-void splash_mini_tick(void);
+// Working-mode: while Claude Code is actively running the splash "homes" to the
+// "work coding" animation. The PWR button can still cycle animations, but the
+// splash snaps back to "work coding" a few seconds after the last manual cycle
+// (while still working). Driven by the daemon's "working" flag.
+void splash_set_working(bool working);
+void splash_note_manual(void);   // call when the user manually cycles (PWR button)
+bool splash_get_working(void);
+
+// Mini animated creature for embedding elsewhere (e.g. the idle screen, or a
+// small "working" badge on the usage meter). Each instance is caller-owned via
+// a splash_mini_t, so several can run at once. Renders the named claudepix
+// animation at ~px×px inside `parent`; returns the canvas object (position it
+// with lv_obj_set_pos/lv_obj_align) or NULL if the animation isn't found /
+// allocation fails. Drive it with splash_mini_tick(&handle).
+typedef struct {
+    int       anim_idx;   // index into the animation catalog; -1 = none
+    uint16_t* buf;
+    lv_obj_t* canvas;
+    uint16_t  frame;
+    uint32_t  started;
+    int       cell;
+    int       w;
+} splash_mini_t;
+
+lv_obj_t* splash_mini_create(splash_mini_t* m, lv_obj_t* parent, const char* anim_name, int px);
+void splash_mini_tick(splash_mini_t* m);
