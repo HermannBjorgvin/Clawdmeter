@@ -19,6 +19,7 @@
 #include "hal/input_hal.h"
 #include "hal/power_hal.h"
 #include "hal/imu_hal.h"
+#include "hal/sound_hal.h"
 
 static UsageData usage = {};
 
@@ -164,6 +165,7 @@ static void check_serial_cmd() {
         if (c == '\n' || c == '\r') {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
+            else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -191,6 +193,7 @@ void setup() {
 
     power_hal_init();
     imu_hal_init();
+    sound_hal_init();
     touch_hal_init();
 
     // ---- LVGL ----
@@ -281,6 +284,7 @@ void loop() {
     ble_tick();
     power_hal_tick();
     imu_hal_tick();
+    sound_hal_tick();
     splash_tick();
     // Rotation transition (blank + ramp) would fight the idle fade — skip
     // ticks while the panel is dark. A rotation that happens during sleep
@@ -360,8 +364,14 @@ void loop() {
     if (ble_has_data()) {
         if (parse_json(ble_get_data(), &usage)) {
             int g_before = usage_rate_group();
-            usage_rate_sample(usage.session_pct);
+            bool session_reset = usage_rate_sample(usage.session_pct);
             int g_after = usage_rate_group();
+            // 5-hour session limit refilled → chime so the user knows they can
+            // use Claude again (no-op on boards without a buzzer).
+            if (session_reset) {
+                Serial.println("session reset detected — chime");
+                sound_hal_play_reset();
+            }
             if (g_after != g_before) {
                 Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
                     g_before, g_after, usage.session_pct);

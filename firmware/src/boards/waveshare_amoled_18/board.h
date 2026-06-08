@@ -44,6 +44,21 @@
 #define IOX_PIN_PA_EN        2     // EXIO2 → audio amp enable
 #define IOX_PIN_PWR_BTN      4     // EXIO4 → PWR button input, active HIGH
 
+// ---- Audio (ES8311 mono codec + speaker, I2S) ----
+// Same ES8311 + I2S path as the 2.16, different MCLK pin (16 vs 42). Amp enable
+// is ambiguous across 1.8 hardware revisions: Waveshare's V2 example drives a
+// plain GPIO 46, while this board's XCA9554 also exposes an amp-enable on EXIO2
+// (IOX_PIN_PA_EN above). sound.cpp drives BOTH to be revision-safe. Pins from
+// Waveshare's factory 15_ES8311 example. Untested on hardware in this repo.
+#define SND_I2S_MCLK         16
+#define SND_I2S_BCLK         9
+#define SND_I2S_WS           45     // LRCK
+#define SND_I2S_DOUT         8      // ESP → ES8311 (speaker)
+#define SND_I2S_DIN          10     // ES8311 → ESP (mic; unused, set for STD mode)
+#define SND_PA_PIN           46     // V2 direct-GPIO amp enable (HIGH = on)
+#define SND_SAMPLE_RATE      44100  // must match the embedded PCM (bell_pcm.h)
+#define SND_ES8311_ADDR      0x18
+
 // ---- Buttons ----
 #define BTN_BACK_GPIO        0     // BOOT — primary, Space (PTT)
 // PWR comes via XCA9554 EXIO4 (see power.cpp); there is no secondary button.
@@ -54,3 +69,4 @@
 #define BOARD_HAS_IMU              1    // present + initialized, but rotation off
 #define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      1
+#define BOARD_HAS_SOUND            1

@@ -38,20 +38,24 @@ static void usage_rate_reset(void) {
     head  = 0;
 }
 
-void usage_rate_sample(float session_pct) {
+bool usage_rate_sample(float session_pct) {
     uint32_t now = millis();
+    bool was_reset = false;
 
     if (count > 0) {
         uint8_t latest = (head + RING_SIZE - 1) % RING_SIZE;
         // Session reset: pct dropped substantially. Restart tracking.
         if (session_pct + 5.0f < ring[latest].pct) {
             usage_rate_reset();
+            was_reset = true;
         }
     }
 
     ring[head] = { now, session_pct };
     head = (head + 1) % RING_SIZE;
     if (count < RING_SIZE) count++;
+
+    return was_reset;
 }
 
 int usage_rate_group(void) {
