@@ -42,7 +42,7 @@ before running the daemon:
 
 1. Put the device on its Bluetooth waiting screen (powered on, not yet connected).
 2. Open **Settings → Bluetooth & devices → Add device → Bluetooth**.
-3. Select **Claude Controller** and complete pairing.
+3. Select **Clawdmeter** and complete pairing.
 
 **Why this is required:**
 
@@ -104,8 +104,8 @@ python daemon\claude_usage_daemon_windows.py
 ```
 [HH:MM:SS] === Claude Usage Tracker Daemon (BLE, Windows) ===
 [HH:MM:SS] Poll interval: 60s
-[HH:MM:SS] Scanning for 'Claude Controller' (8.0s)...
-[HH:MM:SS] Found: XX:XX:XX:XX:XX:XX
+[HH:MM:SS] Scanning for 'Clawdmeter' (8.0s)...
+[HH:MM:SS] Not advertising; connecting to bonded address XX:XX:XX:XX:XX:XX
 [HH:MM:SS] Connecting to XX:XX:XX:XX:XX:XX...
 [HH:MM:SS] Connected
 [HH:MM:SS] Sending: {"s":42,"sr":180,"w":17,"wr":8820,"st":"active","ok":true}
@@ -114,6 +114,11 @@ python daemon\claude_usage_daemon_windows.py
 - **The device must be paired with Windows first** (see [Pair the device](#pair-the-device-one-time)).
   The daemon then connects over that existing link via `BleakScanner` + `BleakClient`; it does
   not pop its own pairing dialog.
+- **`Scanning…` → `Not advertising; connecting to bonded address …` is normal.** Once paired,
+  Windows keeps the device connected, so it stops advertising and an advertisement scan can't
+  see it. The daemon detects this and connects directly to the device's address (recovered from
+  the Windows PnP table). The 8-second scan that precedes the fallback happens once per session.
+  Set `CLAWDMETER_BLE_ADDRESS=AA:BB:CC:DD:EE:FF` to pin the address and skip PnP lookup.
 - After `Connected`, the daemon polls the Anthropic API immediately and sends the first
   payload within a few seconds of connect (warm token path). With a valid, non-expired token
   the device should leave its waiting screen and show session + weekly percentages within
@@ -135,7 +140,7 @@ Press **Ctrl+C** in the terminal. The daemon logs `Daemon stopping` and exits cl
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `Warning: running under Linux/WSL` | Running in WSL, not native Windows | Run from a native PowerShell or Command Prompt on Windows |
-| `Scanning for 'Claude Controller'… Device not found` | Clawdmeter is off, out of range, or showing a non-Bluetooth screen | Power on the device and ensure it is on the Bluetooth waiting screen |
+| `Scanning for 'Clawdmeter'… Device not found` | Clawdmeter is off, out of range, not yet paired, or showing a non-Bluetooth screen | Power on the device, pair it once (see [Pair the device](#pair-the-device-one-time)), and ensure it is in range |
 | `No token; skipping poll` | No credentials file found at any candidate path | Confirm `claude login` ran on this machine; check `%USERPROFILE%\.claude\.credentials.json` exists |
 | `API HTTP 401` | Token expired | Re-run `claude login` in a terminal to refresh the token, then restart the daemon |
 | `Connection failed` | WinRT BLE initialisation issue | Ensure Windows Bluetooth is on; try toggling Bluetooth off/on in Windows Settings |

@@ -33,8 +33,14 @@ def _make_mock_response(status_code=200, headers=None):
 
 
 def _run(coro):
-    """Run a coroutine synchronously for synchronous test functions."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Run a coroutine synchronously for synchronous test functions.
+
+    Uses asyncio.run rather than get_event_loop().run_until_complete: on
+    Python 3.12+ get_event_loop() no longer auto-creates a loop when none is
+    running and raises "There is no current event loop" (the coroutine is then
+    never awaited). asyncio.run creates, drives, and closes a fresh loop.
+    """
+    return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +302,136 @@ def test_missing_status_header_defaults_to_unknown(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Test: overage mode — subscription spent, API omits the 5h/7d breakdown
+# (representative-claim == "overage"). The daemon must not emit all-zeros.
+# Ref: https://github.com/anthropics/claude-code/issues/12829
+# ---------------------------------------------------------------------------
+
+def _poll_with_headers(headers):
+    mock_resp = _make_mock_response(status_code=200, headers=headers)
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=mock_resp)
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        return _run(poll_api("fake-token"))
+
+
+def test_overage_mode_reports_full_subscription_and_overage_status():
+    """In overage mode the 5h/7d headers are absent; the subscription windows are
+    spent, so both bars read 100% and status is 'overage' (not all-zeros)."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-representative-claim": "overage",
+        "anthropic-ratelimit-unified-overage-in-use": "true",
+        "anthropic-ratelimit-unified-overage-utilization": "0.0",
+        "anthropic-ratelimit-unified-reset": str(now + 3600),
+        # NOTE: no -5h-/-7d- headers — the API omits them in overage mode.
+    })
+    assert payload["s"] == 100, f"expected session 100% in overage, got {payload['s']}"
+    assert payload["w"] == 100, f"expected weekly 100% in overage, got {payload['w']}"
+    assert payload["st"] == "overage"
+    assert abs(payload["sr"] - 60) <= 1, f"sr should fall back to unified-reset, got {payload['sr']}"
+    assert abs(payload["wr"] - 60) <= 1, f"wr should fall back to unified-reset, got {payload['wr']}"
+    assert payload["ok"] is True
+
+
+def test_status_prefers_unified_status_over_per_window_status():
+    """The headline status comes from unified-status when present (the overall
+    state), not the per-window 5h-status."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-status": "rate_limited",
+        "anthropic-ratelimit-unified-5h-status": "allowed",
+        "anthropic-ratelimit-unified-5h-utilization": "1.0",
+        "anthropic-ratelimit-unified-5h-reset": str(now + 3600),
+        "anthropic-ratelimit-unified-7d-utilization": "0.5",
+        "anthropic-ratelimit-unified-7d-reset": str(now + 86400),
+    })
+    assert payload["st"] == "rate_limited"
+    assert payload["s"] == 100
+    assert payload["w"] == 50
+
+
+def test_normal_mode_not_treated_as_overage_when_overage_not_in_use():
+    """A normal account (5h/7d present, overage-in-use false) is unchanged —
+    overage handling must not hijack the normal path."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-representative-claim": "five_hour",
+        "anthropic-ratelimit-unified-overage-in-use": "false",
+        "anthropic-ratelimit-unified-5h-utilization": "0.30",
+        "anthropic-ratelimit-unified-5h-reset": str(now + 3600),
+        "anthropic-ratelimit-unified-7d-utilization": "0.74",
+        "anthropic-ratelimit-unified-7d-reset": str(now + 86400),
+    })
+    assert payload["s"] == 30
+    assert payload["w"] == 74
+    assert payload["st"] == "allowed"
+
+
+# ---------------------------------------------------------------------------
+# Test: overage exposes the ACTUAL extra-usage figure (POLL-OVERAGE-02)
+# The device's overage screen relabels the second bar to "Extra Usage" and must
+# show the real overage utilization, not a faked 100%. The daemon therefore
+# carries it on the wire as "o" (overage util %) plus "or" (extra-usage reset
+# minutes, taken from the representative-claim's unified `reset`). The plan bar
+# stays 100% ("allowance spent"); only the extra bar reflects overage spend.
+# ---------------------------------------------------------------------------
+
+def test_overage_payload_carries_real_overage_utilization():
+    """In overage the payload exposes the true overage utilization as "o" (a
+    percentage), sourced from anthropic-ratelimit-unified-overage-utilization —
+    NOT the faked 100% that the plan bar uses."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-representative-claim": "overage",
+        "anthropic-ratelimit-unified-overage-in-use": "true",
+        "anthropic-ratelimit-unified-overage-utilization": "0.23",
+        "anthropic-ratelimit-unified-reset": str(now + 3600),
+        # 5h/7d omitted — the API drops them in overage.
+    })
+    assert payload["st"] == "overage"
+    assert payload["s"] == 100, "plan bar stays full (allowance spent)"
+    assert payload["o"] == 23, f"expected overage util 23%, got {payload.get('o')!r}"
+
+
+def test_overage_extra_reset_minutes_from_representative_claim():
+    """The extra-usage reset ("or") is the representative-claim reset — the
+    firmware's format_reset_time() then renders Xh Ym vs Xd Yh by magnitude."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-representative-claim": "overage",
+        "anthropic-ratelimit-unified-overage-in-use": "true",
+        "anthropic-ratelimit-unified-overage-utilization": "0.5",
+        "anthropic-ratelimit-unified-reset": str(now + 3600),  # 60 minutes out
+    })
+    assert abs(payload["or"] - 60) <= 1, f"expected ~60, got {payload.get('or')!r}"
+
+
+def test_normal_mode_reports_zero_overage():
+    """Outside overage the extra-usage figure is 0 so the device never shows a
+    phantom Extra Usage bar."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-representative-claim": "five_hour",
+        "anthropic-ratelimit-unified-overage-in-use": "false",
+        "anthropic-ratelimit-unified-overage-utilization": "0.0",
+        "anthropic-ratelimit-unified-5h-utilization": "0.30",
+        "anthropic-ratelimit-unified-5h-reset": str(now + 3600),
+        "anthropic-ratelimit-unified-7d-utilization": "0.74",
+        "anthropic-ratelimit-unified-7d-reset": str(now + 86400),
+    })
+    assert payload["o"] == 0
+    assert payload["st"] == "allowed"
+
+
+# ---------------------------------------------------------------------------
 # Test: poll_api returns None on HTTP >= 400
 # ---------------------------------------------------------------------------
 
@@ -453,3 +589,70 @@ def test_poll_api_does_not_log_token(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert secret_token not in captured.out, "Token leaked to stdout (T-02-01 violation)"
     assert secret_token not in captured.err, "Token leaked to stderr (T-02-01 violation)"
+
+
+# ---------------------------------------------------------------------------
+# Account-type discriminator ("acct") + overage-in-use flag ("oiu") — POLL-ACCT-01
+# The device branches screens on these: pro-max with oiu -> "Extra Usage" title
+# over the normal pills; ent -> a dedicated Enterprise spend screen. Both derive
+# purely from which header families are present (DEBT.md D-3):
+#   5h/7d present              -> acct "pro-max" (Pro & Max share the 5h/7d model)
+#   no 5h/7d but overage-in-use-> acct "ent"     (usage-based, permanent overage)
+#   neither                    -> acct "pro-max" (default; keep normal Usage)
+# ---------------------------------------------------------------------------
+
+def test_acct_pro_max_when_subscription_windows_present():
+    """Type 1 State 1 (normal): 5h/7d present, no overage -> pro-max, oiu false."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-5h-utilization": "0.30",
+        "anthropic-ratelimit-unified-5h-reset": str(now + 3600),
+        "anthropic-ratelimit-unified-7d-utilization": "0.10",
+        "anthropic-ratelimit-unified-7d-reset": str(now + 86400),
+        "anthropic-ratelimit-unified-status": "allowed",
+    })
+    assert payload["acct"] == "pro-max"
+    assert payload["oiu"] is False
+
+
+def test_oiu_true_with_windows_present_stays_pro_max():
+    """Type 1 State 2 (overage active): 5h spent but 5h/7d STILL present and
+    overage-in-use true. acct stays pro-max; oiu flips true so the device shows
+    the 'Extra Usage' title over the normal pills (windows are still real)."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-5h-utilization": "1.0",
+        "anthropic-ratelimit-unified-5h-status": "rejected",
+        "anthropic-ratelimit-unified-5h-reset": str(now + 3600),
+        "anthropic-ratelimit-unified-7d-utilization": "0.11",
+        "anthropic-ratelimit-unified-7d-reset": str(now + 86400),
+        "anthropic-ratelimit-unified-overage-in-use": "true",
+        "anthropic-ratelimit-unified-representative-claim": "five_hour",
+        "anthropic-ratelimit-unified-status": "rejected",
+    })
+    assert payload["acct"] == "pro-max"
+    assert payload["oiu"] is True
+    assert payload["s"] == 100
+
+
+def test_acct_ent_when_windowless_overage():
+    """Type 2 (usage-based Enterprise): no 5h/7d family, overage-in-use true,
+    representative-claim overage -> acct 'ent', oiu true."""
+    now = time.time()
+    payload = _poll_with_headers({
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-representative-claim": "overage",
+        "anthropic-ratelimit-unified-overage-in-use": "true",
+        "anthropic-ratelimit-unified-overage-utilization": "0.54",
+        "anthropic-ratelimit-unified-reset": str(now + 3600),
+    })
+    assert payload["acct"] == "ent"
+    assert payload["oiu"] is True
+
+
+def test_acct_defaults_pro_max_when_no_recognisable_headers():
+    """A blank/unrecognised response defaults to pro-max (normal Usage screen),
+    never 'ent' — we don't show the Enterprise spend gauge on an empty read."""
+    payload = _poll_with_headers({})
+    assert payload["acct"] == "pro-max"
+    assert payload["oiu"] is False

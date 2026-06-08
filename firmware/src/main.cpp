@@ -109,6 +109,12 @@ static bool parse_json(const char* json, UsageData* out) {
     out->session_reset_mins = doc["sr"] | -1;
     out->weekly_pct = doc["w"] | 0.0f;
     out->weekly_reset_mins = doc["wr"] | -1;
+    out->overage_pct = doc["o"] | 0.0f;
+    out->overage_reset_mins = doc["or"] | -1;
+    out->overage_in_use = doc["oiu"] | false;
+    // Default "pro-max" so payloads from an older daemon (no acct field) keep the
+    // normal Usage/Extra-Usage screens rather than falling into the Enterprise view.
+    strlcpy(out->acct, doc["acct"] | "pro-max", sizeof(out->acct));
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
     out->valid = true;
