@@ -22,11 +22,16 @@ void touch_hal_init(void) {
         return;
     }
     touch.setMaxCoordinates(LCD_WIDTH, LCD_HEIGHT);
-    // C6 2.16 panel mapping (verified empirically): the CST9217's raw
-    // axes are swapped relative to the SH8601 raster AND X is mirrored.
-    // Matches the Waveshare BSP, which reads y = raw_byte1, x = W - raw_byte2.
-    touch.setSwapXY(true);
-    touch.setMirrorXY(true, false);
+    // C6 2.16 panel mapping. The original values (swap=true, mirrorX=true)
+    // were calibrated to the old display orientation that force-wrote MADCTL
+    // 0x30 (MV transpose + ML). The display now runs at the CO5300 class
+    // default (MADCTL 0x00 — USB-port-on-the-side orientation), so the touch
+    // mapping is re-derived to match. SensorLib applies swap then mirror
+    // (TouchDrvInterface::updateXY); tap-tested on C6 hardware, the raw
+    // CST9217 coordinates map straight through in this orientation — no swap,
+    // no mirror.
+    touch.setSwapXY(false);
+    touch.setMirrorXY(false, false);
     pinMode(TP_INT, INPUT_PULLUP);
     attachInterrupt(TP_INT, touch_isr, FALLING);
     Serial.println("Touch init OK");
