@@ -379,19 +379,31 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
+                # Pure free-ride: read whatever access token Claude Code currently
+                # holds and NEVER refresh it ourselves. Claude Code (the token's owner)
+                # does all refreshing; refreshing here would race its rotation and feed
+                # the OAuth endpoint's rate limit (429). When the token is dead we just
+                # show "No data" until the CLI re-seeds it.
                 token = read_token()  # D-09: fresh each cycle
                 if not token:
-                    log("No token; skipping poll")
+                    log("No token; signalling no-data to device")
+                    await session.write_payload({"ok": False})
+                    last_poll = time.time()
                     if tray_state:
                         tray_state.set_error("token expired — run claude login")
                 else:
+                    payload = None
+                    expired = False
                     try:
                         payload = await poll_api(token)
                     except AuthError:
-                        # Real 401/403 — token genuinely needs a refresh.
+                        # Pure free-ride: we never refresh. A 401/403 means Claude Code's
+                        # token has expired and only Claude Code (its owner) can re-seed it.
+                        expired = True
+                        log("Token expired/invalid; signalling no-data — run `claude login` "
+                            "or use the CLI to let Claude Code renew it")
                         if tray_state:
                             tray_state.set_error("token expired — run claude login")
-                        payload = None
                     if payload is not None:
                         if await session.write_payload(payload):
                             last_poll = time.time()
@@ -407,6 +419,12 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                                     f" write failures); abandoning connection"
                                 )
                                 break
+                    elif expired:
+                        # Token genuinely dead -> show "No data" now instead of stale numbers.
+                        # Transient poll failures (payload None without expiry) stay silent.
+                        log("No data (token dead); signalling idle to device")
+                        await session.write_payload({"ok": False})
+                        last_poll = time.time()
                     # else: payload is None from a TRANSIENT failure (network/DNS,
                     # timeout, rate-limit, 5xx). poll_api already logged it; do NOT
                     # toast "token expired" — that mislabeled a boot-time DNS blip

@@ -141,6 +141,12 @@ def test_read_expiry_non_dict_json_returns_unknown(tmp_path, monkeypatch):
 
 # --- WR-02: D-06 redaction requirement must be tested ---
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="spawns the Windows daemon, which inits CoreBluetooth; on macOS that "
+    "trips the Bluetooth TCC privacy gate and SIGABRTs the child process "
+    "(no NSBluetoothAlwaysUsageDescription) instead of the Linux scan-loop hang",
+)
 def test_main_emits_linux_warning(monkeypatch):
     """__main__ prints a non-fatal stderr warning on non-Windows platforms (new async runner).
 
@@ -172,6 +178,12 @@ def test_main_emits_linux_warning(monkeypatch):
         )
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="spawns the Windows daemon, which inits CoreBluetooth; on macOS that "
+    "trips the Bluetooth TCC privacy gate and SIGABRTs the child process "
+    "(no NSBluetoothAlwaysUsageDescription) instead of the Linux scan-loop hang",
+)
 def test_main_emits_linux_warning_before_loop(monkeypatch):
     """__main__ stderr warning appears before the async scan loop starts on Linux/WSL."""
     import signal as _signal
