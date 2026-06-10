@@ -14,7 +14,9 @@ LV_FONT_DECLARE(font_styrene_24);
 LV_FONT_DECLARE(font_styrene_20);
 LV_FONT_DECLARE(font_styrene_16);
 LV_FONT_DECLARE(font_styrene_14);
+LV_FONT_DECLARE(font_styrene_12);
 LV_FONT_DECLARE(font_mono_32);
+LV_FONT_DECLARE(font_mono_18);
 
 // Layout values computed from the active board's geometry. Populated once
 // in ui_init() and treated as const for the rest of the program. Adding a
@@ -32,6 +34,14 @@ struct Layout {
     int16_t usage_panel_gap;
     int16_t usage_bar_y;
     int16_t usage_reset_y;
+    int16_t usage_bar_h;
+    int16_t panel_hpad;       // make_panel pad_left == pad_right
+    int16_t panel_vpad;       // make_panel pad_top  == pad_bottom
+    const lv_font_t* usage_title_font;
+    const lv_font_t* usage_pct_font;
+    const lv_font_t* usage_pill_font;
+    const lv_font_t* usage_reset_font;
+    const lv_font_t* usage_anim_font;
 
     // Bluetooth screen
     int16_t bt_info_panel_h;
@@ -51,16 +61,24 @@ static Layout L = {};
 static void compute_layout(const BoardCaps& c) {
     L.scr_w = c.width;
     L.scr_h = c.height;
-    L.margin = 20;
-    L.title_y = 30;
 
     if (c.height >= 460) {
         // Large layout — tuned for 480x480 (AMOLED-2.16).
+        L.margin = 20;
+        L.title_y = 30;
         L.content_y = 100;
         L.usage_panel_h = 150;
         L.usage_panel_gap = 16;
         L.usage_bar_y = 56;
         L.usage_reset_y = 94;
+        L.usage_bar_h = 24;
+        L.panel_hpad = 16;
+        L.panel_vpad = 12;
+        L.usage_title_font = &font_tiempos_56;
+        L.usage_pct_font   = &font_styrene_48;
+        L.usage_pill_font  = &font_styrene_28;
+        L.usage_reset_font = &font_styrene_28;
+        L.usage_anim_font  = &font_mono_32;
         L.bt_info_panel_h = 160;
         L.bt_reset_zone_h = 110;
         L.bt_title_font    = &font_tiempos_56;
@@ -68,13 +86,23 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_28;
         L.bt_credit_1_font = &font_styrene_24;
         L.bt_credit_2_font = &font_styrene_20;
-    } else {
+    } else if (c.height >= 250) {
         // Compact layout — tuned for 368x448 (AMOLED-1.8).
+        L.margin = 20;
+        L.title_y = 30;
         L.content_y = 85;
         L.usage_panel_h = 130;
         L.usage_panel_gap = 12;
         L.usage_bar_y = 48;
         L.usage_reset_y = 78;
+        L.usage_bar_h = 24;
+        L.panel_hpad = 16;
+        L.panel_vpad = 12;
+        L.usage_title_font = &font_tiempos_56;
+        L.usage_pct_font   = &font_styrene_48;
+        L.usage_pill_font  = &font_styrene_28;
+        L.usage_reset_font = &font_styrene_28;
+        L.usage_anim_font  = &font_mono_32;
         L.bt_info_panel_h = 140;
         L.bt_reset_zone_h = 90;
         L.bt_title_font    = &font_tiempos_34;
@@ -82,6 +110,70 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_20;
         L.bt_credit_1_font = &font_styrene_16;
         L.bt_credit_2_font = &font_styrene_14;
+    } else {
+        // Tiny layout — tuned for 200x200 e-paper (Waveshare 1.54 V2).
+        // Keeps every element from the AMOLED layout (logo, battery,
+        // both usage panels, rotating animation message) but with
+        // shrunk fonts, scaled icons, and tighter spacing so the whole
+        // thing fits on a 200px-tall panel. ui_init applies
+        // lv_image_set_scale to the logo (~37 %) and battery (~50 %).
+        //
+        // Vertical budget (200 px total):
+        //   y=0..30   top row: logo (30 px), title centred, battery (24 px)
+        //   y=34..98  panel 1 (Current) - 64 px
+        //   y=102..166 panel 2 (Weekly) - 64 px
+        //   y=170..200 footer: rotating animation message
+        L.margin = 6;
+        // title_y=4 lines up the visible top of the "Usage" /
+        // "Bluetooth" header glyphs with the visible-content top of
+        // the Claude logo and battery icons (both 0-based on this
+        // tier but have a few px of transparent padding at the top of
+        // their source bitmaps before the first painted pixel). The
+        // styrene_20 line-box at y=4 spans y=4..24 — visible glyphs
+        // start around y=6-7, matching where the icons' visible ink
+        // begins.
+        L.title_y = 4;
+        L.content_y = 34;
+        L.usage_panel_h = 64;
+        L.usage_panel_gap = 4;
+        // Within each 64 px panel (1 px pad top+bottom, 62 px usable):
+        //   child y=0..28  pct (styrene_28, line_height 28)
+        //   child y=32..42 bar (10 px, 4 px gap above)
+        //   child y=46..62 reset (styrene_16, line_height 16, 4 px gap)
+        L.usage_bar_y = 32;
+        L.usage_reset_y = 46;
+        L.usage_bar_h = 10;
+        L.panel_hpad = 6;
+        L.panel_vpad = 1;
+        // Match the Bluetooth screen's title size (L.bt_title_font =
+        // styrene_20) so the two screens read at the same visual weight.
+        L.usage_title_font = &font_styrene_20;
+        L.usage_pct_font   = &font_styrene_28;
+        // styrene_16 (was 14) so the "Current"/"Weekly" pill reads
+        // slightly bigger and balances better against the styrene_28
+        // percentage next to it. styrene_16 is the next available
+        // size between 14 and 20.
+        L.usage_pill_font  = &font_styrene_16;
+        L.usage_reset_font = &font_styrene_16;
+        // font_mono_18 (DejaVuSansMono) was generated with the U+27xx
+        // spinner glyphs and U+2026 ellipsis included; the proportional
+        // Styrene fonts are ASCII-only. Using mono here on the tiny
+        // tier brings back the original Unicode spinner aesthetic at
+        // the cost of a slightly different (monospaced) typeface for
+        // the footer line — accepted trade-off documented in the
+        // commit message.
+        L.usage_anim_font  = &font_mono_18;
+        L.bt_info_panel_h = 100;
+        L.bt_reset_zone_h = 60;
+        L.bt_title_font    = &font_styrene_20;
+        L.bt_status_font   = &font_styrene_14;
+        // styrene_12 (not 14) so "Address: 70:04:1D:DB:CC:89" — 25 chars
+        // averaging ~8 px each at styrene_14 — fits on a single line in
+        // the 188 px content area. Also used for the "Device:" line and
+        // the "Reset Bluetooth" label so they share visual weight.
+        L.bt_device_font   = &font_styrene_12;
+        L.bt_credit_1_font = &font_styrene_12;
+        L.bt_credit_2_font = &font_styrene_12;
     }
 
     L.content_w = L.scr_w - 2 * L.margin;
@@ -143,6 +235,11 @@ static uint8_t anim_msg_idx = 0;
 static uint32_t anim_msg_start = 0;
 #define ANIM_MSG_MS     4000
 
+// Decorative spinner glyphs: U+00B7 middle dot + U+2722/2733/2736/273B/
+// 273D Dingbats stars. Both anim fonts (font_mono_32 on AMOLED,
+// font_mono_18 on the tiny tier — DejaVuSansMono in both cases) were
+// generated with these codepoints in their glyph range, so the spinner
+// renders properly on every board.
 static const char* const spinner_frames[] = {
     "\xC2\xB7", "\xE2\x9C\xBB", "\xE2\x9C\xBD",
     "\xE2\x9C\xB6", "\xE2\x9C\xB3", "\xE2\x9C\xA2",
@@ -190,6 +287,14 @@ static const char* const anim_messages[] = {
 #define ANIM_MSG_COUNT (sizeof(anim_messages) / sizeof(anim_messages[0]))
 
 static lv_color_t pct_color(float pct) {
+    // On the tiny e-paper tier the display HAL inverts pixel luminance,
+    // and only COL_AMBER lands cleanly on the panel-black side of the
+    // threshold (COL_RED inverts to invisible-white; COL_GREEN is on
+    // the edge). Forcing the indicator to a high-luminance text colour
+    // makes the filled portion render as a solid panel-black bar
+    // regardless of rate-group, paired with the bar's high-luminance
+    // border for a clean black-outline + black-fill paper-style bar.
+    if (L.scr_h < 250) return COL_TEXT;
     if (pct >= 80.0f) return COL_RED;
     if (pct >= 50.0f) return COL_AMBER;
     return COL_GREEN;
@@ -218,10 +323,12 @@ static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(panel, 8, 0);
     lv_obj_set_style_border_width(panel, 0, 0);
-    lv_obj_set_style_pad_left(panel, 16, 0);
-    lv_obj_set_style_pad_right(panel, 16, 0);
-    lv_obj_set_style_pad_top(panel, 12, 0);
-    lv_obj_set_style_pad_bottom(panel, 12, 0);
+    // Panel padding comes from the active tier (tiny tier uses tighter
+    // values so the pct + bar + reset fit inside a 64 px panel).
+    lv_obj_set_style_pad_left(panel, L.panel_hpad, 0);
+    lv_obj_set_style_pad_right(panel, L.panel_hpad, 0);
+    lv_obj_set_style_pad_top(panel, L.panel_vpad, 0);
+    lv_obj_set_style_pad_bottom(panel, L.panel_vpad, 0);
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(panel, LV_OBJ_FLAG_EVENT_BUBBLE);
     return panel;
@@ -239,6 +346,17 @@ static lv_obj_t* make_bar(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_set_style_bg_color(bar, COL_GREEN, LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_INDICATOR);
     lv_obj_set_style_radius(bar, 6, LV_PART_INDICATOR);
+    // Tiny tier (e-paper): give the bar a high-luminance border so the
+    // display-HAL inversion renders a clean BLACK outline of the full
+    // bar extent on the white panel. Without this the unfilled portion
+    // of the bar (COL_BAR_BG, very dark, inverts to panel-white) is
+    // invisible and a low-percentage filled bar looks like a tiny smear
+    // at the left edge.
+    if (L.scr_h < 250) {
+        lv_obj_set_style_border_color(bar, COL_TEXT, LV_PART_MAIN);
+        lv_obj_set_style_border_width(bar, 2, LV_PART_MAIN);
+        lv_obj_set_style_border_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+    }
     return bar;
 }
 
@@ -254,15 +372,25 @@ static void init_icon_dsc_rgb565a8(lv_image_dsc_t* dsc, int w, int h, const uint
 static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_font(lbl, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
-    lv_obj_set_style_bg_color(lbl, COL_BAR_BG, 0);
+    lv_obj_set_style_text_font(lbl, L.usage_pill_font, 0);
+    // AMOLED: a dim COL_BAR_BG chip with light COL_TEXT on top. On the
+    // tiny e-paper tier the 1bpp HAL inverts luminance, so a dark
+    // COL_BAR_BG fill would vanish into the white paper — invert the pill
+    // (light fill, dark text in LVGL) so it renders as a solid BLACK pill
+    // with WHITE "Current"/"Weekly" text on the panel.
+    const bool pill_invert = (L.scr_h < 250);
+    lv_obj_set_style_bg_color(lbl, pill_invert ? COL_TEXT : COL_BAR_BG, 0);
+    lv_obj_set_style_text_color(lbl, pill_invert ? COL_BG : COL_TEXT, 0);
     lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(lbl, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_pad_left(lbl, 18, 0);
-    lv_obj_set_style_pad_right(lbl, 18, 0);
-    lv_obj_set_style_pad_top(lbl, 6, 0);
-    lv_obj_set_style_pad_bottom(lbl, 6, 0);
+    // Pill padding scales with the font: keep tight on the tiny tier so
+    // "Current" / "Weekly" fits next to the percentage without clipping.
+    const int hpad = (L.scr_h < 250) ? 8 : 18;
+    const int vpad = (L.scr_h < 250) ? 2 : 6;
+    lv_obj_set_style_pad_left(lbl, hpad, 0);
+    lv_obj_set_style_pad_right(lbl, hpad, 0);
+    lv_obj_set_style_pad_top(lbl, vpad, 0);
+    lv_obj_set_style_pad_bottom(lbl, vpad, 0);
     return lbl;
 }
 
@@ -283,18 +411,33 @@ static void make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "---%");
-    lv_obj_set_style_text_font(*out_pct, &font_styrene_48, 0);
+    lv_obj_set_style_text_font(*out_pct, L.usage_pct_font, 0);
     lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
     lv_obj_set_pos(*out_pct, 0, 0);
 
     *out_pill = make_pill(panel, pill_text);
-    lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
+    // AMOLED tiers keep the original +1 nudge (unchanged from before the
+    // e-paper port). The tiny tier centres the pill's line-box against the
+    // much taller pct glyph so the two read on one baseline:
+    //   tiny : pct=28, pill=16+4 pad → offset (28-20)/2 = 4
+    const bool pill_tiny = (L.scr_h < 250);
+    const int  pill_vpad = pill_tiny ? 2 : 6;
+    const int  pct_h     = lv_font_get_line_height(L.usage_pct_font);
+    const int  pill_h    = lv_font_get_line_height(L.usage_pill_font)
+                         + 2 * pill_vpad;
+    lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0,
+                 pill_tiny ? (pct_h - pill_h) / 2 : 1);
 
-    *out_bar = make_bar(panel, 0, L.usage_bar_y, L.content_w - 32, 24);
+    // Bar fills the panel's full content width (panel total minus both
+    // sides' padding). The previous "- 32" was hardcoded for AMOLED
+    // padding (16+16) and left ~20 px of dead space on the right of
+    // the tiny tier (6+6 padding).
+    *out_bar = make_bar(panel, 0, L.usage_bar_y,
+                       L.content_w - 2 * L.panel_hpad, L.usage_bar_h);
 
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
-    lv_obj_set_style_text_font(*out_reset, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(*out_reset, L.usage_reset_font, 0);
     lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
     lv_obj_set_pos(*out_reset, 0, L.usage_reset_y);
 }
@@ -366,9 +509,14 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
-    lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_font(lbl_title, L.usage_title_font, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+    // On AMOLED the title is shifted +16 to clear the 80×80 top-left
+    // logo overlay. On the tiny tier the logo is scaled to ~30 px and
+    // doesn't reach the title, so center cleanly.
+    const bool tiny_title = (L.scr_h < 250);
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID,
+                 tiny_title ? 0 : 16, L.title_y);
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
@@ -395,9 +543,36 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
-    lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
+    lv_obj_set_style_text_font(lbl_anim, L.usage_anim_font, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
-    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+    if (L.scr_h < 250) {
+        // Tiny tier uses the proportional 18-px DejaVuSansMono for the
+        // anim label (it's the only available font that carries the
+        // U+27xx spinner glyphs). The longest messages — e.g.
+        // "Flibbertigibbeting" — overflow the panel width at that
+        // size, so give the label a fixed width and let LVGL truncate
+        // gracefully with its own "..." marker instead of running off
+        // the right edge. Width = L.content_w with LV_ALIGN_BOTTOM_MID
+        // puts the widget at x=L.margin..(scr_w-L.margin), text
+        // centered inside — visually flanked by equal margins on each
+        // side.
+        lv_obj_set_width(lbl_anim, L.content_w);
+        lv_obj_set_style_text_align(lbl_anim, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(lbl_anim, LV_LABEL_LONG_MODE_DOTS);
+
+        // Vertically centre the label in the free space between the
+        // bottom of the second usage panel and the bottom of the
+        // screen. font_mono_18 reports a line height of ~18 px, so
+        // half-height ≈ 9.
+        const int weekly_bottom = L.content_y + 2 * L.usage_panel_h
+                                + L.usage_panel_gap;
+        const int free_center   = (weekly_bottom + L.scr_h) / 2;
+        const int anim_half_h   = 9;
+        const int from_bottom   = L.scr_h - free_center - anim_half_h;
+        lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -from_bottom);
+    } else {
+        lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+    }
 }
 
 // ======== Public API ========
@@ -419,14 +594,36 @@ void ui_init(void) {
         lv_obj_add_event_cb(splash_get_root(), global_click_cb, LV_EVENT_CLICKED, NULL);
     }
 
+    // Logo + battery icons. On the tiny tier the source images (80x80
+    // logo, 48x48 battery) overwhelm a 200 px panel, so apply LVGL's
+    // built-in scaling (256 = 1.0x) to shrink them to ~30 / ~24 px and
+    // tuck the logo and battery into the top corners flanking the
+    // "Usage" title. Native size on AMOLED tiers.
+    //
+    // lv_image's scale operates around the image pivot (default
+    // center); without overriding the pivot, a scaled 80x80 image
+    // renders centered inside its 80x80 bbox with empty padding, so
+    // positioning by top-left coordinates doesn't match what's drawn.
+    // Pinning pivot to (0,0) anchors the scaled image at the widget's
+    // top-left so set_pos coordinates match the visible top-left
+    // corner. (At 1.0x scale this is identity; safe to apply on AMOLED.)
+    const bool tiny = (L.scr_h < 250);
+    const uint32_t logo_scale    = tiny ? 96  : 256;   // 80 -> 30
+    const uint32_t battery_scale = tiny ? 128 : 256;   // 48 -> 24
+    const int battery_w = (ICON_BATTERY_W * (int)battery_scale) / 256;
+
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
-    lv_obj_set_pos(logo_img, L.margin, L.title_y - 10);
+    lv_image_set_pivot(logo_img, 0, 0);
+    lv_image_set_scale(logo_img, logo_scale);
+    lv_obj_set_pos(logo_img, L.margin, tiny ? 0 : (L.title_y - 10));
 
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
-    lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
-
+    lv_image_set_pivot(battery_img, 0, 0);
+    lv_image_set_scale(battery_img, battery_scale);
+    lv_obj_set_pos(battery_img, L.scr_w - battery_w - L.margin,
+                   tiny ? 0 : L.title_y);
 }
 
 void ui_update(const UsageData* data) {
@@ -483,7 +680,10 @@ void ui_tick_anim(void) {
 
     uint32_t now = lv_tick_get();
 
-    if (now - anim_msg_start >= ANIM_MSG_MS) {
+    const uint32_t msg_interval     = ANIM_MSG_MS;
+    const uint32_t spinner_interval = spinner_ms[anim_spinner_idx];
+
+    if (now - anim_msg_start >= msg_interval) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
         anim_msg_start = now;
     }
@@ -516,8 +716,11 @@ void ui_tick_anim(void) {
 static screen_t prev_non_splash_screen = SCREEN_USAGE;
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
-    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-    else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    // Hide on the splash screen (it's full-bleed pixel art).
+    if (current_screen == SCREEN_SPLASH)
+        lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    else
+        lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void global_click_cb(lv_event_t* e) {
@@ -537,8 +740,11 @@ void ui_show_screen(screen_t screen) {
     }
 
     if (logo_img) {
-        if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        // Hide the logo on the splash screen (full-bleed); show it elsewhere.
+        if (screen == SCREEN_SPLASH)
+            lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
     }
 
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;

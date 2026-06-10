@@ -21,6 +21,7 @@ Keep the two in sync. The pattern in `caps.cpp` does this for you:
 | `BOARD_HAS_SECONDARY_BUTTON`   | 0       | A second physical button (HID Shift+Tab on the reference ports). `caps.button_count = 1 + this`. UI uses `caps.button_count >= 2` to decide whether to poll/handle the secondary button — there is no `#ifdef` in shared code. |
 | `BOARD_HAS_ROTATION`           | 0       | IMU-driven auto-rotation via CPU strip transformation in `display_hal_draw_bitmap`. When 0, `display_hal_tick` is a no-op and the rotation buffer in `display.cpp` doesn't get allocated. |
 | `BOARD_HAS_IMU`                | 0       | Whether the accelerometer is populated and initialized. Distinct from `BOARD_HAS_ROTATION` — the AMOLED-1.8 has the QMI8658 (so `HAS_IMU=1`) but the kit's enclosure mounts the panel at a fixed orientation, so rotation is off. |
+| `BOARD_HAS_TOUCH`              | 1       | Whether a touch panel is present. When 0, `main.cpp` lets the PWR button advance off the splash (via `ui_cycle_screen()`) since there is no tap to dismiss it; touch boards instead use PWR to cycle splash animations. |
 | `BOARD_HAS_BATTERY`            | 0       | Whether PMU battery measurement is meaningful on this board. UI hides the battery indicator when false. |
 | `BOARD_HAS_IO_EXPANDER`        | 0       | Whether an IO expander gates display / touch reset lines. Doesn't directly gate any code path — but signals to the porter that `board_init()` must release the expander before `display_hal_init()`. |
 
