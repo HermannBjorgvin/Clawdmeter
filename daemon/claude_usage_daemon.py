@@ -35,6 +35,7 @@ SCAN_TIMEOUT = 8.0
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
+CONFIG_FILE = Path.home() / ".config" / "claude-usage-monitor" / "config"
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
@@ -271,6 +272,66 @@ async def discover_target(skip_addr: str | None = None):
     return address
 
 
+def read_clock_setting() -> str:
+    """Read the `clock` option from the config file. One of: off|auto|12|24.
+
+    Defaults to "off" (no clock; the device keeps showing "Usage") so existing
+    setups are unaffected until the user opts in.
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "clock":
+                    val = val.strip().lower()
+                    if val in ("off", "auto", "12", "24"):
+                        return val
+    except OSError:
+        pass
+    return "off"
+
+
+def detect_hour_format() -> int:
+    """Best-effort 12h/24h detection for the host. Returns 12 or 24 (default 24)."""
+    # macOS: the explicit System Settings toggle lives in NSGlobalDomain.
+    for key, result in (("AppleICUForce24HourTime", 24), ("AppleICUForce12HourTime", 12)):
+        try:
+            out = subprocess.run(["defaults", "read", "-g", key],
+                                 capture_output=True, text=True, timeout=3)
+            if out.stdout.strip() == "1":
+                return result
+        except (OSError, subprocess.SubprocessError):
+            pass
+    # Fallback to the C locale's time format (may be C/24h under launchd).
+    try:
+        import locale
+        locale.setlocale(locale.LC_TIME, "")
+        fmt = locale.nl_langinfo(locale.T_FMT)
+        if "%p" in fmt or "%r" in fmt or "%I" in fmt:
+            return 12
+    except (ImportError, locale.Error, AttributeError):
+        pass
+    return 24
+
+
+def add_clock_fields(payload: dict) -> None:
+    """Add wall-clock fields to the payload when the config opts in.
+
+    "t"  = local wall-clock epoch (UTC epoch shifted by the tz offset) so the
+           device can show the time without an RTC.
+    "tf" = 12 or 24, the hour format the device should render.
+    """
+    clock = read_clock_setting()
+    if clock == "off":
+        return
+    tf = 24 if clock == "24" else 12 if clock == "12" else detect_hour_format()
+    payload["t"] = int(time.time()) + time.localtime().tm_gmtoff
+    payload["tf"] = tf
+
+
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
@@ -311,6 +372,7 @@ async def poll_api(token: str) -> dict | None:
         "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
         "ok": True,
     }
+    add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
     return payload
 
 

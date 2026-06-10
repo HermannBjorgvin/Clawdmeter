@@ -39,6 +39,9 @@ ZOMBIE_BREAK_LIMIT = 1     # D-03: consecutive write failures before abandoning 
 RECONNECT_BACKOFF_CAP = 8  # D-05: fast-reconnect cap (seconds); keeps stacked retries inside 120s SLA
                            # ~5–10s band per CONTEXT.md Claude's Discretion; 8 chosen as middle ground
 
+# Optional clock display. Config lives under the same Clawdmeter dir as daemon.log.
+CONFIG_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "config"
+
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
@@ -106,6 +109,49 @@ class AuthError(Exception):
     failed` DNS blip wrongly fired the 'token expired' toast)."""
 
 
+def read_clock_setting() -> str:
+    """Read the `clock` option from the config file. One of: off|auto|12|24.
+
+    Defaults to "off" so existing setups keep showing "Usage" until opted in.
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "clock":
+                    val = val.strip().lower()
+                    if val in ("off", "auto", "12", "24"):
+                        return val
+    except OSError:
+        pass
+    return "off"
+
+
+def detect_hour_format() -> int:
+    """Best-effort 12h/24h detection on Windows via the registry. Returns 12 or 24."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\International") as k:
+            # iTime: "1" = 24-hour, "0" = 12-hour.
+            val, _ = winreg.QueryValueEx(k, "iTime")
+            return 24 if str(val).strip() == "1" else 12
+    except (ImportError, OSError):
+        return 24
+
+
+def add_clock_fields(payload: dict) -> None:
+    """Add "t" (local wall-clock epoch) + "tf" (12|24) when the config opts in."""
+    clock = read_clock_setting()
+    if clock == "off":
+        return
+    tf = 24 if clock == "24" else 12 if clock == "12" else detect_hour_format()
+    payload["t"] = int(time.time()) + time.localtime().tm_gmtoff
+    payload["tf"] = tf
+
+
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
@@ -153,6 +199,7 @@ async def poll_api(token: str) -> dict | None:
         "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
         "ok": True,
     }
+    add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
     return payload
 
 
