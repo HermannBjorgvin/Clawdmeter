@@ -26,9 +26,12 @@
 #define IIC_SDA              15
 #define IIC_SCL              14
 
-// ---- Touch (FT3168 via vendored minimal I2C reader) ----
+// ---- Touch (minimal inline I2C reader; chip varies by board revision) ----
+// Both controllers share the FocalTech-style data layout at regs 0x02..0x06,
+// so only the I2C address differs. Revision is detected in board_init().
 #define TP_INT               21
-#define FT3168_ADDR          0x38
+#define FT3168_ADDR          0x38   // original revision
+#define CST816_ADDR          0x15   // later (CO5300) revision
 
 // ---- PMU ----
 #define AXP2101_ADDR         0x34

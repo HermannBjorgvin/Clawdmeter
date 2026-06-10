@@ -1,0 +1,6 @@
+# Windows-only dependency manifest for claude_usage_daemon_windows.py
+# The macOS/Linux daemons manage their own dependencies separately.
+bleak
+httpx
+pystray
+Pillow

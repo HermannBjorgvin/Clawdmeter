@@ -211,6 +211,16 @@ static lv_obj_t* battery_img;
 static lv_obj_t* logo_img;
 static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 
+// ---- Live-data freshness → which usage sub-view to show ----
+// usage panels when data is flowing, an idle "Zzz" screen when the host is
+// connected but no usage update landed within DATA_FRESH_MS, the pairing hint
+// when BLE is down. Re-evaluated every loop in ui_tick_anim().
+static lv_obj_t* idle_group;            // the "Zzz" idle screen
+static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage update landed
+static bool      data_received = false; // any valid update since boot
+static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage
+static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within this window (daemon sends ~60s)
+
 // ---- Shared ----
 static lv_image_dsc_t logo_dsc;
 static screen_t current_screen = SCREEN_USAGE;
@@ -465,6 +475,28 @@ static void build_pair_group(lv_obj_t* parent) {
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);  // ui_update_ble_status decides
 }
 
+// Idle "Zzz" screen — shown when the host is connected but no usage update has
+// landed recently (token expired, daemon down, host asleep…). Full-screen, like
+// the pairing hint, so we never render hours-old numbers as if they were live.
+static void build_idle_group(lv_obj_t* parent) {
+    idle_group = lv_obj_create(parent);
+    lv_obj_set_size(idle_group, L.scr_w, L.scr_h - L.content_y);
+    lv_obj_set_pos(idle_group, 0, L.content_y);
+    lv_obj_set_style_bg_opa(idle_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(idle_group, 0, 0);
+    lv_obj_set_style_pad_all(idle_group, 0, 0);
+    lv_obj_clear_flag(idle_group, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(idle_group, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    // A shrunk-down sleeping creature (reused claudepix "expression sleep" art)
+    // sits between the header and the status line; the animated "Listening…"
+    // status line carries the words, so no extra text is needed here.
+    lv_obj_t* creature = splash_mini_create(idle_group, "expression sleep", 160);
+    if (creature) lv_obj_align(creature, LV_ALIGN_CENTER, 0, -20);
+
+    lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
+}
+
 static void init_usage_screen(lv_obj_t* scr) {
     usage_container = lv_obj_create(scr);
     lv_obj_set_size(usage_container, L.scr_w, L.scr_h);
@@ -506,6 +538,7 @@ static void init_usage_screen(lv_obj_t* scr) {
                      &bar_weekly, &lbl_weekly_reset);
 
     build_pair_group(usage_container);
+    build_idle_group(usage_container);
 
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
@@ -595,6 +628,8 @@ void ui_init(void) {
 
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
+    last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
+    data_received = true;
 
     int s_pct = (int)(data->session_pct + 0.5f);
 
@@ -615,8 +650,33 @@ void ui_update(const UsageData* data) {
     lv_label_set_text(lbl_weekly_reset, buf);
 }
 
+// Pick the usage-view sub-screen: pairing hint (BLE down), the idle "Zzz" screen
+// (connected but data has gone stale), or the live usage panels. Only re-lays-out
+// on an actual change. The animated status line stays visible everywhere — it
+// reads "Listening…" on the idle screen, keeping it alive rather than frozen.
+static void update_view_state(void) {
+    if (!usage_group || !pair_group || !idle_group) return;
+    int v;
+    if (!s_ble_connected) {
+        v = 0;  // pairing hint
+    } else if (data_received && (lv_tick_get() - last_data_ms) < DATA_FRESH_MS) {
+        v = 2;  // live usage
+    } else {
+        v = 1;  // idle / Zzz
+    }
+    if (v == view_state) return;
+    view_state = v;
+    lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group : usage_group,
+                      LV_OBJ_FLAG_HIDDEN);
+}
+
 void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
+    update_view_state();
+    if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
 
     uint32_t now = lv_tick_get();
 
@@ -637,7 +697,9 @@ void ui_tick_anim(void) {
     // Status text by priority. Whimsical messages only when connected & settled.
     const char* text;
     if (!s_ble_connected) {
-        text = ble_has_bonds() ? "Disconnected" : "Pairing";
+        text = "Waiting";              // advertising / waiting for a host connection
+    } else if (view_state == 1) {      // idle — alternate so it reads as alive AND data-less
+        text = (anim_msg_idx & 1) ? "No data" : "Listening";
     } else if (now - connected_at_ms < 5000) {
         text = "Connected";
     } else {
@@ -704,19 +766,9 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
     bool was_connected = s_ble_connected;
     s_ble_connected = (state == BLE_STATE_CONNECTED);
 
-    // Connected → usage panels; otherwise → pairing hint. The bottom status
-    // line carries the live state word (Connected / Disconnected / Pairing).
-    if (usage_group && pair_group) {
-        if (s_ble_connected) {
-            lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-
     if (s_ble_connected && !was_connected) connected_at_ms = lv_tick_get();
+    // pair / idle / usage — picked from connection + data freshness.
+    update_view_state();
 }
 
 void ui_update_battery(int percent, bool charging) {
