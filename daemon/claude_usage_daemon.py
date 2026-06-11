@@ -31,10 +31,11 @@ TICK = 5
 SCAN_TIMEOUT = 8.0
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
-# Linux: token lives in ~/.claude/.credentials.json.
+# Linux/Windows: token lives in ~/.claude/.credentials.json.
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
+
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
@@ -86,6 +87,58 @@ def _extract_access_token(blob: str) -> str | None:
     return None
 
 
+def _is_token_expired(credentials: dict) -> bool:
+    oauth = credentials.get("claudeAiOauth", {})
+    expires_at = oauth.get("expiresAt")
+    if not expires_at:
+        return False
+    # expiresAt is in milliseconds; 60s buffer before actual expiry
+    return (time.time() * 1000) > (expires_at - 60_000)
+
+
+def _find_claude_cli() -> str | None:
+    candidates = [
+        Path.home() / ".local" / "bin" / "claude.exe",
+        Path.home() / ".local" / "bin" / "claude",
+        Path("claude.exe"),
+        Path("claude"),
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p)
+    # fall back to PATH
+    import shutil
+    return shutil.which("claude")
+
+
+def _refresh_token_via_cli() -> bool:
+    """Run `claude doctor` to trigger the CLI's built-in token refresh.
+
+    `claude --version` and `claude auth status` do NOT refresh the token.
+    `claude doctor` makes a health-check API call that causes the CLI to
+    detect the expired token and use refresh_token to obtain a new one.
+    """
+    cli = _find_claude_cli()
+    if not cli:
+        log("claude CLI not found; cannot auto-refresh token")
+        return False
+    log(f"Token expired — refreshing via '{cli} doctor' ...")
+    try:
+        result = subprocess.run(
+            [cli, "doctor"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "NO_COLOR": "1"},
+        )
+        log(f"claude doctor exit={result.returncode}")
+        # Check if credentials file was actually updated
+        return True
+    except (subprocess.TimeoutExpired, OSError) as e:
+        log(f"Token refresh via claude doctor failed: {e}")
+        return False
+
+
 def _read_token_keychain() -> str | None:
     try:
         out = subprocess.run(
@@ -118,6 +171,19 @@ def _read_token_file() -> str | None:
     except OSError as e:
         log(f"Error reading credentials: {e}")
         return None
+    try:
+        credentials = json.loads(raw)
+    except json.JSONDecodeError:
+        return _extract_access_token(raw)
+    if _is_token_expired(credentials):
+        if _refresh_token_via_cli():
+            # Re-read the file — claude CLI updated it
+            try:
+                raw = CREDENTIALS_PATH.read_text()
+            except OSError:
+                pass
+        else:
+            log("Token refresh failed, trying existing token anyway")
     return _extract_access_token(raw)
 
 
