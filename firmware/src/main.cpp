@@ -11,6 +11,7 @@
 #include "usage_rate.h"
 #include "idle.h"
 #include "idle_cfg.h"
+#include "brightness.h"
 
 #include "hal/board_caps.h"
 #include "hal/display_hal.h"
@@ -186,7 +187,8 @@ void setup() {
 
     display_hal_init();
     display_hal_begin();
-    idle_init();   // takes over brightness (DISPLAY_DEFAULT_BRIGHTNESS) and starts the idle timer
+    idle_init();        // takes over panel brightness and starts the idle timer
+    brightness_init();  // load the user's saved brightness level and apply via idle
 
     power_hal_init();
     imu_hal_init();
@@ -227,6 +229,52 @@ void setup() {
 
 static ble_state_t last_ble_state = BLE_STATE_INIT;
 
+// Hold-to-pair gesture: hold the PWR button ~3s, then RELEASE → clear all BLE
+// bonds and re-advertise. Clearing on *release* (not while held) is deliberate:
+// holding to power the device OFF (AXP hardware shutdown at 8s) must not wipe
+// the bond — a power-off hold never releases before shutdown. To stop a
+// "chicken-out" release just before 8s from pairing, the gesture disarms at 6s.
+//
+//   ~1.5s long-press edge → PENDING
+//   3.0s (+1500)          → ARMED   (release from here clears bonds)
+//   6.0s (+4500)          → DISARMED (no clear; AXP powers off at 8s)
+#define PAIR_ARM_AFTER_LONG_MS    1500   // 3.0s total
+#define PAIR_DISARM_AFTER_LONG_MS 4500   // 6.0s total
+enum pair_state_t { PAIR_IDLE, PAIR_PENDING, PAIR_ARMED };
+static pair_state_t pair_state        = PAIR_IDLE;
+static uint32_t     pair_long_seen_ms = 0;
+
+static void pair_tick(void) {
+    if (pair_state == PAIR_IDLE && power_hal_pwr_long_pressed()) {
+        pair_state = PAIR_PENDING;
+        pair_long_seen_ms = millis();
+        (void)power_hal_pwr_released();  // drain any stale release edge
+        Serial.println("PWR long-press: hold to ~3s then release to pair");
+        return;
+    }
+    if (pair_state == PAIR_IDLE) return;
+
+    if (power_hal_pwr_released()) {
+        if (pair_state == PAIR_ARMED) {
+            Serial.println("Pair: released in window — clearing bonds, advertising");
+            ble_clear_bonds();
+        } else {
+            Serial.println("Pair: released too early — cancelled");
+        }
+        pair_state = PAIR_IDLE;
+        return;
+    }
+
+    uint32_t held = millis() - pair_long_seen_ms;
+    if (pair_state == PAIR_PENDING && held >= PAIR_ARM_AFTER_LONG_MS) {
+        pair_state = PAIR_ARMED;
+        Serial.println("Pair: armed — release to pair");
+    } else if (pair_state == PAIR_ARMED && held >= PAIR_DISARM_AFTER_LONG_MS) {
+        pair_state = PAIR_IDLE;  // power-off territory; don't pair
+        Serial.println("Pair: disarmed (holding toward power-off)");
+    }
+}
+
 void loop() {
     idle_tick();
     lv_timer_handler();
@@ -243,7 +291,8 @@ void loop() {
     // ---- Physical buttons ----
     //   PRIMARY   → HID Space  (Claude Code voice-mode PTT)
     //   SECONDARY → HID Shift+Tab  (mode toggle; only if the board has one)
-    //   PWR       → cycle screens; on splash, cycle animations
+    //   PWR       → on splash: cycle animations; on usage: cycle brightness;
+    //               hold ~3s + release: pairing mode
     // First press from sleep is consumed as a wake-only event by
     // idle_consume_wake_press(); the normal action fires from the second
     // press. Activity bookkeeping happens inside idle_consume_wake_press
@@ -281,10 +330,14 @@ void loop() {
 
         if (power_hal_pwr_pressed()) {
             if (!idle_consume_wake_press()) {
+                // On splash: cycle animations. On the usage view: cycle
+                // screen brightness (single non-splash view, no more screens).
                 if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
-                else                                          ui_cycle_screen();
+                else                                          brightness_cycle();
             }
         }
+
+        pair_tick();
     }
 
     ble_state_t bs = ble_get_state();

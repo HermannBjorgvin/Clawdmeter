@@ -2,7 +2,7 @@
 """Claude Usage Tracker Daemon (BLE) — macOS port of claude-usage-daemon.sh.
 
 Polls Claude API rate-limit headers and writes a JSON payload to the
-ESP32 "Claude Controller" peripheral over a custom GATT service. Uses
+ESP32 "Clawdmeter" peripheral over a custom GATT service. Uses
 bleak (CoreBluetooth backend on macOS).
 """
 
@@ -21,7 +21,7 @@ import httpx
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 
-DEVICE_NAME = "Claude Controller"
+DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
@@ -303,15 +303,17 @@ class Session:
             return False
 
 
-async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
-    """Connect to a known address and poll until disconnected or stopped.
+async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
+    """Connect to a target and poll until disconnected or stopped.
 
-    Returns True if the connection was used successfully (so the caller
-    keeps the cached address), False if the connection failed and the
-    cache should be invalidated.
+    ``target`` is either an address string (Linux) or a BLEDevice carrying
+    live CoreBluetooth details (macOS). Returns True if the connection was
+    used successfully (so the caller keeps the cached address), False if the
+    connection failed and the cache should be invalidated.
     """
-    log(f"Connecting to {address}...")
-    client = BleakClient(address)
+    display = target if isinstance(target, str) else target.address
+    log(f"Connecting to {display}...")
+    client = BleakClient(target)
     try:
         await client.connect()
     except (BleakError, asyncio.TimeoutError) as e:
@@ -376,25 +378,31 @@ async def main() -> None:
     log(f"Poll interval: {POLL_INTERVAL}s")
 
     backoff = 1
+    skip_addr: str | None = None  # macOS: a peripheral to skip for one cycle
     while not stop_event.is_set():
-        address = load_cached_address()
-        if not address:
-            address = await scan_for_device()
-            if address:
-                save_address(address)
-            else:
-                log(f"Device not found, retrying in {backoff}s...")
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=backoff)
-                except asyncio.TimeoutError:
-                    pass
-                backoff = min(backoff * 2, 60)
-                continue
+        # Apply any pending skip exactly once, then clear it so the next
+        # cycle re-tries retrieveConnected (the device may have recovered).
+        target = await discover_target(skip_addr=skip_addr)
+        skip_addr = None
+        if not target:
+            log(f"Device not found, retrying in {backoff}s...")
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+            except asyncio.TimeoutError:
+                pass
+            backoff = min(backoff * 2, 60)
+            continue
 
-        ok = await connect_and_run(address, stop_event)
+        addr = target if isinstance(target, str) else target.address
+        ok = await connect_and_run(target, stop_event)
         if not ok:
-            log("Invalidating cached address")
-            SAVED_ADDR_FILE.unlink(missing_ok=True)
+            if sys.platform == "darwin":
+                # No string cache to drop; instead skip this stale handle on
+                # the next retrieveConnected so the scan fallback is reachable.
+                skip_addr = addr
+            else:
+                log("Invalidating cached address")
+                SAVED_ADDR_FILE.unlink(missing_ok=True)
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=backoff)
             except asyncio.TimeoutError:

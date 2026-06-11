@@ -20,3 +20,7 @@ int  power_hal_battery_pct(void) { return -1; }
 bool power_hal_is_charging(void) { return false; }
 bool power_hal_is_vbus_in(void)  { return false; }
 bool power_hal_pwr_pressed(void) { return false; }
+// Hold-to-pair gesture signals. Mirror the 216 (PMU PKEY long/positive IRQs)
+// or the 1.8" (software hold-timing off a polled GPIO) port. Stub = no gesture.
+bool power_hal_pwr_long_pressed(void) { return false; }
+bool power_hal_pwr_released(void) { return false; }

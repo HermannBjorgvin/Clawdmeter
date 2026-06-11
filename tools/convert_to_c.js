@@ -25,8 +25,17 @@ function safeIdent(s) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
 
+// Brand override: claudepix renders the creature body in a lighter, pinker
+// terracotta (#CD7F6A) than Anthropic's brand terracotta. Remap it to the
+// brand color (THEME_ACCENT, #D97757) so the splash matches the brand.
+const TINT_OVERRIDE = {
+  '#cd7f6a': '#d97757',
+};
+
 function hexToRgb565(hex) {
   if (!hex || hex === 'transparent') return 0x0000;  // dark bg
+  const ov = TINT_OVERRIDE[hex.toLowerCase()];
+  if (ov) hex = ov;
   let h = hex.replace('#', '');
   if (h.length === 3) h = h.split('').map(c => c + c).join('');
   const r = parseInt(h.substr(0, 2), 16);
