@@ -33,7 +33,7 @@ if (-not $Port) {
         Where-Object { $_.FriendlyName -like '*USB*' -and $_.FriendlyName -notlike '*Bluetooth*' } |
         Select-Object -First 1
     if ($detected) {
-        $Port = ($detected.FriendlyName -match 'COM\d+') ? $Matches[0] : $null
+        if ($detected.FriendlyName -match 'COM\d+') { $Port = $Matches[0] } else { $Port = $null }
     }
     if (-not $Port) {
         Write-Host "Could not auto-detect USB serial port. Specify it manually:" -ForegroundColor Yellow
