@@ -106,8 +106,9 @@ static bool parse_json(const char* json, UsageData* out) {
 
     out->session_pct = doc["s"] | 0.0f;
     out->session_reset_mins = doc["sr"] | -1;
-    out->weekly_pct = doc["w"] | 0.0f;
-    out->weekly_reset_mins = doc["wr"] | -1;
+    out->credits_used_cents = doc["cu"] | 0;
+    out->credits_limit_cents = doc["cl"] | 0;
+    strlcpy(out->credits_currency, doc["cc"] | "USD", sizeof(out->credits_currency));
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
     out->valid = true;

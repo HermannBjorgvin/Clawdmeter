@@ -106,10 +106,10 @@ static lv_obj_t* bar_session;
 static lv_obj_t* lbl_session_pct;
 static lv_obj_t* lbl_session_label;
 static lv_obj_t* lbl_session_reset;
-static lv_obj_t* bar_weekly;
-static lv_obj_t* lbl_weekly_pct;
-static lv_obj_t* lbl_weekly_label;
-static lv_obj_t* lbl_weekly_reset;
+static lv_obj_t* bar_credits;
+static lv_obj_t* lbl_credits_pct;
+static lv_obj_t* lbl_credits_label;
+static lv_obj_t* lbl_credits_reset;
 static lv_obj_t* lbl_anim;
 
 // ---- Bluetooth screen widgets ----
@@ -321,9 +321,9 @@ static void init_usage_screen(lv_obj_t* scr) {
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
     make_usage_panel(usage_container,
-                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
-                     &lbl_weekly_pct, &lbl_weekly_label,
-                     &bar_weekly, &lbl_weekly_reset);
+                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Credits",
+                     &lbl_credits_pct, &lbl_credits_label,
+                     &bar_credits, &lbl_credits_reset);
 
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
@@ -459,13 +459,27 @@ void ui_update(const UsageData* data) {
     format_reset_time(data->session_reset_mins, buf, sizeof(buf));
     lv_label_set_text(lbl_session_reset, buf);
 
-    int w_pct = (int)(data->weekly_pct + 0.5f);
-    lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
-    lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
+    if (data->credits_limit_cents > 0) {
+        float c_pct = (float)data->credits_used_cents / data->credits_limit_cents * 100.0f;
+        int c_pct_i = (int)(c_pct + 0.5f);
 
-    format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
-    lv_label_set_text(lbl_weekly_reset, buf);
+        // Show used amount as integer with currency code in pill
+        int used_whole = data->credits_used_cents / 100;
+        lv_label_set_text_fmt(lbl_credits_pct, "%d", used_whole);
+        lv_label_set_text(lbl_credits_label, data->credits_currency);
+
+        lv_bar_set_value(bar_credits, c_pct_i, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_credits, pct_color(c_pct), LV_PART_INDICATOR);
+
+        int limit_whole = data->credits_limit_cents / 100;
+        snprintf(buf, sizeof(buf), "of %d/mo (%d%%)", limit_whole, c_pct_i);
+        lv_label_set_text(lbl_credits_reset, buf);
+    } else {
+        lv_label_set_text(lbl_credits_pct, "---");
+        lv_label_set_text(lbl_credits_label, "Credits");
+        lv_bar_set_value(bar_credits, 0, LV_ANIM_OFF);
+        lv_label_set_text(lbl_credits_reset, "Not available");
+    }
 }
 
 void ui_tick_anim(void) {
