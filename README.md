@@ -10,6 +10,13 @@ Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
 | :-----------------------------------: | :----------------------------------------------: |
 | ![Usage meter](assets/demo.jpeg) | ![Clawd animation screen](assets/demo.gif) |
 
+### ESP32-C6 build — monthly credit usage display
+
+|                                                                 |                                                                    |
+| :-------------------------------------------------------------: | :----------------------------------------------------------------: |
+| ![Device close-up](photos-06-2026/MVIMG_20260611_201856.jpg)   | ![Device in context](photos-06-2026/MVIMG_20260611_201833.jpg)    |
+| ESP32-C6 showing 5h utilization + monthly EUR credits           | Live on desk while finding the `/api/oauth/usage` endpoint         |
+
 The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaanbuilds](https://x.com/amaanbuilds)'s library of pixel-art Clawd sprites, check it out, it's lovely.
 
 ## Screens
