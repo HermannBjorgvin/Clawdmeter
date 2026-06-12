@@ -9,7 +9,7 @@ static const BoardCaps caps = {
     .has_rotation = false,
     .has_battery  = false,
     .has_imu      = false,
-    .has_touch    = false,
+    .has_touch    = true,
 };
 
 const BoardCaps& board_caps(void) { return caps; }
