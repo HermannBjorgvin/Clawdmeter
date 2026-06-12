@@ -3,6 +3,7 @@
 #include <lvgl.h>
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
+#include <sys/time.h>
 
 #include "data.h"
 #include "ui.h"
@@ -112,6 +113,16 @@ static bool parse_json(const char* json, UsageData* out) {
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
     out->valid = true;
+
+    // Optional Unix timestamp from daemon — syncs the ESP32 RTC so boards
+    // without an external RTC can display accurate wall-clock time.
+    uint32_t ts = doc["t"] | (uint32_t)0;
+    if (ts > 0) {
+        struct timeval tv = {};
+        tv.tv_sec = (time_t)ts;
+        settimeofday(&tv, NULL);
+    }
+
     return true;
 }
 
@@ -204,7 +215,7 @@ void setup() {
     buf2 = (uint16_t*)heap_caps_malloc(W * BUF_LINES * 2, LV_BUF_CAPS);
 
     lv_display_t* disp = lv_display_create(W, H);
-    lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
+    lv_display_set_color_format(disp, display_hal_color_format());
     lv_display_set_flush_cb(disp, my_flush_cb);
     lv_display_set_buffers(disp, buf1, buf2, W * BUF_LINES * 2,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);

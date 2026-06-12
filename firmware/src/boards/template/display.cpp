@@ -57,3 +57,6 @@ void display_hal_round_area(int32_t* x1, int32_t* y1, int32_t* x2, int32_t* y2) 
     *x2 = *x2 | 1;
     *y2 = *y2 | 1;
 }
+
+// TODO: return LV_COLOR_FORMAT_RGB565_SWAPPED if your panel has a byte-swapped bus.
+lv_color_format_t display_hal_color_format(void) { return LV_COLOR_FORMAT_RGB565; }
