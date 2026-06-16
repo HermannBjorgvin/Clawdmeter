@@ -14,7 +14,9 @@ LV_FONT_DECLARE(font_styrene_24);
 LV_FONT_DECLARE(font_styrene_20);
 LV_FONT_DECLARE(font_styrene_16);
 LV_FONT_DECLARE(font_styrene_14);
+LV_FONT_DECLARE(font_styrene_12);
 LV_FONT_DECLARE(font_mono_32);
+LV_FONT_DECLARE(font_mono_18);
 
 // Layout values computed from the active board's geometry. Populated once
 // in ui_init() and treated as const for the rest of the program. Adding a
@@ -26,12 +28,20 @@ struct Layout {
     int16_t title_y;
     int16_t content_y;
     int16_t content_w;
+    int16_t title_x_off;
+    int16_t logo_scale;   // 256 = 100% (LV_SCALE_NONE)
 
     // Usage screen
     int16_t usage_panel_h;
     int16_t usage_panel_gap;
     int16_t usage_bar_y;
+    int16_t usage_bar_h;
     int16_t usage_reset_y;
+    const lv_font_t* usage_title_font;
+    const lv_font_t* usage_pct_font;
+    const lv_font_t* usage_pill_font;
+    const lv_font_t* usage_reset_font;
+    const lv_font_t* usage_status_font;
 
     // Bluetooth screen
     int16_t bt_info_panel_h;
@@ -53,6 +63,8 @@ static void compute_layout(const BoardCaps& c) {
     L.scr_h = c.height;
     L.margin = 20;
     L.title_y = 30;
+    L.title_x_off = 16;
+    L.logo_scale = 256;
 
     if (c.height >= 460) {
         // Large layout — tuned for 480x480 (AMOLED-2.16).
@@ -60,7 +72,13 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_h = 150;
         L.usage_panel_gap = 16;
         L.usage_bar_y = 56;
+        L.usage_bar_h = 24;
         L.usage_reset_y = 94;
+        L.usage_title_font  = &font_tiempos_56;
+        L.usage_pct_font    = &font_styrene_48;
+        L.usage_pill_font   = &font_styrene_28;
+        L.usage_reset_font  = &font_styrene_28;
+        L.usage_status_font = &font_mono_32;
         L.bt_info_panel_h = 160;
         L.bt_reset_zone_h = 110;
         L.bt_title_font    = &font_tiempos_56;
@@ -68,13 +86,19 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_28;
         L.bt_credit_1_font = &font_styrene_24;
         L.bt_credit_2_font = &font_styrene_20;
-    } else {
+    } else if (c.width >= 300) {
         // Compact layout — tuned for 368x448 (AMOLED-1.8).
         L.content_y = 85;
         L.usage_panel_h = 130;
         L.usage_panel_gap = 12;
         L.usage_bar_y = 48;
+        L.usage_bar_h = 24;
         L.usage_reset_y = 78;
+        L.usage_title_font  = &font_tiempos_56;
+        L.usage_pct_font    = &font_styrene_48;
+        L.usage_pill_font   = &font_styrene_28;
+        L.usage_reset_font  = &font_styrene_28;
+        L.usage_status_font = &font_mono_32;
         L.bt_info_panel_h = 140;
         L.bt_reset_zone_h = 90;
         L.bt_title_font    = &font_tiempos_34;
@@ -82,6 +106,32 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_20;
         L.bt_credit_1_font = &font_styrene_16;
         L.bt_credit_2_font = &font_styrene_14;
+    } else {
+        // Tiny layout — tuned for 240x284 (LCD-1.83). Narrow + short: title,
+        // percentages, pills and status line all drop a size or two, and the
+        // two usage panels shrink to fit above the bottom status line.
+        L.margin = 14;
+        L.title_y = 14;
+        L.title_x_off = 0;
+        L.logo_scale = 140;   // shrink the 80x80 logo to ~44px on the narrow screen
+        L.content_y = 54;
+        L.usage_panel_h = 88;
+        L.usage_panel_gap = 8;
+        L.usage_bar_y = 30;
+        L.usage_bar_h = 18;
+        L.usage_reset_y = 48;
+        L.usage_title_font  = &font_tiempos_34;
+        L.usage_pct_font    = &font_styrene_28;
+        L.usage_pill_font   = &font_styrene_14;
+        L.usage_reset_font  = &font_styrene_16;
+        L.usage_status_font = &font_mono_18;
+        L.bt_info_panel_h = 110;
+        L.bt_reset_zone_h = 70;
+        L.bt_title_font    = &font_tiempos_34;
+        L.bt_status_font   = &font_styrene_28;
+        L.bt_device_font   = &font_styrene_16;
+        L.bt_credit_1_font = &font_styrene_14;
+        L.bt_credit_2_font = &font_styrene_12;
     }
 
     L.content_w = L.scr_w - 2 * L.margin;
@@ -254,7 +304,7 @@ static void init_icon_dsc_rgb565a8(lv_image_dsc_t* dsc, int w, int h, const uint
 static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_font(lbl, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl, L.usage_pill_font, 0);
     lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
     lv_obj_set_style_bg_color(lbl, COL_BAR_BG, 0);
     lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
@@ -283,18 +333,18 @@ static void make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "---%");
-    lv_obj_set_style_text_font(*out_pct, &font_styrene_48, 0);
+    lv_obj_set_style_text_font(*out_pct, L.usage_pct_font, 0);
     lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
     lv_obj_set_pos(*out_pct, 0, 0);
 
     *out_pill = make_pill(panel, pill_text);
     lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
 
-    *out_bar = make_bar(panel, 0, L.usage_bar_y, L.content_w - 32, 24);
+    *out_bar = make_bar(panel, 0, L.usage_bar_y, L.content_w - 32, L.usage_bar_h);
 
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
-    lv_obj_set_style_text_font(*out_reset, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(*out_reset, L.usage_reset_font, 0);
     lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
     lv_obj_set_pos(*out_reset, 0, L.usage_reset_y);
 }
@@ -366,9 +416,9 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
-    lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_font(lbl_title, L.usage_title_font, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, L.title_x_off, L.title_y);
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
@@ -395,7 +445,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
-    lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
+    lv_obj_set_style_text_font(lbl_anim, L.usage_status_font, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
 }
@@ -421,6 +471,8 @@ void ui_init(void) {
 
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
+    lv_image_set_pivot(logo_img, 0, 0);
+    lv_image_set_scale(logo_img, L.logo_scale);
     lv_obj_set_pos(logo_img, L.margin, L.title_y - 10);
 
     battery_img = lv_image_create(scr);
