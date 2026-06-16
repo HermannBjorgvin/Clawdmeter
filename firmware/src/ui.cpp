@@ -15,6 +15,7 @@ LV_FONT_DECLARE(font_styrene_20);
 LV_FONT_DECLARE(font_styrene_16);
 LV_FONT_DECLARE(font_styrene_14);
 LV_FONT_DECLARE(font_mono_32);
+LV_FONT_DECLARE(font_mono_18);
 
 // Layout values computed from the active board's geometry. Populated once
 // in ui_init() and treated as const for the rest of the program. Adding a
@@ -24,6 +25,10 @@ struct Layout {
     int16_t scr_w, scr_h;
     int16_t margin;
     int16_t title_y;
+    int16_t title_x;        // horizontal nudge for the centered title
+    bool    show_title;     // false on round (the logo takes the header slot)
+    int16_t logo_x, logo_y; // logo position (corner on square, centred on round)
+    const lv_font_t* title_font;  // small under the logo on round
     int16_t content_y;
     int16_t content_w;
 
@@ -36,6 +41,7 @@ struct Layout {
     // Bluetooth screen
     int16_t bt_info_panel_h;
     int16_t bt_reset_zone_h;
+    const lv_font_t* anim_font;     // bottom status line (long words must fit the chord)
     const lv_font_t* bt_title_font;
     const lv_font_t* bt_status_font;
     const lv_font_t* bt_device_font;
@@ -53,8 +59,44 @@ static void compute_layout(const BoardCaps& c) {
     L.scr_h = c.height;
     L.margin = 20;
     L.title_y = 30;
+    L.title_x = 16;      // nudged right to balance the top-left corner logo
+    L.show_title = true;
+    L.title_font = &font_tiempos_56;
+    L.logo_x = L.margin;          // top-left corner (square boards)
+    L.logo_y = L.title_y - 10;
+    L.anim_font = &font_mono_32;
 
-    if (c.height >= 460) {
+    // Round screen (AMOLED-1.43, 466x466 cut to a circle). The square 480 layout
+    // pushes card corners, pills, the corner logo and the battery under the
+    // bezel. Inset everything inside the circle: narrower cards, vertically
+    // centred stack, centred title, and no corner logo (the battery is already
+    // hidden on this no-battery board).
+    bool round = (c.width == 466 && c.height == 466);
+
+    if (round) {
+        L.margin = 52;
+        L.content_y = 118;
+        L.usage_panel_h = 126;
+        L.usage_panel_gap = 8;
+        L.usage_bar_y = 50;
+        L.usage_reset_y = 74;
+        // Header: logo centred at the top with a small "Usage" tucked under it,
+        // then the (shorter, narrower) cards centred below.
+        L.logo_x = (c.width - LOGO_WIDTH) / 2;
+        L.logo_y = 6;
+        L.show_title = true;
+        L.title_x = 0;                  // centred under the logo
+        L.title_y = 92;
+        L.title_font = &font_styrene_24;
+        L.anim_font = &font_mono_18;  // long status words must fit the narrow bottom chord
+        L.bt_info_panel_h = 150;
+        L.bt_reset_zone_h = 100;
+        L.bt_title_font    = &font_tiempos_56;
+        L.bt_status_font   = &font_styrene_48;
+        L.bt_device_font   = &font_styrene_28;
+        L.bt_credit_1_font = &font_styrene_24;
+        L.bt_credit_2_font = &font_styrene_20;
+    } else if (c.height >= 460) {
         // Large layout — tuned for 480x480 (AMOLED-2.16).
         L.content_y = 100;
         L.usage_panel_h = 150;
@@ -366,9 +408,10 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
-    lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, L.title_x, L.title_y);
+    if (!L.show_title) lv_obj_add_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
@@ -395,7 +438,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
-    lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
+    lv_obj_set_style_text_font(lbl_anim, L.anim_font, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
 }
@@ -419,9 +462,11 @@ void ui_init(void) {
         lv_obj_add_event_cb(splash_get_root(), global_click_cb, LV_EVENT_CLICKED, NULL);
     }
 
+    // Header logo — top-left corner on square boards, centred at the top on the
+    // round screen (where it stands in for the title text).
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
-    lv_obj_set_pos(logo_img, L.margin, L.title_y - 10);
+    lv_obj_set_pos(logo_img, L.logo_x, L.logo_y);
 
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
@@ -516,8 +561,12 @@ void ui_tick_anim(void) {
 static screen_t prev_non_splash_screen = SCREEN_USAGE;
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
-    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-    else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    // No PMU/fuel-gauge on this board → never show the indicator (it would just
+    // sit in the clipped corner). Also hidden on the splash.
+    if (!board_caps().has_battery || current_screen == SCREEN_SPLASH)
+        lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    else
+        lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void global_click_cb(lv_event_t* e) {
