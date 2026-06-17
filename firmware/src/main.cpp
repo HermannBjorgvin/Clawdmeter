@@ -110,6 +110,8 @@ static bool parse_json(const char* json, UsageData* out) {
     out->weekly_pct = doc["w"] | 0.0f;
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
+    strlcpy(out->clock, doc["t"] | "", sizeof(out->clock));
+    for (int i = 0; i < 7; i++) out->day7[i] = (uint8_t)(doc["d7"][i] | 0);
     out->ok = doc["ok"] | false;
     out->valid = true;
     return true;
