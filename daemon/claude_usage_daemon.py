@@ -271,6 +271,56 @@ async def discover_target(skip_addr: str | None = None):
     return address
 
 
+CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+
+
+def seven_day_usage() -> list:
+    """Total tokens per local day for the last 7 days, normalized 0-100
+    (busiest day = 100). Index 6 = today. Parsed from Claude Code's local
+    JSONL logs under ~/.claude/projects. Returns [0]*7 on any failure."""
+    import datetime
+    today = datetime.date.today()
+    idx = {(today - datetime.timedelta(days=6 - i)).isoformat(): i for i in range(7)}
+    totals = [0] * 7
+    cutoff = time.time() - 8 * 86400
+    try:
+        for f in CLAUDE_PROJECTS.rglob("*.jsonl"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    continue
+            except OSError:
+                continue
+            with f.open(errors="ignore") as fh:
+                for line in fh:
+                    if '"usage"' not in line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    ts = rec.get("timestamp")
+                    usage = (rec.get("message") or {}).get("usage")
+                    if not ts or not usage:
+                        continue
+                    try:
+                        day = datetime.datetime.fromisoformat(
+                            ts.replace("Z", "+00:00")).astimezone().date().isoformat()
+                    except ValueError:
+                        continue
+                    i = idx.get(day)
+                    if i is None:
+                        continue
+                    totals[i] += (usage.get("input_tokens", 0)
+                                  + usage.get("output_tokens", 0)
+                                  + usage.get("cache_creation_input_tokens", 0)
+                                  + usage.get("cache_read_input_tokens", 0))
+    except Exception as e:
+        log(f"7-day scan failed: {e}")
+        return [0] * 7
+    mx = max(totals) or 1
+    return [round(t * 100 / mx) for t in totals]
+
+
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
@@ -311,6 +361,8 @@ async def poll_api(token: str) -> dict | None:
         "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
         "ok": True,
     }
+    payload["t"] = time.strftime("%H:%M:%S", time.localtime())  # seconds → device anchors minute flip correctly
+    payload["d7"] = seven_day_usage()
     return payload
 
 
