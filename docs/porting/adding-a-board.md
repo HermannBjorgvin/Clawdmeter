@@ -13,9 +13,12 @@ At minimum:
 - An **ESP32-S3** (other ESP32 family members may work; this is what the
   upstream firmware is tested on). OPI PSRAM is **required** — partial
   flush buffers and the splash canvas are allocated from PSRAM.
-- A QSPI **AMOLED panel** with a driver supported by
-  [GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX)
-  (CO5300, SH8601, NV3041A, etc.). Other interfaces aren't supported yet.
+- A display panel with a driver supported by
+  [GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX):
+  a **QSPI AMOLED** (CO5300, SH8601, NV3041A, …) or a **4-wire SPI TFT**
+  (e.g. ST7789, as on the LCD-1.83 port). The board's `display.cpp` builds
+  whatever `Arduino_DataBus` + driver it needs; shared code only calls the
+  `display_hal_*` functions.
 - A **touch controller** over I2C. The HAL just needs init + read; you
   can use any driver you can compile.
 - A **primary button** (typically the BOOT/GPIO 0 push button).
@@ -47,7 +50,7 @@ Optional:
 
    | File              | Reference port (start here)                                    |
    |-------------------|----------------------------------------------------------------|
-   | `display.cpp`     | `boards/waveshare_amoled_216/display.cpp` (with CPU rotation) or `_18/display.cpp` (no rotation) |
+   | `display.cpp`     | `boards/waveshare_amoled_216/display.cpp` (QSPI + CPU rotation), `_18/display.cpp` (QSPI, no rotation), or `waveshare_lcd_183/display.cpp` (4-wire SPI ST7789 + PWM backlight) |
    | `touch.cpp`       | `_216/touch.cpp` (library-based) or `_18/touch.cpp` (vendored I2C reader) |
    | `input.cpp`       | `_216/input.cpp` (two buttons) or `_18/input.cpp` (one button) |
    | `power.cpp`       | `_216/power.cpp` (PMU IRQ) or `_18/power.cpp` (PMU + IO expander button) |
