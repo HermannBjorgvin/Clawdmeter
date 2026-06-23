@@ -46,5 +46,6 @@
 #define BOARD_HAS_SECONDARY_BUTTON 0   // TODO
 #define BOARD_HAS_ROTATION         0   // TODO: IMU-driven CPU rotation in display.cpp
 #define BOARD_HAS_IMU              0   // TODO
+#define BOARD_HAS_TOUCH            1   // most boards have touch; set 0 for touchless (e-paper)
 #define BOARD_HAS_BATTERY          0   // TODO
 #define BOARD_HAS_IO_EXPANDER      0   // TODO

@@ -290,7 +290,7 @@ void loop() {
     // ---- Physical buttons ----
     //   PRIMARY   → HID Space  (Claude Code voice-mode PTT)
     //   SECONDARY → HID Shift+Tab  (mode toggle; only if the board has one)
-    //   PWR       → on splash: cycle animations; on usage: cycle brightness;
+    //   PWR       → on splash: cycle animations (touch boards) or jump to usage (touchless); on usage: cycle brightness;
     //               hold ~3s + release: pairing mode
     // First press from sleep is consumed as a wake-only event by
     // idle_consume_wake_press(); the normal action fires from the second
@@ -331,8 +331,12 @@ void loop() {
             if (!idle_consume_wake_press()) {
                 // On splash: cycle animations. On the usage view: cycle
                 // screen brightness (single non-splash view, no more screens).
-                if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
-                else                                          brightness_cycle();
+                if (ui_get_current_screen() == SCREEN_SPLASH) {
+                    if (board_caps().has_touch) splash_next();
+                    else                        ui_show_screen(SCREEN_USAGE);
+                } else {
+                    brightness_cycle();
+                }
             }
         }
 
