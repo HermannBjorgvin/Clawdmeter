@@ -14,6 +14,7 @@ import logging.handlers
 import os
 import re
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -21,9 +22,10 @@ from pathlib import Path
 
 import httpx
 from bleak import BleakClient, BleakScanner
+from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 
-DEVICE_NAME = "Claude Controller"
+DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
@@ -39,7 +41,9 @@ ZOMBIE_BREAK_LIMIT = 1     # D-03: consecutive write failures before abandoning 
 RECONNECT_BACKOFF_CAP = 8  # D-05: fast-reconnect cap (seconds); keeps stacked retries inside 120s SLA
                            # ~5–10s band per CONTEXT.md Claude's Discretion; 8 chosen as middle ground
 
-# Optional reset chime. Config lives under the same Clawdmeter dir as daemon.log.
+# Optional reset chime.
+# Optional clock display. 
+# Config lives under the same Clawdmeter dir as daemon.log.
 CONFIG_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "config"
 
 API_URL = "https://api.anthropic.com/v1/messages"
@@ -108,11 +112,15 @@ class AuthError(Exception):
     must NOT be mislabeled as a token problem (SC#5: a boot-time `getaddrinfo
     failed` DNS blip wrongly fired the 'token expired' toast)."""
 
-
 def read_chime_setting() -> str:
     """Read the `chime` option from the config file. One of: off|on.
 
     Defaults to "off" so the device stays silent until the user opts in.
+    """
+def read_clock_setting() -> str:
+    """Read the `clock` option from the config file. One of: off|auto|12|24.
+
+    Defaults to "off" so existing setups keep showing "Usage" until opted in.
     """
     try:
         if CONFIG_FILE.exists():
@@ -124,6 +132,9 @@ def read_chime_setting() -> str:
                 if key.strip().lower() == "chime":
                     val = val.strip().lower()
                     if val in ("off", "on"):
+                if key.strip().lower() == "clock":
+                    val = val.strip().lower()
+                    if val in ("off", "auto", "12", "24"):
                         return val
     except OSError:
         pass
@@ -135,6 +146,26 @@ def add_chime_field(payload: dict) -> None:
     sound the session-reset chime. Omitted entirely when chime is off."""
     if read_chime_setting() == "on":
         payload["c"] = 1
+def detect_hour_format() -> int:
+    """Best-effort 12h/24h detection on Windows via the registry. Returns 12 or 24."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\International") as k:
+            # iTime: "1" = 24-hour, "0" = 12-hour.
+            val, _ = winreg.QueryValueEx(k, "iTime")
+            return 24 if str(val).strip() == "1" else 12
+    except (ImportError, OSError):
+        return 24
+
+
+def add_clock_fields(payload: dict) -> None:
+    """Add "t" (local wall-clock epoch) + "tf" (12|24) when the config opts in."""
+    clock = read_clock_setting()
+    if clock == "off":
+        return
+    tf = 24 if clock == "24" else 12 if clock == "12" else detect_hour_format()
+    payload["t"] = int(time.time()) + time.localtime().tm_gmtoff
+    payload["tf"] = tf
 
 
 async def poll_api(token: str) -> dict | None:
@@ -185,6 +216,7 @@ async def poll_api(token: str) -> dict | None:
         "ok": True,
     }
     add_chime_field(payload)   # adds "c":1 iff the config opts in
+    add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
     return payload
 
 
@@ -195,6 +227,86 @@ async def scan_for_device():
     if device:
         log(f"Found: {device.address}")
     return device  # BLEDevice or None — NOT an address string
+
+
+def _mac_from_pnp_instance_id(instance_id: str) -> str | None:
+    """Recover a canonical BLE MAC ("AA:BB:CC:DD:EE:FF") from a PnP instance id.
+
+    Windows encodes a paired BLE device's address in its PnP instance id as a
+    12-hex run after a ``DEV_`` token, e.g.::
+
+        BTHLE\\DEV_98A316A5D706\\7&B8081D1&0&98A316A5D706  ->  98:A3:16:A5:D7:06
+
+    Returns None when no ``DEV_<12 hex>`` token is present. Pure — the
+    subprocess that produces the instance id lives in discover_bonded_address().
+    """
+    m = re.search(r"DEV_([0-9A-Fa-f]{12})(?![0-9A-Fa-f])", instance_id)
+    if not m:
+        return None
+    h = m.group(1).upper()
+    return ":".join(h[i:i + 2] for i in range(0, 12, 2))
+
+
+def discover_bonded_address() -> str | None:
+    """Return the BLE address of the bonded Clawdmeter, or None.
+
+    A device that is paired AND connected to Windows stops advertising, so
+    BleakScanner can't see it (the steady state once paired — see
+    README-windows.md). WinRT can still connect to it directly by address, so
+    we recover that address from the OS:
+
+    1. CLAWDMETER_BLE_ADDRESS env override (skips discovery — testing / pinning).
+    2. Windows PnP table, filtered to the device's FriendlyName.
+
+    Non-Windows or any failure returns None so the caller falls back to scanning.
+    """
+    if override := os.environ.get("CLAWDMETER_BLE_ADDRESS"):
+        return override.strip().upper()
+    if sys.platform != "win32":
+        return None
+    command = (
+        "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | "
+        f"Where-Object {{ $_.FriendlyName -eq '{DEVICE_NAME}' }} | "
+        "Select-Object -ExpandProperty InstanceId"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"Bonded-address lookup failed: {e}")
+        return None
+    for line in result.stdout.splitlines():
+        if mac := _mac_from_pnp_instance_id(line):
+            return mac
+    return None
+
+
+async def acquire_target():
+    """Return a connectable handle for the Clawdmeter, or None.
+
+    Tries an advertisement scan first (works on a fresh boot before the device
+    is bonded-and-connected), then falls back to the bonded address (the steady
+    state, where the device is connected to Windows and no longer advertising).
+    Returns a BLEDevice, an address string, or None.
+    """
+    device = await scan_for_device()
+    if device:
+        return device
+    address = discover_bonded_address()
+    if not address:
+        return None
+    log(f"Not advertising; connecting to bonded address {address}")
+    # CRITICAL: hand BleakClient a BLEDevice, not the bare address string. WinRT's
+    # connect() resolves a bare string via an advertisement scan (find_device_by_address)
+    # — which always fails for a bonded device that has stopped advertising, the very
+    # case we are handling. A BLEDevice sets _device_info directly, so WinRT connects
+    # via from_bluetooth_address_with_bluetooth_address_type_async and skips the scan.
+    return BLEDevice(address, DEVICE_NAME, None)
 
 
 class Session:
@@ -355,8 +467,12 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
     """Connect to device and poll until disconnected or stopped.
 
     Returns True if at least one successful write occurred.
+
+    `device` is a BLEDevice — either from an advertisement scan or built from the
+    bonded address by acquire_target(). The getattr keeps the log line robust if a
+    bare address string is ever passed in.
     """
-    log(f"Connecting to {device.address}...")
+    log(f"Connecting to {getattr(device, 'address', device)}...")
     # D-01: retry wrapper — defeats WinRT post-wake failure modes
     # (Could not get GATT services: Unreachable, stale is_connected).
     # Rebuild a fresh BleakClient each attempt (locked D-05 recipe).
@@ -511,7 +627,7 @@ async def main(tray_state=None) -> None:
     search_backoff = 1     # caps at 60s — gentle, for a device that is genuinely absent/off
     reconnect_backoff = 1  # caps at RECONNECT_BACKOFF_CAP — fast, to clear the 120s SLA after a drop
     while not stop_event.is_set():
-        device = await scan_for_device()
+        device = await acquire_target()
         if not device:
             # Slow-search regime: device was not found by scan — back off gently
             if tray_state:

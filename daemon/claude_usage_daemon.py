@@ -11,6 +11,7 @@ import getpass
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -29,6 +30,7 @@ REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 POLL_INTERVAL = 60
 TICK = 5
 SCAN_TIMEOUT = 8.0
+CONNECT_TIMEOUT = 20.0
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
@@ -189,7 +191,7 @@ async def _get_cb_manager():
 
 
 async def retrieve_connected_macos(skip_addr: str | None = None):
-    """Return a BLEDevice for a system-connected 'Claude Controller', or None.
+    """Return a BLEDevice for a system-connected 'Clawdmeter', or None.
 
     Two-step lookup, strongest signal first:
 
@@ -278,6 +280,12 @@ def read_chime_setting() -> str:
     Defaults to "off" (the device stays silent) so existing setups are
     unaffected until the user opts in.
     """
+def read_clock_setting() -> str:
+    """Read the `clock` option from the config file. One of: off|auto|12|24.
+
+    Defaults to "off" (no clock; the device keeps showing "Usage") so existing
+    setups are unaffected until the user opts in.
+    """
     try:
         if CONFIG_FILE.exists():
             for line in CONFIG_FILE.read_text().splitlines():
@@ -288,6 +296,9 @@ def read_chime_setting() -> str:
                 if key.strip().lower() == "chime":
                     val = val.strip().lower()
                     if val in ("off", "on"):
+                if key.strip().lower() == "clock":
+                    val = val.strip().lower()
+                    if val in ("off", "auto", "12", "24"):
                         return val
     except OSError:
         pass
@@ -299,6 +310,42 @@ def add_chime_field(payload: dict) -> None:
     sound the session-reset chime. Omitted entirely when chime is off."""
     if read_chime_setting() == "on":
         payload["c"] = 1
+def detect_hour_format() -> int:
+    """Best-effort 12h/24h detection for the host. Returns 12 or 24 (default 24)."""
+    # macOS: the explicit System Settings toggle lives in NSGlobalDomain.
+    for key, result in (("AppleICUForce24HourTime", 24), ("AppleICUForce12HourTime", 12)):
+        try:
+            out = subprocess.run(["defaults", "read", "-g", key],
+                                 capture_output=True, text=True, timeout=3)
+            if out.stdout.strip() == "1":
+                return result
+        except (OSError, subprocess.SubprocessError):
+            pass
+    # Fallback to the C locale's time format (may be C/24h under launchd).
+    try:
+        import locale
+        locale.setlocale(locale.LC_TIME, "")
+        fmt = locale.nl_langinfo(locale.T_FMT)
+        if "%p" in fmt or "%r" in fmt or "%I" in fmt:
+            return 12
+    except (ImportError, locale.Error, AttributeError):
+        pass
+    return 24
+
+
+def add_clock_fields(payload: dict) -> None:
+    """Add wall-clock fields to the payload when the config opts in.
+
+    "t"  = local wall-clock epoch (UTC epoch shifted by the tz offset) so the
+           device can show the time without an RTC.
+    "tf" = 12 or 24, the hour format the device should render.
+    """
+    clock = read_clock_setting()
+    if clock == "off":
+        return
+    tf = 24 if clock == "24" else 12 if clock == "12" else detect_hour_format()
+    payload["t"] = int(time.time()) + time.localtime().tm_gmtoff
+    payload["tf"] = tf
 
 
 async def poll_api(token: str) -> dict | None:
@@ -342,6 +389,7 @@ async def poll_api(token: str) -> dict | None:
         "ok": True,
     }
     add_chime_field(payload)   # adds "c":1 iff the config opts in
+    add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
     return payload
 
 
@@ -355,10 +403,22 @@ class Session:
         self.refresh_requested.set()
 
     async def setup_refresh_subscription(self) -> None:
+        # start_notify awaits CoreBluetooth's CCCD-write confirmation, which
+        # never arrives if the peripheral doesn't ACK the subscribe (a
+        # half-open link after the OS auto-connects the HID). Unbounded, that
+        # await wedges the whole daemon between "Connected" and the first poll
+        # — the device then shows nothing until a manual restart. Bound it: the
+        # subscription is only an optional device-initiated refresh nudge (we
+        # poll every POLL_INTERVAL regardless), so on timeout we proceed.
         try:
-            await self.client.start_notify(REQ_CHAR_UUID, self._on_refresh)
+            await asyncio.wait_for(
+                self.client.start_notify(REQ_CHAR_UUID, self._on_refresh),
+                timeout=10,
+            )
         except (BleakError, ValueError) as e:
             log(f"Refresh subscription unavailable: {e}")
+        except asyncio.TimeoutError:
+            log("Refresh subscription timed out; polling without it")
 
     async def write_payload(self, payload: dict) -> bool:
         data = json.dumps(payload, separators=(",", ":")).encode()
@@ -369,6 +429,91 @@ class Session:
         except BleakError as e:
             log(f"Write failed: {e}")
             return False
+
+
+def _is_encryption_error(exc: BaseException) -> bool:
+    """True if a connect error is a macOS bonding/encryption mismatch.
+
+    macOS reports a stale bond as CBErrorDomain Code=15 ("Failed to encrypt
+    the connection..."). Match on the message text so we don't depend on how
+    bleak wraps the underlying CoreBluetooth error.
+    """
+    s = str(exc).lower()
+    return "code=15" in s or "encrypt" in s
+
+
+# blueutil talks to Bluetooth via IOBluetooth, which on recent macOS needs its
+# OWN Bluetooth TCC grant (separate from the daemon's CoreBluetooth grant).
+# Without it, blueutil *hangs* instead of erroring — so every call is bounded
+# by a timeout and a hang is reported as a permission problem, not a crash.
+BLUEUTIL_TIMEOUT = 8
+
+
+def _blueutil(*args: str) -> str | None:
+    """Run `blueutil <args>`, returning stdout, or None on failure/timeout.
+
+    A timeout almost always means blueutil lacks Bluetooth permission (it
+    blocks rather than failing), so we surface that cause explicitly.
+    """
+    try:
+        return subprocess.run(
+            ["blueutil", *args],
+            capture_output=True, text=True,
+            timeout=BLUEUTIL_TIMEOUT, check=True,
+        ).stdout
+    except subprocess.TimeoutExpired:
+        log(f"blueutil {' '.join(args)} timed out — it likely lacks Bluetooth "
+            "permission. Grant it under System Settings > Privacy & Security > "
+            "Bluetooth (run `blueutil --paired` once from Terminal to prompt).")
+        return None
+    except (subprocess.SubprocessError, OSError) as e:
+        log(f"blueutil {' '.join(args)} failed: {e}")
+        return None
+
+
+def unpair_macos() -> bool:
+    """Forget a stale macOS bond for DEVICE_NAME so the device can re-pair.
+
+    A Code=15 "failed to encrypt" connect error means macOS holds bonding
+    keys that no longer match the ESP32's (e.g. after a firmware reflash or
+    the on-device bond-clear gesture). The firmware pairs "just works" (no
+    MITM), so once the stale bond is gone the next connect re-bonds silently
+    with no GUI prompt.
+
+    CoreBluetooth exposes no unpair API, so we shell out to `blueutil`. The
+    daemon only knows the peripheral's CoreBluetooth UUID, not the BD_ADDR
+    that blueutil needs, so we map by name via `blueutil --paired`. Returns
+    True if a bond was removed. Mirrors the Linux daemon's `bluetoothctl
+    remove` self-heal.
+    """
+    if not shutil.which("blueutil"):
+        log("Stale bond detected but `blueutil` is not installed; cannot "
+            "auto-recover. Run `brew install blueutil`, or forget "
+            f"'{DEVICE_NAME}' in System Settings > Bluetooth and reconnect.")
+        return False
+
+    out = _blueutil("--paired")
+    if out is None:
+        return False
+
+    # Each line looks like:
+    #   address: 28-84-85-55-5c-3d, ... name: "Clawdmeter", ...
+    addr = None
+    for line in out.splitlines():
+        if f'name: "{DEVICE_NAME}"' in line:
+            m = re.search(r"address:\s*([0-9a-fA-F:-]+)", line)
+            if m:
+                addr = m.group(1)
+                break
+    if not addr:
+        log(f"No paired '{DEVICE_NAME}' found to unpair (already forgotten?)")
+        return False
+
+    if _blueutil("--unpair", addr) is None:
+        return False
+    log(f"Unpaired stale bond for '{DEVICE_NAME}' [{addr}]; re-pairing on "
+        "next connect")
+    return True
 
 
 async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
@@ -383,9 +528,21 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     log(f"Connecting to {display}...")
     client = BleakClient(target)
     try:
-        await client.connect()
+        # Bound the connect the same way #84 bounded the refresh subscribe.
+        # On macOS the OS auto-connects the firmware's HID link, so
+        # CoreBluetooth can hand us a half-open peripheral whose GATT connect
+        # handshake never completes. BleakClient's own timeout governs
+        # discovery, not connectPeripheral, so an unbounded await here wedges
+        # the single-threaded daemon forever at "Connecting..." (observed ~13h,
+        # device stuck on stale data). wait_for raises TimeoutError, which the
+        # handler below already treats as a connection failure -> drop the
+        # cached address and rescan.
+        await asyncio.wait_for(client.connect(), timeout=CONNECT_TIMEOUT)
     except (BleakError, asyncio.TimeoutError) as e:
         log(f"Connection failed: {e}")
+        if sys.platform == "darwin" and _is_encryption_error(e):
+            log("Encryption failed — likely a stale macOS bond; self-healing")
+            unpair_macos()
         return False
 
     if not client.is_connected:

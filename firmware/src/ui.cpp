@@ -1,6 +1,7 @@
 #include "ui.h"
 #include "splash.h"
 #include <lvgl.h>
+#include <time.h>
 #include "logo.h"
 #include "icons.h"
 #include "hal/board_caps.h"
@@ -102,6 +103,12 @@ static void compute_layout(const BoardCaps& c) {
 // ---- Usage screen widgets (single non-splash view) ----
 static lv_obj_t* usage_container;
 static lv_obj_t* lbl_title;
+// Clock fed by the daemon: base epoch (local wall-clock seconds) + the lv_tick at
+// which it landed, so the title ticks forward locally between 60s payloads.
+static long     clock_base_epoch = 0;
+static uint32_t clock_base_ms = 0;
+static int      clock_fmt = 24;   // 12 or 24, set from the daemon payload
+static int      clock_last_min = -1;   // last rendered minute; avoids redrawing the title every tick
 static lv_obj_t* usage_group;   // the two usage panels — shown when connected
 static lv_obj_t* pair_group;    // pairing hint — shown when disconnected
 static lv_obj_t* bar_session;
@@ -434,6 +441,16 @@ void ui_update(const UsageData* data) {
     last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
     data_received = true;
 
+    if (data->clock_epoch > 0) {    // daemon supplied wall-clock time → drive the title clock
+        clock_base_epoch = data->clock_epoch;
+        clock_base_ms = last_data_ms;
+        clock_fmt = data->clock_fmt;
+    } else if (clock_base_epoch != 0) {   // clock turned off daemon-side → revert title to "Usage"
+        clock_base_epoch = 0;
+        clock_last_min = -1;
+        lv_label_set_text(lbl_title, "Usage");
+    }
+
     int s_pct = (int)(data->session_pct + 0.5f);
 
     lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
@@ -482,6 +499,27 @@ void ui_tick_anim(void) {
     if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
 
     uint32_t now = lv_tick_get();
+
+    // Title clock: once the daemon has sent wall-clock time, replace "Usage" with
+    // the live time, advanced locally so it ticks every minute between payloads.
+    if (clock_base_epoch > 0) {
+        time_t cur = (time_t)(clock_base_epoch + (now - clock_base_ms) / 1000);
+        struct tm tmv;
+        gmtime_r(&cur, &tmv);   // epoch is already local wall-clock → gmtime keeps it as-is
+        if (tmv.tm_min != clock_last_min) {   // only rewrite the title when the minute changes
+            clock_last_min = tmv.tm_min;
+            char tbuf[12];
+            if (clock_fmt == 12) {
+                int h12 = tmv.tm_hour % 12;
+                if (h12 == 0) h12 = 12;
+                snprintf(tbuf, sizeof(tbuf), "%d:%02d %s", h12, tmv.tm_min,
+                         tmv.tm_hour < 12 ? "AM" : "PM");
+            } else {
+                snprintf(tbuf, sizeof(tbuf), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+            }
+            lv_label_set_text(lbl_title, tbuf);
+        }
+    }
 
     if (now - anim_msg_start >= ANIM_MSG_MS) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;

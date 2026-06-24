@@ -38,6 +38,29 @@ read_chime_setting() {
     case "$val" in
         on) echo "on" ;;
         *)  echo "off" ;;
+# Read the `clock` option from the config file. Echoes one of: off|auto|12|24.
+# Defaults to "off" so existing setups keep showing "Usage" until opted in.
+read_clock_setting() {
+    local val=""
+    if [ -f "$CONFIG_FILE" ]; then
+        val=$(grep -E '^[[:space:]]*clock[[:space:]]*=' "$CONFIG_FILE" | tail -1 \
+            | tr -d '\r' \
+            | sed -E 's/^[[:space:]]*clock[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//' \
+            | tr '[:upper:]' '[:lower:]')
+    fi
+    case "$val" in
+        off|auto|12|24) echo "$val" ;;
+        *)              echo "off" ;;
+    esac
+}
+
+# Best-effort 12h/24h detection from the locale. Echoes 12 or 24 (default 24).
+detect_hour_format() {
+    local tfmt
+    tfmt=$(locale -k LC_TIME 2>/dev/null | grep -E '^t_fmt=')
+    case "$tfmt" in
+        *%p*|*%r*|*%I*) echo 12 ;;
+        *)              echo 24 ;;
     esac
 }
 
@@ -214,6 +237,24 @@ poll() {
     local now
     now=$(date +%s)
 
+    # Optional clock. When enabled, send a local wall-clock epoch (UTC epoch shifted
+    # by the timezone offset, so gmtime() on-device reads local) plus the hour format.
+    local clock clock_fragment=""
+    clock=$(read_clock_setting)
+    if [ "$clock" != "off" ]; then
+        local tz off_sec local_epoch tf
+        tz=$(date +%z)            # e.g. +0200 or -0500
+        off_sec=$(( (10#${tz:1:2} * 3600) + (10#${tz:3:2} * 60) ))
+        [ "${tz:0:1}" = "-" ] && off_sec=$(( -off_sec ))
+        local_epoch=$(( now + off_sec ))
+        case "$clock" in
+            12) tf=12 ;;
+            24) tf=24 ;;
+            *)  tf=$(detect_hour_format) ;;
+        esac
+        clock_fragment=",\"t\":$local_epoch,\"tf\":$tf"
+    fi
+
     local headers
     headers=$(curl -s -D - -o /dev/null \
         "https://api.anthropic.com/v1/messages" \
@@ -245,13 +286,15 @@ poll() {
     [ "$chime" = "on" ] && chime_fragment=",\"c\":1"
 
     local payload
-    payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$status" -v now="$now" -v chm="$chime_fragment" \
+    
+    payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$status" -v now="$now" -v clk="$clock_fragment" -v chm="$chime_fragment" \
+
         'BEGIN {
             sp = sprintf("%.0f", u5 * 100);
             sr = (r5 - now) / 60; sr = sr > 0 ? sprintf("%.0f", sr) : 0;
             wp = sprintf("%.0f", u7 * 100);
             wr = (r7 - now) / 60; wr = wr > 0 ? sprintf("%.0f", wr) : 0;
-            printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\"%s,\"ok\":true}", sp, sr, wp, wr, st, chm;
+            printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\"%s,\"ok\":true}", sp, sr, wp, wr, st, clk, chm;
         }')
 
     log "Sending: $payload"
