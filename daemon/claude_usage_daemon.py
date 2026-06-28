@@ -7,7 +7,6 @@ bleak (CoreBluetooth backend on macOS).
 """
 
 import asyncio
-import calendar
 import datetime
 import getpass
 import json
@@ -378,87 +377,55 @@ async def poll_api(token: str) -> dict | None:
         log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
         return None
 
-    def hdr(name: str, default: str = "0") -> str:
-        return resp.headers.get(name, default)
+    H = "anthropic-ratelimit-unified-"
+
+    def raw(suffix: str) -> str | None:
+        return resp.headers.get(H + suffix)
 
     now = time.time()
 
-    def reset_minutes(reset_ts: str) -> int:
+    def reset_minutes(reset_ts: str | None) -> int:
         try:
             r = float(reset_ts)
-        except ValueError:
+        except (TypeError, ValueError):
             return 0
         mins = (r - now) / 60.0
         return int(round(mins)) if mins > 0 else 0
 
-    def pct(util: str) -> int:
+    def pct(util: str | None) -> int:
         try:
             return int(round(float(util) * 100))
-        except ValueError:
+        except (TypeError, ValueError):
             return 0
 
-    # Pro/Max accounts expose 5h/7d windows; Enterprise/overage use a single
-    # spending-limit model reported via overage-utilization.
-    if resp.headers.get("anthropic-ratelimit-unified-5h-utilization"):
-        payload = {
-            "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
-            "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
-            "w": pct(hdr("anthropic-ratelimit-unified-7d-utilization")),
-            "wr": reset_minutes(hdr("anthropic-ratelimit-unified-7d-reset")),
-            "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
-            "acct": "pro",
-            "ok": True,
-        }
-    else:
-        reset_ts = hdr("anthropic-ratelimit-unified-overage-reset")
-        payload = {
-            "s": pct(hdr("anthropic-ratelimit-unified-overage-utilization")),
-            "sr": reset_minutes(reset_ts),
-            "w": 0,
-            "wr": 0,
-            "st": hdr("anthropic-ratelimit-unified-status", "unknown"),
-            "acct": "ent",
-            **_billing_period_info(now, reset_ts),
-            "ok": True,
-        }
-    add_chime_field(payload)   # adds "c":1 iff the config opts in
-    add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
-    return payload
+    s_util = raw("5h-utilization")
+    w_util = raw("7d-utilization")
+    has_windows = s_util is not None or w_util is not None
+    overage_in_use = raw("overage-in-use") == "true"
+    status = raw("status") or raw("5h-status") or "unknown"
 
+    if overage_in_use and s_util is None and w_util is None:
+        s_util = w_util = "1.0"
+        status = "overage"
 
-def _billing_period_info(now: float, reset_ts: str) -> dict:
-    """Fraction of billing period elapsed (tp, 0-100) and period length in days (pd).
+    acct = "pro-max" if has_windows else ("ent" if overage_in_use else "pro-max")
+    unified_reset = raw("reset")
 
-    Billing periods are assumed calendar-monthly: period_end is the reset
-    timestamp, period_start is the same day/time one calendar month earlier.
-
-    The rate-limit headers expose only the reset timestamp, not the period
-    length, so the monthly window is an assumption — but a documented one:
-    Enterprise spend-limit `period` "the only value today is monthly"
-    (Claude Enterprise Admin API reference). The doc notes period is an open
-    string that may gain other values later; revisit this if so.
-    """
-    try:
-        period_end = float(reset_ts)
-    except ValueError:
-        return {"tp": 0, "pd": 30}
-    dt_end = datetime.datetime.fromtimestamp(period_end)
-    prev_month = dt_end.month - 1 or 12
-    prev_year = dt_end.year if dt_end.month > 1 else dt_end.year - 1
-    prev_day = min(dt_end.day, calendar.monthrange(prev_year, prev_month)[1])
-    dt_start = dt_end.replace(year=prev_year, month=prev_month, day=prev_day)
-    period_start = dt_start.timestamp()
-    period_len = period_end - period_start
-    if period_len <= 0:
-        return {"tp": 0, "pd": 30}
-    pct_val = (now - period_start) / period_len * 100
-    total_days = int(round(period_len / 86400))
-    rd = f"{dt_end.strftime('%b')} {dt_end.day}"
-    return {
-        "tp": max(0, min(100, int(round(pct_val)))),
-        "pd": total_days,
-        "rd": rd,
+    payload = {
+        "s": pct(s_util),
+        "sr": reset_minutes(raw("5h-reset") or unified_reset),
+        "w": pct(w_util),
+        "wr": reset_minutes(raw("7d-reset") or unified_reset),
+        "o": pct(raw("overage-utilization")),
+        "or": reset_minutes(unified_reset),
+        "oiu": overage_in_use,
+        "acct": acct,
+        "st": status,
+        "ok": True,
     }
+    add_chime_field(payload)
+    add_clock_fields(payload)
+    return payload
 
 
 class Session:

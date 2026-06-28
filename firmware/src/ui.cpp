@@ -2,12 +2,14 @@
 #include "splash.h"
 #include <lvgl.h>
 #include <time.h>
+#include <esp_heap_caps.h>
 #include "logo.h"
 #include "icons.h"
 #include "hal/board_caps.h"
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
+LV_FONT_DECLARE(font_tiempos_48);
 LV_FONT_DECLARE(font_tiempos_34);
 LV_FONT_DECLARE(font_styrene_48);
 LV_FONT_DECLARE(font_styrene_28);
@@ -90,6 +92,7 @@ static void compute_layout(const BoardCaps& c) {
 
 // Anthropic brand palette — design tokens live in theme.h
 #include "theme.h"
+#include "ui_cfg.h"
 #define COL_BG        THEME_BG
 #define COL_PANEL     THEME_PANEL
 #define COL_TEXT      THEME_TEXT
@@ -109,8 +112,11 @@ static long     clock_base_epoch = 0;
 static uint32_t clock_base_ms = 0;
 static int      clock_fmt = 24;   // 12 or 24, set from the daemon payload
 static int      clock_last_min = -1;   // last rendered minute; avoids redrawing the title every tick
+static bool     title_is_clock = false; // true when the title shows live clock (not Usage/Extra/Enterprise)
 static lv_obj_t* usage_group;   // the two usage panels — shown when connected
 static lv_obj_t* pair_group;    // pairing hint — shown when disconnected
+static lv_obj_t* panel_session; // panel backgrounds (captured so the Enterprise
+static lv_obj_t* panel_weekly;  // view can hide the weekly panel under the strip)
 static lv_obj_t* bar_session;
 static lv_obj_t* lbl_session_pct;
 static lv_obj_t* lbl_session_label;
@@ -119,13 +125,19 @@ static lv_obj_t* bar_weekly;
 static lv_obj_t* lbl_weekly_pct;
 static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
-static lv_obj_t* panel_session = nullptr;
-static lv_obj_t* panel_weekly = nullptr;
-// Enterprise-only widgets inside panel_session
-static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
-static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
-static lv_obj_t* lbl_spending_status = nullptr;   // "Under pace" / "On pace" / "Over pace"
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
+
+// ---- Enterprise screen: a row of mini splash animations where pill 2 would be ----
+#define ENT_STRIP_COUNT 4
+static lv_obj_t* ent_strip = nullptr;
+static lv_obj_t* ent_canvas[ENT_STRIP_COUNT] = {};
+static uint16_t* ent_buf[ENT_STRIP_COUNT] = {};
+static int       ent_cell = 0;
+static int       ent_anim_idx[ENT_STRIP_COUNT] = {};
+static int       ent_frame[ENT_STRIP_COUNT] = {};
+static uint32_t  ent_frame_started[ENT_STRIP_COUNT] = {};
+static bool      ent_strip_built = false;
+static bool      ent_active = false;
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
@@ -289,10 +301,12 @@ static void init_battery_icons(void) {
 
 // ======== Usage Screen ========
 
-static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
-                                  lv_obj_t** out_pct, lv_obj_t** out_pill,
-                                  lv_obj_t** out_bar, lv_obj_t** out_reset) {
+static void make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
+                             lv_obj_t** out_pct, lv_obj_t** out_pill,
+                             lv_obj_t** out_bar, lv_obj_t** out_reset,
+                             lv_obj_t** out_panel) {
     lv_obj_t* panel = make_panel(parent, L.margin, y, L.content_w, L.usage_panel_h);
+    if (out_panel) *out_panel = panel;
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "---%");
@@ -310,8 +324,52 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
     lv_obj_set_style_text_font(*out_reset, &font_styrene_28, 0);
     lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
     lv_obj_set_pos(*out_reset, 0, L.usage_reset_y);
+}
 
-    return panel;
+static void build_enterprise_strip(lv_obj_t* parent) {
+    if (splash_anim_count() <= 0) return;
+
+#ifdef BOARD_HAS_PSRAM
+    const uint32_t buf_caps = MALLOC_CAP_SPIRAM;
+    const int      max_cell = 100;
+#else
+    const uint32_t buf_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    const int      max_cell = 3;
+#endif
+
+    const int y = L.content_y + L.usage_panel_h + L.usage_panel_gap;
+    ent_strip = make_panel(parent, L.margin, y, L.content_w, L.usage_panel_h);
+    lv_obj_add_flag(ent_strip, LV_OBJ_FLAG_HIDDEN);
+
+    const int inner_w = L.content_w - 32;
+    const int inner_h = L.usage_panel_h - 24;
+    const int by_w = inner_w / (ENT_STRIP_COUNT * 20);
+    const int by_h = inner_h / 20;
+    ent_cell = (by_w < by_h) ? by_w : by_h;
+    if (ent_cell < 3) ent_cell = 3;
+    if (ent_cell > max_cell) ent_cell = max_cell;
+
+    const int side = ent_cell * 20;
+    int gap = (inner_w - ENT_STRIP_COUNT * side) / (ENT_STRIP_COUNT + 1);
+    if (gap < 0) gap = 0;
+    const int top = (inner_h - side) / 2;
+    const int count = splash_anim_count();
+
+    for (int i = 0; i < ENT_STRIP_COUNT; i++) {
+        ent_buf[i] = (uint16_t*)heap_caps_malloc(side * side * 2, buf_caps);
+        if (!ent_buf[i]) return;
+        ent_canvas[i] = lv_canvas_create(ent_strip);
+        lv_canvas_set_buffer(ent_canvas[i], ent_buf[i], side, side, LV_COLOR_FORMAT_RGB565);
+        lv_obj_set_size(ent_canvas[i], side, side);
+        lv_obj_set_pos(ent_canvas[i], gap + i * (side + gap), top);
+
+        ent_anim_idx[i] = (i * count / ENT_STRIP_COUNT) % count;
+        ent_frame[i] = 0;
+        ent_frame_started[i] = lv_tick_get();
+        splash_render_into(ent_anim_idx[i], 0, ent_buf[i], ent_cell);
+        lv_obj_invalidate(ent_canvas[i]);
+    }
+    ent_strip_built = true;
 }
 
 // Pairing hint — shown when disconnected so the screen isn't empty and the
@@ -396,36 +454,18 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    panel_session = make_usage_panel(usage_group, L.content_y, "Current",
+    panel_session = nullptr;
+    panel_weekly = nullptr;
+    make_usage_panel(usage_group, L.content_y, "Current",
                      &lbl_session_pct, &lbl_session_label,
-                     &bar_session, &lbl_session_reset);
+                     &bar_session, &lbl_session_reset, &panel_session);
 
-    // Enterprise-only overlays inside panel_session — hidden until enterprise data arrives
-    lbl_session_pct_sym = lv_label_create(panel_session);
-    lv_label_set_text(lbl_session_pct_sym, "%");
-    lv_obj_set_style_text_font(lbl_session_pct_sym, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_session_pct_sym, COL_TEXT, 0);
-    lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
-
-    lbl_spending_desc = lv_label_create(panel_session);
-    lv_label_set_text(lbl_spending_desc, "of your monthly budget");
-    lv_obj_set_style_text_font(lbl_spending_desc, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_spending_desc, COL_DIM, 0);
-    lv_obj_set_pos(lbl_spending_desc, 0, L.usage_reset_y);
-    lv_obj_add_flag(lbl_spending_desc, LV_OBJ_FLAG_HIDDEN);
-
-    lbl_spending_status = lv_label_create(panel_session);
-    lv_label_set_text(lbl_spending_status, "");
-    lv_obj_set_style_text_font(lbl_spending_status, &font_styrene_16, 0);
-    lv_obj_set_pos(lbl_spending_status, 0, L.usage_reset_y + 20);
-    lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
-
-    panel_weekly = make_usage_panel(usage_group,
+    make_usage_panel(usage_group,
                      L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
                      &lbl_weekly_pct, &lbl_weekly_label,
-                     &bar_weekly, &lbl_weekly_reset);
-    // Recolor enabled so enterprise period box can color pace and reset separately
-    lv_label_set_recolor(lbl_weekly_reset, true);
+                     &bar_weekly, &lbl_weekly_reset, &panel_weekly);
+
+    build_enterprise_strip(usage_group);
 
     build_pair_group(usage_container);
     build_idle_group(usage_container);
@@ -436,6 +476,68 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+}
+
+static void render_panel(lv_obj_t* pct_lbl, lv_obj_t* pill, lv_obj_t* bar,
+                         lv_obj_t* reset_lbl, const char* pill_text,
+                         int pct, lv_color_t bar_color, const char* reset_text) {
+    lv_label_set_text_fmt(pct_lbl, "%d%%", pct);
+    lv_label_set_text(pill, pill_text);
+    lv_bar_set_value(bar, pct, LV_ANIM_ON);
+    lv_obj_set_style_bg_color(bar, bar_color, LV_PART_INDICATOR);
+    lv_label_set_text(reset_lbl, reset_text);
+}
+
+static void set_title(const char* text, const lv_font_t* font, lv_color_t color, int y_offset) {
+    lv_label_set_text(lbl_title, text);
+    lv_obj_set_style_text_font(lbl_title, font, 0);
+    lv_obj_set_style_text_color(lbl_title, color, 0);
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y + y_offset);
+}
+
+static void set_title_banner(bool on) {
+    if (on) {
+        lv_obj_set_style_bg_color(lbl_title, lv_color_hex(UI_EXTRA_USAGE_BANNER_COLOR), 0);
+        lv_obj_set_style_bg_opa(lbl_title, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(lbl_title, 8, 0);
+        lv_obj_set_style_pad_left(lbl_title, 13, 0);
+        lv_obj_set_style_pad_right(lbl_title, 13, 0);
+        lv_obj_set_style_pad_top(lbl_title, 4, 0);
+        lv_obj_set_style_pad_bottom(lbl_title, 2, 0);
+    } else {
+        lv_obj_set_style_bg_opa(lbl_title, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_pad_all(lbl_title, 0, 0);
+    }
+}
+
+static void set_enterprise_view(bool on) {
+    if (panel_weekly) {
+        if (on) lv_obj_add_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (ent_strip_built && ent_strip) {
+        if (on) {
+            lv_obj_clear_flag(ent_strip, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(ent_strip);
+        } else {
+            lv_obj_add_flag(ent_strip, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    ent_active = on;
+}
+
+static void render_enterprise(const UsageData* data) {
+    char buf[48];
+    title_is_clock = false;
+    set_title_banner(false);
+    set_title("Enterprise", &font_tiempos_56, COL_TEXT, 0);
+
+    int o_pct = (int)(data->overage_pct + 0.5f);
+    format_reset_time(data->overage_reset_mins, buf, sizeof(buf));
+    render_panel(lbl_session_pct, lbl_session_label, bar_session, lbl_session_reset,
+                 "Usage", o_pct, pct_color(data->overage_pct), buf);
+
+    set_enterprise_view(true);
 }
 
 // ======== Public API ========
@@ -469,85 +571,54 @@ void ui_init(void) {
 
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
-    last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
+    last_data_ms = lv_tick_get();
     data_received = true;
 
-    if (data->clock_epoch > 0) {    // daemon supplied wall-clock time → drive the title clock
+    if (data->clock_epoch > 0) {
         clock_base_epoch = data->clock_epoch;
         clock_base_ms = last_data_ms;
         clock_fmt = data->clock_fmt;
-    } else if (clock_base_epoch != 0) {   // clock turned off daemon-side → revert title to "Usage"
+        clock_last_min = -1;
+    } else if (clock_base_epoch != 0) {
         clock_base_epoch = 0;
         clock_last_min = -1;
-        lv_label_set_text(lbl_title, "Usage");
-    }
-
-    int s_pct = (int)(data->session_pct + 0.5f);
-
-    if (data->enterprise) {
-        // Spending box: big number-only label + small "%" symbol + desc + pace
-        lv_obj_set_style_text_font(lbl_session_pct, &font_tiempos_56, 0);
-        lv_label_set_text(lbl_session_label, "Spending");
-        lv_obj_add_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_spending_status,   LV_OBJ_FLAG_HIDDEN);
-        if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_set_style_text_font(lbl_session_pct, &font_styrene_48, 0);
-        lv_label_set_text(lbl_session_label, "Current");
-        lv_obj_clear_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
-        if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+        title_is_clock = false;
     }
 
     char buf[48];
 
-    // Pace vars used in both enterprise blocks below
-    const char* pace_text = "Under pace";
-    lv_color_t  pace_color = COL_GREEN;
-    const char* pace_hex   = "788c5d";   // matches THEME_GREEN
-    if (data->session_pct > (float)data->time_pct + 15.0f) {
-        pace_text = "Over pace";  pace_color = COL_RED;   pace_hex = "c0392b";
-    } else if (data->session_pct > (float)data->time_pct - 15.0f) {
-        pace_text = "On pace";    pace_color = COL_AMBER; pace_hex = "d97757";
+    if (strcmp(data->acct, "ent") == 0) {
+        render_enterprise(data);
+        return;
     }
 
-    if (data->enterprise) {
-        lv_label_set_text_fmt(lbl_session_pct, "%d", s_pct);
-        lv_obj_align_to(lbl_session_pct_sym, lbl_session_pct,
-                        LV_ALIGN_OUT_RIGHT_TOP, 4, 12);
+    set_enterprise_view(false);
+
+    if (data->overage_in_use) {
+        title_is_clock = false;
+        const bool banner = UI_EXTRA_USAGE_BANNER;
+        lv_color_t title_col = banner ? lv_color_hex(UI_EXTRA_USAGE_BANNER_TEXT) : COL_RED;
+        set_title("Extra Usage", &font_tiempos_48, title_col, 4);
+        set_title_banner(banner);
     } else {
-        lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
-        format_reset_time(data->session_reset_mins, buf, sizeof(buf));
-        lv_label_set_text(lbl_session_reset, buf);
+        set_title_banner(false);
+        if (clock_base_epoch > 0) {
+            title_is_clock = true;
+        } else {
+            title_is_clock = false;
+            set_title("Usage", &font_tiempos_56, COL_TEXT, 0);
+        }
     }
 
-    lv_bar_set_value(bar_session, s_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
+    int s_pct = (int)(data->session_pct + 0.5f);
+    format_reset_time(data->session_reset_mins, buf, sizeof(buf));
+    render_panel(lbl_session_pct, lbl_session_label, bar_session, lbl_session_reset,
+                 "Current", s_pct, pct_color(data->session_pct), buf);
 
-    if (data->enterprise) {
-        // Period box: time % + dynamic pace color + "Resets <date>" label
-        lv_label_set_text(lbl_weekly_label, "Period");
-        lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", data->time_pct);
-        lv_bar_set_value(bar_weekly, data->time_pct, LV_ANIM_ON);
-        lv_color_t bar_pace = (data->session_pct <= (float)data->time_pct) ? COL_GREEN :
-                              (data->session_pct <= (float)data->time_pct + 15.0f) ? COL_AMBER :
-                              COL_RED;
-        lv_obj_set_style_bg_color(bar_weekly, bar_pace, LV_PART_INDICATOR);
-        snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Resets %s#",
-                 pace_hex, pace_text, data->reset_date);
-        lv_label_set_text(lbl_weekly_reset, buf);
-    } else {
-        int w_pct = (int)(data->weekly_pct + 0.5f);
-        lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
-        lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
-        lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
-        format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
-        lv_label_set_text(lbl_weekly_reset, buf);
-    }
+    int w_pct = (int)(data->weekly_pct + 0.5f);
+    format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
+    render_panel(lbl_weekly_pct, lbl_weekly_label, bar_weekly, lbl_weekly_reset,
+                 "Weekly", w_pct, pct_color(data->weekly_pct), buf);
 }
 
 // Pick the usage-view sub-screen: pairing hint (BLE down), the idle "Zzz" screen
@@ -573,16 +644,32 @@ static void update_view_state(void) {
                       LV_OBJ_FLAG_HIDDEN);
 }
 
+static void tick_enterprise_strip(void) {
+    if (!ent_active || !ent_strip_built || !s_ble_connected) return;
+    uint32_t now = lv_tick_get();
+    for (int i = 0; i < ENT_STRIP_COUNT; i++) {
+        if (!ent_canvas[i] || !ent_buf[i]) continue;
+        uint16_t hold = splash_frame_hold(ent_anim_idx[i], ent_frame[i]);
+        if (hold == 0) hold = 500;
+        if (now - ent_frame_started[i] < hold) continue;
+        ent_frame[i]++;
+        ent_frame_started[i] = now;
+        int fc = splash_render_into(ent_anim_idx[i], ent_frame[i], ent_buf[i], ent_cell);
+        if (fc > 0) ent_frame[i] %= fc;
+        lv_obj_invalidate(ent_canvas[i]);
+    }
+}
+
 void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
     update_view_state();
-    if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
+    if (view_state == 1) splash_mini_tick();
+
+    tick_enterprise_strip();
 
     uint32_t now = lv_tick_get();
 
-    // Title clock: once the daemon has sent wall-clock time, replace "Usage" with
-    // the live time, advanced locally so it ticks every minute between payloads.
-    if (clock_base_epoch > 0) {
+    if (clock_base_epoch > 0 && title_is_clock) {
         time_t cur = (time_t)(clock_base_epoch + (now - clock_base_ms) / 1000);
         struct tm tmv;
         gmtime_r(&cur, &tmv);   // epoch is already local wall-clock → gmtime keeps it as-is
