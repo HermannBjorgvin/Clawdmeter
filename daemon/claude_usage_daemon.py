@@ -55,6 +55,12 @@ API_BODY = {
 }
 
 
+class TokenExpired(Exception):
+    """Raised by poll_api on a 401/403 — the access token is dead. The daemon never
+    refreshes (pure free-ride: Claude Code owns refreshing), so the caller just
+    signals "No data" to the device until the CLI re-seeds the token."""
+
+
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -91,45 +97,63 @@ def _extract_access_token(blob: str) -> str | None:
     return None
 
 
-def _read_token_keychain() -> str | None:
-    try:
-        out = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-a",
-                getpass.getuser(),
-                "-w",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except subprocess.CalledProcessError as e:
-        log(f"Keychain read failed (rc={e.returncode}): {e.stderr.strip()}")
-        return None
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        log(f"Keychain access error: {e}")
-        return None
-    return _extract_access_token(out.stdout)
+def _decode_keychain_blob(raw: str) -> str:
+    """Transparently decode a hex-dumped Keychain secret back to text.
+
+    ``security … -w`` prints the password as a continuous hex string whenever
+    the stored bytes aren't cleanly printable (e.g. an embedded newline). A
+    normal credentials blob is JSON, which is never valid hex (it contains
+    '{', '"', …), so all-hex detection is unambiguous and safe.
+    """
+    s = raw.strip()
+    if s and len(s) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", s):
+        try:
+            return bytes.fromhex(s).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return raw
+    return raw
 
 
-def _read_token_file() -> str | None:
+def _read_credentials_raw() -> str | None:
+    """Return the raw credentials blob (a JSON string) or None.
+
+    macOS: the Keychain generic-password item Claude Code writes.
+    Linux: the ~/.claude/.credentials.json file.
+    """
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                [
+                    "security",
+                    "find-generic-password",
+                    "-s",
+                    KEYCHAIN_SERVICE,
+                    "-a",
+                    getpass.getuser(),
+                    "-w",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except subprocess.CalledProcessError as e:
+            log(f"Keychain read failed (rc={e.returncode}): {e.stderr.strip()}")
+            return None
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            log(f"Keychain access error: {e}")
+            return None
+        return _decode_keychain_blob(out.stdout)
     try:
-        raw = CREDENTIALS_PATH.read_text()
+        return CREDENTIALS_PATH.read_text()
     except OSError as e:
         log(f"Error reading credentials: {e}")
         return None
-    return _extract_access_token(raw)
 
 
 def read_token() -> str | None:
-    if sys.platform == "darwin":
-        return _read_token_keychain()
-    return _read_token_file()
+    raw = _read_credentials_raw()
+    return _extract_access_token(raw) if raw else None
 
 
 def load_cached_address() -> str | None:
@@ -374,6 +398,9 @@ async def poll_api(token: str) -> dict | None:
     except httpx.HTTPError as e:
         log(f"API call failed: {e}")
         return None
+    if resp.status_code in (401, 403):
+        log(f"API HTTP {resp.status_code} (token expired/invalid)")
+        raise TokenExpired()
     if resp.status_code >= 400:
         log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
         return None
@@ -629,15 +656,37 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
+                # Pure free-ride: read whatever access token Claude Code currently
+                # holds and NEVER refresh it ourselves. Claude Code (the token's owner)
+                # does all refreshing; refreshing here would race its rotation and feed
+                # the OAuth endpoint's rate limit (429). When the token is dead we just
+                # show "No data" until the CLI re-seeds it.
                 token = read_token()
                 if not token:
-                    log("No token; skipping poll")
+                    log("No token; signalling no-data to device")
+                    await session.write_payload({"ok": False})
+                    last_poll = time.time()
                 else:
-                    payload = await poll_api(token)
+                    payload = None
+                    expired = False
+                    try:
+                        payload = await poll_api(token)
+                    except TokenExpired:
+                        # Pure free-ride: we never refresh. A 401 means Claude Code's token
+                        # has expired and only Claude Code (its owner) can re-seed it.
+                        expired = True
+                        log("Token expired/invalid; signalling no-data — run `claude login` "
+                            "or use the CLI to let Claude Code renew it")
                     if payload is not None:
                         if await session.write_payload(payload):
                             last_poll = time.time()
                             used_successfully = True
+                    elif expired:
+                        # Token genuinely dead -> show "No data" now instead of stale numbers.
+                        # Transient poll failures (payload None without expiry) stay silent
+                        # and just retry next tick.
+                        await session.write_payload({"ok": False})
+                        last_poll = time.time()
 
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
