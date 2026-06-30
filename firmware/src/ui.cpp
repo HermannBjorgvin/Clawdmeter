@@ -69,6 +69,22 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_28;
         L.bt_credit_1_font = &font_styrene_24;
         L.bt_credit_2_font = &font_styrene_20;
+    } else if (c.width >= 560) {
+        // Wide landscape layout — tuned for 600x450 (LilyGo T4-S3).
+        // Same panel heights as the large layout; the extra horizontal space
+        // is used automatically via content_w = scr_w - 2*margin.
+        L.content_y = 100;
+        L.usage_panel_h = 148;
+        L.usage_panel_gap = 16;
+        L.usage_bar_y = 56;
+        L.usage_reset_y = 94;
+        L.bt_info_panel_h = 160;
+        L.bt_reset_zone_h = 110;
+        L.bt_title_font    = &font_tiempos_56;
+        L.bt_status_font   = &font_styrene_48;
+        L.bt_device_font   = &font_styrene_28;
+        L.bt_credit_1_font = &font_styrene_24;
+        L.bt_credit_2_font = &font_styrene_20;
     } else {
         // Compact layout — tuned for 368x448 (AMOLED-1.8).
         L.content_y = 85;

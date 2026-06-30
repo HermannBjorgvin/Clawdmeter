@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <lvgl.h>
 
 // Display abstraction. The board provides the QSPI bus, panel driver, and any
 // CPU-side rotation. Shared code (main.cpp, LVGL glue) never sees the GFX
@@ -30,3 +31,8 @@ void display_hal_tick(void);
 
 // LVGL flush regions must be even-aligned on the CO5300; harmless on others.
 void display_hal_round_area(int32_t* x1, int32_t* y1, int32_t* x2, int32_t* y2);
+
+// Returns the LVGL pixel format expected by this display panel.
+// Most panels use RGB565; panels with a byte-swapped pixel bus
+// (e.g. RM690B0 via QSPI) return RGB565_SWAPPED.
+lv_color_format_t display_hal_color_format(void);
