@@ -110,13 +110,16 @@ static bool parse_json(const char* json, UsageData* out) {
     out->session_reset_mins = doc["sr"] | -1;
     out->weekly_pct = doc["w"] | 0.0f;
     out->weekly_reset_mins = doc["wr"] | -1;
+    out->overage_pct = doc["o"] | 0.0f;
+    out->overage_reset_mins = doc["or"] | -1;
+    out->overage_in_use = doc["oiu"] | false;
+    // Default "pro-max" so payloads from an older daemon (no acct field) keep the
+    // normal Usage/Extra-Usage screens rather than falling into the Enterprise view.
+    strlcpy(out->acct, doc["acct"] | "pro-max", sizeof(out->acct));
+    // Legacy daemons sent acct "pro" — treat as pro-max.
+    if (strcmp(out->acct, "pro") == 0) strlcpy(out->acct, "pro-max", sizeof(out->acct));
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->chime = doc["c"] | false;   // absent (old daemon / chime off) → stay silent
-    const char* acct = doc["acct"] | "pro";
-    out->enterprise = (strcmp(acct, "ent") == 0);
-    out->time_pct = doc["tp"] | 0;
-    out->period_days = doc["pd"] | 30;
-    strlcpy(out->reset_date, doc["rd"] | "", sizeof(out->reset_date));
     out->clock_epoch = doc["t"] | 0L;
     out->clock_fmt = doc["tf"] | 24;
     out->ok = doc["ok"] | false;
