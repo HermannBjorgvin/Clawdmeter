@@ -200,8 +200,7 @@ async def _get_cb_manager():
             CentralManagerDelegate,
         )
 
-        mgr = CentralManagerDelegate()
-        await mgr.wait_until_ready()  # raises if Bluetooth is unauthorized/off
+        mgr = CentralManagerDelegate()  # raises BleakError if BT off/unauthorized
         _cb_manager = mgr
     return _cb_manager
 
