@@ -30,6 +30,7 @@ Boards supported out of the box:
 - [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786)
 - [Waveshare ESP32-C6-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-c6-touch-amoled-2.16.htm?&aff_id=149786) 
 - [Waveshare ESP32-S3-Touch-AMOLED-1.8](https://www.waveshare.com/esp32-s3-touch-amoled-1.8.htm?&aff_id=149786)
+- [Waveshare ESP32-C6-Touch-AMOLED-1.8](https://www.waveshare.com/esp32-c6-touch-amoled-1.8.htm?&aff_id=149786)
 
 > Please check if a pull request exists for your alternative hardware port before opening a new one, providing QA feedback and testing on the same hardware is more valuable than duplicate pull requests.
 
@@ -59,7 +60,7 @@ The board env name is required. Run `./flash-mac.sh` with no args to see the ava
 
 ### Pair the device
 
-After flashing, open **System Settings → Bluetooth** and click *Connect* next to "Clawdmeter". The daemon will discover it on its next scan (~30 s).
+After flashing, open **System Settings → Bluetooth** and click *Connect* next to "Clawdmeter". The daemon only ever connects to the peripheral this Mac is paired/connected to — it never scans for a nearby device — so once it's connected here the daemon picks it up on its next poll (~60 s).
 
 ### Install the daemon
 
@@ -140,7 +141,7 @@ Run `pio run -d firmware` with no env to see the available board envs.
 
 ### Pair the device
 
-The device is a bonded BLE HID keyboard, so pair it once: **Settings → Bluetooth & devices → Add device → Bluetooth**, then select "Claude Controller". Pairing is **required** — it enables the physical buttons and keeps a persistent connection (the device keeps showing your last-synced usage even after the daemon quits). To undo, use **Remove device** (this disables the buttons).
+The device is a bonded BLE HID keyboard, so pair it once: **Settings → Bluetooth & devices → Add device → Bluetooth**, then select "Clawdmeter". Pairing is **required** — it enables the physical buttons and keeps a persistent connection (the device keeps showing your last-synced usage even after the daemon quits). To undo, use **Remove device** (this disables the buttons).
 
 ### Install the daemon (recommended)
 
@@ -262,31 +263,6 @@ lv_font_conv --font assets/DejaVuSansMono.ttf \
 4. Add `.fallback = NULL`, `.user_data = NULL` to the font struct
 
 Without these patches, fonts compile but render as invisible.
-
-### CJK support
-
-`firmware/src/font_cjk_16.c` covers the full CJK Unified Ideographs basic
-block (U+4E00–U+9FFF, ~20k glyphs) plus ASCII, CJK punctuation, and
-halfwidth/fullwidth forms. Generated from [Noto Sans CJK SC](https://github.com/notofonts/noto-cjk)
-(SIL OFL 1.1) at 16px, 2bpp:
-
-```bash
-lv_font_conv --font NotoSansCJKsc-Regular.otf --size 16 --bpp 2 \
-  --no-compress --format lvgl --lv-include 'lvgl.h' \
-  -r '0x20-0x7E,0xB7,0x2014,0x2018-0x2019,0x201C-0x201D,0x2026,0x3000-0x303F,0x4E00-0x9FFF,0xFF00-0xFFEF' \
-  -o firmware/src/font_cjk_16.c
-```
-
-Then apply the four LVGL 9 patches above. Because the font has >65k of
-glyph bitmap data, the build needs `-DLV_FONT_FMT_TXT_LARGE=1` in
-`platformio.ini` build flags so font descriptor offsets switch from
-16-bit to 32-bit.
-
-The CJK font is used for the Activity screen's user-prompt row and todo
-content rows. The headline (28pt Styrene B) and titles stay ASCII-only
-to preserve the brand font — Chinese text in those slots renders as
-empty boxes. Add a `font_cjk_28.c` if full coverage is needed (~1MB
-more flash).
 
 ## Converting Lucide icons
 

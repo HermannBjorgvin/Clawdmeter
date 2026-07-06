@@ -1,0 +1,32 @@
+# Clawdmeter daemon config
+#
+# Copy this file to:
+#   macOS / Linux : ~/.config/claude-usage-monitor/config
+#   Windows       : %LOCALAPPDATA%\Clawdmeter\config
+#
+# The daemon re-reads it on every poll, so edits take effect within ~60s — no restart needed.
+
+# Poll more than one Claude config dir and show whichever plan is currently
+# active. Use this if you run separate plans from different config dirs (e.g. a
+# personal plan in ~/.claude and a work plan in ~/.claude-work, selected via
+# CLAUDE_CONFIG_DIR). Comma-separated; ~ is expanded.
+#   - The daemon polls every listed dir each cycle and displays the plan whose
+#     usage rose most recently (i.e. the one you're actively using). Before any
+#     change is seen it shows the plan with the highest current usage.
+#   - Unset (default) = just ~/.claude, unchanged single-plan behavior.
+#   - install.sh can detect your ~/.claude* dirs and fill this in for you.
+# config_dirs = ~/.claude, ~/.claude-work
+
+# Play a sound on the device when your 5-hour session limit resets, so you know
+# you can use Claude again without watching the screen.
+#   off = silent (default)
+#   on  = chime through the board speaker (boards with audio: AMOLED-2.16 / 1.8)
+chime = off
+# Show a clock on the Usage screen, in place of the "Usage" title.
+#   off  = no clock; the screen keeps showing "Usage" (default)
+#   auto = show the clock, auto-detecting 12h/24h from this machine's settings
+#          (detection can default to 24h when the daemon runs under launchd/systemd
+#           with no locale — set 12 or 24 explicitly below if auto guesses wrong)
+#   12   = show the clock, forced 12-hour  (e.g. 6:28 PM)
+#   24   = show the clock, forced 24-hour  (e.g. 18:28)
+clock = off

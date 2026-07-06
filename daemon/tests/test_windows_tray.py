@@ -116,15 +116,17 @@ def test_main_populates_tray_state_loop_and_stop_event():
     ts = TrayState()
     populated = {}
 
-    async def _fake_scan():
-        # Record the state of ts at first scan entry (after main() startup lines).
+    async def _fake_acquire():
+        # Record the state of ts at first acquisition entry (after main() startup lines).
         populated["loop"] = ts.loop
         populated["stop_event"] = ts.stop_event
         # Signal stop so the loop exits cleanly.
         ts.stop_event.set()
-        return None   # no device found
+        return None   # nothing acquired
 
-    with patch.object(mod, "scan_for_device", side_effect=_fake_scan):
+    # Patch acquire_target (main()'s device-acquisition seam) so the test never does
+    # real bonded-address discovery + a real BLE connect, hammering live hardware.
+    with patch.object(mod, "acquire_target", side_effect=_fake_acquire):
         asyncio.run(mod.main(tray_state=ts))
 
     assert populated.get("loop") is not None, "ts.loop must be set by daemon main()"
@@ -309,13 +311,16 @@ def test_main_runs_in_background_thread_without_signal_error():
     ts = TrayState()
     errors: list = []
 
-    async def _fake_scan():
+    async def _fake_acquire():
         ts.stop_event.set()   # exit the loop immediately
         return None
 
     def _run() -> None:
         try:
-            with patch.object(mod, "scan_for_device", side_effect=_fake_scan):
+            # Patch acquire_target (the device-acquisition seam) so this never does
+            # real bonded-address discovery + a real BLE connect (which would block
+            # past the 10s join below and make this regression test hit hardware).
+            with patch.object(mod, "acquire_target", side_effect=_fake_acquire):
                 asyncio.run(mod.main(tray_state=ts))
         except Exception as exc:   # noqa: BLE001 — capture for the assertion
             errors.append(exc)
