@@ -58,9 +58,14 @@ read_config_dirs() {
 }
 
 # Read the OAuth access token from a specific config dir's credentials file.
+# The file can hold many "accessToken" fields — one per OAuth integration (MCP
+# servers, design tools, etc.) — so we must isolate the claudeAiOauth object
+# first and pull ITS accessToken. A bare grep for "accessToken" would return
+# every token concatenated, yielding an invalid Bearer header and constant 401s.
 read_token_for() {
     local dir="$1"
-    grep -o '"accessToken":"[^"]*"' "$dir/.credentials.json" 2>/dev/null | cut -d'"' -f4
+    grep -o '"claudeAiOauth"[[:space:]]*:[[:space:]]*{[^}]*}' "$dir/.credentials.json" 2>/dev/null \
+        | grep -o '"accessToken":"[^"]*"' | head -1 | cut -d'"' -f4
 }
 
 # Read the `chime` option from the config file. Echoes one of: off|on.
