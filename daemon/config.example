@@ -30,3 +30,11 @@ chime = off
 #   12   = show the clock, forced 12-hour  (e.g. 6:28 PM)
 #   24   = show the clock, forced 24-hour  (e.g. 18:28)
 clock = off
+
+# Append a usage record (session/weekly utilization) once per poll to
+# usage_log.jsonl in this same dir, so you can build a report later with
+# `python tools/usage_report.py`. Append-only JSON-lines; nothing is written
+# until you opt in here.
+#   off = no log (default)
+#   on  = log every poll
+usage_log = off

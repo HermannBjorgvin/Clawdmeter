@@ -46,6 +46,10 @@ RECONNECT_BACKOFF_CAP = 8  # D-05: fast-reconnect cap (seconds); keeps stacked r
 # Config lives under the same Clawdmeter dir as daemon.log.
 CONFIG_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "config"
 
+# Opt-in usage log: one JSON-lines record per poll for tools/usage_report.py.
+# Only written when `usage_log = on` in the config; append-only, self-describing.
+USAGE_LOG_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "usage_log.jsonl"
+
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
@@ -183,6 +187,49 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
+def read_usage_log_setting() -> str:
+    """Read the `usage_log` option from the config file. One of: off|on.
+
+    Defaults to "off" — the daemon writes no log until the user opts in.
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "usage_log":
+                    val = val.strip().lower()
+                    if val in ("off", "on"):
+                        return val
+    except OSError:
+        pass
+    return "off"
+
+
+def _log_usage(payload: dict) -> None:
+    """Append one JSON-lines record per poll for tools/usage_report.py, when the
+    `usage_log` config opts in. Best-effort — a logging failure must never
+    disturb the poll loop. Self-describing so new payload fields are picked up
+    automatically."""
+    if read_usage_log_setting() != "on":
+        return
+    try:
+        rec = {
+            "ts": round(time.time(), 1),
+            "iso": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        for k in ("s", "sr", "w", "wr", "st", "acct", "tp", "pd", "rd"):
+            if k in payload:
+                rec[k] = payload[k]
+        USAGE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with USAGE_LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError as e:
+        log(f"usage log write failed: {e}")
+
+
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
@@ -246,6 +293,7 @@ async def poll_api(token: str) -> dict | None:
         }
     add_chime_field(payload)   # adds "c":1 iff the config opts in
     add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
+    _log_usage(payload)         # appends a log record iff the config opts in
     return payload
 
 
