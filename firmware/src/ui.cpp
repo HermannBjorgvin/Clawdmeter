@@ -139,6 +139,7 @@ static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 static lv_obj_t* idle_group;            // the "Zzz" idle screen
 static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage update landed
 static bool      data_received = false; // any valid update since boot
+static bool      data_ok = true;        // last payload's ok flag; a {"ok":false} beat = "no fresh data"
 static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage
 static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within this window (daemon sends ~60s)
 
@@ -469,7 +470,9 @@ void ui_init(void) {
 
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
-    last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
+    data_ok = data->ok;
+    if (!data->ok) return;          // a {"ok":false} "no data" beat → fall through to idle, keep last numbers
+    last_data_ms = lv_tick_get();   // a real usage update just landed
     data_received = true;
 
     if (data->clock_epoch > 0) {    // daemon supplied wall-clock time → drive the title clock
@@ -559,7 +562,7 @@ static void update_view_state(void) {
     int v;
     if (!s_ble_connected) {
         v = 0;  // pairing hint
-    } else if (data_received && (lv_tick_get() - last_data_ms) < DATA_FRESH_MS) {
+    } else if (data_received && data_ok && (lv_tick_get() - last_data_ms) < DATA_FRESH_MS) {
         v = 2;  // live usage
     } else {
         v = 1;  // idle / Zzz
