@@ -15,7 +15,9 @@ LV_FONT_DECLARE(font_styrene_24);
 LV_FONT_DECLARE(font_styrene_20);
 LV_FONT_DECLARE(font_styrene_16);
 LV_FONT_DECLARE(font_styrene_14);
+LV_FONT_DECLARE(font_styrene_12);
 LV_FONT_DECLARE(font_mono_32);
+LV_FONT_DECLARE(font_mono_18);
 
 // Layout values computed from the active board's geometry. Populated once
 // in ui_init() and treated as const for the rest of the program. Adding a
@@ -33,6 +35,27 @@ struct Layout {
     int16_t usage_panel_gap;
     int16_t usage_bar_y;
     int16_t usage_reset_y;
+    int16_t bar_h;
+    int16_t panel_pad_x, panel_pad_y;
+    int16_t pill_pad_x, pill_pad_y;
+    const lv_font_t* title_font;     // screen title / clock
+    const lv_font_t* pct_font;       // big percentage number
+    const lv_font_t* ent_pct_font;   // enterprise spending number
+    const lv_font_t* pill_font;      // "Current" / "Weekly" pill
+    const lv_font_t* reset_font;     // "Resets in ..." line
+    const lv_font_t* anim_font;      // animated status line
+    int16_t anim_y;                  // status line offset from bottom
+    bool    anim_plain;              // plain-ASCII status line (no spinner/… glyphs)
+    bool    show_logo;               // logo is 80x80 — hidden on small screens
+    bool    show_title;              // "Usage" header — dropped on tiny screens
+    const char* session_pill;        // 5h-window pill label ("Current" / "5h")
+    const char* weekly_pill;         // 7d-window pill label ("Weekly" / "7d")
+    int16_t battery_scale;           // LVGL image scale for the 48px icon (256 = 1:1)
+
+    // Pairing hint / idle screen
+    int16_t pair_y1, pair_y2, pair_y3;
+    const char* pair_l1, *pair_l2, *pair_l3;  // pairing hint wording (gesture differs per board)
+    int16_t idle_px;                 // sleeping-creature size on the idle screen
 
     // Bluetooth screen
     int16_t bt_info_panel_h;
@@ -55,6 +78,34 @@ static void compute_layout(const BoardCaps& c) {
     L.margin = 20;
     L.title_y = 30;
 
+    // Values shared by the two original breakpoints; the small branch below
+    // overrides them wholesale.
+    L.bar_h = 24;
+    L.panel_pad_x = 16;
+    L.panel_pad_y = 12;
+    L.pill_pad_x = 18;
+    L.pill_pad_y = 6;
+    L.title_font   = &font_tiempos_56;
+    L.pct_font     = &font_styrene_48;
+    L.ent_pct_font = &font_tiempos_56;
+    L.pill_font    = &font_styrene_28;
+    L.reset_font   = &font_styrene_28;
+    L.anim_font    = &font_mono_32;
+    L.anim_y = -15;
+    L.anim_plain = false;
+    L.show_logo = true;
+    L.show_title = true;
+    L.session_pill = "Current";
+    L.weekly_pill  = "Weekly";
+    L.battery_scale = 256;
+    L.pair_y1 = 40;
+    L.pair_y2 = 120;
+    L.pair_y3 = 160;
+    L.pair_l1 = "To pair";
+    L.pair_l2 = "hold the power button";
+    L.pair_l3 = "for 3 seconds, then release";
+    L.idle_px = 160;
+
     if (c.height >= 460) {
         // Large layout — tuned for 480x480 (AMOLED-2.16).
         L.content_y = 100;
@@ -69,7 +120,7 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_28;
         L.bt_credit_1_font = &font_styrene_24;
         L.bt_credit_2_font = &font_styrene_20;
-    } else {
+    } else if (c.height >= 300) {
         // Compact layout — tuned for 368x448 (AMOLED-1.8).
         L.content_y = 85;
         L.usage_panel_h = 130;
@@ -83,6 +134,85 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_20;
         L.bt_credit_1_font = &font_styrene_16;
         L.bt_credit_2_font = &font_styrene_14;
+    } else if (c.width >= 200) {
+        // Small layout — tuned for 240x240 (LCD-1.54 and similar square TFTs).
+        // Everything shrinks: fonts two steps down, panels ~half height, the
+        // 80x80 logo is hidden (it would cover a third of the screen width).
+        L.margin = 8;
+        L.title_y = 4;
+        L.content_y = 44;
+        L.usage_panel_h = 74;
+        L.usage_panel_gap = 6;
+        L.usage_bar_y = 30;
+        L.usage_reset_y = 46;
+        L.bar_h = 12;
+        L.panel_pad_x = 10;
+        L.panel_pad_y = 6;
+        L.pill_pad_x = 8;
+        L.pill_pad_y = 2;
+        L.title_font   = &font_tiempos_34;
+        L.pct_font     = &font_styrene_24;
+        L.ent_pct_font = &font_tiempos_34;
+        L.pill_font    = &font_styrene_14;
+        L.reset_font   = &font_styrene_14;
+        L.anim_font    = &font_mono_18;
+        L.anim_y = -4;
+        L.show_logo = false;
+        L.pair_y1 = 12;
+        L.pair_y2 = 56;
+        L.pair_y3 = 80;
+        L.idle_px = 96;
+        L.bt_info_panel_h = 90;
+        L.bt_reset_zone_h = 60;
+        L.bt_title_font    = &font_tiempos_34;
+        L.bt_status_font   = &font_styrene_20;
+        L.bt_device_font   = &font_styrene_14;
+        L.bt_credit_1_font = &font_styrene_12;
+        L.bt_credit_2_font = &font_styrene_12;
+    } else {
+        // Stick layout — tuned for 135x240 portrait (M5StickS3 and the
+        // StickC-Plus family). Height is plentiful, width is the enemy:
+        // no logo, no "Usage" header, half-scale battery icon, short pill
+        // labels, and mono_18 for the status line (it carries the spinner
+        // and ellipsis glyphs, so the whimsy survives the shrink).
+        L.margin = 6;
+        L.title_y = 6;
+        L.content_y = 36;
+        L.usage_panel_h = 80;
+        L.usage_panel_gap = 8;
+        L.usage_bar_y = 38;
+        L.usage_reset_y = 58;
+        L.bar_h = 10;
+        L.panel_pad_x = 8;
+        L.panel_pad_y = 6;
+        L.pill_pad_x = 7;
+        L.pill_pad_y = 2;
+        L.title_font   = &font_tiempos_34;
+        L.pct_font     = &font_styrene_24;
+        L.ent_pct_font = &font_tiempos_34;
+        L.pill_font    = &font_styrene_12;
+        L.reset_font   = &font_styrene_12;
+        L.anim_font    = &font_mono_18;
+        L.anim_y = -6;
+        L.show_logo = false;
+        L.show_title = false;
+        L.session_pill = "5h";
+        L.weekly_pill  = "7d";
+        L.battery_scale = 128;   // 48px asset drawn at 24px
+        L.pair_y1 = 24;
+        L.pair_y2 = 84;
+        L.pair_y3 = 108;
+        L.pair_l1 = "To pair";
+        L.pair_l2 = "hold the side button";
+        L.pair_l3 = "3s, then release";
+        L.idle_px = 96;
+        L.bt_info_panel_h = 80;
+        L.bt_reset_zone_h = 46;
+        L.bt_title_font    = &font_styrene_24;
+        L.bt_status_font   = &font_styrene_16;
+        L.bt_device_font   = &font_styrene_12;
+        L.bt_credit_1_font = &font_styrene_12;
+        L.bt_credit_2_font = &font_styrene_12;
     }
 
     L.content_w = L.scr_w - 2 * L.margin;
@@ -231,10 +361,10 @@ static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(panel, 8, 0);
     lv_obj_set_style_border_width(panel, 0, 0);
-    lv_obj_set_style_pad_left(panel, 16, 0);
-    lv_obj_set_style_pad_right(panel, 16, 0);
-    lv_obj_set_style_pad_top(panel, 12, 0);
-    lv_obj_set_style_pad_bottom(panel, 12, 0);
+    lv_obj_set_style_pad_left(panel, L.panel_pad_x, 0);
+    lv_obj_set_style_pad_right(panel, L.panel_pad_x, 0);
+    lv_obj_set_style_pad_top(panel, L.panel_pad_y, 0);
+    lv_obj_set_style_pad_bottom(panel, L.panel_pad_y, 0);
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(panel, LV_OBJ_FLAG_EVENT_BUBBLE);
     return panel;
@@ -267,15 +397,15 @@ static void init_icon_dsc_rgb565a8(lv_image_dsc_t* dsc, int w, int h, const uint
 static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_font(lbl, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl, L.pill_font, 0);
     lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
     lv_obj_set_style_bg_color(lbl, COL_BAR_BG, 0);
     lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(lbl, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_pad_left(lbl, 18, 0);
-    lv_obj_set_style_pad_right(lbl, 18, 0);
-    lv_obj_set_style_pad_top(lbl, 6, 0);
-    lv_obj_set_style_pad_bottom(lbl, 6, 0);
+    lv_obj_set_style_pad_left(lbl, L.pill_pad_x, 0);
+    lv_obj_set_style_pad_right(lbl, L.pill_pad_x, 0);
+    lv_obj_set_style_pad_top(lbl, L.pill_pad_y, 0);
+    lv_obj_set_style_pad_bottom(lbl, L.pill_pad_y, 0);
     return lbl;
 }
 
@@ -296,18 +426,19 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "---%");
-    lv_obj_set_style_text_font(*out_pct, &font_styrene_48, 0);
+    lv_obj_set_style_text_font(*out_pct, L.pct_font, 0);
     lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
     lv_obj_set_pos(*out_pct, 0, 0);
 
     *out_pill = make_pill(panel, pill_text);
     lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
 
-    *out_bar = make_bar(panel, 0, L.usage_bar_y, L.content_w - 32, 24);
+    *out_bar = make_bar(panel, 0, L.usage_bar_y,
+                        L.content_w - 2 * L.panel_pad_x, L.bar_h);
 
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
-    lv_obj_set_style_text_font(*out_reset, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(*out_reset, L.reset_font, 0);
     lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
     lv_obj_set_pos(*out_reset, 0, L.usage_reset_y);
 
@@ -327,22 +458,22 @@ static void build_pair_group(lv_obj_t* parent) {
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     lv_obj_t* l1 = lv_label_create(pair_group);
-    lv_label_set_text(l1, "To pair");
+    lv_label_set_text(l1, L.pair_l1);
     lv_obj_set_style_text_font(l1, L.bt_status_font, 0);
     lv_obj_set_style_text_color(l1, COL_TEXT, 0);
-    lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, L.pair_y1);
 
     lv_obj_t* l2 = lv_label_create(pair_group);
-    lv_label_set_text(l2, "hold the power button");
+    lv_label_set_text(l2, L.pair_l2);
     lv_obj_set_style_text_font(l2, L.bt_device_font, 0);
     lv_obj_set_style_text_color(l2, COL_DIM, 0);
-    lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, 120);
+    lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, L.pair_y2);
 
     lv_obj_t* l3 = lv_label_create(pair_group);
-    lv_label_set_text(l3, "for 3 seconds, then release");
+    lv_label_set_text(l3, L.pair_l3);
     lv_obj_set_style_text_font(l3, L.bt_device_font, 0);
     lv_obj_set_style_text_color(l3, COL_DIM, 0);
-    lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, 160);
+    lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, L.pair_y3);
 
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);  // ui_update_ble_status decides
 }
@@ -363,7 +494,7 @@ static void build_idle_group(lv_obj_t* parent) {
     // A shrunk-down sleeping creature (reused claudepix "expression sleep" art)
     // sits between the header and the status line; the animated "Listening…"
     // status line carries the words, so no extra text is needed here.
-    lv_obj_t* creature = splash_mini_create(idle_group, "expression sleep", 160);
+    lv_obj_t* creature = splash_mini_create(idle_group, "expression sleep", L.idle_px);
     if (creature) lv_obj_align(creature, LV_ALIGN_CENTER, 0, -20);
 
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
@@ -381,9 +512,14 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
-    lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+    // The +16 nudge balances the 80x80 logo on the left; without the logo
+    // (small screens) it would push the title into the battery icon instead.
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, L.show_logo ? 16 : 0, L.title_y);
+    // Stick-width screens drop the header entirely to reclaim vertical space.
+    // (The daemon-fed clock, off by default, lives here too — acceptable loss.)
+    if (!L.show_title) lv_obj_add_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
@@ -396,32 +532,32 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    panel_session = make_usage_panel(usage_group, L.content_y, "Current",
+    panel_session = make_usage_panel(usage_group, L.content_y, L.session_pill,
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
 
     // Enterprise-only overlays inside panel_session — hidden until enterprise data arrives
     lbl_session_pct_sym = lv_label_create(panel_session);
     lv_label_set_text(lbl_session_pct_sym, "%");
-    lv_obj_set_style_text_font(lbl_session_pct_sym, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl_session_pct_sym, L.reset_font, 0);
     lv_obj_set_style_text_color(lbl_session_pct_sym, COL_TEXT, 0);
     lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
 
     lbl_spending_desc = lv_label_create(panel_session);
     lv_label_set_text(lbl_spending_desc, "of your monthly budget");
-    lv_obj_set_style_text_font(lbl_spending_desc, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl_spending_desc, L.reset_font, 0);
     lv_obj_set_style_text_color(lbl_spending_desc, COL_DIM, 0);
     lv_obj_set_pos(lbl_spending_desc, 0, L.usage_reset_y);
     lv_obj_add_flag(lbl_spending_desc, LV_OBJ_FLAG_HIDDEN);
 
     lbl_spending_status = lv_label_create(panel_session);
     lv_label_set_text(lbl_spending_status, "");
-    lv_obj_set_style_text_font(lbl_spending_status, &font_styrene_16, 0);
+    lv_obj_set_style_text_font(lbl_spending_status, L.bt_credit_1_font, 0);
     lv_obj_set_pos(lbl_spending_status, 0, L.usage_reset_y + 20);
     lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
 
     panel_weekly = make_usage_panel(usage_group,
-                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
+                     L.content_y + L.usage_panel_h + L.usage_panel_gap, L.weekly_pill,
                      &lbl_weekly_pct, &lbl_weekly_label,
                      &bar_weekly, &lbl_weekly_reset);
     // Recolor enabled so enterprise period box can color pace and reset separately
@@ -433,9 +569,9 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
-    lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
+    lv_obj_set_style_text_font(lbl_anim, L.anim_font, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
-    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
 }
 
 // ======== Public API ========
@@ -460,11 +596,27 @@ void ui_init(void) {
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
     lv_obj_set_pos(logo_img, L.margin, L.title_y - 10);
+    if (!L.show_logo) {
+        // 80x80 logo covers a third of a 240-wide screen — drop it entirely
+        // (ui_show_screen also unhides it per screen, so delete, don't hide).
+        lv_obj_del(logo_img);
+        logo_img = nullptr;
+    }
 
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
-    lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
-
+    // Stick-width screens draw the 48px asset scaled down (pivot at the
+    // top-left so the scaled bitmap stays where it's placed).
+    lv_image_set_pivot(battery_img, 0, 0);
+    lv_image_set_scale(battery_img, L.battery_scale);
+    lv_obj_set_pos(battery_img,
+                   L.scr_w - (48 * L.battery_scale) / 256 - L.margin, L.title_y);
+    // Boards without battery telemetry never show the indicator (per the HAL
+    // contract; previously every board drew the empty-battery glyph).
+    if (!board_caps().has_battery) {
+        lv_obj_del(battery_img);
+        battery_img = nullptr;
+    }
 }
 
 void ui_update(const UsageData* data) {
@@ -486,7 +638,7 @@ void ui_update(const UsageData* data) {
 
     if (data->enterprise) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
-        lv_obj_set_style_text_font(lbl_session_pct, &font_tiempos_56, 0);
+        lv_obj_set_style_text_font(lbl_session_pct, L.ent_pct_font, 0);
         lv_label_set_text(lbl_session_label, "Spending");
         lv_obj_add_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
@@ -494,8 +646,8 @@ void ui_update(const UsageData* data) {
         lv_obj_add_flag(lbl_spending_status,   LV_OBJ_FLAG_HIDDEN);
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_set_style_text_font(lbl_session_pct, &font_styrene_48, 0);
-        lv_label_set_text(lbl_session_label, "Current");
+        lv_obj_set_style_text_font(lbl_session_pct, L.pct_font, 0);
+        lv_label_set_text(lbl_session_label, L.session_pill);
         lv_obj_clear_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
@@ -624,10 +776,15 @@ void ui_tick_anim(void) {
         text = anim_messages[anim_msg_idx];
     }
 
-    // All states share the whimsical style: "<glyph> <Title-case word>…"
+    // All states share the whimsical style: "<glyph> <Title-case word>…".
+    // Layouts whose status font lacks the spinner + ellipsis glyphs use a
+    // plain ASCII form instead of rendering tofu on both sides.
     static char buf[80];
-    snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6",
-             spinner_frames[anim_spinner_idx], text);
+    if (L.anim_plain)
+        snprintf(buf, sizeof(buf), "%s...", text);
+    else
+        snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6",
+                 spinner_frames[anim_spinner_idx], text);
     lv_label_set_text(lbl_anim, buf);
 }
 
@@ -684,6 +841,7 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
 }
 
 void ui_update_battery(int percent, bool charging) {
+    if (!battery_img) return;
     int idx;
     if (charging) {
         idx = 4;
