@@ -15,6 +15,7 @@ DAEMON="$(dirname "$0")/../claude-usage-daemon.sh"
 
 # Pull just the two functions out of the daemon; sourcing it would start the loop.
 eval "$(awk '/^read_codex_token\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
+eval "$(awk '/^codex_fetch_fragment\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
 eval "$(awk '/^poll_codex\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
 eval "$(awk '/^read_plan_label_for\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
 
@@ -64,7 +65,7 @@ FAKE_JSON='{"plan_type":"plus","rate_limit":{"primary_window":
 {"used_percent":92,"limit_window_seconds":604800,"reset_after_seconds":595912},
 "secondary_window":null}}'
 check_prefix "primary-only window -> cx/cxr/cxw" \
-      ',"cx":92,"cxr":9932,"cxw":10080' "$(poll_codex)"
+      ',"cx":92,"cxr":9932,"cxw":10080' "$(codex_fetch_fragment)"
 
 # --- both windows present: most-USED wins, not slot order --------------------
 FAKE_JSON='{"rate_limit":{"primary_window":
@@ -72,42 +73,42 @@ FAKE_JSON='{"rate_limit":{"primary_window":
 "secondary_window":
 {"used_percent":80,"limit_window_seconds":604800,"reset_after_seconds":86400}}}'
 check_prefix "both windows -> picks the most-used one" \
-      ',"cx":80,"cxr":1440,"cxw":10080' "$(poll_codex)"
+      ',"cx":80,"cxr":1440,"cxw":10080' "$(codex_fetch_fragment)"
 
 # --- a 5h window must label itself as 5h (cxw drives the UI label) -----------
 FAKE_JSON='{"rate_limit":{"primary_window":
 {"used_percent":55,"limit_window_seconds":18000,"reset_after_seconds":3600},
 "secondary_window":null}}'
 check_prefix "5h window reports cxw=300" \
-      ',"cx":55,"cxr":60,"cxw":300' "$(poll_codex)"
+      ',"cx":55,"cxr":60,"cxw":300' "$(codex_fetch_fragment)"
 
 # --- degradation paths: all must yield an EMPTY fragment --------------------
 FAKE_JSON='{"rate_limit":{"primary_window":null,"secondary_window":null}}'
-check "both windows null -> empty" "" "$(poll_codex)"
+check "both windows null -> empty" "" "$(codex_fetch_fragment)"
 
 FAKE_JSON='{"rate_limit":{}}'
-check "no windows at all -> empty" "" "$(poll_codex)"
+check "no windows at all -> empty" "" "$(codex_fetch_fragment)"
 
 FAKE_JSON='not json at all'
-check "malformed JSON -> empty" "" "$(poll_codex)"
+check "malformed JSON -> empty" "" "$(codex_fetch_fragment)"
 
 FAKE_JSON=''
-check "empty response -> empty" "" "$(poll_codex)"
+check "empty response -> empty" "" "$(codex_fetch_fragment)"
 
 FAKE_JSON='{"rate_limit":{"primary_window":{"used_percent":null}}}'
-check "null used_percent -> empty" "" "$(poll_codex)"
+check "null used_percent -> empty" "" "$(codex_fetch_fragment)"
 
 FAKE_RC=7
-check "curl failure -> empty" "" "$(poll_codex)"
+check "curl failure -> empty" "" "$(codex_fetch_fragment)"
 FAKE_RC=0
 
 # missing auth.json entirely (no Codex installed) — the common case for most users
 rm -f "$CODEX_AUTH_FILE"
-check "no auth.json -> empty" "" "$(poll_codex)"
+check "no auth.json -> empty" "" "$(codex_fetch_fragment)"
 
 # unreadable/garbage auth.json
 echo 'garbage' > "$CODEX_AUTH_FILE"
-check "garbage auth.json -> empty" "" "$(poll_codex)"
+check "garbage auth.json -> empty" "" "$(codex_fetch_fragment)"
 
 # --- Codex plan label + absolute reset ride along in the fragment -----------
 cat > "$CODEX_AUTH_FILE" <<'JSON'
@@ -116,7 +117,7 @@ JSON
 FAKE_JSON='{"plan_type":"plus","rate_limit":{"primary_window":
 {"used_percent":42,"limit_window_seconds":604800,"reset_after_seconds":600,
  "reset_at":4102462800},"secondary_window":null}}'
-got="$(poll_codex)"
+got="$(codex_fetch_fragment)"
 case "$got" in
     *'"cxpl":"Codex Plus"'*) echo "PASS: codex plan label -> Codex Plus" ;;
     *) echo "FAIL: codex plan label missing/wrong in [$got]"; fails=$((fails + 1)) ;;
@@ -129,7 +130,7 @@ esac
 # plan_type absent must not emit an empty label
 FAKE_JSON='{"rate_limit":{"primary_window":
 {"used_percent":42,"limit_window_seconds":604800,"reset_after_seconds":600}}}'
-case "$(poll_codex)" in
+case "$(codex_fetch_fragment)" in
     *cxpl*) echo "FAIL: emitted cxpl with no plan_type"; fails=$((fails + 1)) ;;
     *) echo "PASS: no plan_type -> no cxpl key" ;;
 esac
@@ -158,6 +159,41 @@ check "missing credentials file -> empty" "" "$(read_plan_label_for "$TMP/nope")
 
 echo 'garbage' > "$plandir/.credentials.json"
 check "garbage credentials -> empty" "" "$(read_plan_label_for "$plandir")"
+
+# --- poll_codex caching: a transient failure must NOT blank the panel --------
+# The endpoint has been measured at ~0.9-6.6s, so a slow reply occasionally trips
+# the curl timeout. Without the cache the Codex panel flaps to "No Codex data"
+# for one cycle and back — the reported bug.
+cat > "$CODEX_AUTH_FILE" <<'JSON'
+{"tokens":{"access_token":"ACCESS-RIGHT"}}
+JSON
+CODEX_LAST_FRAGMENT=""; CODEX_LAST_TS=0; CODEX_STALE_MAX=600
+CODEX_FRAGMENT=""
+log() { :; }   # silence the daemon's logger inside the test
+
+FAKE_JSON='{"plan_type":"plus","rate_limit":{"primary_window":
+{"used_percent":63,"limit_window_seconds":604800,"reset_after_seconds":600},
+"secondary_window":null}}'
+poll_codex
+check_prefix "poll_codex: good poll populates the fragment" ',"cx":63' "$CODEX_FRAGMENT"
+
+# now the endpoint goes slow/dead — must reuse the last good reading
+FAKE_RC=28   # curl's timeout exit code
+poll_codex
+check_prefix "poll_codex: transient failure reuses last reading" ',"cx":63' "$CODEX_FRAGMENT"
+
+# ...but not forever: past CODEX_STALE_MAX it degrades to no Codex
+CODEX_LAST_TS=$(( $(date +%s) - 601 ))
+poll_codex
+check "poll_codex: stale beyond TTL -> empty (degrades)" "" "$CODEX_FRAGMENT"
+
+# and once dropped it stays dropped until a fresh poll succeeds
+poll_codex
+check "poll_codex: stays empty while still failing" "" "$CODEX_FRAGMENT"
+
+FAKE_RC=0
+poll_codex
+check_prefix "poll_codex: recovers on the next good poll" ',"cx":63' "$CODEX_FRAGMENT"
 
 echo
 if [ "$fails" -eq 0 ]; then

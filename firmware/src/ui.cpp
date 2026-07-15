@@ -6,6 +6,7 @@
 #include "codex_logo.h"
 #include "icons.h"
 #include "hal/board_caps.h"
+#include "hal/imu_hal.h"   // rotation quadrant — gestures arrive in native axes
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
@@ -789,14 +790,31 @@ static void global_click_cb(lv_event_t* e) {
 // Horizontal swipe pages between the Claude and Codex tabs. LVGL reports a
 // gesture on the indev, and it also fires a CLICKED on release — consume the
 // gesture so a page swipe doesn't also toggle the splash screen.
+// Map a gesture direction from LVGL's frame into the frame the user actually
+// sees. Touch is fixed to the panel's native axes (each board's touch_hal_init
+// applies a constant swap/mirror), while boards with IMU rotation turn the
+// IMAGE by imu_hal_rotation_quadrant() quarter-turns CW inside
+// display_hal_draw_bitmap. So on a rotated board the user's "left" arrives as
+// some other axis: with r=1 the panel maps (x,y)->(S-1-y,x), which makes a
+// perceived swipe-right show up as LV_DIR_BOTTOM. Undo r quarter-turns to get
+// back to what the user meant. Boards without rotation report 0 → identity.
+static lv_dir_t gesture_dir_as_seen(lv_dir_t d) {
+    static const lv_dir_t cw[4] = { LV_DIR_RIGHT, LV_DIR_BOTTOM, LV_DIR_LEFT, LV_DIR_TOP };
+    int idx = -1;
+    for (int i = 0; i < 4; i++) {
+        if (cw[i] == d) { idx = i; break; }
+    }
+    if (idx < 0) return d;   // diagonal/none — leave alone
+    uint8_t r = imu_hal_rotation_quadrant() & 3;
+    return cw[(idx - r + 4) & 3];
+}
+
 static void global_gesture_cb(lv_event_t* e) {
     (void)e;
-    lv_indev_t* indev = lv_indev_active();
-    lv_dir_t dir = indev ? lv_indev_get_gesture_dir(indev) : LV_DIR_NONE;
-    Serial.printf("[GESTURE] fired scr=%d indev=%p dir=%d\n",
-                  (int)current_screen, (void*)indev, (int)dir);   // TEMP trace
     if (current_screen == SCREEN_SPLASH) return;
+    lv_indev_t* indev = lv_indev_active();
     if (!indev) return;
+    lv_dir_t dir = gesture_dir_as_seen(lv_indev_get_gesture_dir(indev));
     if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return;
     lv_indev_wait_release(indev);   // suppress the trailing CLICKED
 

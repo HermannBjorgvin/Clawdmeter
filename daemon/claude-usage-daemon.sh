@@ -9,7 +9,7 @@ DEVICE_MAC="${DEVICE_MAC:-}"  # auto-discovered if empty
 SERVICE_UUID="4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID="4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID="4c41555a-4465-7669-6365-000000000004"
-POLL_INTERVAL=60
+POLL_INTERVAL=30
 TICK=5
 SAVED_MAC_FILE="$HOME/.config/claude-usage-monitor/ble-address"
 CONFIG_FILE="$HOME/.config/claude-usage-monitor/config"
@@ -434,6 +434,16 @@ CODEX_AUTH_FILE="${CODEX_HOME:-$HOME/.codex}/auth.json"
 CODEX_USAGE_URL="https://chatgpt.com/backend-api/wham/usage"
 CODEX_FRAGMENT=""   # recomputed once per poll cycle; "" = no Codex data this cycle
 PAYLOAD_DIR=""      # config dir the in-flight payload belongs to (plan label lookup)
+# Last good Codex reading, reused across a transient failure. Measured response
+# times for this endpoint range ~0.9s to ~6.6s, so an occasional slow reply trips
+# the curl timeout; without this the panel would flap to "No Codex data" for a
+# cycle and back. Quota moves slowly (a 7-day window), so serving a reading up to
+# CODEX_STALE_MAX old is far better than blanking.
+# ponytail: reused verbatim, so the countdown can lag by up to CODEX_STALE_MAX.
+# Invisible on a weekly window; revisit if a short (e.g. 5h) window ever ships.
+CODEX_LAST_FRAGMENT=""
+CODEX_LAST_TS=0
+CODEX_STALE_MAX=600   # 10 min; past this, Codex is treated as genuinely gone
 
 read_codex_token() {
     [ -f "$CODEX_AUTH_FILE" ] || return 1
@@ -449,12 +459,13 @@ sys.stdout.write((d.get("tokens") or {}).get("access_token") or "")
 
 # Echo a JSON fragment (",\"cx\":..,\"cxr\":..,\"cxw\":..") or nothing at all.
 # Never returns non-zero: Codex is strictly optional and must never be able to
-# fail the Claude payload or stall the poll loop.
-poll_codex() {
+# fail the Claude payload or stall the poll loop. max-time must stay well under
+# POLL_INTERVAL; the endpoint has been measured at ~0.9-6.6s.
+codex_fetch_fragment() {
     local token json
     token=$(read_codex_token) || return 0
     [ -z "$token" ] && return 0
-    json=$(curl -s --connect-timeout 5 --max-time 10 "$CODEX_USAGE_URL" \
+    json=$(curl -s --connect-timeout 5 --max-time 15 "$CODEX_USAGE_URL" \
         -H "Authorization: Bearer $token" \
         -H "Accept: application/json" 2>/dev/null) || return 0
     [ -z "$json" ] && return 0
@@ -495,6 +506,36 @@ sys.stdout.write(out)
 ' 2>/dev/null
 }
 
+# Refresh CODEX_FRAGMENT for this cycle. Sets globals rather than echoing —
+# command substitution would run this in a subshell and silently discard the
+# cache updates below.
+poll_codex() {
+    local frag now_ts age
+    frag=$(codex_fetch_fragment)
+    now_ts=$(date +%s)
+
+    if [ -n "$frag" ]; then
+        CODEX_FRAGMENT="$frag"
+        CODEX_LAST_FRAGMENT="$frag"
+        CODEX_LAST_TS="$now_ts"
+        return 0
+    fi
+
+    # Transient failure — serve the last good reading rather than blanking.
+    if [ -n "$CODEX_LAST_FRAGMENT" ]; then
+        age=$(( now_ts - CODEX_LAST_TS ))
+        if [ "$age" -lt "$CODEX_STALE_MAX" ]; then
+            CODEX_FRAGMENT="$CODEX_LAST_FRAGMENT"
+            log "Codex poll failed; reusing reading from ${age}s ago"
+            return 0
+        fi
+        log "Codex unavailable for ${age}s (> ${CODEX_STALE_MAX}s) — dropping the Codex panel"
+        CODEX_LAST_FRAGMENT=""
+    fi
+    CODEX_FRAGMENT=""
+    return 0
+}
+
 # Extract the integer session % ("s") from a built payload, or 0.
 _payload_session_pct() {
     echo "$1" | grep -o '"s":[0-9]*' | head -1 | cut -d: -f2
@@ -509,8 +550,10 @@ poll() {
     POLL_SEQ=$((POLL_SEQ + 1))
 
     # Once per cycle, not once per config dir: Codex usage is per-machine, so
-    # polling it inside the dir loop would fire N identical requests.
-    CODEX_FRAGMENT=$(poll_codex)
+    # polling it inside the dir loop would fire N identical requests. Called
+    # directly (NOT via $(...)) — poll_codex maintains a cache in globals, which
+    # a subshell would throw away.
+    poll_codex
 
     local -a dirs
     mapfile -t dirs < <(read_config_dirs)
