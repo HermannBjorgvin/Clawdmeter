@@ -231,7 +231,13 @@ void setup() {
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
+#ifdef BOOT_TO_USAGE
+    // Boards with no dedicated splash-cycle button (e.g. SpotPear 1.54) boot
+    // straight to the usage view; the splash is still reachable via tap/toggle.
+    ui_show_screen(SCREEN_USAGE);
+#else
     ui_show_screen(SCREEN_SPLASH);
+#endif
 
     Serial.printf("Dashboard ready (%s, %dx%d), waiting for data on BLE...\n",
         board_caps().name, W, H);
