@@ -48,13 +48,21 @@ plus `archived_sessions/*.jsonl`. Per session take the LAST `token_count` event'
 `info.total_token_usage` (it is cumulative), and the first/last `timestamp` for
 duration. Model appears as `payload.model` (observed: `gpt-5.6-sol`).
 
+**Total tokens MUST be `(input_tokens - cached_input_tokens) + output_tokens`.**
+Codex's `input_tokens` *includes* `cached_input_tokens`, whereas Claude's
+`/stats` total counts only non-cache `inputTokens + outputTokens`. Summing
+Codex's raw `input_tokens + output_tokens` gives 218.8m against Claude's 51.6m —
+a meaningless 4x "win" that is really 207.5m of re-sent cached context. The
+like-for-like figures are Claude 51.6m (41.6m output) vs Codex 11.2m (1.2m
+output). Getting this wrong makes the two tabs silently incomparable.
+
 Measured: 58 files, **0.15s** to aggregate the lot — no caching needed; do it
 inline each stats cycle.
 
 **Codex history is only 2 days deep** (all files dated 2026-07-14/15). Its
 heatmap and streaks are therefore near-empty. Accepted: show the real, sparse
-graph rather than hide it or fake depth. Current values: 58 sessions, 218.78m
-tokens, longest session 47m.
+graph rather than hide it or fake depth. Current values: 58 sessions, 11.2m
+comparable tokens (1.2m output), longest session 47m.
 
 ### Existing constraints
 
