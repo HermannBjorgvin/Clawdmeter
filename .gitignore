@@ -19,3 +19,5 @@ daemon/.venv/
 __pycache__/
 *.pyc
 skill-observations/
+screenshots/*.raw
+screenshots/*.dims

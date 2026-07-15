@@ -45,10 +45,17 @@ provider whose CLI isn't installed or logged in is simply omitted — the tabs t
 remain still work. A subtitle under each title shows the detected plan (e.g.
 "Claude Max 20x", "Codex Plus", "Gemini Models").
 
-|              Splash               |              Usage              |
-| :-------------------------------: | :-----------------------------: |
-| ![Splash](screenshots/splash.png) | ![Usage](screenshots/usage.png) |
-|   Splash; tap the logo anytime    | Per-provider session and weekly bars |
+Screens below are captured directly from the device (Waveshare AMOLED-2.16):
+
+|              Claude              |               Codex               |             Antigravity             |
+| :------------------------------: | :-------------------------------: | :---------------------------------: |
+| ![Claude](screenshots/claude.png) | ![Codex](screenshots/codex.png)  | ![Antigravity](screenshots/antigravity.png) |
+| 5-hour + weekly windows          | Weekly window + context gauge     | Gemini pool: 5-hour + weekly        |
+
+|               System                |               Stats               |              Splash               |
+| :---------------------------------: | :-------------------------------: | :-------------------------------: |
+| ![System](screenshots/system.png)   | ![Stats](screenshots/stats.png)   | ![Splash](screenshots/splash.png) |
+| Host CPU / GPU / RAM + temps        | Heatmap, tokens, model, streak    | Clawd animation; tap logo to toggle |
 
 While the splash is up, the middle (PWR) button cycles animations, and the tab
 buttons/brightness controls still apply. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
