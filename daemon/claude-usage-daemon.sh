@@ -337,13 +337,16 @@ build_payload_for_token() {
         s5h_util=${s5h_util:-0}; s5h_reset=${s5h_reset:-0}
         s7d_util=${s7d_util:-0}; s7d_reset=${s7d_reset:-0}
         s5h_status=${s5h_status:-unknown}
-        payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$s5h_status" -v now="$now" -v clk="$clock_fragment" -v chm="$chime_fragment" \
+        # CODEX_FRAGMENT is computed once per poll cycle (see poll()) and is empty
+        # whenever Codex data is unavailable — the firmware then renders the
+        # Claude-only 2-bar view. Enterprise deliberately gets no Codex bar.
+        payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$s5h_status" -v now="$now" -v clk="$clock_fragment" -v chm="$chime_fragment" -v cdx="$CODEX_FRAGMENT" \
             'BEGIN {
                 sp = sprintf("%.0f", u5 * 100);
                 sr = (r5 - now) / 60; sr = sr > 0 ? sprintf("%.0f", sr) : 0;
                 wp = sprintf("%.0f", u7 * 100);
                 wr = (r7 - now) / 60; wr = wr > 0 ? sprintf("%.0f", wr) : 0;
-                printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"acct\":\"pro\"%s%s,\"ok\":true}", sp, sr, wp, wr, st, clk, chm;
+                printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"acct\":\"pro\"%s%s%s,\"ok\":true}", sp, sr, wp, wr, st, clk, chm, cdx;
             }')
     else
         # Enterprise account — spending-limit model
@@ -382,6 +385,75 @@ PYEOF
     return 0
 }
 
+# --- Codex (OpenAI) usage -------------------------------------------------
+# Codex quota is read from the ChatGPT backend endpoint the Codex CLI itself
+# polls, authenticated with the OAuth access token the CLI stores. Notes:
+#   * We only ever READ auth.json. The CLI owns token refresh (a 240h JWT plus a
+#     refresh_token); a second writer would race it over a credentials file and
+#     could log the user out.
+#   * The endpoint is undocumented and may change without notice — every failure
+#     path here is non-fatal and simply omits the Codex keys.
+#   * OpenAI's published usage APIs are NOT usable: they cover pay-per-token API
+#     keys only and cannot see ChatGPT-subscription Codex usage.
+CODEX_AUTH_FILE="${CODEX_HOME:-$HOME/.codex}/auth.json"
+CODEX_USAGE_URL="https://chatgpt.com/backend-api/wham/usage"
+CODEX_FRAGMENT=""   # recomputed once per poll cycle; "" = no Codex data this cycle
+
+read_codex_token() {
+    [ -f "$CODEX_AUTH_FILE" ] || return 1
+    python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+sys.stdout.write((d.get("tokens") or {}).get("access_token") or "")
+' "$CODEX_AUTH_FILE" 2>/dev/null
+}
+
+# Echo a JSON fragment (",\"cx\":..,\"cxr\":..,\"cxw\":..") or nothing at all.
+# Never returns non-zero: Codex is strictly optional and must never be able to
+# fail the Claude payload or stall the poll loop.
+poll_codex() {
+    local token json
+    token=$(read_codex_token) || return 0
+    [ -z "$token" ] && return 0
+    json=$(curl -s --connect-timeout 5 --max-time 10 "$CODEX_USAGE_URL" \
+        -H "Authorization: Bearer $token" \
+        -H "Accept: application/json" 2>/dev/null) || return 0
+    [ -z "$json" ] && return 0
+    printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+rl = d.get("rate_limit") or {}
+# ponytail: show the most-used window. Plus exposes only primary_window (7d) and
+# leaves secondary_window null, but the pair exists in the API — picking the
+# most-used one renders whichever limit you will hit first. Revisit if a plan
+# ever needs both windows on screen at once.
+best = None
+for k in ("primary_window", "secondary_window"):
+    w = rl.get(k)
+    if not isinstance(w, dict) or w.get("used_percent") is None:
+        continue
+    if best is None or w["used_percent"] > best["used_percent"]:
+        best = w
+if best is None:
+    sys.exit(0)
+try:
+    pct = int(round(float(best["used_percent"])))
+except (TypeError, ValueError):
+    sys.exit(0)
+reset_s = best.get("reset_after_seconds")
+win_s = best.get("limit_window_seconds")
+cxr = max(0, int(round(reset_s / 60))) if isinstance(reset_s, (int, float)) else -1
+cxw = int(round(win_s / 60)) if isinstance(win_s, (int, float)) and win_s else 10080
+sys.stdout.write(",\"cx\":%d,\"cxr\":%d,\"cxw\":%d" % (pct, cxr, cxw))
+' 2>/dev/null
+}
+
 # Extract the integer session % ("s") from a built payload, or 0.
 _payload_session_pct() {
     echo "$1" | grep -o '"s":[0-9]*' | head -1 | cut -d: -f2
@@ -394,6 +466,10 @@ _payload_session_pct() {
 # (startup), fall back to the plan with the highest current session %.
 poll() {
     POLL_SEQ=$((POLL_SEQ + 1))
+
+    # Once per cycle, not once per config dir: Codex usage is per-machine, so
+    # polling it inside the dir loop would fire N identical requests.
+    CODEX_FRAGMENT=$(poll_codex)
 
     local -a dirs
     mapfile -t dirs < <(read_config_dirs)

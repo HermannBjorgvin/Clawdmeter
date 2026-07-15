@@ -14,6 +14,12 @@ struct UsageData {
     char reset_date[12];     // formatted reset date e.g. "Jul 1" (Enterprise)
     long clock_epoch;        // local wall-clock epoch (s) from daemon; 0 = not provided
     int  clock_fmt;          // 12 or 24 (hour format from daemon); defaults to 24
+    // Codex (OpenAI) usage — strictly optional. The daemon omits these keys on any
+    // failure, so codex_valid=false must always fall back to the Claude-only view.
+    float codex_pct;         // Codex utilization 0-100; <0 = daemon sent no Codex data
+    int  codex_reset_mins;   // minutes until the Codex window resets
+    int  codex_window_mins;  // Codex window length in minutes (10080 = weekly)
+    bool codex_valid;        // true once a payload carried Codex data
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
 };

@@ -119,6 +119,12 @@ static bool parse_json(const char* json, UsageData* out) {
     strlcpy(out->reset_date, doc["rd"] | "", sizeof(out->reset_date));
     out->clock_epoch = doc["t"] | 0L;
     out->clock_fmt = doc["tf"] | 24;
+    // Codex block is optional: absent "cx" → -1 → codex_valid false → Claude-only view.
+    // No separate validity key; the sentinel is the flag.
+    out->codex_pct = doc["cx"] | -1.0f;
+    out->codex_reset_mins = doc["cxr"] | -1;
+    out->codex_window_mins = doc["cxw"] | 10080;
+    out->codex_valid = (out->codex_pct >= 0.0f);
     out->ok = doc["ok"] | false;
     out->valid = true;
     return true;

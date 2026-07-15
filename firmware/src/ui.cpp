@@ -15,6 +15,7 @@ LV_FONT_DECLARE(font_styrene_24);
 LV_FONT_DECLARE(font_styrene_20);
 LV_FONT_DECLARE(font_styrene_16);
 LV_FONT_DECLARE(font_styrene_14);
+LV_FONT_DECLARE(font_styrene_12);
 LV_FONT_DECLARE(font_mono_32);
 
 // Layout values computed from the active board's geometry. Populated once
@@ -28,11 +29,27 @@ struct Layout {
     int16_t content_y;
     int16_t content_w;
 
-    // Usage screen
+    // Usage screen. Two geometries: the 2-panel Claude-only view (unsuffixed) and
+    // the tighter 3-panel view used when the daemon also supplies Codex data (*3).
+    // apply_usage_geometry() switches between them at runtime.
     int16_t usage_panel_h;
     int16_t usage_panel_gap;
     int16_t usage_bar_y;
     int16_t usage_reset_y;
+    int16_t usage_bar_h;
+    const lv_font_t* usage_pct_font;
+    const lv_font_t* usage_reset_font;
+    const lv_font_t* usage_pill_font;
+
+    int16_t usage_content_y3;
+    int16_t usage_panel_h3;
+    int16_t usage_panel_gap3;
+    int16_t usage_bar_y3;
+    int16_t usage_reset_y3;
+    int16_t usage_bar_h3;
+    const lv_font_t* usage_pct_font3;
+    const lv_font_t* usage_reset_font3;
+    const lv_font_t* usage_pill_font3;
 
     // Bluetooth screen
     int16_t bt_info_panel_h;
@@ -62,6 +79,20 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 16;
         L.usage_bar_y = 56;
         L.usage_reset_y = 94;
+        L.usage_bar_h = 24;
+        L.usage_pct_font   = &font_styrene_48;
+        L.usage_reset_font = &font_styrene_28;
+        L.usage_pill_font  = &font_styrene_28;
+        // 3-panel: 92 + 3*100 + 2*10 = 412, clearing the status line at y>=427.
+        L.usage_content_y3 = 92;
+        L.usage_panel_h3   = 100;
+        L.usage_panel_gap3 = 10;
+        L.usage_bar_y3     = 38;
+        L.usage_reset_y3   = 56;
+        L.usage_bar_h3     = 16;
+        L.usage_pct_font3   = &font_styrene_28;
+        L.usage_reset_font3 = &font_styrene_16;
+        L.usage_pill_font3  = &font_styrene_16;
         L.bt_info_panel_h = 160;
         L.bt_reset_zone_h = 110;
         L.bt_title_font    = &font_tiempos_56;
@@ -76,6 +107,22 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 12;
         L.usage_bar_y = 48;
         L.usage_reset_y = 78;
+        L.usage_bar_h = 24;
+        // 2-panel fonts match what make_usage_panel/make_pill hardcoded before the
+        // Codex change — the compact 2-bar view must look exactly as it did.
+        L.usage_pct_font   = &font_styrene_48;
+        L.usage_reset_font = &font_styrene_28;
+        L.usage_pill_font  = &font_styrene_28;
+        // 3-panel: 78 + 3*86 + 2*8 = 352, well clear of the status line.
+        L.usage_content_y3 = 78;
+        L.usage_panel_h3   = 86;
+        L.usage_panel_gap3 = 8;
+        L.usage_bar_y3     = 30;
+        L.usage_reset_y3   = 46;
+        L.usage_bar_h3     = 14;
+        L.usage_pct_font3   = &font_styrene_20;
+        L.usage_reset_font3 = &font_styrene_12;
+        L.usage_pill_font3  = &font_styrene_12;
         L.bt_info_panel_h = 140;
         L.bt_reset_zone_h = 90;
         L.bt_title_font    = &font_tiempos_34;
@@ -121,6 +168,13 @@ static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 static lv_obj_t* panel_session = nullptr;
 static lv_obj_t* panel_weekly = nullptr;
+// Codex panel — built always, shown only when the daemon supplies Codex data.
+static lv_obj_t* bar_codex = nullptr;
+static lv_obj_t* lbl_codex_pct = nullptr;
+static lv_obj_t* lbl_codex_label = nullptr;
+static lv_obj_t* lbl_codex_reset = nullptr;
+static lv_obj_t* panel_codex = nullptr;
+static int       panel_mode = -1;   // -1 unset / 2 = Claude only / 3 = Claude + Codex
 // Enterprise-only widgets inside panel_session
 static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
 static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
@@ -264,10 +318,10 @@ static void init_icon_dsc_rgb565a8(lv_image_dsc_t* dsc, int w, int h, const uint
     dsc->data_size = w * h * 3;
 }
 
-static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
+static lv_obj_t* make_pill(lv_obj_t* parent, const char* text, const lv_font_t* font) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_font(lbl, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl, font, 0);
     lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
     lv_obj_set_style_bg_color(lbl, COL_BAR_BG, 0);
     lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
@@ -296,18 +350,18 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "---%");
-    lv_obj_set_style_text_font(*out_pct, &font_styrene_48, 0);
+    lv_obj_set_style_text_font(*out_pct, L.usage_pct_font, 0);
     lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
     lv_obj_set_pos(*out_pct, 0, 0);
 
-    *out_pill = make_pill(panel, pill_text);
+    *out_pill = make_pill(panel, pill_text, L.usage_pill_font);
     lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
 
-    *out_bar = make_bar(panel, 0, L.usage_bar_y, L.content_w - 32, 24);
+    *out_bar = make_bar(panel, 0, L.usage_bar_y, L.content_w - 32, L.usage_bar_h);
 
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
-    lv_obj_set_style_text_font(*out_reset, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(*out_reset, L.usage_reset_font, 0);
     lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
     lv_obj_set_pos(*out_reset, 0, L.usage_reset_y);
 
@@ -427,6 +481,14 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
 
+    // Codex panel. Built here so apply_usage_geometry() only ever moves/resizes —
+    // position is a placeholder; it is hidden until Codex data arrives.
+    panel_codex = make_usage_panel(usage_group,
+                     L.content_y + 2 * (L.usage_panel_h + L.usage_panel_gap), "Codex",
+                     &lbl_codex_pct, &lbl_codex_label,
+                     &bar_codex, &lbl_codex_reset);
+    lv_obj_add_flag(panel_codex, LV_OBJ_FLAG_HIDDEN);
+
     build_pair_group(usage_container);
     build_idle_group(usage_container);
 
@@ -436,6 +498,49 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+}
+
+// Move/resize the usage panels between the 2-panel (Claude only) and 3-panel
+// (Claude + Codex) geometries. Called from ui_update() on every payload but only
+// does work when the mode actually changes, so a steady stream of same-shape
+// payloads costs one int compare. Enterprise always uses the 2-panel geometry —
+// its spending/period overlays are positioned against L.usage_reset_y.
+static void apply_usage_geometry(int mode) {
+    if (mode == panel_mode) return;
+    if (!panel_session || !panel_weekly || !panel_codex) return;
+    panel_mode = mode;
+
+    const bool three = (mode == 3);
+    const int16_t top     = three ? L.usage_content_y3 : L.content_y;
+    const int16_t h       = three ? L.usage_panel_h3   : L.usage_panel_h;
+    const int16_t gap     = three ? L.usage_panel_gap3 : L.usage_panel_gap;
+    const int16_t bar_y   = three ? L.usage_bar_y3     : L.usage_bar_y;
+    const int16_t bar_h   = three ? L.usage_bar_h3     : L.usage_bar_h;
+    const int16_t reset_y = three ? L.usage_reset_y3   : L.usage_reset_y;
+    const lv_font_t* pct_f   = three ? L.usage_pct_font3   : L.usage_pct_font;
+    const lv_font_t* reset_f = three ? L.usage_reset_font3 : L.usage_reset_font;
+    const lv_font_t* pill_f  = three ? L.usage_pill_font3  : L.usage_pill_font;
+
+    lv_obj_t* const panels[3] = { panel_session, panel_weekly, panel_codex };
+    lv_obj_t* const pcts[3]   = { lbl_session_pct, lbl_weekly_pct, lbl_codex_pct };
+    lv_obj_t* const pills[3]  = { lbl_session_label, lbl_weekly_label, lbl_codex_label };
+    lv_obj_t* const bars[3]   = { bar_session, bar_weekly, bar_codex };
+    lv_obj_t* const resets[3] = { lbl_session_reset, lbl_weekly_reset, lbl_codex_reset };
+
+    for (int i = 0; i < 3; i++) {
+        lv_obj_set_pos(panels[i], L.margin, top + i * (h + gap));
+        lv_obj_set_size(panels[i], L.content_w, h);
+        lv_obj_set_style_text_font(pcts[i], pct_f, 0);
+        lv_obj_set_style_text_font(pills[i], pill_f, 0);
+        lv_obj_align(pills[i], LV_ALIGN_TOP_RIGHT, 0, 1);
+        lv_obj_set_pos(bars[i], 0, bar_y);
+        lv_obj_set_size(bars[i], L.content_w - 32, bar_h);
+        lv_obj_set_style_text_font(resets[i], reset_f, 0);
+        lv_obj_set_pos(resets[i], 0, reset_y);
+    }
+
+    if (three) lv_obj_clear_flag(panel_codex, LV_OBJ_FLAG_HIDDEN);
+    else       lv_obj_add_flag(panel_codex, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ======== Public API ========
@@ -484,6 +589,12 @@ void ui_update(const UsageData* data) {
 
     int s_pct = (int)(data->session_pct + 0.5f);
 
+    // Codex rides along only on the Pro/Max view; Enterprise keeps its spending
+    // layout (see the design spec's out-of-scope list). Must run before the
+    // enterprise branch below, which overrides the session pct font.
+    const bool show_codex = data->codex_valid && !data->enterprise;
+    apply_usage_geometry(show_codex ? 3 : 2);
+
     if (data->enterprise) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
         lv_obj_set_style_text_font(lbl_session_pct, &font_tiempos_56, 0);
@@ -494,7 +605,10 @@ void ui_update(const UsageData* data) {
         lv_obj_add_flag(lbl_spending_status,   LV_OBJ_FLAG_HIDDEN);
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_set_style_text_font(lbl_session_pct, &font_styrene_48, 0);
+        // Font comes from the active geometry, not a constant — the 3-panel view
+        // uses a smaller face and apply_usage_geometry() already set it.
+        lv_obj_set_style_text_font(lbl_session_pct,
+                                   show_codex ? L.usage_pct_font3 : L.usage_pct_font, 0);
         lv_label_set_text(lbl_session_label, "Current");
         lv_obj_clear_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
@@ -547,6 +661,25 @@ void ui_update(const UsageData* data) {
         lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
         format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
         lv_label_set_text(lbl_weekly_reset, buf);
+    }
+
+    if (show_codex) {
+        int c_pct = (int)(data->codex_pct + 0.5f);
+        lv_label_set_text_fmt(lbl_codex_pct, "%d%%", c_pct);
+        lv_bar_set_value(bar_codex, c_pct, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_codex, pct_color(data->codex_pct), LV_PART_INDICATOR);
+        format_reset_time(data->codex_reset_mins, buf, sizeof(buf));
+        lv_label_set_text(lbl_codex_reset, buf);
+        // Label the window from its actual length rather than assuming "weekly":
+        // Plus exposes only a 7d window today, but the API models others.
+        if (data->codex_window_mins >= 10080) {
+            lv_label_set_text(lbl_codex_label, "Codex");
+        } else if (data->codex_window_mins >= 60) {
+            lv_label_set_text_fmt(lbl_codex_label, "Codex %dh", data->codex_window_mins / 60);
+        } else {
+            lv_label_set_text_fmt(lbl_codex_label, "Codex %dm", data->codex_window_mins);
+        }
+        lv_obj_align(lbl_codex_label, LV_ALIGN_TOP_RIGHT, 0, 1);
     }
 }
 
