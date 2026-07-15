@@ -51,6 +51,12 @@ CONFIG_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Loc
 ACCOUNTS_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "accounts.json"
 MAX_ACCOUNTS = 4   # must match the firmware's MAX_ACCOUNTS
 
+# Usage alerts (Telegram). Config in alerts.json; per-account/-window threshold
+# state is persisted so we alert once per crossing and re-arm after a reset.
+ALERTS_FILE = ACCOUNTS_FILE.parent / "alerts.json"
+ALERTS_STATE_FILE = ACCOUNTS_FILE.parent / "alerts_state.json"
+DEFAULT_THRESHOLDS = [50, 80, 100]
+
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
@@ -578,6 +584,101 @@ async def poll_account_payload(config_dir: str | None):
             return None, "auth"
 
 
+def _fmt_reset(mins) -> str:
+    try:
+        m = int(mins)
+    except (TypeError, ValueError):
+        return "—"
+    if m <= 0:
+        return "now"
+    if m < 60:
+        return f"{m}m"
+    if m < 1440:
+        return f"{m // 60}h {m % 60}m"
+    return f"{m // 1440}d {(m % 1440) // 60}h"
+
+
+def _load_alerts_config() -> dict | None:
+    """Read alerts.json; returns None (alerts off) unless a Telegram token+chat_id
+    are present. thresholds default to 50/80/100."""
+    try:
+        cfg = json.loads(ALERTS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    tg = cfg.get("telegram") or {}
+    if not tg.get("token") or not tg.get("chat_id"):
+        return None
+    try:
+        cfg["thresholds"] = sorted({int(t) for t in (cfg.get("thresholds") or DEFAULT_THRESHOLDS)})
+    except (TypeError, ValueError):
+        cfg["thresholds"] = sorted(DEFAULT_THRESHOLDS)
+    return cfg
+
+
+def _load_alert_state() -> dict:
+    try:
+        return json.loads(ALERTS_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_alert_state(state: dict) -> None:
+    try:
+        ALERTS_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ALERTS_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+    except OSError:
+        pass
+
+
+async def send_telegram(token: str, chat_id, text: str) -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            r = await http.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text},
+            )
+    except httpx.HTTPError as e:
+        log(f"Telegram send failed: {e}")
+        return False
+    if r.status_code != 200:
+        log(f"Telegram HTTP {r.status_code}: {r.text[:120]}")
+        return False
+    return True
+
+
+async def check_usage_alerts(payloads: list[dict]) -> None:
+    """Fire a Telegram alert the first time each account's 5h/7d usage crosses a
+    threshold (50/80/100 by default), re-arming once that window resets. Each
+    alert names the account and includes the full 5h+7d readout."""
+    cfg = _load_alerts_config()
+    if not cfg or not payloads:
+        return
+    thresholds, tg = cfg["thresholds"], cfg["telegram"]
+    state = _load_alert_state()
+    changed = False
+    for p in payloads:
+        if not p.get("ok"):
+            continue
+        label = p.get("lbl") or "Claude"
+        s_pct, w_pct = int(p.get("s", 0)), int(p.get("w", 0))
+        summary = (f"5h:  {s_pct}%  · resets in {_fmt_reset(p.get('sr'))}\n"
+                   f"7d:  {w_pct}%  · resets in {_fmt_reset(p.get('wr'))}")
+        acc = state.setdefault(label, {})
+        for key, pct, name in (("s", s_pct, "5h session"), ("w", w_pct, "7-day weekly")):
+            crossed = max([t for t in thresholds if pct >= t], default=0)
+            prev = int(acc.get(key, 0))
+            if crossed > prev:
+                head = (f"🚨 {label} — {name} limit reached (100%)" if crossed >= 100
+                        else f"🔔 {label} — {name} at {crossed}%")
+                await send_telegram(tg["token"], tg["chat_id"], f"{head}\n\n{summary}")
+                log(f"Alert: {label} {name} crossed {crossed}%")
+            if crossed != prev:
+                acc[key] = crossed
+                changed = True
+    if changed:
+        _save_alert_state(state)
+
+
 def read_accounts_config() -> list[dict] | None:
     """Read the optional multi-account list from accounts.json.
 
@@ -802,6 +903,9 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                     # toast "token expired" — that mislabeled a boot-time DNS blip
                     # as an auth problem (SC#5). Leave tray state unchanged; the next
                     # tick retries and set_connected() recovers it.
+
+                # Usage threshold alerts (Telegram) across all polled accounts.
+                await check_usage_alerts(payloads)
 
             # Wake on a refresh request OR a stop, whichever comes first. Waking
             # promptly on stop_event is what lets the finally below run
