@@ -20,9 +20,27 @@ struct UsageData {
     int  codex_reset_mins;   // minutes until the Codex window resets
     int  codex_window_mins;  // Codex window length in minutes (10080 = weekly)
     bool codex_valid;        // true once a payload carried Codex data
+    long codex_context_tokens;  // current Codex context token count
+    int  codex_context_window;  // Codex model context window in tokens
+    bool codex_context_valid;   // true once the daemon sent a context reading
+    // Antigravity CLI Gemini-pool usage. Optional; the daemon persists the last
+    // valid quota response while `agy` is not running.
+    float antigravity_5h_pct;
+    int   antigravity_5h_reset_mins;
+    float antigravity_weekly_pct;
+    int   antigravity_weekly_reset_mins;
+    bool  antigravity_valid;
+    // Host resource snapshot from the Linux BLE daemon.
+    float cpu_pct;
+    int   cpu_temp_c;
+    float gpu_pct;
+    int   gpu_temp_c;
+    float ram_pct;
+    bool  system_valid;
     // Plan labels, pre-formatted by the daemon (the device never parses tiers).
     char plan[24];           // e.g. "Claude Max 20x"; "" = daemon sent none
     char codex_plan[24];     // e.g. "Codex Plus"
+    char antigravity_plan[24]; // "Gemini Models"
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
 };

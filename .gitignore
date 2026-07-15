@@ -18,3 +18,4 @@ daemon/.venv/
 # Python bytecode cache
 __pycache__/
 *.pyc
+skill-observations/

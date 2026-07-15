@@ -119,6 +119,7 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
 
 static StatsData stats_claude = {};
 static StatsData stats_codex = {};
+static StatsData stats_antigravity = {};
 
 // Parse a payload. Returns 0 = bad JSON, 1 = usage payload, 2 = stats payload.
 // The daemon marks stats with "sv"; stats land in their own struct and must
@@ -137,7 +138,8 @@ static int parse_json(const char* json, UsageData* out) {
 
     if (!doc["sv"].isNull()) {
         const char* p = doc["p"] | "c";
-        StatsData* s = (strcmp(p, "x") == 0) ? &stats_codex : &stats_claude;
+        StatsData* s = (strcmp(p, "x") == 0) ? &stats_codex :
+                       (strcmp(p, "g") == 0) ? &stats_antigravity : &stats_claude;
         s->total_tokens_m = doc["tt"] | -1.0f;
         strlcpy(s->model, doc["fm"] | "", sizeof(s->model));
         s->sessions     = doc["ns"] | 0;
@@ -172,8 +174,26 @@ static int parse_json(const char* json, UsageData* out) {
     out->codex_reset_mins = doc["cxr"] | -1;
     out->codex_window_mins = doc["cxw"] | 10080;
     out->codex_valid = (out->codex_pct >= 0.0f);
+    out->codex_context_tokens = doc["ctx"] | -1L;
+    out->codex_context_window = doc["ctxw"] | -1;
+    out->codex_context_valid = (out->codex_context_tokens >= 0 &&
+                                 out->codex_context_window > 0);
+    out->antigravity_5h_pct = doc["ag5"] | -1.0f;
+    out->antigravity_5h_reset_mins = doc["ag5r"] | -1;
+    out->antigravity_weekly_pct = doc["agw"] | -1.0f;
+    out->antigravity_weekly_reset_mins = doc["agwr"] | -1;
+    out->antigravity_valid = (out->antigravity_5h_pct >= 0.0f &&
+                              out->antigravity_weekly_pct >= 0.0f);
+    out->cpu_pct = doc["cpu"] | -1.0f;
+    out->cpu_temp_c = doc["ct"] | -1;
+    out->gpu_pct = doc["gpu"] | -1.0f;
+    out->gpu_temp_c = doc["gt"] | -1;
+    out->ram_pct = doc["ram"] | -1.0f;
+    out->system_valid = (out->cpu_pct >= 0.0f && out->gpu_pct >= 0.0f &&
+                         out->ram_pct >= 0.0f);
     strlcpy(out->plan, doc["pl"] | "", sizeof(out->plan));
     strlcpy(out->codex_plan, doc["cxpl"] | "", sizeof(out->codex_plan));
+    strlcpy(out->antigravity_plan, doc["agpl"] | "", sizeof(out->antigravity_plan));
     out->ok = doc["ok"] | false;
     out->valid = true;
     return PAYLOAD_USAGE;
@@ -427,7 +447,7 @@ void loop() {
     if (ble_has_data()) {
         int kind = parse_json(ble_get_data(), &usage);
         if (kind == PAYLOAD_STATS) {
-            ui_update_stats(&stats_claude, &stats_codex);
+            ui_update_stats(&stats_claude, &stats_codex, &stats_antigravity);
             ble_send_ack();
         } else if (kind == PAYLOAD_USAGE) {
             int g_before = usage_rate_group();

@@ -4,6 +4,7 @@
 #include <time.h>
 #include "logo.h"
 #include "codex_logo.h"
+#include "gemini_logo.h"
 #include "icons.h"
 #include "hal/board_caps.h"
 #include "hal/imu_hal.h"   // rotation quadrant — gestures arrive in native axes
@@ -43,6 +44,17 @@ struct Layout {
     const lv_font_t* usage_reset_font;
     const lv_font_t* usage_pill_font;
     const lv_font_t* subtitle_font;
+
+    // System screen
+    int16_t system_bar_w;
+    int16_t system_bar_h;
+    int16_t system_bar_y;
+    int16_t system_pct_y;
+    int16_t system_name_y;
+    int16_t system_temp_y;
+    const lv_font_t* system_pct_font;
+    const lv_font_t* system_name_font;
+    const lv_font_t* system_temp_font;
 
     // Stats screen
     int16_t heat_y, heat_cell, heat_gap;
@@ -88,6 +100,15 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_pill_font  = &font_styrene_28;
         L.subtitle_y       = 80;   // title ends at 22+58=80
         L.subtitle_font    = &font_styrene_20;
+        L.system_bar_w     = 72;
+        L.system_bar_h     = 202;
+        L.system_bar_y     = 154;
+        L.system_pct_y     = 94;
+        L.system_name_y    = 368;
+        L.system_temp_y    = 398;
+        L.system_pct_font  = &font_mono_32;
+        L.system_name_font = &font_styrene_28;
+        L.system_temp_font = &font_styrene_20;
         // Stats: 7x7 grid of 24px cells + 5 gap = 198 wide, leaving ~240 to its right.
         L.heat_y          = 104;
         L.heat_cell       = 24;
@@ -116,6 +137,15 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_pill_font  = &font_styrene_28;
         L.subtitle_y       = 80;   // title ends at 22+58=80
         L.subtitle_font    = &font_styrene_16;
+        L.system_bar_w     = 60;
+        L.system_bar_h     = 176;
+        L.system_bar_y     = 148;
+        L.system_pct_y     = 90;
+        L.system_name_y    = 336;
+        L.system_temp_y    = 362;
+        L.system_pct_font  = &font_mono_32;
+        L.system_name_font = &font_styrene_20;
+        L.system_temp_font = &font_styrene_16;
         L.heat_y          = 100;
         L.heat_cell       = 18;
         L.heat_gap        = 4;
@@ -173,12 +203,38 @@ static lv_obj_t* bar_codex = nullptr;
 static lv_obj_t* lbl_codex_pct = nullptr;
 static lv_obj_t* lbl_codex_label = nullptr;
 static lv_obj_t* lbl_codex_reset = nullptr;
+static lv_obj_t* bar_codex_context = nullptr;
+static lv_obj_t* lbl_codex_context_pct = nullptr;
+static lv_obj_t* lbl_codex_context_label = nullptr;
+static lv_obj_t* lbl_codex_context_detail = nullptr;
+static lv_obj_t* panel_codex_context = nullptr;
 static lv_obj_t* panel_codex = nullptr;
 static lv_obj_t* lbl_codex_none = nullptr;  // "No Codex data" when the daemon omits it
 static lv_obj_t* lbl_subtitle = nullptr;    // plan line under the title, e.g. "Claude Max 20x"
 static bool      s_codex_valid = false;     // last payload carried Codex data
 static char      claude_plan_str[24] = "";  // "Claude Max 20x" — from the daemon
 static char      codex_plan_str[24]  = "";  // "Codex Plus"     — from the daemon
+// Antigravity tab — Gemini pool from agy's /usage quota summary.
+static lv_obj_t* antigravity_group = nullptr;
+static lv_obj_t* bar_antigravity_5h = nullptr;
+static lv_obj_t* lbl_antigravity_5h_pct = nullptr;
+static lv_obj_t* lbl_antigravity_5h_label = nullptr;
+static lv_obj_t* lbl_antigravity_5h_reset = nullptr;
+static lv_obj_t* bar_antigravity_weekly = nullptr;
+static lv_obj_t* lbl_antigravity_weekly_pct = nullptr;
+static lv_obj_t* lbl_antigravity_weekly_label = nullptr;
+static lv_obj_t* lbl_antigravity_weekly_reset = nullptr;
+static lv_obj_t* panel_antigravity_5h = nullptr;
+static lv_obj_t* panel_antigravity_weekly = nullptr;
+static lv_obj_t* lbl_antigravity_none = nullptr;
+static char      antigravity_plan_str[24] = "";
+// System tab — three vertical host resource meters, immediately left of Claude.
+static lv_obj_t* system_group = nullptr;
+static lv_obj_t* system_bars[3] = {};
+static lv_obj_t* system_pcts[3] = {};
+static lv_obj_t* system_temps[3] = {};
+static lv_obj_t* system_names[3] = {};
+static lv_obj_t* lbl_system_none = nullptr;
 static void      apply_subtitle(void);
 // Enterprise-only widgets inside panel_session
 static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
@@ -189,6 +245,7 @@ static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idl
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
 static lv_obj_t* logo_img;
+static lv_obj_t* system_icon = nullptr;
 static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 
 // ---- Live-data freshness → which usage sub-view to show ----
@@ -219,13 +276,14 @@ static lv_obj_t* lbl_stats_l2 = nullptr;   // "9d 22h longest"
 static lv_obj_t* lbl_stats_r2 = nullptr;   // "29/47 days"
 static lv_obj_t* lbl_stats_dune = nullptr;
 static lv_obj_t* lbl_stats_none = nullptr; // "No stats yet"
-static StatsData s_stats[2] = {};          // [0] = Claude, [1] = Codex
+static StatsData s_stats[3] = {};          // Claude, Codex, Antigravity
 static int       stats_provider = 0;       // which one SCREEN_STATS is showing
 static screen_t  stats_from = SCREEN_USAGE; // tab to return to
 
 // ---- Shared ----
 static lv_image_dsc_t logo_dsc;
 static lv_image_dsc_t codex_logo_dsc;   // OpenAI mark, shown on the Codex tab
+static lv_image_dsc_t gemini_logo_dsc;  // Gemini mark, shown on Antigravity
 static screen_t current_screen = SCREEN_USAGE;
 static bool     s_ble_connected = false;   // cached BLE connection state
 static uint32_t connected_at_ms = 0;       // when we last entered CONNECTED ("Connected" dwell)
@@ -290,6 +348,13 @@ static lv_color_t pct_color(float pct) {
     return COL_GREEN;
 }
 
+static lv_color_t temp_color(int temp_c) {
+    if (temp_c < 0) return COL_DIM;
+    if (temp_c >= 85) return COL_RED;
+    if (temp_c >= 70) return COL_AMBER;
+    return COL_GREEN;
+}
+
 static void format_reset_time(int mins, char* buf, size_t len) {
     if (mins < 0) {
         snprintf(buf, len, "---");
@@ -299,6 +364,30 @@ static void format_reset_time(int mins, char* buf, size_t len) {
         snprintf(buf, len, "Resets in %dh %dm", mins / 60, mins % 60);
     } else {
         snprintf(buf, len, "Resets in %dd %dh", mins / 1440, (mins % 1440) / 60);
+    }
+}
+
+static void format_compact_count(long value, char* buf, size_t len) {
+    if (value < 0) {
+        snprintf(buf, len, "---");
+    } else if (value < 1000) {
+        snprintf(buf, len, "%ld", value);
+    } else if (value < 1000000L) {
+        snprintf(buf, len, "%.1fk", value / 1000.0);
+    } else {
+        snprintf(buf, len, "%.1fm", value / 1000000.0);
+    }
+}
+
+static void format_context_detail(long tokens, long window, char* buf, size_t len) {
+    char used[24];
+    char cap[24];
+    format_compact_count(tokens, used, sizeof(used));
+    format_compact_count(window, cap, sizeof(cap));
+    if (tokens < 0 || window <= 0) {
+        snprintf(buf, len, "---");
+    } else {
+        snprintf(buf, len, "%s / %s", used, cap);
     }
 }
 
@@ -373,6 +462,41 @@ static void init_battery_icons(void) {
     init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_W, ICON_BATTERY_CHARGING_H, icon_battery_charging_data);
 }
 
+static void init_system_icon(lv_obj_t* parent) {
+    system_icon = lv_obj_create(parent);
+    lv_obj_set_size(system_icon, 48, 48);
+    lv_obj_set_pos(system_icon, L.margin, L.title_y - 10);
+    lv_obj_set_style_bg_opa(system_icon, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(system_icon, 0, 0);
+    lv_obj_set_style_pad_all(system_icon, 0, 0);
+    lv_obj_clear_flag(system_icon, LV_OBJ_FLAG_SCROLLABLE);
+
+    struct BarSpec { int x; int y; int w; int h; };
+    const BarSpec bars[] = {
+        {  8, 26,  6,  8 },
+        { 19, 18,  6, 16 },
+        { 30, 30,  6,  4 },
+    };
+    for (const BarSpec& bar : bars) {
+        lv_obj_t* b = lv_obj_create(system_icon);
+        lv_obj_set_pos(b, bar.x, bar.y);
+        lv_obj_set_size(b, bar.w, bar.h);
+        lv_obj_set_style_bg_color(b, COL_TEXT, 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(b, 0, 0);
+        lv_obj_set_style_radius(b, 2, 0);
+        lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+    }
+    lv_obj_t* base = lv_obj_create(system_icon);
+    lv_obj_set_pos(base, 10, 38);
+    lv_obj_set_size(base, 28, 3);
+    lv_obj_set_style_bg_color(base, COL_TEXT, 0);
+    lv_obj_set_style_bg_opa(base, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(base, 0, 0);
+    lv_obj_set_style_radius(base, 2, 0);
+    lv_obj_clear_flag(base, LV_OBJ_FLAG_SCROLLABLE);
+}
+
 // ======== Usage Screen ========
 
 static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
@@ -398,6 +522,48 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
     lv_obj_set_pos(*out_reset, 0, L.usage_reset_y);
 
     return panel;
+}
+
+static void make_resource_meter(lv_obj_t* parent, int index, const char* name) {
+    const int col_w = L.content_w / 3;
+    const int center_x = L.margin + col_w * index + col_w / 2;
+    const int bar_w = L.system_bar_w;
+    const int bar_h = L.system_bar_h;
+    const int bar_y = L.system_bar_y;
+
+    system_pcts[index] = lv_label_create(parent);
+    lv_label_set_text(system_pcts[index], "--%");
+    lv_obj_set_style_text_font(system_pcts[index], L.system_pct_font, 0);
+    lv_obj_set_style_text_color(system_pcts[index], COL_TEXT, 0);
+    lv_obj_align(system_pcts[index], LV_ALIGN_TOP_MID,
+                 center_x - L.scr_w / 2, L.system_pct_y);
+
+    system_bars[index] = lv_bar_create(parent);
+    lv_obj_set_pos(system_bars[index], center_x - bar_w / 2, bar_y);
+    lv_obj_set_size(system_bars[index], bar_w, bar_h);
+    lv_bar_set_range(system_bars[index], 0, 100);
+    lv_bar_set_orientation(system_bars[index], LV_BAR_ORIENTATION_VERTICAL);
+    lv_bar_set_value(system_bars[index], 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(system_bars[index], COL_BAR_BG, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(system_bars[index], LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(system_bars[index], 8, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(system_bars[index], COL_GREEN, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(system_bars[index], LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(system_bars[index], 8, LV_PART_INDICATOR);
+
+    system_names[index] = lv_label_create(parent);
+    lv_label_set_text(system_names[index], name);
+    lv_obj_set_style_text_font(system_names[index], L.system_name_font, 0);
+    lv_obj_set_style_text_color(system_names[index], COL_TEXT, 0);
+    lv_obj_align(system_names[index], LV_ALIGN_TOP_MID,
+                 center_x - L.scr_w / 2, L.system_name_y);
+
+    system_temps[index] = lv_label_create(parent);
+    lv_label_set_text(system_temps[index], index < 2 ? "-- C" : "");
+    lv_obj_set_style_text_font(system_temps[index], L.system_temp_font, 0);
+    lv_obj_set_style_text_color(system_temps[index], COL_DIM, 0);
+    lv_obj_align(system_temps[index], LV_ALIGN_TOP_MID,
+                 center_x - L.scr_w / 2, L.system_temp_y);
 }
 
 // Pairing hint — shown when disconnected so the screen isn't empty and the
@@ -537,6 +703,10 @@ static void init_usage_screen(lv_obj_t* scr) {
     panel_codex = make_usage_panel(codex_group, L.content_y, "Weekly",
                      &lbl_codex_pct, &lbl_codex_label,
                      &bar_codex, &lbl_codex_reset);
+    panel_codex_context = make_usage_panel(codex_group,
+                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Context",
+                     &lbl_codex_context_pct, &lbl_codex_context_label,
+                     &bar_codex_context, &lbl_codex_context_detail);
 
     // Shown instead of the panel when the daemon sends no Codex data.
     lbl_codex_none = lv_label_create(codex_group);
@@ -548,6 +718,51 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     lv_obj_add_flag(codex_group, LV_OBJ_FLAG_HIDDEN);   // update_view_state decides
 
+    // ---- Antigravity CLI tab: Gemini's 5-hour and weekly quota buckets ----
+    antigravity_group = lv_obj_create(usage_container);
+    lv_obj_set_size(antigravity_group, L.scr_w, L.scr_h);
+    lv_obj_set_pos(antigravity_group, 0, 0);
+    lv_obj_set_style_bg_opa(antigravity_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(antigravity_group, 0, 0);
+    lv_obj_set_style_pad_all(antigravity_group, 0, 0);
+    lv_obj_clear_flag(antigravity_group, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(antigravity_group, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    panel_antigravity_5h = make_usage_panel(antigravity_group, L.content_y, "Current",
+                     &lbl_antigravity_5h_pct, &lbl_antigravity_5h_label,
+                     &bar_antigravity_5h, &lbl_antigravity_5h_reset);
+    panel_antigravity_weekly = make_usage_panel(antigravity_group,
+                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
+                     &lbl_antigravity_weekly_pct, &lbl_antigravity_weekly_label,
+                     &bar_antigravity_weekly, &lbl_antigravity_weekly_reset);
+
+    lbl_antigravity_none = lv_label_create(antigravity_group);
+    lv_label_set_text(lbl_antigravity_none, "No Antigravity data");
+    lv_obj_set_style_text_font(lbl_antigravity_none, L.usage_pill_font, 0);
+    lv_obj_set_style_text_color(lbl_antigravity_none, COL_DIM, 0);
+    lv_obj_align(lbl_antigravity_none, LV_ALIGN_CENTER, 0, -20);
+    lv_obj_add_flag(lbl_antigravity_none, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(antigravity_group, LV_OBJ_FLAG_HIDDEN);
+
+    system_group = lv_obj_create(usage_container);
+    lv_obj_set_size(system_group, L.scr_w, L.scr_h);
+    lv_obj_set_pos(system_group, 0, 0);
+    lv_obj_set_style_bg_opa(system_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(system_group, 0, 0);
+    lv_obj_set_style_pad_all(system_group, 0, 0);
+    lv_obj_clear_flag(system_group, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(system_group, LV_OBJ_FLAG_EVENT_BUBBLE);
+    make_resource_meter(system_group, 0, "CPU");
+    make_resource_meter(system_group, 1, "GPU");
+    make_resource_meter(system_group, 2, "RAM");
+    lbl_system_none = lv_label_create(system_group);
+    lv_label_set_text(lbl_system_none, "No system data");
+    lv_obj_set_style_text_font(lbl_system_none, L.usage_pill_font, 0);
+    lv_obj_set_style_text_color(lbl_system_none, COL_DIM, 0);
+    lv_obj_align(lbl_system_none, LV_ALIGN_CENTER, 0, -20);
+    lv_obj_add_flag(lbl_system_none, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(system_group, LV_OBJ_FLAG_HIDDEN);
+
     build_pair_group(usage_container);
     build_idle_group(usage_container);
 
@@ -557,7 +772,8 @@ static void init_usage_screen(lv_obj_t* scr) {
     // the title still rendered (they're transparent) but never got
     // LV_EVENT_CLICKED. They are not interactive, so take them out of hit-testing
     // entirely, and lift the header above them so nothing can bury it again.
-    lv_obj_t* const wrappers[] = { usage_group, codex_group, pair_group, idle_group };
+    lv_obj_t* const wrappers[] = { system_group, usage_group, codex_group, antigravity_group,
+                                   pair_group, idle_group };
     for (unsigned i = 0; i < sizeof(wrappers) / sizeof(wrappers[0]); i++) {
         if (wrappers[i]) lv_obj_clear_flag(wrappers[i], LV_OBJ_FLAG_CLICKABLE);
     }
@@ -688,7 +904,8 @@ static void init_stats_screen(lv_obj_t* scr) {
 // Paint the stats screen from whichever provider the user came from.
 static void render_stats(void) {
     if (!stats_container) return;
-    const StatsData* s = &s_stats[stats_provider ? 1 : 0];
+    const StatsData* s = &s_stats[(stats_provider >= 0 && stats_provider < 3)
+                                  ? stats_provider : 0];
     const bool ok = s->valid;
 
     if (lbl_stats_none) {
@@ -731,9 +948,11 @@ static void render_stats(void) {
     lv_obj_align(lbl_stats_dune, LV_ALIGN_BOTTOM_MID, 0, -18);
 }
 
-void ui_update_stats(const StatsData* claude, const StatsData* codex) {
+void ui_update_stats(const StatsData* claude, const StatsData* codex,
+                     const StatsData* antigravity) {
     if (claude) s_stats[0] = *claude;
     if (codex)  s_stats[1] = *codex;
+    if (antigravity) s_stats[2] = *antigravity;
     if (current_screen == SCREEN_STATS) render_stats();
 }
 
@@ -748,6 +967,7 @@ void ui_init(void) {
 
     init_icon_dsc_rgb565a8(&logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data);
     init_icon_dsc_rgb565a8(&codex_logo_dsc, CODEX_LOGO_WIDTH, CODEX_LOGO_HEIGHT, codex_logo_data);
+    init_icon_dsc_rgb565a8(&gemini_logo_dsc, GEMINI_LOGO_W, GEMINI_LOGO_H, gemini_logo);
     init_battery_icons();
 
     init_usage_screen(scr);
@@ -778,6 +998,7 @@ void ui_init(void) {
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
     lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
+    init_system_icon(scr);
 
 }
 
@@ -801,12 +1022,16 @@ void ui_update(const UsageData* data) {
     // Codex is its own tab; Enterprise keeps its spending layout and gets none.
     const bool show_codex = data->codex_valid && !data->enterprise;
     s_codex_valid = show_codex;
+    const bool show_antigravity = data->antigravity_valid;
 
     // Plan labels drive the subtitle on each tab.
     snprintf(claude_plan_str, sizeof(claude_plan_str), "%s",
              data->plan[0] ? data->plan : "");
     snprintf(codex_plan_str, sizeof(codex_plan_str), "%s",
              show_codex && data->codex_plan[0] ? data->codex_plan : "");
+    snprintf(antigravity_plan_str, sizeof(antigravity_plan_str), "%s",
+             show_antigravity && data->antigravity_plan[0]
+                 ? data->antigravity_plan : "");
     apply_subtitle();
 
     if (panel_codex) {
@@ -814,6 +1039,39 @@ void ui_update(const UsageData* data) {
                           if (lbl_codex_none) lv_obj_add_flag(lbl_codex_none, LV_OBJ_FLAG_HIDDEN); }
         else            { lv_obj_add_flag(panel_codex, LV_OBJ_FLAG_HIDDEN);
                           if (lbl_codex_none) lv_obj_clear_flag(lbl_codex_none, LV_OBJ_FLAG_HIDDEN); }
+    }
+    if (panel_codex_context) {
+        if (show_codex && data->codex_context_valid) {
+            lv_obj_clear_flag(panel_codex_context, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(panel_codex_context, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (panel_antigravity_5h && panel_antigravity_weekly) {
+        if (show_antigravity) {
+            lv_obj_clear_flag(panel_antigravity_5h, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(panel_antigravity_weekly, LV_OBJ_FLAG_HIDDEN);
+            if (lbl_antigravity_none) lv_obj_add_flag(lbl_antigravity_none, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(panel_antigravity_5h, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(panel_antigravity_weekly, LV_OBJ_FLAG_HIDDEN);
+            if (lbl_antigravity_none) lv_obj_clear_flag(lbl_antigravity_none, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (system_group) {
+        for (int i = 0; i < 3; ++i) {
+            lv_obj_t* widgets[] = { system_bars[i], system_pcts[i],
+                                    system_temps[i], system_names[i] };
+            for (lv_obj_t* widget : widgets) {
+                if (!widget) continue;
+                if (data->system_valid) lv_obj_clear_flag(widget, LV_OBJ_FLAG_HIDDEN);
+                else                    lv_obj_add_flag(widget, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        if (lbl_system_none) {
+            if (data->system_valid) lv_obj_add_flag(lbl_system_none, LV_OBJ_FLAG_HIDDEN);
+            else                    lv_obj_clear_flag(lbl_system_none, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
     if (data->enterprise) {
@@ -898,6 +1156,57 @@ void ui_update(const UsageData* data) {
             lv_label_set_text_fmt(lbl_codex_label, "%dm", data->codex_window_mins);
         }
         lv_obj_align(lbl_codex_label, LV_ALIGN_TOP_RIGHT, 0, 1);
+
+        if (data->codex_context_valid) {
+            int ctx_pct = (int)(((double)data->codex_context_tokens * 100.0) /
+                                (double)data->codex_context_window + 0.5);
+            if (ctx_pct < 0) ctx_pct = 0;
+            if (ctx_pct > 100) ctx_pct = 100;
+            char detail[48];
+            lv_label_set_text_fmt(lbl_codex_context_pct, "%d%%", ctx_pct);
+            lv_bar_set_value(bar_codex_context, ctx_pct, LV_ANIM_ON);
+            lv_obj_set_style_bg_color(bar_codex_context,
+                                      pct_color((float)ctx_pct), LV_PART_INDICATOR);
+            format_context_detail(data->codex_context_tokens,
+                                  data->codex_context_window, detail, sizeof(detail));
+            lv_label_set_text(lbl_codex_context_detail, detail);
+            lv_label_set_text(lbl_codex_context_label, "Context");
+            lv_obj_align(lbl_codex_context_label, LV_ALIGN_TOP_RIGHT, 0, 1);
+        }
+    }
+
+    if (show_antigravity) {
+        const int five_pct = (int)(data->antigravity_5h_pct + 0.5f);
+        const int week_pct = (int)(data->antigravity_weekly_pct + 0.5f);
+        lv_label_set_text_fmt(lbl_antigravity_5h_pct, "%d%%", five_pct);
+        lv_bar_set_value(bar_antigravity_5h, five_pct, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_antigravity_5h,
+                                  pct_color(data->antigravity_5h_pct), LV_PART_INDICATOR);
+        format_reset_time(data->antigravity_5h_reset_mins, buf, sizeof(buf));
+        lv_label_set_text(lbl_antigravity_5h_reset, buf);
+
+        lv_label_set_text_fmt(lbl_antigravity_weekly_pct, "%d%%", week_pct);
+        lv_bar_set_value(bar_antigravity_weekly, week_pct, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_antigravity_weekly,
+                                  pct_color(data->antigravity_weekly_pct), LV_PART_INDICATOR);
+        format_reset_time(data->antigravity_weekly_reset_mins, buf, sizeof(buf));
+        lv_label_set_text(lbl_antigravity_weekly_reset, buf);
+    }
+
+    if (data->system_valid) {
+        const float values[] = { data->cpu_pct, data->gpu_pct, data->ram_pct };
+        const int temps[] = { data->cpu_temp_c, data->gpu_temp_c, -1 };
+        for (int i = 0; i < 3; ++i) {
+            const int value = (int)(values[i] + 0.5f);
+            lv_label_set_text_fmt(system_pcts[i], "%d%%", value);
+            lv_bar_set_value(system_bars[i], value, LV_ANIM_ON);
+            lv_obj_set_style_bg_color(system_bars[i], pct_color(values[i]), LV_PART_INDICATOR);
+            if (i < 2) {
+                if (temps[i] >= 0) lv_label_set_text_fmt(system_temps[i], "%d C", temps[i]);
+                else               lv_label_set_text(system_temps[i], "No sensor");
+                lv_obj_set_style_text_color(system_temps[i], temp_color(temps[i]), 0);
+            }
+        }
     }
 }
 
@@ -907,6 +1216,17 @@ void ui_update(const UsageData* data) {
 // reads "Listening…" on the idle screen, keeping it alive rather than frozen.
 static void update_view_state(void) {
     if (!usage_group || !pair_group || !idle_group) return;
+    if (current_screen == SCREEN_SYSTEM) {
+        view_state = 2;
+        view_tab = current_screen;
+        lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
+        if (codex_group) lv_obj_add_flag(codex_group, LV_OBJ_FLAG_HIDDEN);
+        if (antigravity_group) lv_obj_add_flag(antigravity_group, LV_OBJ_FLAG_HIDDEN);
+        if (system_group) lv_obj_clear_flag(system_group, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
     int v;
     if (!s_ble_connected) {
         v = 0;  // pairing hint
@@ -924,16 +1244,23 @@ static void update_view_state(void) {
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
     if (codex_group) lv_obj_add_flag(codex_group, LV_OBJ_FLAG_HIDDEN);
+    if (antigravity_group) lv_obj_add_flag(antigravity_group, LV_OBJ_FLAG_HIDDEN);
+    if (system_group) lv_obj_add_flag(system_group, LV_OBJ_FLAG_HIDDEN);
 
     if (v == 0)      lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
     else if (v == 1) lv_obj_clear_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
     else if (current_screen == SCREEN_CODEX && codex_group)
                      lv_obj_clear_flag(codex_group, LV_OBJ_FLAG_HIDDEN);
+    else if (current_screen == SCREEN_ANTIGRAVITY && antigravity_group)
+                     lv_obj_clear_flag(antigravity_group, LV_OBJ_FLAG_HIDDEN);
+    else if (current_screen == SCREEN_SYSTEM && system_group)
+                     lv_obj_clear_flag(system_group, LV_OBJ_FLAG_HIDDEN);
     else             lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
 }
 
 void ui_tick_anim(void) {
-    if (current_screen != SCREEN_USAGE && current_screen != SCREEN_CODEX) return;
+    if (current_screen != SCREEN_SYSTEM && current_screen != SCREEN_USAGE && current_screen != SCREEN_CODEX &&
+        current_screen != SCREEN_ANTIGRAVITY) return;
     update_view_state();
     if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
 
@@ -941,7 +1268,7 @@ void ui_tick_anim(void) {
 
     // Title clock: once the daemon has sent wall-clock time, replace "Usage" with
     // the live time, advanced locally so it ticks every minute between payloads.
-    if (clock_base_epoch > 0) {
+    if (clock_base_epoch > 0 && current_screen != SCREEN_SYSTEM) {
         time_t cur = (time_t)(clock_base_epoch + (now - clock_base_ms) / 1000);
         struct tm tmv;
         gmtime_r(&cur, &tmv);   // epoch is already local wall-clock → gmtime keeps it as-is
@@ -996,7 +1323,10 @@ static screen_t prev_non_splash_screen = SCREEN_USAGE;
 // just leaves the line blank rather than inventing a label.
 static void apply_subtitle(void) {
     if (!lbl_subtitle) return;
-    const char* s = (current_screen == SCREEN_CODEX) ? codex_plan_str : claude_plan_str;
+    const char* s = (current_screen == SCREEN_SYSTEM) ? "" :
+                    (current_screen == SCREEN_CODEX) ? codex_plan_str :
+                    (current_screen == SCREEN_ANTIGRAVITY) ? antigravity_plan_str :
+                    claude_plan_str;
     lv_label_set_text(lbl_subtitle, s);
     lv_obj_align(lbl_subtitle, LV_ALIGN_TOP_MID, 16, L.subtitle_y);
     if (current_screen == SCREEN_SPLASH || s[0] == '\0')
@@ -1028,10 +1358,11 @@ static void global_click_cb(lv_event_t* e) {
 // The title toggles the /stats view for the tab you're on.
 static void usage_title_cb(lv_event_t* e) {
     (void)e;
-    Serial.printf("[TAP] title scr=%d\n", (int)current_screen);   // TEMP
-    if (current_screen != SCREEN_USAGE && current_screen != SCREEN_CODEX) return;
+    if (current_screen != SCREEN_USAGE && current_screen != SCREEN_CODEX &&
+        current_screen != SCREEN_ANTIGRAVITY) return;
     stats_from = current_screen;
-    stats_provider = (current_screen == SCREEN_CODEX) ? 1 : 0;
+    stats_provider = (current_screen == SCREEN_CODEX) ? 1 :
+                     (current_screen == SCREEN_ANTIGRAVITY) ? 2 : 0;
     ui_show_screen(SCREEN_STATS);
 }
 
@@ -1040,7 +1371,7 @@ static void stats_title_cb(lv_event_t* e) {
     ui_show_screen(stats_from);
 }
 
-// Horizontal swipe pages between the Claude and Codex tabs. LVGL reports a
+// Horizontal swipe pages between System, Claude, Codex, and Antigravity. LVGL reports a
 // gesture on the indev, and it also fires a CLICKED on release — consume the
 // gesture so a page swipe doesn't also toggle the splash screen.
 static void global_gesture_cb(lv_event_t* e) {
@@ -1061,8 +1392,12 @@ static void global_gesture_cb(lv_event_t* e) {
     if (current_screen == SCREEN_SPLASH) return;
     if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return;
 
-    // Swipe left (content moves left) = go right to Codex; swipe right = back.
-    if (dir == LV_DIR_LEFT  && current_screen == SCREEN_USAGE) ui_show_screen(SCREEN_CODEX);
+    // System sits immediately left of Claude; the provider flow remains unchanged.
+    if (dir == LV_DIR_LEFT && current_screen == SCREEN_SYSTEM) ui_show_screen(SCREEN_USAGE);
+    else if (dir == LV_DIR_RIGHT && current_screen == SCREEN_USAGE) ui_show_screen(SCREEN_SYSTEM);
+    else if (dir == LV_DIR_LEFT  && current_screen == SCREEN_USAGE) ui_show_screen(SCREEN_CODEX);
+    else if (dir == LV_DIR_LEFT && current_screen == SCREEN_CODEX) ui_show_screen(SCREEN_ANTIGRAVITY);
+    else if (dir == LV_DIR_RIGHT && current_screen == SCREEN_ANTIGRAVITY) ui_show_screen(SCREEN_CODEX);
     else if (dir == LV_DIR_RIGHT && current_screen == SCREEN_CODEX) ui_show_screen(SCREEN_USAGE);
 }
 
@@ -1074,8 +1409,11 @@ void ui_show_screen(screen_t screen) {
 
     switch (screen) {
     case SCREEN_SPLASH:  splash_show(); break;
+    case SCREEN_SYSTEM:
     case SCREEN_USAGE:
-    case SCREEN_CODEX:   lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_CODEX:
+    case SCREEN_ANTIGRAVITY:
+        lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
     case SCREEN_STATS:
         if (stats_container) lv_obj_clear_flag(stats_container, LV_OBJ_FLAG_HIDDEN);
         break;
@@ -1083,22 +1421,38 @@ void ui_show_screen(screen_t screen) {
     }
 
     if (logo_img) {
-        if (screen == SCREEN_SPLASH) {
+        if (screen == SCREEN_SPLASH || screen == SCREEN_SYSTEM) {
             lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
             // Swap the header mark to match the provider you're looking at —
             // including on the stats screen, which belongs to one of the tabs.
-            const bool codex_mark = (screen == SCREEN_CODEX) ||
-                                    (screen == SCREEN_STATS && stats_provider == 1);
-            lv_image_set_src(logo_img, codex_mark ? &codex_logo_dsc : &logo_dsc);
+            const int provider = (screen == SCREEN_STATS) ? stats_provider :
+                                 (screen == SCREEN_CODEX) ? 1 :
+                                 (screen == SCREEN_ANTIGRAVITY) ? 2 : 0;
+            lv_image_set_src(logo_img, provider == 1 ? &codex_logo_dsc :
+                                       provider == 2 ? &gemini_logo_dsc : &logo_dsc);
         }
+    }
+    if (system_icon) {
+        if (screen == SCREEN_SYSTEM) lv_obj_clear_flag(system_icon, LV_OBJ_FLAG_HIDDEN);
+        else                         lv_obj_add_flag(system_icon, LV_OBJ_FLAG_HIDDEN);
     }
 
     if (screen == SCREEN_STATS) render_stats();
 
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
     current_screen = screen;
+    if (lbl_title) {
+        if (screen == SCREEN_SYSTEM) {
+            lv_label_set_text(lbl_title, "System");
+            lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, L.title_y);
+        } else if (screen != SCREEN_SPLASH) {
+            lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+            if (clock_base_epoch == 0) lv_label_set_text(lbl_title, "Usage");
+            else clock_last_min = -1;
+        }
+    }
     view_state = -1;            // force update_view_state() to re-lay-out for this tab
     apply_subtitle();
     apply_battery_visibility();

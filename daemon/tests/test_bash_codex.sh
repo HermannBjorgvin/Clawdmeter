@@ -16,6 +16,7 @@ DAEMON="$(dirname "$0")/../claude-usage-daemon.sh"
 # Pull just the two functions out of the daemon; sourcing it would start the loop.
 eval "$(awk '/^read_codex_token\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
 eval "$(awk '/^codex_fetch_fragment\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
+eval "$(awk '/^codex_context_fragment\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
 eval "$(awk '/^poll_codex\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
 eval "$(awk '/^read_plan_label_for\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
 
@@ -134,6 +135,21 @@ case "$(codex_fetch_fragment)" in
     *cxpl*) echo "FAIL: emitted cxpl with no plan_type"; fails=$((fails + 1)) ;;
     *) echo "PASS: no plan_type -> no cxpl key" ;;
 esac
+
+# --- Codex context: latest rollout token_count drives the second bar --------
+ctx_home="$TMP/.codex"
+mkdir -p "$ctx_home/sessions/2026/07/15"
+cat > "$ctx_home/sessions/2026/07/15/rollout-old.jsonl" <<'JSONL'
+{"payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":12345},"model_context_window":258400}}}
+JSONL
+cat > "$ctx_home/sessions/2026/07/15/rollout-new.jsonl" <<'JSONL'
+{"payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":17210},"model_context_window":258400}}}
+JSONL
+touch -t 202607151200 "$ctx_home/sessions/2026/07/15/rollout-old.jsonl"
+touch -t 202607151300 "$ctx_home/sessions/2026/07/15/rollout-new.jsonl"
+CODEX_HOME="$ctx_home"
+check_prefix "context fragment -> ctx/ctxw" \
+      ',"ctx":17210,"ctxw":258400' "$(codex_context_fragment)"
 
 # --- Claude plan label from rateLimitTier -----------------------------------
 plandir="$TMP/claude"; mkdir -p "$plandir"
