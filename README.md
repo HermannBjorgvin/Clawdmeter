@@ -1,27 +1,57 @@
-# Clawdmeter
+# AI Usage Monitor
 
-A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
+A small ESP32 desk dashboard that tracks usage across **multiple AI coding CLIs at once** —
+Claude Code, OpenAI Codex, and Antigravity (Gemini) — plus a live view of your
+host machine's CPU / GPU / RAM.
 
-It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) as well as a few other alternative boards and pairs over Bluetooth, the splash screen plays pixel-art Clawd animations that get
-busier when your usage rate climbs. The two side buttons send Space and
-Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
+> **Fork notice.** This project is a multi-provider fork of
+> [HermannBjorgvin/Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter),
+> which tracks Claude Code only. It adds per-provider swipe tabs, a `/stats`
+> screen with an activity heatmap, and a host-resource view. Full credit for the
+> original firmware, HAL, splash engine, and BLE daemon goes to the upstream
+> author — see [`NOTICE.md`](NOTICE.md).
 
-|              Usage meter              |              Clawd animation screen              |
-| :-----------------------------------: | :----------------------------------------------: |
-| ![Usage meter](assets/demo.jpeg) | ![Clawd animation screen](assets/demo.gif) |
+It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786)
+(and a few sibling boards) and pairs over Bluetooth. A Linux/macOS/Windows daemon
+polls each provider and pushes compact JSON over BLE GATT; the board renders it.
+The splash screen plays pixel-art Clawd animations that get busier as your usage
+climbs. The two side buttons send Space and Shift+Tab over BLE HID for Claude
+Code's voice mode and mode-toggle shortcuts.
 
 The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaanbuilds](https://x.com/amaanbuilds)'s library of pixel-art Clawd sprites, check it out, it's lovely.
 
-## Screens
+## Screens & navigation
 
-The device boots into the splash. Tap the screen anywhere to switch to the Usage view; tap again to flip back to the splash.
+The device boots into the splash. It has one usage tab per provider plus a host
+System tab, laid out left-to-right, and a per-provider Stats screen:
+
+```
+              (swipe left  <->  swipe right)
+   System  <->  Claude  <->  Codex  <->  Antigravity
+                          |
+              tap the title on any tab
+                          v
+                        Stats   (heatmap - tokens - model - sessions - streak)
+```
+
+- **Swipe left / right** to page between the System, Claude, Codex, and Antigravity tabs.
+- **Tap the title** ("Usage" / "Codex" / ...) to open that provider's **Stats** screen — a GitHub-style activity heatmap, total tokens, favourite model, session count, longest session, current/best streak, and a whimsical "~Nx more tokens than Dune" line. Tap the title again to go back.
+- **Tap the logo** (top-left) to jump to the splash; tap the splash to return.
+
+Each usage tab shows the provider's limits as bars: Claude has a 5-hour session
+window and a weekly window; Codex has one weekly window plus a context-length
+gauge; Antigravity has 5-hour and weekly windows for its Gemini model pool. Any
+provider whose CLI isn't installed or logged in is simply omitted — the tabs that
+remain still work. A subtitle under each title shows the detected plan (e.g.
+"Claude Max 20x", "Codex Plus", "Gemini Models").
 
 |              Splash               |              Usage              |
 | :-------------------------------: | :-----------------------------: |
 | ![Splash](screenshots/splash.png) | ![Usage](screenshots/usage.png) |
-|   Splash; touch-toggle anytime    | Session and weekly utilization  |
+|   Splash; tap the logo anytime    | Per-provider session and weekly bars |
 
-While the splash is up, the middle (PWR) button cycles animations. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
+While the splash is up, the middle (PWR) button cycles animations, and the tab
+buttons/brightness controls still apply. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
 
 ## Hardware
 
@@ -43,7 +73,8 @@ Boards supported out of the box:
 - Linux: `curl`, `bluetoothctl`, `busctl` (BlueZ Bluetooth stack)
 - macOS: `python3` (the installer sets up a venv with `bleak` and `httpx`)
 - Windows: `python3` 3.11+ (the installer sets up a venv with `bleak`, `httpx`, and `pystray`)
-- Claude Code with an active subscription
+- Claude Code with an active subscription (required)
+- Optional, each adds its own tab if present: **OpenAI Codex** CLI (logged in, `~/.codex/auth.json`), **Antigravity** / Gemini CLI (`agy`, logged in). The System tab needs no extra setup on Linux.
 
 ## macOS installation
 
@@ -186,22 +217,37 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
 
 ## How it works
 
-1. The daemon reads your Claude Code OAuth token — from the macOS Keychain (service `Claude Code-credentials`) on macOS, or from `~/.claude/.credentials.json` on Linux (`%USERPROFILE%\.claude\.credentials.json` on Windows).
-2. It makes a minimal API call to `api.anthropic.com/v1/messages` — one token of Haiku, basically free.
-3. The usage numbers come straight out of the response headers (`anthropic-ratelimit-unified-5h-utilization` and friends).
-4. The daemon connects to the ESP32 over BLE and writes a JSON payload to the GATT RX characteristic.
-5. The firmware parses it and updates the LVGL dashboard.
-6. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.
-7. The two side buttons are independent of all of this — they send Space and Shift+Tab as BLE HID keyboard input to the paired host directly.
+The daemon polls every provider it can find each cycle (~30 s), merges the
+results into one payload, and pushes it to the board over BLE. Each provider is
+independent — a missing or logged-out CLI just drops its keys from the payload.
 
-## Physical buttons
+- **Claude** — reads the OAuth token (macOS Keychain `Claude Code-credentials`, else `~/.claude/.credentials.json` / `%USERPROFILE%\.claude\.credentials.json`), makes a 1-token Haiku call to `api.anthropic.com/v1/messages`, and reads the usage numbers from the `anthropic-ratelimit-unified-*` **response headers** (the body is thrown away). The 5-hour and weekly windows come from these headers.
+- **Codex** — reads the ChatGPT OAuth token from `~/.codex/auth.json` and GETs `chatgpt.com/backend-api/wham/usage` (the endpoint the Codex CLI itself polls) for the weekly window; the live context-length gauge comes from the newest `~/.codex/sessions/**/rollout-*.jsonl`.
+- **Antigravity (Gemini)** — the `agy` CLI runs a local language server; the daemon finds its port from `~/.gemini/antigravity-cli/log/` and POSTs to `127.0.0.1:<port>/…/RetrieveUserQuotaSummary`. The local server does the auth, so the daemon needs no token of its own. The last good response is cached so the tab keeps showing while `agy` is closed. Only the "Gemini Models" pool (5-hour + weekly) is shown.
+- **System** — CPU / GPU / RAM utilization and temperatures from the host, refreshed each cycle.
+- **Stats** — Claude's come from `~/.claude/stats-cache.json` (the same file `/stats` reads) with today's activity merged live from the session transcripts; Codex's and Antigravity's are aggregated from their session logs.
 
-The board has three side buttons. Left and right send HID keys; the middle (PWR) button cycles splash animations and, held for 3 seconds, triggers pairing mode.
+The daemon connects to the ESP32 over BLE and writes a JSON payload to the GATT
+RX characteristic; the firmware parses it and updates the LVGL dashboard. It also
+tracks the rate of change of Claude's session % over a 5-minute window and picks
+splash animations from the matching mood group. The two side buttons are
+independent of all this — they send Space and Shift+Tab as BLE HID keyboard input
+to the paired host directly.
+
+## Controls
+
+**Touch** drives navigation: swipe left/right to page between the System, Claude,
+Codex, and Antigravity tabs; tap a title to open/close that provider's Stats
+screen; tap the logo to toggle the splash.
+
+**Buttons** — the board has three side buttons. Left and right send HID keys; the
+middle (PWR) button cycles splash animations and, held for 3 seconds, triggers
+pairing mode.
 
 | Button           | GPIO         | Function                                                       |
 | ---------------- | ------------ | -------------------------------------------------------------- |
 | **Left**         | GPIO 0       | Hold to send Space (Claude Code voice-mode push-to-talk)       |
-| **Middle** (PWR) | AXP2101 PKEY | On splash: cycle animations. Hold 3s + release: pairing mode |
+| **Middle** (PWR) | AXP2101 PKEY | On splash: cycle animations. On a tab: cycle brightness. Hold 3s + release: pairing mode |
 | **Right**        | GPIO 18      | Press to send Shift+Tab (Claude Code mode toggle)              |
 
 Space and Shift+Tab go out as standard BLE HID keyboard reports, so they trigger in whatever window has focus on the paired host — not just Claude Code.
@@ -217,13 +263,32 @@ The device advertises a custom GATT service alongside the standard HID keyboard 
 | TX Characteristic (notify) | `4c41555a-4465-7669-6365-000000000003` |
 | **HID Service**            | `00001812-0000-1000-8000-00805f9b34fb` |
 
-JSON payload format (written to RX):
+Two payload shapes are written to RX. Every key is optional — a provider whose
+CLI is absent or logged out just omits its keys, and the firmware falls back
+gracefully. The **usage** payload carries all live bars:
 
 ```json
-{ "s": 45, "sr": 120, "w": 28, "wr": 7200, "st": "allowed", "ok": true }
+{
+  "s": 45, "sr": 120, "w": 28, "wr": 7200, "st": "allowed", "pl": "Claude Max 20x",
+  "cx": 92, "cxr": 9932, "cxw": 10080, "cxpl": "Codex Plus", "ctx": 113580, "ctxw": 258400,
+  "ag5": 44, "ag5r": 136, "agw": 7, "agwr": 9916, "agpl": "Gemini Models",
+  "cpu": 12, "ct": 66, "gpu": 3, "gt": 37, "ram": 65,
+  "ok": true
+}
 ```
 
-Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
+| Prefix | Provider | Keys |
+| ------ | -------- | ---- |
+| `s`/`w` | Claude | `s`/`w` = 5h/weekly %, `sr`/`wr` = reset mins, `st` = status, `pl` = plan |
+| `cx` | Codex | `cx` = used %, `cxr` = reset mins, `cxw` = window mins, `cxpl` = plan, `ctx`/`ctxw` = context tokens / window |
+| `ag` | Antigravity | `ag5`/`agw` = 5h/weekly %, `ag5r`/`agwr` = reset mins, `agpl` = plan |
+| `cpu`/`gpu`/`ram` | System | percentages; `ct`/`gt` = CPU/GPU temp °C |
+
+The **stats** payload is marked with `sv` and carries one provider's `/stats`
+figures (`p` = provider, `tt` = total tokens, `fm` = favourite model, `ns` =
+sessions, `cs`/`bs` = current/best streak, `hm` = 49-char heatmap, …). It is sent
+separately per provider because all of it plus the usage bars would overflow the
+512-byte RX buffer.
 
 ## Recompiling fonts
 
@@ -241,8 +306,8 @@ lv_font_conv --font assets/TiemposText-400-Regular.otf -r 0x20-0x7E \
   --size 56 --format lvgl --bpp 4 --no-compress \
   -o firmware/src/font_tiempos_56.c --lv-include "lvgl.h"
 
-# Styrene B (large numbers 48, panel labels 28, small text 24, minimal 20)
-for size in 48 28 24 20; do
+# Styrene B (numbers 48, labels 28, small text 24/20, dense stat rows 16/14/12)
+for size in 48 28 24 20 16 14 12; do
   lv_font_conv --font assets/StyreneB-Regular.otf -r 0x20-0x7E \
     --size $size --format lvgl --bpp 4 --no-compress \
     -o firmware/src/font_styrene_${size}.c --lv-include "lvgl.h"
@@ -294,9 +359,10 @@ See `tools/README.md` for details.
 
 ## Credits
 
+- Original **Clawdmeter** project by [Hermann Björgvin](https://github.com/HermannBjorgvin/Clawdmeter) — firmware, board HAL, splash engine, and BLE daemon. This repo is a multi-provider fork; see [`NOTICE.md`](NOTICE.md).
 - Pixel-art Clawd animation by [@amaanbuilds](https://x.com/amaanbuilds), sourced from [claudepix.vercel.app](https://claudepix.vercel.app). Frame data and palettes scraped + converted by the tooling in `tools/`.
 - Lucide icon set ([lucide.dev](https://lucide.dev), MIT) for bluetooth and battery UI glyphs.
-- Anthropic brand fonts (Tiempos Text, Styrene B) — see licensing warning below.
+- Anthropic brand fonts (Tiempos Text, Styrene B) and the Clawd mascot; **OpenAI** and **Google Gemini** logos as provider marks — all property of their owners, included for personal use only. See the licensing note below and [`NOTICE.md`](NOTICE.md).
 
 ## Licensing gray area warning
 
