@@ -26,3 +26,22 @@ struct UsageData {
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
 };
+
+// One provider's /stats-style figures. Arrives in its OWN payload (marked "sv"),
+// not the usage one — usage plus both providers' stats would overflow the 512B
+// RX buffer. Everything is pre-computed by the daemon; the device does no date
+// math and never sees a raw timestamp.
+struct StatsData {
+    bool  valid;             // false until a stats payload for this provider lands
+    float total_tokens_m;    // millions, non-cache input + output (comparable across providers)
+    char  model[16];         // favourite model, display name e.g. "Opus 4.8"
+    int   sessions;
+    long  longest_secs;      // longest single session
+    int   active_days;       // days with activity
+    int   span_days;         // days since first session
+    int   streak;            // current streak
+    int   best_streak;
+    char  last_active[12];   // e.g. "Jul 14"
+    int   dune;              // total tokens / ~245k (the novel)
+    char  heat[50];          // 49 chars '0'-'4', oldest->newest, + NUL
+};

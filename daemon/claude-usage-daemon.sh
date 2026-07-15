@@ -536,6 +536,229 @@ poll_codex() {
     return 0
 }
 
+# --- Usage statistics (the /stats screen) ---------------------------------
+# Two sources, both read-only:
+#   Claude — ~/.claude/stats-cache.json IS the file Claude Code's /stats reads.
+#            We never recompute from the session JSONLs: slow, and it would drift
+#            from what /stats reports. Claude Code owns and refreshes this file,
+#            so the device mirrors /stats, staleness included.
+#   Codex  — no equivalent cache; aggregate the rollout JSONLs (measured 0.15s
+#            for 58 files, so no caching needed).
+STATS_INTERVAL=300      # stats move slowly; no need to recompute every poll
+STATS_LAST_TS=0
+DUNE_TOKENS=245000      # ~ the novel, for the "Nx more tokens than Dune" line
+HEAT_DAYS=49            # 7x7 grid on the device
+
+# Emit a stats payload for Claude, or nothing. Shape is documented in
+# docs/superpowers/specs/2026-07-15-stats-screen-design.md.
+stats_payload_claude() {
+    local dir="${1:-$HOME/.claude}"
+    [ -f "$dir/stats-cache.json" ] || return 0
+    python3 - "$dir/stats-cache.json" "$DUNE_TOKENS" "$HEAT_DAYS" <<'PYEOF' 2>/dev/null
+import json, sys, datetime
+
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+DUNE = int(sys.argv[2]); HEAT_DAYS = int(sys.argv[3])
+
+mu = d.get("modelUsage") or {}
+if not mu:
+    sys.exit(0)
+
+# /stats counts non-cache input + output only. cacheRead/cacheCreation are
+# excluded — they dwarf everything (billions) and are not "tokens you used".
+def total(v):
+    return int(v.get("inputTokens", 0)) + int(v.get("outputTokens", 0))
+
+tot = sum(total(v) for v in mu.values())
+if tot <= 0:
+    sys.exit(0)
+fav_raw = max(mu.items(), key=lambda kv: total(kv[1]))[0]
+
+# claude-opus-4-8 -> "Opus 4.8"; leave unknown vendors' names alone.
+def pretty(m):
+    s = m
+    if s.startswith("claude-"):
+        s = s[len("claude-"):]
+        s = s.split("-2")[0]                       # drop a trailing date stamp
+        parts = s.split("-")
+        if len(parts) >= 3 and parts[1].isdigit() and parts[2].isdigit():
+            return "%s %s.%s" % (parts[0].capitalize(), parts[1], parts[2])
+        if len(parts) >= 2 and parts[1].isdigit():
+            return "%s %s" % (parts[0].capitalize(), parts[1])
+        return parts[0].capitalize()
+    return s[:15]
+
+days = sorted({a["date"] for a in (d.get("dailyActivity") or [])
+               if a.get("messageCount", 0) > 0})
+if not days:
+    sys.exit(0)
+ds = [datetime.date.fromisoformat(x) for x in days]
+today = datetime.date.today()
+first = datetime.date.fromisoformat((d.get("firstSessionDate") or days[0])[:10])
+span = (today - first).days + 1
+
+best = cur = 1
+for i in range(1, len(ds)):
+    cur = cur + 1 if (ds[i] - ds[i-1]).days == 1 else 1
+    best = max(best, cur)
+run = 1
+for i in range(len(ds) - 1, 0, -1):
+    if (ds[i] - ds[i-1]).days == 1:
+        run += 1
+    else:
+        break
+# A streak only counts as "current" if it reaches today or yesterday.
+streak = run if (today - ds[-1]).days <= 1 else 0
+
+# Heatmap: one char per day, oldest->newest, quantised 0-4 by message count.
+counts = {a["date"]: a.get("messageCount", 0) for a in (d.get("dailyActivity") or [])}
+mx = max(counts.values()) if counts else 0
+heat = []
+for i in range(HEAT_DAYS - 1, -1, -1):
+    c = counts.get((today - datetime.timedelta(days=i)).isoformat(), 0)
+    heat.append("0" if c <= 0 or mx <= 0 else str(min(4, 1 + int(3 * c / mx))))
+
+ls = int((d.get("longestSession") or {}).get("duration", 0) / 1000)
+out = {
+    "sv": 1, "p": "c",
+    "tt": round(tot / 1e6, 1),
+    "fm": pretty(fav_raw),
+    "ns": int(d.get("totalSessions", 0)),
+    "ls": ls,
+    "ad": len(days), "as": max(span, len(days)),
+    "cs": streak, "bs": best,
+    "la": ds[-1].strftime("%b %-d"),
+    "dn": int(round(tot / DUNE)),
+    "hm": "".join(heat),
+    }
+sys.stdout.write(json.dumps(out, separators=(",", ":")))
+PYEOF
+}
+
+# Emit a stats payload for Codex, or nothing.
+stats_payload_codex() {
+    local home="${CODEX_HOME:-$HOME/.codex}"
+    [ -d "$home" ] || return 0
+    python3 - "$home" "$DUNE_TOKENS" "$HEAT_DAYS" <<'PYEOF' 2>/dev/null
+import json, sys, os, glob, datetime, collections
+
+home = sys.argv[1]; DUNE = int(sys.argv[2]); HEAT_DAYS = int(sys.argv[3])
+files = glob.glob(os.path.join(home, "sessions", "**", "rollout-*.jsonl"), recursive=True) \
+      + glob.glob(os.path.join(home, "archived_sessions", "*.jsonl"))
+if not files:
+    sys.exit(0)
+
+tot = 0; models = collections.Counter(); per_day = collections.Counter()
+longest = 0; sessions = 0
+for f in files:
+    last = None; first_ts = None; last_ts = None; msgs = 0
+    try:
+        fh = open(f)
+    except OSError:
+        continue
+    with fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue    # a truncated tail line must not kill the whole file
+            p = rec.get("payload") or {}
+            ts = rec.get("timestamp")
+            if ts:
+                if first_ts is None or ts < first_ts: first_ts = ts
+                if last_ts is None or ts > last_ts:   last_ts = ts
+            t = p.get("type")
+            if t == "token_count":
+                u = (p.get("info") or {}).get("total_token_usage")
+                if u:
+                    last = u          # cumulative — the last one wins
+                msgs += 1
+            m = p.get("model") or (p.get("info") or {}).get("model")
+            if m:
+                models[m] += 1
+    if last is None and first_ts is None:
+        continue
+    sessions += 1
+    if last:
+        # MUST subtract cached_input_tokens: Codex's input_tokens includes them,
+        # Claude's /stats total does not. Without this the two tabs are not
+        # comparable (218m vs 51m, of which 207m was re-sent cached context).
+        tot += max(0, int(last.get("input_tokens", 0)) - int(last.get("cached_input_tokens", 0))) \
+             + int(last.get("output_tokens", 0))
+    if first_ts and last_ts:
+        try:
+            a = datetime.datetime.fromisoformat(first_ts.replace("Z", "+00:00"))
+            b = datetime.datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+            longest = max(longest, int((b - a).total_seconds()))
+            per_day[a.astimezone().date().isoformat()] += max(1, msgs)
+        except Exception:
+            pass
+
+if sessions == 0 or not per_day:
+    sys.exit(0)
+
+days = sorted(per_day)
+ds = [datetime.date.fromisoformat(x) for x in days]
+today = datetime.date.today()
+span = (today - ds[0]).days + 1
+best = cur = 1
+for i in range(1, len(ds)):
+    cur = cur + 1 if (ds[i] - ds[i-1]).days == 1 else 1
+    best = max(best, cur)
+run = 1
+for i in range(len(ds) - 1, 0, -1):
+    if (ds[i] - ds[i-1]).days == 1: run += 1
+    else: break
+streak = run if (today - ds[-1]).days <= 1 else 0
+
+mx = max(per_day.values())
+heat = []
+for i in range(HEAT_DAYS - 1, -1, -1):
+    c = per_day.get((today - datetime.timedelta(days=i)).isoformat(), 0)
+    heat.append("0" if c <= 0 else str(min(4, 1 + int(3 * c / mx))))
+
+fav = models.most_common(1)[0][0] if models else "codex"
+out = {
+    "sv": 1, "p": "x",
+    "tt": round(tot / 1e6, 1),
+    "fm": fav[:15],
+    "ns": sessions,
+    "ls": longest,
+    "ad": len(days), "as": max(span, len(days)),
+    "cs": streak, "bs": best,
+    "la": ds[-1].strftime("%b %-d"),
+    "dn": int(round(tot / DUNE)),
+    "hm": "".join(heat),
+    }
+sys.stdout.write(json.dumps(out, separators=(",", ":")))
+PYEOF
+}
+
+# Send both providers' stats. Separate writes: usage + two stats blocks would
+# blow the firmware's 512-byte RX buffer. Any failure just skips that provider.
+push_stats() {
+    local now_ts payload
+    now_ts=$(date +%s)
+    [ $(( now_ts - STATS_LAST_TS )) -lt "$STATS_INTERVAL" ] && return 0
+    STATS_LAST_TS="$now_ts"
+
+    payload=$(stats_payload_claude "$PAYLOAD_DIR")
+    if [ -n "$payload" ]; then
+        log "Stats (claude): ${#payload} bytes"
+        write_gatt "$RX_CHAR_PATH" "$payload" || log "Stats write failed (claude)"
+        sleep 1   # let the firmware consume one payload before the next
+    fi
+    payload=$(stats_payload_codex)
+    if [ -n "$payload" ]; then
+        log "Stats (codex): ${#payload} bytes"
+        write_gatt "$RX_CHAR_PATH" "$payload" || log "Stats write failed (codex)"
+    fi
+    return 0
+}
+
 # Extract the integer session % ("s") from a built payload, or 0.
 _payload_session_pct() {
     echo "$1" | grep -o '"s":[0-9]*' | head -1 | cut -d: -f2
@@ -600,6 +823,10 @@ poll() {
     fi
     log "Sending: ${cycle_payload[$best_dir]}"
     write_gatt "$RX_CHAR_PATH" "${cycle_payload[$best_dir]}" || { log "Write failed"; return 1; }
+
+    # Stats ride separately and far less often — see push_stats.
+    PAYLOAD_DIR="$best_dir"
+    push_stats
     return 0
 }
 

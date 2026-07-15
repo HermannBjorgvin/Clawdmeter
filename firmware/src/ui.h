@@ -6,11 +6,13 @@ enum screen_t {
     SCREEN_SPLASH,
     SCREEN_USAGE,   // Claude tab
     SCREEN_CODEX,   // Codex tab — swipe left from SCREEN_USAGE
+    SCREEN_STATS,   // /stats view — tap the title on either tab
     SCREEN_COUNT,
 };
 
 void ui_init(void);
 void ui_update(const UsageData* data);
+void ui_update_stats(const StatsData* claude, const StatsData* codex);
 void ui_tick_anim(void);
 void ui_show_screen(screen_t screen);
 void ui_toggle_splash(void);

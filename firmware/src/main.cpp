@@ -117,13 +117,40 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 }
 
-// Parse a JSON line into UsageData.
-static bool parse_json(const char* json, UsageData* out) {
+static StatsData stats_claude = {};
+static StatsData stats_codex = {};
+
+// Parse a payload. Returns 0 = bad JSON, 1 = usage payload, 2 = stats payload.
+// The daemon marks stats with "sv"; stats land in their own struct and must
+// never touch UsageData (they'd blank the live bars between usage polls).
+#define PAYLOAD_BAD   0
+#define PAYLOAD_USAGE 1
+#define PAYLOAD_STATS 2
+
+static int parse_json(const char* json, UsageData* out) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
         Serial.printf("JSON parse error: %s\n", err.c_str());
-        return false;
+        return PAYLOAD_BAD;
+    }
+
+    if (!doc["sv"].isNull()) {
+        const char* p = doc["p"] | "c";
+        StatsData* s = (strcmp(p, "x") == 0) ? &stats_codex : &stats_claude;
+        s->total_tokens_m = doc["tt"] | -1.0f;
+        strlcpy(s->model, doc["fm"] | "", sizeof(s->model));
+        s->sessions     = doc["ns"] | 0;
+        s->longest_secs = doc["ls"] | 0L;
+        s->active_days  = doc["ad"] | 0;
+        s->span_days    = doc["as"] | 0;
+        s->streak       = doc["cs"] | 0;
+        s->best_streak  = doc["bs"] | 0;
+        strlcpy(s->last_active, doc["la"] | "", sizeof(s->last_active));
+        s->dune = doc["dn"] | 0;
+        strlcpy(s->heat, doc["hm"] | "", sizeof(s->heat));
+        s->valid = (s->total_tokens_m >= 0.0f);
+        return PAYLOAD_STATS;
     }
 
     out->session_pct = doc["s"] | 0.0f;
@@ -149,7 +176,7 @@ static bool parse_json(const char* json, UsageData* out) {
     strlcpy(out->codex_plan, doc["cxpl"] | "", sizeof(out->codex_plan));
     out->ok = doc["ok"] | false;
     out->valid = true;
-    return true;
+    return PAYLOAD_USAGE;
 }
 
 // ---- Serial command buffer ----
@@ -398,7 +425,11 @@ void loop() {
     check_serial_cmd();
 
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
+        int kind = parse_json(ble_get_data(), &usage);
+        if (kind == PAYLOAD_STATS) {
+            ui_update_stats(&stats_claude, &stats_codex);
+            ble_send_ack();
+        } else if (kind == PAYLOAD_USAGE) {
             int g_before = usage_rate_group();
             bool session_reset = usage_rate_sample(usage.session_pct);
             int g_after = usage_rate_group();

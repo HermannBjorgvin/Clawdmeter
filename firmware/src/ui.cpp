@@ -44,6 +44,12 @@ struct Layout {
     const lv_font_t* usage_pill_font;
     const lv_font_t* subtitle_font;
 
+    // Stats screen
+    int16_t heat_y, heat_cell, heat_gap;
+    int16_t stats_cap_dy;      // caption offset below its big number
+    int16_t stats_model_dy;    // model block offset below the token block
+    int16_t stats_row_dy;      // gap between the two stat rows
+
     // Bluetooth screen
     int16_t bt_info_panel_h;
     int16_t bt_reset_zone_h;
@@ -82,6 +88,13 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_pill_font  = &font_styrene_28;
         L.subtitle_y       = 80;   // title ends at 22+58=80
         L.subtitle_font    = &font_styrene_20;
+        // Stats: 7x7 grid of 24px cells + 5 gap = 198 wide, leaving ~240 to its right.
+        L.heat_y          = 104;
+        L.heat_cell       = 24;
+        L.heat_gap        = 5;
+        L.stats_cap_dy    = 52;
+        L.stats_model_dy  = 96;
+        L.stats_row_dy    = 34;
         L.bt_info_panel_h = 160;
         L.bt_reset_zone_h = 110;
         L.bt_title_font    = &font_tiempos_56;
@@ -103,6 +116,12 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_pill_font  = &font_styrene_28;
         L.subtitle_y       = 80;   // title ends at 22+58=80
         L.subtitle_font    = &font_styrene_16;
+        L.heat_y          = 100;
+        L.heat_cell       = 18;
+        L.heat_gap        = 4;
+        L.stats_cap_dy    = 40;
+        L.stats_model_dy  = 74;
+        L.stats_row_dy    = 28;
         L.bt_info_panel_h = 140;
         L.bt_reset_zone_h = 90;
         L.bt_title_font    = &font_tiempos_34;
@@ -182,6 +201,27 @@ static bool      data_received = false; // any valid update since boot
 static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage
 static screen_t  view_tab = SCREEN_USAGE;  // tab the current view_state was laid out for
 static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within this window (daemon sends ~60s)
+
+// ---- Stats screen (/stats view, reached by tapping the title) ----
+#define HEAT_COLS 7
+#define HEAT_ROWS 7
+#define HEAT_CELLS (HEAT_COLS * HEAT_ROWS)
+static lv_obj_t* stats_container = nullptr;
+static lv_obj_t* lbl_stats_title = nullptr;
+static lv_obj_t* heat_cells[HEAT_CELLS] = {};
+static lv_obj_t* lbl_stats_tokens = nullptr;
+static lv_obj_t* lbl_stats_tokens_cap = nullptr;
+static lv_obj_t* lbl_stats_model = nullptr;
+static lv_obj_t* lbl_stats_model_cap = nullptr;
+static lv_obj_t* lbl_stats_l1 = nullptr;   // "331 sessions"
+static lv_obj_t* lbl_stats_r1 = nullptr;   // "17d streak"
+static lv_obj_t* lbl_stats_l2 = nullptr;   // "9d 22h longest"
+static lv_obj_t* lbl_stats_r2 = nullptr;   // "29/47 days"
+static lv_obj_t* lbl_stats_dune = nullptr;
+static lv_obj_t* lbl_stats_none = nullptr; // "No stats yet"
+static StatsData s_stats[2] = {};          // [0] = Claude, [1] = Codex
+static int       stats_provider = 0;       // which one SCREEN_STATS is showing
+static screen_t  stats_from = SCREEN_USAGE; // tab to return to
 
 // ---- Shared ----
 static lv_image_dsc_t logo_dsc;
@@ -265,6 +305,9 @@ static void format_reset_time(int mins, char* buf, size_t len) {
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
 static void global_gesture_cb(lv_event_t* e);
+static void logo_click_cb(lv_event_t* e);
+static void usage_title_cb(lv_event_t* e);
+static void render_stats(void);
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -427,6 +470,9 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
     lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+    // Labels aren't clickable by default — tapping the title opens /stats.
+    lv_obj_add_flag(lbl_title, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(lbl_title, usage_title_cb, LV_EVENT_CLICKED, NULL);
 
     // Plan line under the title ("Claude Max 20x" / "Codex Plus"). Filled from the
     // daemon payload; stays empty (and invisible) if it never sends one.
@@ -513,6 +559,166 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
 }
 
+// Heatmap intensity ramp: 0 = no activity (bar background), then dark green up
+// through the accent orange, matching the usage bars' own palette.
+static lv_color_t heat_color(char c) {
+    switch (c) {
+    case '1': return lv_color_hex(0x39452c);
+    case '2': return COL_GREEN;
+    case '3': return COL_AMBER;
+    case '4': return COL_ACCENT;
+    default:  return COL_BAR_BG;
+    }
+}
+
+// "857580" -> "9d 22h"; "2870" -> "47m". Compact enough for a stat line.
+static void format_duration(long secs, char* buf, size_t len) {
+    if (secs <= 0)          snprintf(buf, len, "--");
+    else if (secs < 3600)   snprintf(buf, len, "%ldm", secs / 60);
+    else if (secs < 86400)  snprintf(buf, len, "%ldh %ldm", secs / 3600, (secs % 3600) / 60);
+    else                    snprintf(buf, len, "%ldd %ldh", secs / 86400, (secs % 86400) / 3600);
+}
+
+static void stats_title_cb(lv_event_t* e);
+
+static void init_stats_screen(lv_obj_t* scr) {
+    stats_container = lv_obj_create(scr);
+    lv_obj_set_size(stats_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(stats_container, 0, 0);
+    lv_obj_set_style_bg_opa(stats_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(stats_container, 0, 0);
+    lv_obj_set_style_pad_all(stats_container, 0, 0);
+    lv_obj_clear_flag(stats_container, LV_OBJ_FLAG_SCROLLABLE);
+
+    lbl_stats_title = lv_label_create(stats_container);
+    lv_label_set_text(lbl_stats_title, "Stats");
+    lv_obj_set_style_text_font(lbl_stats_title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_color(lbl_stats_title, COL_TEXT, 0);
+    lv_obj_align(lbl_stats_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+    // Labels aren't clickable by default — tapping the title pages back.
+    lv_obj_add_flag(lbl_stats_title, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(lbl_stats_title, stats_title_cb, LV_EVENT_CLICKED, NULL);
+
+    const int cell = L.heat_cell;
+    const int gap  = L.heat_gap;
+    for (int i = 0; i < HEAT_CELLS; i++) {
+        lv_obj_t* c = lv_obj_create(stats_container);
+        lv_obj_set_size(c, cell, cell);
+        lv_obj_set_pos(c, L.margin + (i % HEAT_COLS) * (cell + gap),
+                          L.heat_y  + (i / HEAT_COLS) * (cell + gap));
+        lv_obj_set_style_radius(c, 3, 0);
+        lv_obj_set_style_border_width(c, 0, 0);
+        lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(c, COL_BAR_BG, 0);
+        lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+        heat_cells[i] = c;
+    }
+
+    const int rx = L.margin + HEAT_COLS * (cell + gap) + 16;   // right of the grid
+    lbl_stats_tokens = lv_label_create(stats_container);
+    lv_obj_set_style_text_font(lbl_stats_tokens, L.usage_pct_font, 0);
+    lv_obj_set_style_text_color(lbl_stats_tokens, COL_TEXT, 0);
+    lv_obj_set_pos(lbl_stats_tokens, rx, L.heat_y);
+    lv_label_set_text(lbl_stats_tokens, "--");
+
+    lbl_stats_tokens_cap = lv_label_create(stats_container);
+    lv_obj_set_style_text_font(lbl_stats_tokens_cap, L.subtitle_font, 0);
+    lv_obj_set_style_text_color(lbl_stats_tokens_cap, COL_DIM, 0);
+    lv_obj_set_pos(lbl_stats_tokens_cap, rx, L.heat_y + L.stats_cap_dy);
+    lv_label_set_text(lbl_stats_tokens_cap, "tokens");
+
+    lbl_stats_model = lv_label_create(stats_container);
+    lv_obj_set_style_text_font(lbl_stats_model, L.usage_reset_font, 0);
+    lv_obj_set_style_text_color(lbl_stats_model, COL_TEXT, 0);
+    lv_obj_set_pos(lbl_stats_model, rx, L.heat_y + L.stats_model_dy);
+    lv_label_set_text(lbl_stats_model, "--");
+
+    lbl_stats_model_cap = lv_label_create(stats_container);
+    lv_obj_set_style_text_font(lbl_stats_model_cap, L.subtitle_font, 0);
+    lv_obj_set_style_text_color(lbl_stats_model_cap, COL_DIM, 0);
+    lv_obj_set_pos(lbl_stats_model_cap, rx, L.heat_y + L.stats_model_dy + L.stats_cap_dy);
+    lv_label_set_text(lbl_stats_model_cap, "favorite");
+
+    const int row_y = L.heat_y + HEAT_ROWS * (cell + gap) + 14;
+    lv_obj_t** rows[4] = { &lbl_stats_l1, &lbl_stats_r1, &lbl_stats_l2, &lbl_stats_r2 };
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t* l = lv_label_create(stats_container);
+        lv_obj_set_style_text_font(l, L.usage_reset_font, 0);
+        lv_obj_set_style_text_color(l, COL_TEXT, 0);
+        lv_obj_set_pos(l, (i & 1) ? L.scr_w / 2 + 8 : L.margin,
+                          row_y + (i / 2) * L.stats_row_dy);
+        lv_label_set_text(l, "");
+        *rows[i] = l;
+    }
+
+    lbl_stats_dune = lv_label_create(stats_container);
+    lv_obj_set_style_text_font(lbl_stats_dune, L.subtitle_font, 0);
+    lv_obj_set_style_text_color(lbl_stats_dune, COL_ACCENT, 0);
+    lv_obj_align(lbl_stats_dune, LV_ALIGN_BOTTOM_MID, 0, -18);
+    lv_label_set_text(lbl_stats_dune, "");
+
+    lbl_stats_none = lv_label_create(stats_container);
+    lv_obj_set_style_text_font(lbl_stats_none, L.usage_pill_font, 0);
+    lv_obj_set_style_text_color(lbl_stats_none, COL_DIM, 0);
+    lv_label_set_text(lbl_stats_none, "No stats yet");
+    lv_obj_align(lbl_stats_none, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(lbl_stats_none, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_add_flag(stats_container, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Paint the stats screen from whichever provider the user came from.
+static void render_stats(void) {
+    if (!stats_container) return;
+    const StatsData* s = &s_stats[stats_provider ? 1 : 0];
+    const bool ok = s->valid;
+
+    if (lbl_stats_none) {
+        if (ok) lv_obj_add_flag(lbl_stats_none, LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_clear_flag(lbl_stats_none, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_t* body[] = { lbl_stats_tokens, lbl_stats_tokens_cap, lbl_stats_model,
+                         lbl_stats_model_cap, lbl_stats_l1, lbl_stats_r1,
+                         lbl_stats_l2, lbl_stats_r2, lbl_stats_dune };
+    for (unsigned i = 0; i < sizeof(body) / sizeof(body[0]); i++) {
+        if (!body[i]) continue;
+        if (ok) lv_obj_clear_flag(body[i], LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_add_flag(body[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    for (int i = 0; i < HEAT_CELLS; i++) {
+        if (!heat_cells[i]) continue;
+        if (ok) lv_obj_clear_flag(heat_cells[i], LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_add_flag(heat_cells[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    if (!ok) return;
+
+    const int hlen = (int)strlen(s->heat);
+    for (int i = 0; i < HEAT_CELLS; i++) {
+        // heat is oldest->newest; a short/absent string just leaves cells empty.
+        char c = (i < hlen) ? s->heat[i] : '0';
+        lv_obj_set_style_bg_color(heat_cells[i], heat_color(c), 0);
+    }
+
+    char buf[48];
+    snprintf(buf, sizeof(buf), "%.1fm", s->total_tokens_m);
+    lv_label_set_text(lbl_stats_tokens, buf);
+    lv_label_set_text(lbl_stats_model, s->model[0] ? s->model : "--");
+
+    lv_label_set_text_fmt(lbl_stats_l1, "%d sessions", s->sessions);
+    lv_label_set_text_fmt(lbl_stats_r1, "%dd streak", s->streak);
+    format_duration(s->longest_secs, buf, sizeof(buf));
+    lv_label_set_text_fmt(lbl_stats_l2, "%s longest", buf);
+    lv_label_set_text_fmt(lbl_stats_r2, "%d/%d days", s->active_days, s->span_days);
+    lv_label_set_text_fmt(lbl_stats_dune, "~%dx more tokens than Dune", s->dune);
+    lv_obj_align(lbl_stats_dune, LV_ALIGN_BOTTOM_MID, 0, -18);
+}
+
+void ui_update_stats(const StatsData* claude, const StatsData* codex) {
+    if (claude) s_stats[0] = *claude;
+    if (codex)  s_stats[1] = *codex;
+    if (current_screen == SCREEN_STATS) render_stats();
+}
+
 // ======== Public API ========
 
 void ui_init(void) {
@@ -527,6 +733,7 @@ void ui_init(void) {
     init_battery_icons();
 
     init_usage_screen(scr);
+    init_stats_screen(scr);
     splash_init(scr);
 
     // Gesture handling lives on the SCREEN, not on usage_container. LVGL's
@@ -544,6 +751,11 @@ void ui_init(void) {
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
     lv_obj_set_pos(logo_img, L.margin, L.title_y - 10);
+    // The logo is now the ONLY way into the splash — images aren't clickable by
+    // default, and it must sit above the containers to receive the tap.
+    lv_obj_add_flag(logo_img, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(logo_img, logo_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_move_foreground(logo_img);
 
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
@@ -781,10 +993,32 @@ static void apply_battery_visibility(void) {
     else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
-static void global_click_cb(lv_event_t* e) {
+// Splash is now reached ONLY from the logo; tapping the body does nothing.
+static void logo_click_cb(lv_event_t* e) {
     (void)e;
     if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
     else                                  ui_show_screen(SCREEN_SPLASH);
+}
+
+// Tapping the splash anywhere still returns you to where you were — otherwise
+// the logo is hidden there and you'd be stuck.
+static void global_click_cb(lv_event_t* e) {
+    (void)e;
+    if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
+}
+
+// The title toggles the /stats view for the tab you're on.
+static void usage_title_cb(lv_event_t* e) {
+    (void)e;
+    if (current_screen != SCREEN_USAGE && current_screen != SCREEN_CODEX) return;
+    stats_from = current_screen;
+    stats_provider = (current_screen == SCREEN_CODEX) ? 1 : 0;
+    ui_show_screen(SCREEN_STATS);
+}
+
+static void stats_title_cb(lv_event_t* e) {
+    (void)e;
+    ui_show_screen(stats_from);
 }
 
 // Horizontal swipe pages between the Claude and Codex tabs. LVGL reports a
@@ -817,10 +1051,15 @@ void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
+    if (stats_container) lv_obj_add_flag(stats_container, LV_OBJ_FLAG_HIDDEN);
+
     switch (screen) {
     case SCREEN_SPLASH:  splash_show(); break;
     case SCREEN_USAGE:
     case SCREEN_CODEX:   lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_STATS:
+        if (stats_container) lv_obj_clear_flag(stats_container, LV_OBJ_FLAG_HIDDEN);
+        break;
     default: break;
     }
 
@@ -829,11 +1068,15 @@ void ui_show_screen(screen_t screen) {
             lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-            // Swap the header mark to match the tab you're on.
-            lv_image_set_src(logo_img,
-                             screen == SCREEN_CODEX ? &codex_logo_dsc : &logo_dsc);
+            // Swap the header mark to match the provider you're looking at —
+            // including on the stats screen, which belongs to one of the tabs.
+            const bool codex_mark = (screen == SCREEN_CODEX) ||
+                                    (screen == SCREEN_STATS && stats_provider == 1);
+            lv_image_set_src(logo_img, codex_mark ? &codex_logo_dsc : &logo_dsc);
         }
     }
+
+    if (screen == SCREEN_STATS) render_stats();
 
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
     current_screen = screen;
