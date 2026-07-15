@@ -35,6 +35,14 @@ void power_hal_init(void) {
     pmu.enableBattDetection();
     pmu.enableBattVoltageMeasure();
 
+    // The AXP2101 has no true fuel gauge — it estimates % from battery voltage
+    // and can latch into a bad state (frozen / stuck-near-zero %) that a normal
+    // power cycle does NOT clear, because the gauge lives in the chip's
+    // always-on domain kept alive by the battery itself. Force a gauge reset at
+    // boot so it recalibrates from the current voltage every startup.
+    pmu.enableGauge();
+    pmu.resetGauge();
+
     pmu.disableIRQ(XPOWERS_AXP2101_ALL_IRQ);
     pmu.clearIrqStatus();
     pmu.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ
