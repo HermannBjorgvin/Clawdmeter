@@ -127,8 +127,6 @@ static bool parse_json(const char* json, UsageData* out) {
     out->codex_valid = (out->codex_pct >= 0.0f);
     strlcpy(out->plan, doc["pl"] | "", sizeof(out->plan));
     strlcpy(out->codex_plan, doc["cxpl"] | "", sizeof(out->codex_plan));
-    strlcpy(out->weekly_reset_at, doc["wra"] | "", sizeof(out->weekly_reset_at));
-    strlcpy(out->codex_reset_at, doc["cxra"] | "", sizeof(out->codex_reset_at));
     out->ok = doc["ok"] | false;
     out->valid = true;
     return true;

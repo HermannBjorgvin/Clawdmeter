@@ -17,7 +17,6 @@ DAEMON="$(dirname "$0")/../claude-usage-daemon.sh"
 eval "$(awk '/^read_codex_token\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
 eval "$(awk '/^poll_codex\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
 eval "$(awk '/^read_plan_label_for\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
-eval "$(awk '/^fmt_reset_at\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -123,8 +122,8 @@ case "$got" in
     *) echo "FAIL: codex plan label missing/wrong in [$got]"; fails=$((fails + 1)) ;;
 esac
 case "$got" in
-    *'"cxra":"Jan 1 '*) echo "PASS: codex absolute reset present" ;;
-    *) echo "FAIL: codex absolute reset missing in [$got]"; fails=$((fails + 1)) ;;
+    *cxra*|*wra*) echo "FAIL: absolute reset keys should be gone, got [$got]"; fails=$((fails + 1)) ;;
+    *) echo "PASS: no absolute-reset keys (countdown only)" ;;
 esac
 
 # plan_type absent must not emit an empty label
@@ -159,26 +158,6 @@ check "missing credentials file -> empty" "" "$(read_plan_label_for "$TMP/nope")
 
 echo 'garbage' > "$plandir/.credentials.json"
 check "garbage credentials -> empty" "" "$(read_plan_label_for "$plandir")"
-
-# --- absolute reset formatting ----------------------------------------------
-# 4102462800 = 2100-01-01 05:00 UTC; assert against the daemon's own tz math
-# rather than hardcoding an offset, so this passes on any host TZ.
-want_far="$(python3 -c '
-import datetime
-dt = datetime.datetime.fromtimestamp(4102462800)
-h = dt.hour % 12 or 12
-ampm = "am" if dt.hour < 12 else "pm"
-clock = "%d%s" % (h, ampm) if dt.minute == 0 else "%d:%02d%s" % (h, dt.minute, ampm)
-print("%s %d %s" % (dt.strftime("%b"), dt.day, clock))')"
-check "future date -> 'Mon D h(am|pm)'" "$want_far" "$(fmt_reset_at 4102462800)"
-
-want_today="$(python3 -c '
-import datetime, time
-dt = datetime.datetime.now().replace(hour=18, minute=15, second=0, microsecond=0)
-print(int(dt.timestamp()))')"
-check "same-day -> clock only, no date" "6:15pm" "$(fmt_reset_at "$want_today")"
-
-check "garbage epoch -> empty" "" "$(fmt_reset_at 'not-a-number')"
 
 echo
 if [ "$fails" -eq 0 ]; then

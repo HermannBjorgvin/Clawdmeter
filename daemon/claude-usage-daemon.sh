@@ -338,26 +338,19 @@ build_payload_for_token() {
         s7d_util=${s7d_util:-0}; s7d_reset=${s7d_reset:-0}
         s5h_status=${s5h_status:-unknown}
 
-        # Weekly gets an absolute local reset time alongside its countdown; the
-        # 5h session stays relative (an absolute time adds nothing under 5h).
-        local wra_fragment="" wra=""
-        if [ -n "$s7d_reset" ] && [ "$s7d_reset" != "0" ]; then
-            wra=$(fmt_reset_at "$s7d_reset")
-            [ -n "$wra" ] && wra_fragment=",\"wra\":\"$wra\""
-        fi
         local plan_fragment="" plan_label=""
         plan_label=$(read_plan_label_for "$PAYLOAD_DIR")
         [ -n "$plan_label" ] && plan_fragment=",\"pl\":\"$plan_label\""
         # CODEX_FRAGMENT is computed once per poll cycle (see poll()) and is empty
         # whenever Codex data is unavailable — the firmware then renders the
         # Claude-only 2-bar view. Enterprise deliberately gets no Codex bar.
-        payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$s5h_status" -v now="$now" -v clk="$clock_fragment" -v chm="$chime_fragment" -v cdx="$CODEX_FRAGMENT" -v wra="$wra_fragment" -v pln="$plan_fragment" \
+        payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$s5h_status" -v now="$now" -v clk="$clock_fragment" -v chm="$chime_fragment" -v cdx="$CODEX_FRAGMENT" -v pln="$plan_fragment" \
             'BEGIN {
                 sp = sprintf("%.0f", u5 * 100);
                 sr = (r5 - now) / 60; sr = sr > 0 ? sprintf("%.0f", sr) : 0;
                 wp = sprintf("%.0f", u7 * 100);
                 wr = (r7 - now) / 60; wr = wr > 0 ? sprintf("%.0f", wr) : 0;
-                printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"acct\":\"pro\"%s%s%s%s%s,\"ok\":true}", sp, sr, wp, wr, st, clk, chm, cdx, wra, pln;
+                printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"acct\":\"pro\"%s%s%s%s,\"ok\":true}", sp, sr, wp, wr, st, clk, chm, cdx, pln;
             }')
     else
         # Enterprise account — spending-limit model
@@ -427,26 +420,6 @@ sys.stdout.write("Claude " + " ".join(words))
 ' "$dir/.credentials.json" 2>/dev/null
 }
 
-# Absolute reset time in this host's local tz, formatted for the device (which
-# has no RTC). Args: epoch seconds. Same-day -> "6am", else "Jul 18 6am".
-fmt_reset_at() {
-    python3 -c '
-import sys, datetime
-try:
-    ts = float(sys.argv[1])
-except Exception:
-    sys.exit(0)
-dt = datetime.datetime.fromtimestamp(ts)
-h = dt.hour % 12 or 12
-ampm = "am" if dt.hour < 12 else "pm"
-clock = "%d%s" % (h, ampm) if dt.minute == 0 else "%d:%02d%s" % (h, dt.minute, ampm)
-if dt.date() == datetime.date.today():
-    sys.stdout.write(clock)
-else:
-    sys.stdout.write("%s %d %s" % (dt.strftime("%b"), dt.day, clock))
-' "$1" 2>/dev/null
-}
-
 # --- Codex (OpenAI) usage -------------------------------------------------
 # Codex quota is read from the ChatGPT backend endpoint the Codex CLI itself
 # polls, authenticated with the OAuth access token the CLI stores. Notes:
@@ -486,20 +459,7 @@ poll_codex() {
         -H "Accept: application/json" 2>/dev/null) || return 0
     [ -z "$json" ] && return 0
     printf '%s' "$json" | python3 -c '
-import json, sys, time, datetime
-sys.path.insert(0, "")
-
-def fmt_reset(ts):
-    """Absolute reset time in the daemon host'"'"'s local tz, compact for a 24px label.
-    Same-day -> "6am" / "6:15am"; otherwise "Jul 18 6am"."""
-    dt = datetime.datetime.fromtimestamp(ts)
-    h = dt.hour % 12 or 12
-    ampm = "am" if dt.hour < 12 else "pm"
-    clock = "%d%s" % (h, ampm) if dt.minute == 0 else "%d:%02d%s" % (h, dt.minute, ampm)
-    if dt.date() == datetime.date.today():
-        return clock
-    return "%s %d %s" % (dt.strftime("%b"), dt.day, clock)
-
+import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -527,13 +487,6 @@ win_s = best.get("limit_window_seconds")
 cxr = max(0, int(round(reset_s / 60))) if isinstance(reset_s, (int, float)) else -1
 cxw = int(round(win_s / 60)) if isinstance(win_s, (int, float)) and win_s else 10080
 out = ",\"cx\":%d,\"cxr\":%d,\"cxw\":%d" % (pct, cxr, cxw)
-
-# Absolute reset time, formatted in the DAEMON host tz (the device has no RTC).
-ts = best.get("reset_at")
-if not isinstance(ts, (int, float)) and cxr >= 0:
-    ts = time.time() + cxr * 60
-if isinstance(ts, (int, float)):
-    out += ",\"cxra\":\"%s\"" % fmt_reset(ts)
 
 plan = d.get("plan_type")
 if isinstance(plan, str) and plan:

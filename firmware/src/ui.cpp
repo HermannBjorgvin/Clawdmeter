@@ -420,7 +420,6 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_pad_all(usage_container, 0, 0);
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(usage_container, global_gesture_cb, LV_EVENT_GESTURE, NULL);
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
@@ -528,6 +527,14 @@ void ui_init(void) {
 
     init_usage_screen(scr);
     splash_init(scr);
+
+    // Gesture handling lives on the SCREEN, not on usage_container. LVGL's
+    // indev_gesture() walks up from the pressed object while each ancestor has
+    // LV_OBJ_FLAG_GESTURE_BUBBLE — and lv_obj_create() sets that flag on every
+    // object that has a parent (lv_obj.c). So the walk climbs past every
+    // container and only stops at the screen, which has no parent and therefore
+    // no flag. A handler anywhere below the screen is simply never called.
+    lv_obj_add_event_cb(scr, global_gesture_cb, LV_EVENT_GESTURE, NULL);
 
     if (splash_get_root()) {
         lv_obj_add_event_cb(splash_get_root(), global_click_cb, LV_EVENT_CLICKED, NULL);
@@ -639,19 +646,8 @@ void ui_update(const UsageData* data) {
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
         lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
         lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
-        // Weekly shows the countdown AND the absolute local reset time (the daemon
-        // formats it in ITS timezone, so no device clock is needed). Session stays
-        // relative — an absolute time is noise when it's under 5 hours out.
         format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
-        if (data->weekly_reset_at[0]) {
-            char wbuf[64];
-            // ASCII only: the Styrene faces are built -r 0x20-0x7E, so a middle
-            // dot / en-dash would render as tofu. Parentheses it is.
-            snprintf(wbuf, sizeof(wbuf), "%s (%s)", buf, data->weekly_reset_at);
-            lv_label_set_text(lbl_weekly_reset, wbuf);
-        } else {
-            lv_label_set_text(lbl_weekly_reset, buf);
-        }
+        lv_label_set_text(lbl_weekly_reset, buf);
     }
 
     if (show_codex) {
@@ -660,13 +656,7 @@ void ui_update(const UsageData* data) {
         lv_bar_set_value(bar_codex, c_pct, LV_ANIM_ON);
         lv_obj_set_style_bg_color(bar_codex, pct_color(data->codex_pct), LV_PART_INDICATOR);
         format_reset_time(data->codex_reset_mins, buf, sizeof(buf));
-        if (data->codex_reset_at[0]) {
-            char cbuf[64];
-            snprintf(cbuf, sizeof(cbuf), "%s (%s)", buf, data->codex_reset_at);
-            lv_label_set_text(lbl_codex_reset, cbuf);
-        } else {
-            lv_label_set_text(lbl_codex_reset, buf);
-        }
+        lv_label_set_text(lbl_codex_reset, buf);
         // Label the window from its actual length rather than assuming "weekly":
         // Plus exposes only a 7d window today, but the API models others.
         if (data->codex_window_mins >= 10080) {
@@ -801,10 +791,12 @@ static void global_click_cb(lv_event_t* e) {
 // gesture so a page swipe doesn't also toggle the splash screen.
 static void global_gesture_cb(lv_event_t* e) {
     (void)e;
-    if (current_screen == SCREEN_SPLASH) return;
     lv_indev_t* indev = lv_indev_active();
+    lv_dir_t dir = indev ? lv_indev_get_gesture_dir(indev) : LV_DIR_NONE;
+    Serial.printf("[GESTURE] fired scr=%d indev=%p dir=%d\n",
+                  (int)current_screen, (void*)indev, (int)dir);   // TEMP trace
+    if (current_screen == SCREEN_SPLASH) return;
     if (!indev) return;
-    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
     if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return;
     lv_indev_wait_release(indev);   // suppress the trailing CLICKED
 

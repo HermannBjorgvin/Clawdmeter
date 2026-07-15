@@ -20,12 +20,9 @@ struct UsageData {
     int  codex_reset_mins;   // minutes until the Codex window resets
     int  codex_window_mins;  // Codex window length in minutes (10080 = weekly)
     bool codex_valid;        // true once a payload carried Codex data
-    // Plan labels + absolute reset times, both pre-formatted by the daemon in ITS
-    // local timezone — the device has no RTC, so it never does date math.
+    // Plan labels, pre-formatted by the daemon (the device never parses tiers).
     char plan[24];           // e.g. "Claude Max 20x"; "" = daemon sent none
     char codex_plan[24];     // e.g. "Codex Plus"
-    char weekly_reset_at[24];// e.g. "Jul 18 6am"; "" = show the countdown only
-    char codex_reset_at[24]; // e.g. "Jul 22 4pm"
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
 };
