@@ -337,16 +337,27 @@ build_payload_for_token() {
         s5h_util=${s5h_util:-0}; s5h_reset=${s5h_reset:-0}
         s7d_util=${s7d_util:-0}; s7d_reset=${s7d_reset:-0}
         s5h_status=${s5h_status:-unknown}
+
+        # Weekly gets an absolute local reset time alongside its countdown; the
+        # 5h session stays relative (an absolute time adds nothing under 5h).
+        local wra_fragment="" wra=""
+        if [ -n "$s7d_reset" ] && [ "$s7d_reset" != "0" ]; then
+            wra=$(fmt_reset_at "$s7d_reset")
+            [ -n "$wra" ] && wra_fragment=",\"wra\":\"$wra\""
+        fi
+        local plan_fragment="" plan_label=""
+        plan_label=$(read_plan_label_for "$PAYLOAD_DIR")
+        [ -n "$plan_label" ] && plan_fragment=",\"pl\":\"$plan_label\""
         # CODEX_FRAGMENT is computed once per poll cycle (see poll()) and is empty
         # whenever Codex data is unavailable — the firmware then renders the
         # Claude-only 2-bar view. Enterprise deliberately gets no Codex bar.
-        payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$s5h_status" -v now="$now" -v clk="$clock_fragment" -v chm="$chime_fragment" -v cdx="$CODEX_FRAGMENT" \
+        payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$s5h_status" -v now="$now" -v clk="$clock_fragment" -v chm="$chime_fragment" -v cdx="$CODEX_FRAGMENT" -v wra="$wra_fragment" -v pln="$plan_fragment" \
             'BEGIN {
                 sp = sprintf("%.0f", u5 * 100);
                 sr = (r5 - now) / 60; sr = sr > 0 ? sprintf("%.0f", sr) : 0;
                 wp = sprintf("%.0f", u7 * 100);
                 wr = (r7 - now) / 60; wr = wr > 0 ? sprintf("%.0f", wr) : 0;
-                printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"acct\":\"pro\"%s%s%s,\"ok\":true}", sp, sr, wp, wr, st, clk, chm, cdx;
+                printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"acct\":\"pro\"%s%s%s%s%s,\"ok\":true}", sp, sr, wp, wr, st, clk, chm, cdx, wra, pln;
             }')
     else
         # Enterprise account — spending-limit model
@@ -385,6 +396,57 @@ PYEOF
     return 0
 }
 
+# Claude plan label for the subtitle, e.g. "Claude Max 20x". Source is
+# claudeAiOauth.rateLimitTier ("default_claude_max_20x"); subscriptionType
+# ("max") is the fallback since it lacks the multiplier. Echoes "" if unknown —
+# the firmware then just leaves the subtitle blank rather than guessing.
+read_plan_label_for() {
+    local dir="$1"
+    [ -f "$dir/.credentials.json" ] || return 0
+    python3 -c '
+import json, sys
+try:
+    o = json.load(open(sys.argv[1])).get("claudeAiOauth") or {}
+except Exception:
+    sys.exit(0)
+tier = o.get("rateLimitTier") or ""
+sub = o.get("subscriptionType") or ""
+s = tier or sub
+if not s:
+    sys.exit(0)
+for p in ("default_claude_", "default_"):
+    if s.startswith(p):
+        s = s[len(p):]
+        break
+s = s.replace("claude_", "").replace("_", " ").strip()
+if not s:
+    sys.exit(0)
+# "max 20x" -> "Max 20x" (title() would give "20X")
+words = [w if any(c.isdigit() for c in w) else w.capitalize() for w in s.split()]
+sys.stdout.write("Claude " + " ".join(words))
+' "$dir/.credentials.json" 2>/dev/null
+}
+
+# Absolute reset time in this host's local tz, formatted for the device (which
+# has no RTC). Args: epoch seconds. Same-day -> "6am", else "Jul 18 6am".
+fmt_reset_at() {
+    python3 -c '
+import sys, datetime
+try:
+    ts = float(sys.argv[1])
+except Exception:
+    sys.exit(0)
+dt = datetime.datetime.fromtimestamp(ts)
+h = dt.hour % 12 or 12
+ampm = "am" if dt.hour < 12 else "pm"
+clock = "%d%s" % (h, ampm) if dt.minute == 0 else "%d:%02d%s" % (h, dt.minute, ampm)
+if dt.date() == datetime.date.today():
+    sys.stdout.write(clock)
+else:
+    sys.stdout.write("%s %d %s" % (dt.strftime("%b"), dt.day, clock))
+' "$1" 2>/dev/null
+}
+
 # --- Codex (OpenAI) usage -------------------------------------------------
 # Codex quota is read from the ChatGPT backend endpoint the Codex CLI itself
 # polls, authenticated with the OAuth access token the CLI stores. Notes:
@@ -398,6 +460,7 @@ PYEOF
 CODEX_AUTH_FILE="${CODEX_HOME:-$HOME/.codex}/auth.json"
 CODEX_USAGE_URL="https://chatgpt.com/backend-api/wham/usage"
 CODEX_FRAGMENT=""   # recomputed once per poll cycle; "" = no Codex data this cycle
+PAYLOAD_DIR=""      # config dir the in-flight payload belongs to (plan label lookup)
 
 read_codex_token() {
     [ -f "$CODEX_AUTH_FILE" ] || return 1
@@ -423,7 +486,20 @@ poll_codex() {
         -H "Accept: application/json" 2>/dev/null) || return 0
     [ -z "$json" ] && return 0
     printf '%s' "$json" | python3 -c '
-import json, sys
+import json, sys, time, datetime
+sys.path.insert(0, "")
+
+def fmt_reset(ts):
+    """Absolute reset time in the daemon host'"'"'s local tz, compact for a 24px label.
+    Same-day -> "6am" / "6:15am"; otherwise "Jul 18 6am"."""
+    dt = datetime.datetime.fromtimestamp(ts)
+    h = dt.hour % 12 or 12
+    ampm = "am" if dt.hour < 12 else "pm"
+    clock = "%d%s" % (h, ampm) if dt.minute == 0 else "%d:%02d%s" % (h, dt.minute, ampm)
+    if dt.date() == datetime.date.today():
+        return clock
+    return "%s %d %s" % (dt.strftime("%b"), dt.day, clock)
+
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -450,7 +526,19 @@ reset_s = best.get("reset_after_seconds")
 win_s = best.get("limit_window_seconds")
 cxr = max(0, int(round(reset_s / 60))) if isinstance(reset_s, (int, float)) else -1
 cxw = int(round(win_s / 60)) if isinstance(win_s, (int, float)) and win_s else 10080
-sys.stdout.write(",\"cx\":%d,\"cxr\":%d,\"cxw\":%d" % (pct, cxr, cxw))
+out = ",\"cx\":%d,\"cxr\":%d,\"cxw\":%d" % (pct, cxr, cxw)
+
+# Absolute reset time, formatted in the DAEMON host tz (the device has no RTC).
+ts = best.get("reset_at")
+if not isinstance(ts, (int, float)) and cxr >= 0:
+    ts = time.time() + cxr * 60
+if isinstance(ts, (int, float)):
+    out += ",\"cxra\":\"%s\"" % fmt_reset(ts)
+
+plan = d.get("plan_type")
+if isinstance(plan, str) and plan:
+    out += ",\"cxpl\":\"Codex %s\"" % plan.replace("_", " ").title()
+sys.stdout.write(out)
 ' 2>/dev/null
 }
 
@@ -482,6 +570,7 @@ poll() {
             log "No token in $dir; skipping"
             continue
         fi
+        PAYLOAD_DIR="$dir"   # which config dir this payload is for (plan label lookup)
         payload=$(build_payload_for_token "$token") || { log "API call failed for $dir"; continue; }
         [ -z "$payload" ] && continue
         s=$(_payload_session_pct "$payload"); s=${s:-0}

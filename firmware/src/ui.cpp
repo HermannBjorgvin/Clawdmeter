@@ -3,6 +3,7 @@
 #include <lvgl.h>
 #include <time.h>
 #include "logo.h"
+#include "codex_logo.h"
 #include "icons.h"
 #include "hal/board_caps.h"
 
@@ -29,27 +30,18 @@ struct Layout {
     int16_t content_y;
     int16_t content_w;
 
-    // Usage screen. Two geometries: the 2-panel Claude-only view (unsuffixed) and
-    // the tighter 3-panel view used when the daemon also supplies Codex data (*3).
-    // apply_usage_geometry() switches between them at runtime.
+    // Usage screen. Claude and Codex each get their own tab, so panels stay
+    // full-size on both — no cramped multi-provider geometry.
     int16_t usage_panel_h;
     int16_t usage_panel_gap;
     int16_t usage_bar_y;
     int16_t usage_reset_y;
     int16_t usage_bar_h;
+    int16_t subtitle_y;
     const lv_font_t* usage_pct_font;
     const lv_font_t* usage_reset_font;
     const lv_font_t* usage_pill_font;
-
-    int16_t usage_content_y3;
-    int16_t usage_panel_h3;
-    int16_t usage_panel_gap3;
-    int16_t usage_bar_y3;
-    int16_t usage_reset_y3;
-    int16_t usage_bar_h3;
-    const lv_font_t* usage_pct_font3;
-    const lv_font_t* usage_reset_font3;
-    const lv_font_t* usage_pill_font3;
+    const lv_font_t* subtitle_font;
 
     // Bluetooth screen
     int16_t bt_info_panel_h;
@@ -70,29 +62,25 @@ static void compute_layout(const BoardCaps& c) {
     L.scr_w = c.width;
     L.scr_h = c.height;
     L.margin = 20;
-    L.title_y = 30;
+    // Title is font_tiempos_56 (line_height 58) on every board, so it spans
+    // title_y .. title_y+58. The plan subtitle sits directly under that, and
+    // content_y must clear the subtitle — keep these three in step.
+    L.title_y = 22;
 
     if (c.height >= 460) {
         // Large layout — tuned for 480x480 (AMOLED-2.16).
-        L.content_y = 100;
+        // 104 + 2*150 + 16 = 420, clearing the status line at y>=431.
+        L.content_y = 104;
         L.usage_panel_h = 150;
         L.usage_panel_gap = 16;
         L.usage_bar_y = 56;
         L.usage_reset_y = 94;
         L.usage_bar_h = 24;
         L.usage_pct_font   = &font_styrene_48;
-        L.usage_reset_font = &font_styrene_28;
+        L.usage_reset_font = &font_styrene_24;
         L.usage_pill_font  = &font_styrene_28;
-        // 3-panel: 92 + 3*100 + 2*10 = 412, clearing the status line at y>=427.
-        L.usage_content_y3 = 92;
-        L.usage_panel_h3   = 100;
-        L.usage_panel_gap3 = 10;
-        L.usage_bar_y3     = 38;
-        L.usage_reset_y3   = 56;
-        L.usage_bar_h3     = 16;
-        L.usage_pct_font3   = &font_styrene_28;
-        L.usage_reset_font3 = &font_styrene_16;
-        L.usage_pill_font3  = &font_styrene_16;
+        L.subtitle_y       = 80;   // title ends at 22+58=80
+        L.subtitle_font    = &font_styrene_20;
         L.bt_info_panel_h = 160;
         L.bt_reset_zone_h = 110;
         L.bt_title_font    = &font_tiempos_56;
@@ -102,27 +90,18 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_credit_2_font = &font_styrene_20;
     } else {
         // Compact layout — tuned for 368x448 (AMOLED-1.8).
-        L.content_y = 85;
+        // Title is the same 58px face here, so content starts below the subtitle.
+        L.content_y = 100;
         L.usage_panel_h = 130;
         L.usage_panel_gap = 12;
         L.usage_bar_y = 48;
         L.usage_reset_y = 78;
         L.usage_bar_h = 24;
-        // 2-panel fonts match what make_usage_panel/make_pill hardcoded before the
-        // Codex change — the compact 2-bar view must look exactly as it did.
         L.usage_pct_font   = &font_styrene_48;
-        L.usage_reset_font = &font_styrene_28;
+        L.usage_reset_font = &font_styrene_20;
         L.usage_pill_font  = &font_styrene_28;
-        // 3-panel: 78 + 3*86 + 2*8 = 352, well clear of the status line.
-        L.usage_content_y3 = 78;
-        L.usage_panel_h3   = 86;
-        L.usage_panel_gap3 = 8;
-        L.usage_bar_y3     = 30;
-        L.usage_reset_y3   = 46;
-        L.usage_bar_h3     = 14;
-        L.usage_pct_font3   = &font_styrene_20;
-        L.usage_reset_font3 = &font_styrene_12;
-        L.usage_pill_font3  = &font_styrene_12;
+        L.subtitle_y       = 80;   // title ends at 22+58=80
+        L.subtitle_font    = &font_styrene_16;
         L.bt_info_panel_h = 140;
         L.bt_reset_zone_h = 90;
         L.bt_title_font    = &font_tiempos_34;
@@ -168,13 +147,19 @@ static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 static lv_obj_t* panel_session = nullptr;
 static lv_obj_t* panel_weekly = nullptr;
-// Codex panel — built always, shown only when the daemon supplies Codex data.
+// Codex tab — its own full-size panel, reached by swiping left from the Claude tab.
+static lv_obj_t* codex_group = nullptr;   // Codex panel, shown on SCREEN_CODEX
 static lv_obj_t* bar_codex = nullptr;
 static lv_obj_t* lbl_codex_pct = nullptr;
 static lv_obj_t* lbl_codex_label = nullptr;
 static lv_obj_t* lbl_codex_reset = nullptr;
 static lv_obj_t* panel_codex = nullptr;
-static int       panel_mode = -1;   // -1 unset / 2 = Claude only / 3 = Claude + Codex
+static lv_obj_t* lbl_codex_none = nullptr;  // "No Codex data" when the daemon omits it
+static lv_obj_t* lbl_subtitle = nullptr;    // plan line under the title, e.g. "Claude Max 20x"
+static bool      s_codex_valid = false;     // last payload carried Codex data
+static char      claude_plan_str[24] = "";  // "Claude Max 20x" — from the daemon
+static char      codex_plan_str[24]  = "";  // "Codex Plus"     — from the daemon
+static void      apply_subtitle(void);
 // Enterprise-only widgets inside panel_session
 static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
 static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
@@ -194,10 +179,12 @@ static lv_obj_t* idle_group;            // the "Zzz" idle screen
 static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage update landed
 static bool      data_received = false; // any valid update since boot
 static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage
+static screen_t  view_tab = SCREEN_USAGE;  // tab the current view_state was laid out for
 static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within this window (daemon sends ~60s)
 
 // ---- Shared ----
 static lv_image_dsc_t logo_dsc;
+static lv_image_dsc_t codex_logo_dsc;   // OpenAI mark, shown on the Codex tab
 static screen_t current_screen = SCREEN_USAGE;
 static bool     s_ble_connected = false;   // cached BLE connection state
 static uint32_t connected_at_ms = 0;       // when we last entered CONNECTED ("Connected" dwell)
@@ -276,6 +263,7 @@ static void format_reset_time(int mins, char* buf, size_t len) {
 
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
+static void global_gesture_cb(lv_event_t* e);
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -432,12 +420,21 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_pad_all(usage_container, 0, 0);
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(usage_container, global_gesture_cb, LV_EVENT_GESTURE, NULL);
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
     lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
     lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+
+    // Plan line under the title ("Claude Max 20x" / "Codex Plus"). Filled from the
+    // daemon payload; stays empty (and invisible) if it never sends one.
+    lbl_subtitle = lv_label_create(usage_container);
+    lv_label_set_text(lbl_subtitle, "");
+    lv_obj_set_style_text_font(lbl_subtitle, L.subtitle_font, 0);
+    lv_obj_set_style_text_color(lbl_subtitle, COL_DIM, 0);
+    lv_obj_align(lbl_subtitle, LV_ALIGN_TOP_MID, 16, L.subtitle_y);
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
@@ -481,13 +478,29 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
 
-    // Codex panel. Built here so apply_usage_geometry() only ever moves/resizes —
-    // position is a placeholder; it is hidden until Codex data arrives.
-    panel_codex = make_usage_panel(usage_group,
-                     L.content_y + 2 * (L.usage_panel_h + L.usage_panel_gap), "Codex",
+    // ---- Codex tab: its own group, same full-size panel geometry as Claude ----
+    codex_group = lv_obj_create(usage_container);
+    lv_obj_set_size(codex_group, L.scr_w, L.scr_h);
+    lv_obj_set_pos(codex_group, 0, 0);
+    lv_obj_set_style_bg_opa(codex_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(codex_group, 0, 0);
+    lv_obj_set_style_pad_all(codex_group, 0, 0);
+    lv_obj_clear_flag(codex_group, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(codex_group, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    panel_codex = make_usage_panel(codex_group, L.content_y, "Weekly",
                      &lbl_codex_pct, &lbl_codex_label,
                      &bar_codex, &lbl_codex_reset);
-    lv_obj_add_flag(panel_codex, LV_OBJ_FLAG_HIDDEN);
+
+    // Shown instead of the panel when the daemon sends no Codex data.
+    lbl_codex_none = lv_label_create(codex_group);
+    lv_label_set_text(lbl_codex_none, "No Codex data");
+    lv_obj_set_style_text_font(lbl_codex_none, L.usage_pill_font, 0);
+    lv_obj_set_style_text_color(lbl_codex_none, COL_DIM, 0);
+    lv_obj_align(lbl_codex_none, LV_ALIGN_CENTER, 0, -20);
+    lv_obj_add_flag(lbl_codex_none, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_add_flag(codex_group, LV_OBJ_FLAG_HIDDEN);   // update_view_state decides
 
     build_pair_group(usage_container);
     build_idle_group(usage_container);
@@ -500,49 +513,6 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
 }
 
-// Move/resize the usage panels between the 2-panel (Claude only) and 3-panel
-// (Claude + Codex) geometries. Called from ui_update() on every payload but only
-// does work when the mode actually changes, so a steady stream of same-shape
-// payloads costs one int compare. Enterprise always uses the 2-panel geometry —
-// its spending/period overlays are positioned against L.usage_reset_y.
-static void apply_usage_geometry(int mode) {
-    if (mode == panel_mode) return;
-    if (!panel_session || !panel_weekly || !panel_codex) return;
-    panel_mode = mode;
-
-    const bool three = (mode == 3);
-    const int16_t top     = three ? L.usage_content_y3 : L.content_y;
-    const int16_t h       = three ? L.usage_panel_h3   : L.usage_panel_h;
-    const int16_t gap     = three ? L.usage_panel_gap3 : L.usage_panel_gap;
-    const int16_t bar_y   = three ? L.usage_bar_y3     : L.usage_bar_y;
-    const int16_t bar_h   = three ? L.usage_bar_h3     : L.usage_bar_h;
-    const int16_t reset_y = three ? L.usage_reset_y3   : L.usage_reset_y;
-    const lv_font_t* pct_f   = three ? L.usage_pct_font3   : L.usage_pct_font;
-    const lv_font_t* reset_f = three ? L.usage_reset_font3 : L.usage_reset_font;
-    const lv_font_t* pill_f  = three ? L.usage_pill_font3  : L.usage_pill_font;
-
-    lv_obj_t* const panels[3] = { panel_session, panel_weekly, panel_codex };
-    lv_obj_t* const pcts[3]   = { lbl_session_pct, lbl_weekly_pct, lbl_codex_pct };
-    lv_obj_t* const pills[3]  = { lbl_session_label, lbl_weekly_label, lbl_codex_label };
-    lv_obj_t* const bars[3]   = { bar_session, bar_weekly, bar_codex };
-    lv_obj_t* const resets[3] = { lbl_session_reset, lbl_weekly_reset, lbl_codex_reset };
-
-    for (int i = 0; i < 3; i++) {
-        lv_obj_set_pos(panels[i], L.margin, top + i * (h + gap));
-        lv_obj_set_size(panels[i], L.content_w, h);
-        lv_obj_set_style_text_font(pcts[i], pct_f, 0);
-        lv_obj_set_style_text_font(pills[i], pill_f, 0);
-        lv_obj_align(pills[i], LV_ALIGN_TOP_RIGHT, 0, 1);
-        lv_obj_set_pos(bars[i], 0, bar_y);
-        lv_obj_set_size(bars[i], L.content_w - 32, bar_h);
-        lv_obj_set_style_text_font(resets[i], reset_f, 0);
-        lv_obj_set_pos(resets[i], 0, reset_y);
-    }
-
-    if (three) lv_obj_clear_flag(panel_codex, LV_OBJ_FLAG_HIDDEN);
-    else       lv_obj_add_flag(panel_codex, LV_OBJ_FLAG_HIDDEN);
-}
-
 // ======== Public API ========
 
 void ui_init(void) {
@@ -553,6 +523,7 @@ void ui_init(void) {
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
     init_icon_dsc_rgb565a8(&logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data);
+    init_icon_dsc_rgb565a8(&codex_logo_dsc, CODEX_LOGO_WIDTH, CODEX_LOGO_HEIGHT, codex_logo_data);
     init_battery_icons();
 
     init_usage_screen(scr);
@@ -589,11 +560,23 @@ void ui_update(const UsageData* data) {
 
     int s_pct = (int)(data->session_pct + 0.5f);
 
-    // Codex rides along only on the Pro/Max view; Enterprise keeps its spending
-    // layout (see the design spec's out-of-scope list). Must run before the
-    // enterprise branch below, which overrides the session pct font.
+    // Codex is its own tab; Enterprise keeps its spending layout and gets none.
     const bool show_codex = data->codex_valid && !data->enterprise;
-    apply_usage_geometry(show_codex ? 3 : 2);
+    s_codex_valid = show_codex;
+
+    // Plan labels drive the subtitle on each tab.
+    snprintf(claude_plan_str, sizeof(claude_plan_str), "%s",
+             data->plan[0] ? data->plan : "");
+    snprintf(codex_plan_str, sizeof(codex_plan_str), "%s",
+             show_codex && data->codex_plan[0] ? data->codex_plan : "");
+    apply_subtitle();
+
+    if (panel_codex) {
+        if (show_codex) { lv_obj_clear_flag(panel_codex, LV_OBJ_FLAG_HIDDEN);
+                          if (lbl_codex_none) lv_obj_add_flag(lbl_codex_none, LV_OBJ_FLAG_HIDDEN); }
+        else            { lv_obj_add_flag(panel_codex, LV_OBJ_FLAG_HIDDEN);
+                          if (lbl_codex_none) lv_obj_clear_flag(lbl_codex_none, LV_OBJ_FLAG_HIDDEN); }
+    }
 
     if (data->enterprise) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
@@ -605,10 +588,7 @@ void ui_update(const UsageData* data) {
         lv_obj_add_flag(lbl_spending_status,   LV_OBJ_FLAG_HIDDEN);
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     } else {
-        // Font comes from the active geometry, not a constant — the 3-panel view
-        // uses a smaller face and apply_usage_geometry() already set it.
-        lv_obj_set_style_text_font(lbl_session_pct,
-                                   show_codex ? L.usage_pct_font3 : L.usage_pct_font, 0);
+        lv_obj_set_style_text_font(lbl_session_pct, L.usage_pct_font, 0);
         lv_label_set_text(lbl_session_label, "Current");
         lv_obj_clear_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
@@ -659,8 +639,19 @@ void ui_update(const UsageData* data) {
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
         lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
         lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
+        // Weekly shows the countdown AND the absolute local reset time (the daemon
+        // formats it in ITS timezone, so no device clock is needed). Session stays
+        // relative — an absolute time is noise when it's under 5 hours out.
         format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
-        lv_label_set_text(lbl_weekly_reset, buf);
+        if (data->weekly_reset_at[0]) {
+            char wbuf[64];
+            // ASCII only: the Styrene faces are built -r 0x20-0x7E, so a middle
+            // dot / en-dash would render as tofu. Parentheses it is.
+            snprintf(wbuf, sizeof(wbuf), "%s (%s)", buf, data->weekly_reset_at);
+            lv_label_set_text(lbl_weekly_reset, wbuf);
+        } else {
+            lv_label_set_text(lbl_weekly_reset, buf);
+        }
     }
 
     if (show_codex) {
@@ -669,15 +660,21 @@ void ui_update(const UsageData* data) {
         lv_bar_set_value(bar_codex, c_pct, LV_ANIM_ON);
         lv_obj_set_style_bg_color(bar_codex, pct_color(data->codex_pct), LV_PART_INDICATOR);
         format_reset_time(data->codex_reset_mins, buf, sizeof(buf));
-        lv_label_set_text(lbl_codex_reset, buf);
+        if (data->codex_reset_at[0]) {
+            char cbuf[64];
+            snprintf(cbuf, sizeof(cbuf), "%s (%s)", buf, data->codex_reset_at);
+            lv_label_set_text(lbl_codex_reset, cbuf);
+        } else {
+            lv_label_set_text(lbl_codex_reset, buf);
+        }
         // Label the window from its actual length rather than assuming "weekly":
         // Plus exposes only a 7d window today, but the API models others.
         if (data->codex_window_mins >= 10080) {
-            lv_label_set_text(lbl_codex_label, "Codex");
+            lv_label_set_text(lbl_codex_label, "Weekly");
         } else if (data->codex_window_mins >= 60) {
-            lv_label_set_text_fmt(lbl_codex_label, "Codex %dh", data->codex_window_mins / 60);
+            lv_label_set_text_fmt(lbl_codex_label, "%dh", data->codex_window_mins / 60);
         } else {
-            lv_label_set_text_fmt(lbl_codex_label, "Codex %dm", data->codex_window_mins);
+            lv_label_set_text_fmt(lbl_codex_label, "%dm", data->codex_window_mins);
         }
         lv_obj_align(lbl_codex_label, LV_ALIGN_TOP_RIGHT, 0, 1);
     }
@@ -697,17 +694,25 @@ static void update_view_state(void) {
     } else {
         v = 1;  // idle / Zzz
     }
-    if (v == view_state) return;
+    // The live view differs per tab, so the cache key is (freshness, tab) — not
+    // freshness alone. ui_show_screen() resets view_state to force a re-lay-out.
+    if (v == view_state && view_tab == current_screen) return;
     view_state = v;
+    view_tab = current_screen;
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group : usage_group,
-                      LV_OBJ_FLAG_HIDDEN);
+    if (codex_group) lv_obj_add_flag(codex_group, LV_OBJ_FLAG_HIDDEN);
+
+    if (v == 0)      lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
+    else if (v == 1) lv_obj_clear_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
+    else if (current_screen == SCREEN_CODEX && codex_group)
+                     lv_obj_clear_flag(codex_group, LV_OBJ_FLAG_HIDDEN);
+    else             lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
 }
 
 void ui_tick_anim(void) {
-    if (current_screen != SCREEN_USAGE) return;
+    if (current_screen != SCREEN_USAGE && current_screen != SCREEN_CODEX) return;
     update_view_state();
     if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
 
@@ -765,6 +770,20 @@ void ui_tick_anim(void) {
 }
 
 static screen_t prev_non_splash_screen = SCREEN_USAGE;
+
+// Plan line under the title, per tab. Strings come from the daemon; an empty one
+// just leaves the line blank rather than inventing a label.
+static void apply_subtitle(void) {
+    if (!lbl_subtitle) return;
+    const char* s = (current_screen == SCREEN_CODEX) ? codex_plan_str : claude_plan_str;
+    lv_label_set_text(lbl_subtitle, s);
+    lv_obj_align(lbl_subtitle, LV_ALIGN_TOP_MID, 16, L.subtitle_y);
+    if (current_screen == SCREEN_SPLASH || s[0] == '\0')
+        lv_obj_add_flag(lbl_subtitle, LV_OBJ_FLAG_HIDDEN);
+    else
+        lv_obj_clear_flag(lbl_subtitle, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
     if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
@@ -777,23 +796,49 @@ static void global_click_cb(lv_event_t* e) {
     else                                  ui_show_screen(SCREEN_SPLASH);
 }
 
+// Horizontal swipe pages between the Claude and Codex tabs. LVGL reports a
+// gesture on the indev, and it also fires a CLICKED on release — consume the
+// gesture so a page swipe doesn't also toggle the splash screen.
+static void global_gesture_cb(lv_event_t* e) {
+    (void)e;
+    if (current_screen == SCREEN_SPLASH) return;
+    lv_indev_t* indev = lv_indev_active();
+    if (!indev) return;
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return;
+    lv_indev_wait_release(indev);   // suppress the trailing CLICKED
+
+    // Swipe left (content moves left) = go right to Codex; swipe right = back.
+    if (dir == LV_DIR_LEFT  && current_screen == SCREEN_USAGE) ui_show_screen(SCREEN_CODEX);
+    else if (dir == LV_DIR_RIGHT && current_screen == SCREEN_CODEX) ui_show_screen(SCREEN_USAGE);
+}
+
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
     case SCREEN_SPLASH:  splash_show(); break;
-    case SCREEN_USAGE:   lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_USAGE:
+    case SCREEN_CODEX:   lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
     }
 
     if (logo_img) {
-        if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        if (screen == SCREEN_SPLASH) {
+            lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+            // Swap the header mark to match the tab you're on.
+            lv_image_set_src(logo_img,
+                             screen == SCREEN_CODEX ? &codex_logo_dsc : &logo_dsc);
+        }
     }
 
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
     current_screen = screen;
+    view_state = -1;            // force update_view_state() to re-lay-out for this tab
+    apply_subtitle();
     apply_battery_visibility();
 }
 

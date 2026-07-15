@@ -16,6 +16,8 @@ DAEMON="$(dirname "$0")/../claude-usage-daemon.sh"
 # Pull just the two functions out of the daemon; sourcing it would start the loop.
 eval "$(awk '/^read_codex_token\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
 eval "$(awk '/^poll_codex\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
+eval "$(awk '/^read_plan_label_for\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
+eval "$(awk '/^fmt_reset_at\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$DAEMON")"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -44,6 +46,16 @@ check() { # name want got
     fi
 }
 
+# The fragment also carries the time-dependent cxra and optional cxpl keys, so
+# the numeric core is asserted by prefix rather than exact match.
+check_prefix() { # name want_prefix got
+    case "$3" in
+        "$2"*) echo "PASS: $1" ;;
+        *) echo "FAIL: $1"; echo "      expected prefix [$2]"; echo "      got            [$3]"
+           fails=$((fails + 1)) ;;
+    esac
+}
+
 # --- token extraction: must take tokens.access_token, never id_token ---------
 check "read_codex_token picks tokens.access_token" \
       "ACCESS-RIGHT" "$(read_codex_token)"
@@ -52,7 +64,7 @@ check "read_codex_token picks tokens.access_token" \
 FAKE_JSON='{"plan_type":"plus","rate_limit":{"primary_window":
 {"used_percent":92,"limit_window_seconds":604800,"reset_after_seconds":595912},
 "secondary_window":null}}'
-check "primary-only window -> cx/cxr/cxw" \
+check_prefix "primary-only window -> cx/cxr/cxw" \
       ',"cx":92,"cxr":9932,"cxw":10080' "$(poll_codex)"
 
 # --- both windows present: most-USED wins, not slot order --------------------
@@ -60,14 +72,14 @@ FAKE_JSON='{"rate_limit":{"primary_window":
 {"used_percent":30,"limit_window_seconds":18000,"reset_after_seconds":600},
 "secondary_window":
 {"used_percent":80,"limit_window_seconds":604800,"reset_after_seconds":86400}}}'
-check "both windows -> picks the most-used one" \
+check_prefix "both windows -> picks the most-used one" \
       ',"cx":80,"cxr":1440,"cxw":10080' "$(poll_codex)"
 
 # --- a 5h window must label itself as 5h (cxw drives the UI label) -----------
 FAKE_JSON='{"rate_limit":{"primary_window":
 {"used_percent":55,"limit_window_seconds":18000,"reset_after_seconds":3600},
 "secondary_window":null}}'
-check "5h window reports cxw=300" \
+check_prefix "5h window reports cxw=300" \
       ',"cx":55,"cxr":60,"cxw":300' "$(poll_codex)"
 
 # --- degradation paths: all must yield an EMPTY fragment --------------------
@@ -97,6 +109,76 @@ check "no auth.json -> empty" "" "$(poll_codex)"
 # unreadable/garbage auth.json
 echo 'garbage' > "$CODEX_AUTH_FILE"
 check "garbage auth.json -> empty" "" "$(poll_codex)"
+
+# --- Codex plan label + absolute reset ride along in the fragment -----------
+cat > "$CODEX_AUTH_FILE" <<'JSON'
+{"tokens":{"access_token":"ACCESS-RIGHT"}}
+JSON
+FAKE_JSON='{"plan_type":"plus","rate_limit":{"primary_window":
+{"used_percent":42,"limit_window_seconds":604800,"reset_after_seconds":600,
+ "reset_at":4102462800},"secondary_window":null}}'
+got="$(poll_codex)"
+case "$got" in
+    *'"cxpl":"Codex Plus"'*) echo "PASS: codex plan label -> Codex Plus" ;;
+    *) echo "FAIL: codex plan label missing/wrong in [$got]"; fails=$((fails + 1)) ;;
+esac
+case "$got" in
+    *'"cxra":"Jan 1 '*) echo "PASS: codex absolute reset present" ;;
+    *) echo "FAIL: codex absolute reset missing in [$got]"; fails=$((fails + 1)) ;;
+esac
+
+# plan_type absent must not emit an empty label
+FAKE_JSON='{"rate_limit":{"primary_window":
+{"used_percent":42,"limit_window_seconds":604800,"reset_after_seconds":600}}}'
+case "$(poll_codex)" in
+    *cxpl*) echo "FAIL: emitted cxpl with no plan_type"; fails=$((fails + 1)) ;;
+    *) echo "PASS: no plan_type -> no cxpl key" ;;
+esac
+
+# --- Claude plan label from rateLimitTier -----------------------------------
+plandir="$TMP/claude"; mkdir -p "$plandir"
+cat > "$plandir/.credentials.json" <<'JSON'
+{"claudeAiOauth":{"accessToken":"t","subscriptionType":"max","rateLimitTier":"default_claude_max_20x"}}
+JSON
+check "rateLimitTier -> 'Claude Max 20x' (not 20X)" \
+      "Claude Max 20x" "$(read_plan_label_for "$plandir")"
+
+cat > "$plandir/.credentials.json" <<'JSON'
+{"claudeAiOauth":{"accessToken":"t","subscriptionType":"pro"}}
+JSON
+check "no rateLimitTier -> falls back to subscriptionType" \
+      "Claude Pro" "$(read_plan_label_for "$plandir")"
+
+cat > "$plandir/.credentials.json" <<'JSON'
+{"claudeAiOauth":{"accessToken":"t"}}
+JSON
+check "no plan fields -> empty (subtitle stays blank)" \
+      "" "$(read_plan_label_for "$plandir")"
+
+check "missing credentials file -> empty" "" "$(read_plan_label_for "$TMP/nope")"
+
+echo 'garbage' > "$plandir/.credentials.json"
+check "garbage credentials -> empty" "" "$(read_plan_label_for "$plandir")"
+
+# --- absolute reset formatting ----------------------------------------------
+# 4102462800 = 2100-01-01 05:00 UTC; assert against the daemon's own tz math
+# rather than hardcoding an offset, so this passes on any host TZ.
+want_far="$(python3 -c '
+import datetime
+dt = datetime.datetime.fromtimestamp(4102462800)
+h = dt.hour % 12 or 12
+ampm = "am" if dt.hour < 12 else "pm"
+clock = "%d%s" % (h, ampm) if dt.minute == 0 else "%d:%02d%s" % (h, dt.minute, ampm)
+print("%s %d %s" % (dt.strftime("%b"), dt.day, clock))')"
+check "future date -> 'Mon D h(am|pm)'" "$want_far" "$(fmt_reset_at 4102462800)"
+
+want_today="$(python3 -c '
+import datetime, time
+dt = datetime.datetime.now().replace(hour=18, minute=15, second=0, microsecond=0)
+print(int(dt.timestamp()))')"
+check "same-day -> clock only, no date" "6:15pm" "$(fmt_reset_at "$want_today")"
+
+check "garbage epoch -> empty" "" "$(fmt_reset_at 'not-a-number')"
 
 echo
 if [ "$fails" -eq 0 ]; then

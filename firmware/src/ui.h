@@ -4,7 +4,8 @@
 
 enum screen_t {
     SCREEN_SPLASH,
-    SCREEN_USAGE,
+    SCREEN_USAGE,   // Claude tab
+    SCREEN_CODEX,   // Codex tab — swipe left from SCREEN_USAGE
     SCREEN_COUNT,
 };
 
