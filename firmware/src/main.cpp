@@ -21,7 +21,12 @@
 #include "hal/imu_hal.h"
 #include "hal/sound_hal.h"
 
-static UsageData usage = {};
+// Multi-account: the daemon may send several accounts (each tagged with an
+// index/count/label); we store them and auto-cycle which one is displayed.
+#define MAX_ACCOUNTS 4
+static UsageData accounts[MAX_ACCOUNTS] = {};
+static int      account_count  = 1;   // how many the daemon is currently sending
+static int      current_account = 0;  // which one is on screen (advanced by tapping)
 
 // ---- LVGL draw buffers (partial render mode) ----
 // PSRAM-equipped boards (S3) can comfortably hold larger strips. PSRAM-free
@@ -120,6 +125,12 @@ static bool parse_json(const char* json, UsageData* out) {
     out->clock_epoch = doc["t"] | 0L;
     out->clock_fmt = doc["tf"] | 24;
     out->ok = doc["ok"] | false;
+    // Multi-account fields — absent (single-account daemon) → index 0, count 1.
+    strlcpy(out->label, doc["lbl"] | "", sizeof(out->label));
+    out->acct_index = doc["id"] | 0;
+    out->acct_count = doc["n"] | 1;
+    const char* col = doc["col"] | "";
+    out->accent = col[0] ? (uint32_t)strtoul(col, nullptr, 16) : 0;  // "RRGGBB" hex
     out->valid = true;
     return true;
 }
@@ -376,27 +387,48 @@ void loop() {
     check_serial_cmd();
 
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
-            int g_before = usage_rate_group();
-            bool session_reset = usage_rate_sample(usage.session_pct);
-            int g_after = usage_rate_group();
-            // 5-hour session limit refilled → chime so the user knows they can
-            // use Claude again (no-op on boards without a buzzer). Gated on the
-            // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
-            if (session_reset && usage.chime) {
-                Serial.println("session reset detected — chime");
-                sound_hal_play_reset();
+        UsageData u = {};
+        if (parse_json(ble_get_data(), &u)) {
+            int idx = u.acct_index;
+            if (idx < 0) idx = 0;
+            if (idx >= MAX_ACCOUNTS) idx = MAX_ACCOUNTS - 1;
+            accounts[idx] = u;
+            account_count = u.acct_count;
+            if (account_count < 1) account_count = 1;
+            if (account_count > MAX_ACCOUNTS) account_count = MAX_ACCOUNTS;
+
+            // Reset-chime + splash rate-group tracking follow the PRIMARY account
+            // (index 0) so they don't thrash as the display cycles accounts.
+            if (idx == 0) {
+                int g_before = usage_rate_group();
+                bool session_reset = usage_rate_sample(u.session_pct);
+                int g_after = usage_rate_group();
+                // 5-hour session limit refilled → chime so the user knows they
+                // can use Claude again (no-op on boards without a buzzer).
+                if (session_reset && u.chime) {
+                    Serial.println("session reset detected — chime");
+                    sound_hal_play_reset();
+                }
+                if (g_after != g_before) {
+                    Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
+                        g_before, g_after, u.session_pct);
+                    if (splash_is_active()) splash_pick_for_current_rate();
+                }
             }
-            if (g_after != g_before) {
-                Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
-                if (splash_is_active()) splash_pick_for_current_rate();
-            }
-            ui_update(&usage);
+            // Live-refresh the screen if the account currently shown just updated.
+            if (idx == current_account) ui_update(&accounts[current_account]);
             ble_send_ack();
         } else {
             ble_send_nack();
         }
+    }
+
+    // Tap on the usage screen advances to the next account (multi-account only).
+    // No timed auto-cycle — the display stays on the tapped account until the
+    // next tap (its data still refreshes live each poll).
+    if (ui_take_tap_advance() && account_count > 1) {
+        current_account = (current_account + 1) % account_count;
+        if (accounts[current_account].valid) ui_update(&accounts[current_account]);
     }
 
     delay(5);

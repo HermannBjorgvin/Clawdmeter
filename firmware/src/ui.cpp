@@ -48,6 +48,7 @@ struct Layout {
     const lv_font_t* title_font;   // "Usage" header font
     bool    show_logo;             // hide the 80x80 logo on tiny screens
     bool    show_title;            // hide the "Usage" header on tiny screens
+    bool    show_anim;             // show the bottom whimsy/status line (off on tiny)
     int16_t pair_l1_y, pair_l2_y, pair_l3_y;  // pair-hint line offsets
     const char* pair_l1;           // pair-hint text (board-appropriate: the
     const char* pair_l2;           // AMOLED boards have a PWR hold-to-pair
@@ -70,6 +71,14 @@ struct Layout {
                          // the small styrene font lacks — they'd render as tofu)
     const char* session_pill;   // 5h-window label ("Current" / "5h" on tiny)
     const char* weekly_pill;    // 7d-window label ("Weekly" / "7d" on tiny)
+
+    // Account header (multi-account): alias shown at the top. On tiny the panels
+    // shift down to make room; on boards with a title the alias replaces it in
+    // place (content_y_hdr == content_y, panel_h_hdr == usage_panel_h).
+    int16_t account_y;              // TOP_MID offset of the alias header
+    const lv_font_t* account_font;
+    int16_t content_y_hdr;          // panel start-y when the header is shown
+    int16_t panel_h_hdr;            // panel height when the header is shown
 };
 static Layout L = {};
 
@@ -90,6 +99,10 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 16;
         L.usage_bar_y = 56;
         L.usage_reset_y = 94;
+        L.account_y        = 30;
+        L.account_font     = &font_tiempos_34;
+        L.content_y_hdr    = 100;   // == content_y: alias replaces the title
+        L.panel_h_hdr      = 150;   // == usage_panel_h
         L.usage_pct_font   = &font_styrene_48;
         L.usage_pill_font  = &font_styrene_28;
         L.usage_reset_font = &font_styrene_28;
@@ -109,6 +122,7 @@ static void compute_layout(const BoardCaps& c) {
         L.title_font       = &font_tiempos_56;
         L.show_logo        = true;
         L.show_title       = true;
+        L.show_anim        = true;
         L.pair_l1_y = 40; L.pair_l2_y = 120; L.pair_l3_y = 160;
         L.pair_l1 = "To pair";
         L.pair_l2 = "hold the power button";
@@ -120,6 +134,10 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 12;
         L.usage_bar_y = 48;
         L.usage_reset_y = 78;
+        L.account_y        = 30;
+        L.account_font     = &font_styrene_28;
+        L.content_y_hdr    = 85;    // == content_y: alias replaces the title
+        L.panel_h_hdr      = 130;   // == usage_panel_h
         L.usage_pct_font   = &font_styrene_48;
         L.usage_pill_font  = &font_styrene_28;
         L.usage_reset_font = &font_styrene_28;
@@ -139,6 +157,7 @@ static void compute_layout(const BoardCaps& c) {
         L.title_font       = &font_tiempos_34;
         L.show_logo        = true;
         L.show_title       = true;
+        L.show_anim        = true;
         L.pair_l1_y = 40; L.pair_l2_y = 120; L.pair_l3_y = 160;
         L.pair_l1 = "To pair";
         L.pair_l2 = "hold the power button";
@@ -148,15 +167,19 @@ static void compute_layout(const BoardCaps& c) {
         // no logo (an 80x80 mark won't share the top row with a title here),
         // tight vertical rhythm.
         L.title_y = 8;
-        L.content_y = 12;
-        L.usage_panel_h = 96;
+        L.content_y = 10;
+        L.usage_panel_h = 108;   // no bottom whimsy line → taller panels
         L.usage_panel_gap = 8;
-        L.usage_bar_y = 34;
+        L.usage_bar_y = 36;
         L.usage_reset_y = 54;
         L.usage_pct_font   = &font_styrene_24;
         L.usage_pill_font  = &font_styrene_16;
         L.usage_reset_font = &font_styrene_14;
         L.usage_bar_h      = 16;
+        L.account_y        = 4;
+        L.account_font     = &font_styrene_20;
+        L.content_y_hdr    = 32;    // panels shift down to make room for the alias
+        L.panel_h_hdr      = 96;
         L.anim_font        = &font_styrene_14;
         L.anim_y           = -4;
         L.session_pill     = "5h";
@@ -172,6 +195,7 @@ static void compute_layout(const BoardCaps& c) {
         L.title_font       = &font_tiempos_34;
         L.show_logo        = false;
         L.show_title       = false;
+        L.show_anim        = false;   // no bottom line — reclaim it for taller panels
         L.pair_l1_y = 18; L.pair_l2_y = 84; L.pair_l3_y = 112;
         // No PWR button on this board — it auto-pairs the moment a host
         // connects by name, so the hint tells the user to start the host.
@@ -198,6 +222,15 @@ static void compute_layout(const BoardCaps& c) {
 // ---- Usage screen widgets (single non-splash view) ----
 static lv_obj_t* usage_container;
 static lv_obj_t* lbl_title;
+static lv_obj_t* lbl_account;   // account alias header (multi-account)
+
+// Per-account header accent palette — used when the daemon omits "col".
+// Anthropic-ish hues: clay, sage, slate-blue, violet.
+static const uint32_t ACCENT_PALETTE[] = {0xD97757, 0x788C5D, 0x6A9BCC, 0xB784D9};
+
+static volatile bool s_tap_advance = false;   // set by a usage-screen tap
+static int  s_acct_count = 1;                  // cached so global_click_cb knows the mode
+bool ui_take_tap_advance(void) { bool v = s_tap_advance; s_tap_advance = false; return v; }
 // Clock fed by the daemon: base epoch (local wall-clock seconds) + the lv_tick at
 // which it landed, so the title ticks forward locally between 60s payloads.
 static long     clock_base_epoch = 0;
@@ -235,7 +268,7 @@ static lv_obj_t* idle_group;            // the "Zzz" idle screen
 static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage update landed
 static bool      data_received = false; // any valid update since boot
 static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage
-static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within this window (daemon sends ~60s)
+static const uint32_t DATA_FRESH_MS = 150000;  // >~2.5 missed polls → "stale" (daemon sends ~60s)
 
 // ---- Shared ----
 static lv_image_dsc_t logo_dsc;
@@ -535,6 +568,16 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_font(lbl_anim, L.anim_font, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
+    if (!L.show_anim) lv_obj_add_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+
+    // Account alias header (multi-account). Created after the panels so it draws
+    // on top; hidden until ui_update() decides there's an account label to show.
+    lbl_account = lv_label_create(usage_container);
+    lv_label_set_text(lbl_account, "");
+    lv_obj_set_style_text_font(lbl_account, L.account_font, 0);
+    lv_obj_set_style_text_color(lbl_account, COL_TEXT, 0);
+    lv_obj_align(lbl_account, LV_ALIGN_TOP_MID, 0, L.account_y);
+    lv_obj_add_flag(lbl_account, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ======== Public API ========
@@ -570,6 +613,7 @@ void ui_update(const UsageData* data) {
     if (!data->valid) return;
     last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
     data_received = true;
+    s_acct_count = data->acct_count;   // let the tap handler know if we're multi-account
 
     if (data->clock_epoch > 0) {    // daemon supplied wall-clock time → drive the title clock
         clock_base_epoch = data->clock_epoch;
@@ -579,6 +623,36 @@ void ui_update(const UsageData* data) {
         clock_base_epoch = 0;
         clock_last_min = -1;
         lv_label_set_text(lbl_title, "Usage");
+    }
+
+    // ---- Account header + panel positioning (multi-account cycling) ----
+    // Shows the current account's alias at the top and shifts the panels down to
+    // make room; single-account (no label) keeps the roomy title-less layout.
+    bool show_header = (data->acct_count > 1) || (data->label[0] != '\0');
+    if (show_header) {
+        char hbuf[24];
+        if (data->acct_count > 1)
+            snprintf(hbuf, sizeof(hbuf), "%s (%d/%d)", data->label,
+                     data->acct_index + 1, data->acct_count);
+        else
+            snprintf(hbuf, sizeof(hbuf), "%s", data->label);
+        lv_label_set_text(lbl_account, hbuf);
+        uint32_t acc = data->accent ? data->accent
+                                    : ACCENT_PALETTE[data->acct_index % 4];
+        lv_obj_set_style_text_color(lbl_account, lv_color_hex(acc), 0);
+        lv_obj_clear_flag(lbl_account, LV_OBJ_FLAG_HIDDEN);
+        if (L.show_title) lv_obj_add_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
+        if (panel_session) { lv_obj_set_y(panel_session, L.content_y_hdr);
+                             lv_obj_set_height(panel_session, L.panel_h_hdr); }
+        if (panel_weekly)  { lv_obj_set_y(panel_weekly, L.content_y_hdr + L.panel_h_hdr + L.usage_panel_gap);
+                             lv_obj_set_height(panel_weekly, L.panel_h_hdr); }
+    } else {
+        lv_obj_add_flag(lbl_account, LV_OBJ_FLAG_HIDDEN);
+        if (L.show_title) lv_obj_clear_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
+        if (panel_session) { lv_obj_set_y(panel_session, L.content_y);
+                             lv_obj_set_height(panel_session, L.usage_panel_h); }
+        if (panel_weekly)  { lv_obj_set_y(panel_weekly, L.content_y + L.usage_panel_h + L.usage_panel_gap);
+                             lv_obj_set_height(panel_weekly, L.usage_panel_h); }
     }
 
     int s_pct = (int)(data->session_pct + 0.5f);
@@ -657,19 +731,37 @@ static void update_view_state(void) {
     if (!usage_group || !pair_group || !idle_group) return;
     int v;
     if (!s_ble_connected) {
-        v = 0;  // pairing hint
-    } else if (data_received && (lv_tick_get() - last_data_ms) < DATA_FRESH_MS) {
-        v = 2;  // live usage
+        v = 0;                                   // pairing hint (BLE down)
+    } else if (!data_received) {
+        v = 1;                                   // connected, no data yet → Zzz
+    } else if ((lv_tick_get() - last_data_ms) < DATA_FRESH_MS) {
+        v = 2;                                   // live usage
     } else {
-        v = 1;  // idle / Zzz
+        v = 3;                                   // stale — keep numbers, flag them
     }
     if (v == view_state) return;
     view_state = v;
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group : usage_group,
-                      LV_OBJ_FLAG_HIDDEN);
+    if (v == 0)      lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
+    else if (v == 1) lv_obj_clear_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
+    else             lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
+
+    // Stale (v==3): dim the last numbers and show an amber "stale" line so a
+    // glance tells you the data is old; otherwise full brightness + the board's
+    // normal bottom-line behaviour.
+    if (v == 3) {
+        lv_obj_set_style_opa(usage_group, LV_OPA_40, 0);
+        lv_label_set_text(lbl_anim, "stale");
+        lv_obj_set_style_text_color(lbl_anim, COL_AMBER, 0);
+        lv_obj_clear_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_set_style_opa(usage_group, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
+        if (!L.show_anim) lv_obj_add_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+        else              lv_obj_clear_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void ui_tick_anim(void) {
@@ -711,6 +803,9 @@ void ui_tick_anim(void) {
     anim_spinner_idx = (anim_phase < SPINNER_COUNT) ? anim_phase
                                                     : (SPINNER_PHASES - anim_phase);
 
+    if (view_state == 3) return;   // stale badge is owned by update_view_state
+    if (!L.show_anim) return;   // this board hides the bottom status line
+
     // Status text by priority. Whimsical messages only when connected & settled.
     const char* text;
     if (!s_ble_connected) {
@@ -746,8 +841,11 @@ static void apply_battery_visibility(void) {
 
 static void global_click_cb(lv_event_t* e) {
     (void)e;
-    if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
-    else                                  ui_show_screen(SCREEN_SPLASH);
+    if (current_screen == SCREEN_SPLASH) { ui_show_screen(prev_non_splash_screen); return; }
+    // On the usage view: a tap cycles accounts when several are present;
+    // otherwise it toggles to the splash (single-account behaviour, unchanged).
+    if (s_acct_count > 1) { s_tap_advance = true; return; }
+    ui_show_screen(SCREEN_SPLASH);
 }
 
 void ui_show_screen(screen_t screen) {

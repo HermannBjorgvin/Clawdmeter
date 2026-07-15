@@ -13,6 +13,7 @@ void ui_update(const UsageData* data);
 void ui_tick_anim(void);
 void ui_show_screen(screen_t screen);
 void ui_toggle_splash(void);
+bool ui_take_tap_advance(void);   // true once if a usage-screen tap asked to cycle accounts
 screen_t ui_get_current_screen(void);
 void ui_update_ble_status(ble_state_t state, const char* name, const char* mac);
 void ui_update_battery(int percent, bool charging);

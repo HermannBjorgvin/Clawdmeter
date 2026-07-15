@@ -16,4 +16,8 @@ struct UsageData {
     int  clock_fmt;          // 12 or 24 (hour format from daemon); defaults to 24
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
+    char label[12];          // account alias, shown as the header ("" = none)
+    int  acct_index;         // 0-based index of this account within the set
+    int  acct_count;         // total accounts the daemon sends (1 = single-account)
+    uint32_t accent;         // 0xRRGGBB header accent; 0 = use the index palette
 };

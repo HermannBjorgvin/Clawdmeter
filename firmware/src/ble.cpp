@@ -68,7 +68,13 @@ static bool need_advertise = false;
 // One-shot supervision-timeout pushback (see onConnParamsUpdate). Written by
 // NimBLE host-task callbacks, consumed by ble_tick() on the loop task.
 static const uint16_t CONN_HANDLE_NONE  = 0xFFFF;
-static const uint16_t DESIRED_TIMEOUT   = 600;   // ×10ms = 6s, matches PPCP
+#ifndef BLE_SUPERVISION_TMO
+#define BLE_SUPERVISION_TMO 600   // ×10ms = 6s (default). Boards paired through a
+                                  // flaky BLE adapter (e.g. a cheap CSR dongle)
+                                  // can raise this via a build flag so a single
+                                  // transient GATT hiccup doesn't drop the link.
+#endif
+static const uint16_t DESIRED_TIMEOUT   = BLE_SUPERVISION_TMO;
 static volatile uint16_t param_fix_handle = CONN_HANDLE_NONE;  // pending retry
 static volatile uint32_t param_fix_at_ms  = 0;                 // when to send it
 static volatile uint16_t param_fix_spent  = CONN_HANDLE_NONE;  // one per connection

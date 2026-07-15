@@ -45,6 +45,11 @@ RECONNECT_BACKOFF_CAP = 8  # D-05: fast-reconnect cap (seconds); keeps stacked r
 # Optional clock display. 
 # Config lives under the same Clawdmeter dir as daemon.log.
 CONFIG_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "config"
+# Optional multi-account list. When present, the daemon polls each entry and
+# sends one payload per account (tagged with lbl/id/n) so the device can cycle
+# between accounts. Absent → single-account (the default, unchanged) behaviour.
+ACCOUNTS_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "accounts.json"
+MAX_ACCOUNTS = 4   # must match the firmware's MAX_ACCOUNTS
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
@@ -478,6 +483,156 @@ def read_token() -> str | None:
     return None
 
 
+def read_token_from(config_dir: str | None) -> str | None:
+    """Read a token from a specific CLAUDE_CONFIG_DIR, or the default search if None."""
+    if not config_dir:
+        return read_token()
+    try:
+        return _extract_access_token((Path(config_dir) / ".credentials.json").read_text(encoding="utf-8"))
+    except OSError:
+        return None
+
+
+OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # Claude Code's public OAuth client
+
+
+def _creds_path_for(config_dir: str | None) -> Path:
+    if config_dir:
+        return Path(config_dir) / ".credentials.json"
+    for p in _windows_credential_candidates():
+        if p.exists():
+            return p
+    return _windows_credential_candidates()[0]
+
+
+async def refresh_access_token(config_dir: str | None) -> str | None:
+    """Self-heal an expired token: exchange the stored refresh token for a fresh
+    access token, write the rotated pair back to the credentials file, and return
+    the new access token (None on failure). The refresh token ROTATES, so the
+    write-back is mandatory — otherwise the next refresh (ours or Claude Code's)
+    would use a dead token. On any failure we leave the file untouched and let
+    `claude login` handle it."""
+    path = _creds_path_for(config_dir)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    oauth = data.get("claudeAiOauth") or {}
+    rt = oauth.get("refreshToken")
+    if not rt:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.post(OAUTH_TOKEN_URL, json={
+                "grant_type": "refresh_token",
+                "refresh_token": rt,
+                "client_id": OAUTH_CLIENT_ID,
+            })
+    except httpx.HTTPError as e:
+        log(f"Token refresh failed (network): {e}")
+        return None
+    if resp.status_code != 200:
+        log(f"Token refresh HTTP {resp.status_code}; leaving it to `claude login`")
+        return None
+    try:
+        tok = resp.json()
+    except ValueError:
+        return None
+    new_access = tok.get("access_token")
+    if not new_access:
+        return None
+    oauth["accessToken"] = new_access
+    if tok.get("refresh_token"):
+        oauth["refreshToken"] = tok["refresh_token"]
+    if tok.get("expires_in"):
+        oauth["expiresAt"] = int(time.time() * 1000) + int(tok["expires_in"]) * 1000
+    data["claudeAiOauth"] = oauth
+    try:
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, path)   # atomic swap so a crash can't truncate the creds
+    except OSError as e:
+        log(f"Token refresh: got a token but couldn't save creds ({e})")
+    log("Access token auto-refreshed")
+    return new_access
+
+
+async def poll_account_payload(config_dir: str | None):
+    """Poll one account, auto-refreshing the token once on a 401. Returns
+    (payload_or_None, status) where status is ok|no_token|auth|transient."""
+    token = read_token_from(config_dir)
+    if not token:
+        return None, "no_token"
+    try:
+        p = await poll_api(token)
+        return p, ("ok" if p is not None else "transient")
+    except AuthError:
+        new = await refresh_access_token(config_dir)
+        if not new:
+            return None, "auth"
+        try:
+            p = await poll_api(new)
+            return p, ("ok" if p is not None else "transient")
+        except AuthError:
+            return None, "auth"
+
+
+def read_accounts_config() -> list[dict] | None:
+    """Read the optional multi-account list from accounts.json.
+
+    Format: a JSON array of {"label": "Work", "dir": "<CLAUDE_CONFIG_DIR>"} —
+    `dir` is optional (omit to use the default credentials). Returns a capped
+    list (<= MAX_ACCOUNTS) of normalized dicts, or None when not configured so
+    the caller falls back to single-account mode.
+    """
+    try:
+        if not ACCOUNTS_FILE.exists():
+            return None
+        data = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        log(f"accounts.json unreadable ({e}); single-account mode")
+        return None
+    if not isinstance(data, list) or not data:
+        return None
+    out = []
+    for i, e in enumerate(data[:MAX_ACCOUNTS]):
+        if isinstance(e, dict):
+            out.append({
+                "label": str(e.get("label") or f"Acct {i + 1}")[:11],  # firmware label[12]
+                "dir": e.get("dir"),
+                "color": e.get("color"),   # optional "RRGGBB" header accent
+            })
+    return out or None
+
+
+async def poll_accounts(accounts: list[dict]) -> list[dict]:
+    """Poll each configured account and return payloads tagged with lbl/id/n.
+
+    Skips (but keeps the slot count of) accounts whose token is missing/expired
+    or whose poll failed transiently, so the surviving accounts still display.
+    """
+    n = len(accounts)
+    payloads: list[dict] = []
+    for i, acct in enumerate(accounts):
+        p, status = await poll_account_payload(acct.get("dir"))
+        if status == "no_token":
+            log(f"Account '{acct['label']}' (#{i}): no token; skipping")
+            continue
+        if status == "auth":
+            log(f"Account '{acct['label']}' (#{i}): token expired (auto-refresh failed)")
+            continue
+        if p is None:
+            continue  # transient; poll_api already logged
+        p["lbl"] = acct["label"]
+        p["id"] = i
+        p["n"] = n
+        if acct.get("color"):
+            p["col"] = str(acct["color"]).lstrip("#")   # firmware parses hex "RRGGBB"
+        payloads.append(p)
+    return payloads
+
+
 def _read_expiry() -> str:
     """Return human-readable expiry from the first-hit credentials file.
 
@@ -584,7 +739,12 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
 
     log("Connected")
     session = Session(client)
-    await session.setup_refresh_subscription()
+    # The refresh-subscription GATT notify is optional (button-triggered refresh
+    # only; the 60s poll works without it). On flaky BLE adapters its start_notify
+    # can fail "Unreachable" and take the whole link down, so skip it in
+    # multi-account mode where re-polling already cycles all accounts.
+    if not read_accounts_config():
+        await session.setup_refresh_subscription()
 
     last_poll = 0.0  # D-03: poll immediately on first connect
     used_successfully = False
@@ -595,34 +755,48 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
-                token = read_token()  # D-09: fresh each cycle
-                if not token:
-                    log("No token; skipping poll")
-                    if tray_state:
-                        tray_state.set_error("token expired — run claude login")
+                # Multi-account when accounts.json is configured; else single.
+                accounts = read_accounts_config()
+                if accounts:
+                    payloads = await poll_accounts(accounts)
+                    if not payloads and tray_state:
+                        tray_state.set_error("no account tokens — run claude login")
                 else:
-                    try:
-                        payload = await poll_api(token)
-                    except AuthError:
-                        # Real 401/403 — token genuinely needs a refresh.
+                    payloads = []
+                    p, status = await poll_account_payload(None)  # auto-refreshes on 401
+                    if status == "no_token":
+                        log("No token; skipping poll")
                         if tray_state:
                             tray_state.set_error("token expired — run claude login")
-                        payload = None
-                    if payload is not None:
-                        if await session.write_payload(payload):
-                            last_poll = time.time()
-                            used_successfully = True
-                            consecutive_failures = 0  # D-03: reset on success
-                            if tray_state:
-                                tray_state.set_connected(time.time())
-                        else:
-                            consecutive_failures += 1
-                            if consecutive_failures >= ZOMBIE_BREAK_LIMIT:
-                                log(
-                                    f"Zombie link detected ({consecutive_failures} consecutive"
-                                    f" write failures); abandoning connection"
-                                )
-                                break
+                    elif status == "auth":
+                        # Refresh also failed — the refresh token itself expired.
+                        if tray_state:
+                            tray_state.set_error("token expired — run claude login")
+                    elif p is not None:
+                        payloads = [p]
+
+                if payloads:
+                    # Write every account this cycle; one failed write trips the
+                    # zombie-link break (same recovery as before, across accounts).
+                    all_written = True
+                    for p in payloads:
+                        if not await session.write_payload(p):
+                            all_written = False
+                            break
+                    if all_written:
+                        last_poll = time.time()
+                        used_successfully = True
+                        consecutive_failures = 0  # D-03: reset on success
+                        if tray_state:
+                            tray_state.set_connected(time.time())
+                    else:
+                        consecutive_failures += 1
+                        if consecutive_failures >= ZOMBIE_BREAK_LIMIT:
+                            log(
+                                f"Zombie link detected ({consecutive_failures} consecutive"
+                                f" write failures); abandoning connection"
+                            )
+                            break
                     # else: payload is None from a TRANSIENT failure (network/DNS,
                     # timeout, rate-limit, 5xx). poll_api already logged it; do NOT
                     # toast "token expired" — that mislabeled a boot-time DNS blip
