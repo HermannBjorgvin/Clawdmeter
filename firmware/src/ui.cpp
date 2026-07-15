@@ -551,6 +551,19 @@ static void init_usage_screen(lv_obj_t* scr) {
     build_pair_group(usage_container);
     build_idle_group(usage_container);
 
+    // The four groups above are full-screen transparent layout wrappers, created
+    // AFTER lbl_title — and lv_obj_create() flags every object CLICKABLE by
+    // default (lv_obj.c). So they sat on top of the title and swallowed its taps:
+    // the title still rendered (they're transparent) but never got
+    // LV_EVENT_CLICKED. They are not interactive, so take them out of hit-testing
+    // entirely, and lift the header above them so nothing can bury it again.
+    lv_obj_t* const wrappers[] = { usage_group, codex_group, pair_group, idle_group };
+    for (unsigned i = 0; i < sizeof(wrappers) / sizeof(wrappers[0]); i++) {
+        if (wrappers[i]) lv_obj_clear_flag(wrappers[i], LV_OBJ_FLAG_CLICKABLE);
+    }
+    lv_obj_move_foreground(lbl_title);
+    if (lbl_subtitle) lv_obj_move_foreground(lbl_subtitle);
+
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
@@ -663,6 +676,11 @@ static void init_stats_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_stats_none, "No stats yet");
     lv_obj_align(lbl_stats_none, LV_ALIGN_CENTER, 0, 0);
     lv_obj_add_flag(lbl_stats_none, LV_OBJ_FLAG_HIDDEN);
+
+    // Same trap as the usage screen: every heat cell is a CLICKABLE lv_obj by
+    // default. They don't overlap the title today, but keep the title on top so
+    // a later layout tweak can't silently steal its taps.
+    lv_obj_move_foreground(lbl_stats_title);
 
     lv_obj_add_flag(stats_container, LV_OBJ_FLAG_HIDDEN);
 }
@@ -1010,6 +1028,7 @@ static void global_click_cb(lv_event_t* e) {
 // The title toggles the /stats view for the tab you're on.
 static void usage_title_cb(lv_event_t* e) {
     (void)e;
+    Serial.printf("[TAP] title scr=%d\n", (int)current_screen);   // TEMP
     if (current_screen != SCREEN_USAGE && current_screen != SCREEN_CODEX) return;
     stats_from = current_screen;
     stats_provider = (current_screen == SCREEN_CODEX) ? 1 : 0;

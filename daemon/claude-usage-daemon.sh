@@ -544,7 +544,11 @@ poll_codex() {
 #            so the device mirrors /stats, staleness included.
 #   Codex  — no equivalent cache; aggregate the rollout JSONLs (measured 0.15s
 #            for 58 files, so no caching needed).
-STATS_INTERVAL=300      # stats move slowly; no need to recompute every poll
+# Stats ride every poll, like the usage bars. They used to be throttled to 300s
+# on the assumption they move slowly — but the heatmap's newest cell is TODAY and
+# it visibly lagged, so it tracks the usage cadence now. The scan behind it costs
+# ~0.8s (mtime-filtered to today's files only), which fits inside a 30s poll.
+STATS_INTERVAL=$POLL_INTERVAL
 STATS_LAST_TS=0
 DUNE_TOKENS=245000      # ~ the novel, for the "Nx more tokens than Dune" line
 HEAT_DAYS=49            # 7x7 grid on the device
@@ -554,14 +558,67 @@ HEAT_DAYS=49            # 7x7 grid on the device
 stats_payload_claude() {
     local dir="${1:-$HOME/.claude}"
     [ -f "$dir/stats-cache.json" ] || return 0
-    python3 - "$dir/stats-cache.json" "$DUNE_TOKENS" "$HEAT_DAYS" <<'PYEOF' 2>/dev/null
-import json, sys, datetime
+    python3 - "$dir/stats-cache.json" "$DUNE_TOKENS" "$HEAT_DAYS" "$dir" <<'PYEOF' 2>/dev/null
+import json, sys, datetime, glob, os
 
 try:
     d = json.load(open(sys.argv[1]))
 except Exception:
     sys.exit(0)
 DUNE = int(sys.argv[2]); HEAT_DAYS = int(sys.argv[3])
+CLAUDE_DIR = sys.argv[4]
+
+# ---- today, live -----------------------------------------------------------
+# Claude Code recomputes stats-cache.json on its own (slow) schedule, so its
+# newest dailyActivity entry is usually YESTERDAY: the heatmap's last cell reads
+# empty and the streak stops a day short, no matter how often we poll. Scan
+# today's session transcripts ourselves and merge the result in.
+# Only messageCount and tokens are merged — both verified comparable to the
+# cache's own numbers (cache: 5644 msgs on the 14th, 11277 on the 12th; this scan
+# finds 12630 today — same definition, same order). sessionCount is NOT merged:
+# counting transcript files gives 241 where Claude Code reports 70, so its
+# definition differs and merging it would report a number /stats never would.
+def scan_today(claude_dir):
+    today = datetime.date.today().isoformat()
+    start = datetime.datetime.combine(datetime.date.today(), datetime.time.min).timestamp()
+    msgs = 0; tok = 0
+    try:
+        files = [f for f in glob.glob(os.path.join(claude_dir, "projects", "**", "*.jsonl"),
+                                      recursive=True)
+                 if os.path.getmtime(f) >= start]
+    except OSError:
+        return 0, 0
+    for f in files:
+        try:
+            fh = open(f, errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                # cheap prefilter before paying json.loads on a big transcript
+                if today not in line or '"timestamp"' not in line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue          # truncated tail line — skip, never fatal
+                if (r.get("timestamp") or "")[:10] != today:
+                    continue
+                t = r.get("type")
+                if t in ("user", "assistant"):
+                    msgs += 1
+                if t == "assistant":
+                    u = ((r.get("message") or {}).get("usage")) or {}
+                    # same definition as the cache: non-cache input + output
+                    tok += int(u.get("input_tokens", 0)) + int(u.get("output_tokens", 0))
+    return msgs, tok
+
+today_msgs, today_tok = scan_today(CLAUDE_DIR)
+today_iso = datetime.date.today().isoformat()
+if today_msgs > 0:
+    da = [a for a in (d.get("dailyActivity") or []) if a.get("date") != today_iso]
+    da.append({"date": today_iso, "messageCount": today_msgs})
+    d["dailyActivity"] = da
 
 mu = d.get("modelUsage") or {}
 if not mu:
@@ -573,6 +630,10 @@ def total(v):
     return int(v.get("inputTokens", 0)) + int(v.get("outputTokens", 0))
 
 tot = sum(total(v) for v in mu.values())
+# Add today's tokens only when the cache hasn't already counted today, otherwise
+# a freshly-recomputed cache would be double-counted.
+if today_tok > 0 and (d.get("lastComputedDate") or "") < today_iso:
+    tot += today_tok
 if tot <= 0:
     sys.exit(0)
 fav_raw = max(mu.items(), key=lambda kv: total(kv[1]))[0]
