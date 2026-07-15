@@ -58,10 +58,30 @@ static void rounder_cb(lv_event_t* e) {
 //   false → touch never counts as activity and is fully swallowed while the
 //           panel is dark, so pets/sleeves can't wake it overnight and LVGL
 //           can't quietly toggle splash<->usage on a black panel.
+// touch_hal_read() reports in the panel's physical frame, but the display draws
+// LVGL content rotated by imu_hal_rotation_quadrant() quarter-turns CW (see
+// display_hal_draw_bitmap). Undo that rotation so LVGL's coordinate space is the
+// one the user is actually looking at. Without this, every touch is expressed in
+// a frame the UI doesn't use: taps hit the wrong widgets and gestures report the
+// wrong axis (a swipe the user reads as "left" arrives as LV_DIR_TOP, etc).
+// Boards without IMU rotation report 0 and get the identity mapping.
+static void rotate_touch_to_content(uint16_t* x, uint16_t* y) {
+    const uint16_t W = board_caps().width;
+    const uint16_t H = board_caps().height;
+    const uint16_t px = *x, py = *y;
+    switch (imu_hal_rotation_quadrant() & 3) {
+    case 1:  *x = py;                       *y = (uint16_t)(W - 1 - px); break;
+    case 2:  *x = (uint16_t)(W - 1 - px);   *y = (uint16_t)(H - 1 - py); break;
+    case 3:  *x = (uint16_t)(H - 1 - py);   *y = px;                     break;
+    default: break;
+    }
+}
+
 static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     uint16_t x, y;
     bool pressed;
     touch_hal_read(&x, &y, &pressed);
+    rotate_touch_to_content(&x, &y);
     const bool raw_pressed = pressed;
 
     if (IDLE_WAKE_ON_TOUCH) {
