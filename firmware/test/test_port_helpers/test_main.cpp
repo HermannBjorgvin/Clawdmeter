@@ -149,6 +149,42 @@ void test_missing_codex_window_is_not_invented_and_zero_unread_is_valid(void) {
     TEST_ASSERT_EQUAL_INT(0, data.activity.codex_unread);
 }
 
+void test_local_only_payload_does_not_update_claude(void) {
+    UsageData data = {};
+    uint8_t full = parse_dashboard_json("{\"s\":25,\"w\":10,\"v\":2}", &data);
+    TEST_ASSERT_BITS_HIGH(DASHBOARD_UPDATE_CLAUDE, full);
+
+    uint8_t local = parse_dashboard_json(
+        "{\"v\":2,\"x\":{\"l\":[],\"td\":0},\"a\":{\"cl\":null,\"cx\":{\"u\":0}}}",
+        &data
+    );
+    TEST_ASSERT_BITS_LOW(DASHBOARD_UPDATE_CLAUDE, local);
+    TEST_ASSERT_BITS_HIGH(DASHBOARD_UPDATE_CODEX, local);
+    TEST_ASSERT_BITS_HIGH(DASHBOARD_UPDATE_ACTIVITY, local);
+    TEST_ASSERT_TRUE(data.valid);
+}
+
+void test_explicit_tombstones_clear_only_local_providers(void) {
+    UsageData data = {};
+    parse_dashboard_json(
+        "{\"x\":{\"l\":[],\"td\":0},\"a\":{\"cl\":{\"o\":0,\"b\":0,\"w\":0},\"cx\":{\"u\":0}}}",
+        &data
+    );
+    uint8_t mask = parse_dashboard_json(
+        "{\"x\":null,\"a\":{\"cl\":null,\"cx\":null}}",
+        &data
+    );
+    TEST_ASSERT_BITS_HIGH(DASHBOARD_UPDATE_CODEX | DASHBOARD_UPDATE_ACTIVITY, mask);
+    TEST_ASSERT_FALSE(data.codex.valid);
+    TEST_ASSERT_FALSE(data.activity.claude_valid);
+    TEST_ASSERT_FALSE(data.activity.codex_valid);
+}
+
+void test_ui_update_accepts_provider_mask(void) {
+    void (*masked_update)(const UsageData*, uint8_t) = ui_update;
+    TEST_ASSERT_NOT_NULL(masked_update);
+}
+
 void test_codex_window_labels_follow_actual_window_duration(void) {
     TEST_ASSERT_EQUAL_STRING("5 hours", codex_window_label(300));
     TEST_ASSERT_EQUAL_STRING("Weekly", codex_window_label(10080));
@@ -205,6 +241,9 @@ void setup() {
     RUN_TEST(test_old_claude_payload_remains_compatible);
     RUN_TEST(test_new_payload_parses_codex_and_activity);
     RUN_TEST(test_missing_codex_window_is_not_invented_and_zero_unread_is_valid);
+    RUN_TEST(test_local_only_payload_does_not_update_claude);
+    RUN_TEST(test_explicit_tombstones_clear_only_local_providers);
+    RUN_TEST(test_ui_update_accepts_provider_mask);
     RUN_TEST(test_codex_window_labels_follow_actual_window_duration);
     RUN_TEST(test_daily_tokens_are_formatted_compactly);
     RUN_TEST(test_carousel_wraps_in_approved_order);

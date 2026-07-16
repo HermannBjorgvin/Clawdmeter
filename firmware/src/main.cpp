@@ -110,7 +110,7 @@ static bool apply_usage_json(const char* json, DashboardTransport transport) {
         if (session_reset && usage.chime) sound_hal_play_reset();
         if (g_after != g_before && splash_is_active()) splash_pick_for_current_rate();
     }
-    ui_update(&usage);
+    ui_update(&usage, updates);
     static bool dashboard_started = false;
     if (!dashboard_started) {
         ui_start_dashboard(millis());

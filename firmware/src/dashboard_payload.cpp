@@ -27,39 +27,49 @@ uint8_t parse_dashboard_json(const char* json, UsageData* out) {
         mask |= DASHBOARD_UPDATE_CLAUDE;
     }
 
-    JsonObject codex = doc["x"].as<JsonObject>();
-    if (!codex.isNull()) {
-        out->codex.limit_count = 0;
-        for (JsonObject limit : codex["l"].as<JsonArray>()) {
-            if (out->codex.limit_count >= 2) break;
-            CodexLimitData& target = out->codex.limits[out->codex.limit_count++];
-            target.percent = limit["p"] | 0.0f;
-            target.window_mins = limit["wm"] | 0;
-            target.reset_mins = limit["rm"] | -1;
-        }
-        out->codex.tokens_today = codex["td"] | 0U;
-        strlcpy(out->codex.plan, codex["pl"] | "", sizeof(out->codex.plan));
-        out->codex.valid = true;
+    if (doc.containsKey("x")) {
         mask |= DASHBOARD_UPDATE_CODEX;
+        out->codex = {};
+        JsonObject codex = doc["x"].as<JsonObject>();
+        if (!codex.isNull()) {
+            for (JsonObject limit : codex["l"].as<JsonArray>()) {
+                if (out->codex.limit_count >= 2) break;
+                CodexLimitData& target = out->codex.limits[out->codex.limit_count++];
+                target.percent = limit["p"] | 0.0f;
+                target.window_mins = limit["wm"] | 0;
+                target.reset_mins = limit["rm"] | -1;
+            }
+            out->codex.tokens_today = codex["td"] | 0U;
+            strlcpy(out->codex.plan, codex["pl"] | "", sizeof(out->codex.plan));
+            out->codex.valid = true;
+        }
     }
 
-    JsonObject activity = doc["a"].as<JsonObject>();
-    if (!activity.isNull()) {
-        JsonObject claude = activity["cl"].as<JsonObject>();
-        if (!claude.isNull()) {
-            out->activity.claude_open = claude["o"] | 0;
-            out->activity.claude_busy = claude["b"] | 0;
-            out->activity.claude_waiting = claude["w"] | 0;
-            out->activity.claude_valid = true;
+    if (doc.containsKey("a")) {
+        JsonObject activity = doc["a"].as<JsonObject>();
+        if (!activity.isNull()) {
+            if (activity.containsKey("cl")) {
+                out->activity.claude_valid = false;
+                JsonObject claude = activity["cl"].as<JsonObject>();
+                if (!claude.isNull()) {
+                    out->activity.claude_open = claude["o"] | 0;
+                    out->activity.claude_busy = claude["b"] | 0;
+                    out->activity.claude_waiting = claude["w"] | 0;
+                    out->activity.claude_valid = true;
+                }
+            }
+            if (activity.containsKey("cx")) {
+                out->activity.codex_valid = false;
+                JsonObject codex_activity = activity["cx"].as<JsonObject>();
+                if (!codex_activity.isNull()) {
+                    out->activity.codex_unread = codex_activity["u"] | 0;
+                    out->activity.codex_valid = true;
+                }
+            }
+            out->activity.scanned_epoch = activity["ts"] | 0L;
+            out->activity.valid = out->activity.claude_valid || out->activity.codex_valid;
+            mask |= DASHBOARD_UPDATE_ACTIVITY;
         }
-        JsonObject codex_activity = activity["cx"].as<JsonObject>();
-        if (!codex_activity.isNull()) {
-            out->activity.codex_unread = codex_activity["u"] | 0;
-            out->activity.codex_valid = true;
-        }
-        out->activity.scanned_epoch = activity["ts"] | 0L;
-        out->activity.valid = out->activity.claude_valid || out->activity.codex_valid;
-        mask |= DASHBOARD_UPDATE_ACTIVITY;
     }
     out->updated_epoch = doc["ts"] | out->updated_epoch;
     return mask;

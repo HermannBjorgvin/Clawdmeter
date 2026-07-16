@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "dashboard_payload.h"
 #include "splash.h"
 #include <lvgl.h>
 #include <time.h>
@@ -653,49 +654,61 @@ void ui_init(void) {
     lv_obj_add_event_cb(navigation_layer, global_click_cb, LV_EVENT_CLICKED, NULL);
 }
 
-void ui_update(const UsageData* data) {
+void ui_update(const UsageData* data, uint8_t updates) {
     if (!data) return;
 
     last_received_update_ms = millis();
     last_received_transport = data->transport;
 
-    if (data->codex.valid) {
-        const uint8_t limit_count = data->codex.limit_count > 2
-            ? 2
-            : data->codex.limit_count;
-        char buf[48];
+    if (updates & DASHBOARD_UPDATE_CODEX) {
+        if (data->codex.valid) {
+            const uint8_t limit_count = data->codex.limit_count > 2
+                ? 2
+                : data->codex.limit_count;
+            char buf[48];
 
-        for (uint8_t i = 0; i < 2; ++i) {
-            if (i < limit_count) {
-                const CodexLimitData& limit = data->codex.limits[i];
-                const int percent = static_cast<int>(limit.percent + 0.5f);
-                lv_label_set_text_fmt(codex_pct[i], "%d%%", percent);
-                lv_label_set_text(codex_label[i], codex_window_label(limit.window_mins));
-                lv_obj_clear_flag(codex_label[i], LV_OBJ_FLAG_HIDDEN);
-                lv_bar_set_value(codex_bar[i], percent, LV_ANIM_ON);
-                lv_obj_set_style_bg_color(
-                    codex_bar[i], pct_color(limit.percent), LV_PART_INDICATOR
-                );
-                lv_obj_clear_flag(codex_bar[i], LV_OBJ_FLAG_HIDDEN);
-                format_reset_time(limit.reset_mins, buf, sizeof(buf));
-                lv_label_set_text(codex_reset[i], buf);
-            } else if (i == 0) {
-                lv_label_set_text(codex_pct[i], "Codex");
-                lv_obj_add_flag(codex_label[i], LV_OBJ_FLAG_HIDDEN);
-                lv_obj_add_flag(codex_bar[i], LV_OBJ_FLAG_HIDDEN);
-                lv_label_set_text(codex_reset[i], "No limit data");
-            } else {
-                format_compact_tokens(data->codex.tokens_today, buf, sizeof(buf));
-                lv_label_set_text(codex_pct[i], buf);
-                lv_label_set_text(codex_label[i], "Tokens today");
-                lv_obj_clear_flag(codex_label[i], LV_OBJ_FLAG_HIDDEN);
-                lv_obj_add_flag(codex_bar[i], LV_OBJ_FLAG_HIDDEN);
-                lv_label_set_text(codex_reset[i], "");
+            for (uint8_t i = 0; i < 2; ++i) {
+                if (i < limit_count) {
+                    const CodexLimitData& limit = data->codex.limits[i];
+                    const int percent = static_cast<int>(limit.percent + 0.5f);
+                    lv_label_set_text_fmt(codex_pct[i], "%d%%", percent);
+                    lv_label_set_text(codex_label[i], codex_window_label(limit.window_mins));
+                    lv_obj_clear_flag(codex_label[i], LV_OBJ_FLAG_HIDDEN);
+                    lv_bar_set_value(codex_bar[i], percent, LV_ANIM_ON);
+                    lv_obj_set_style_bg_color(
+                        codex_bar[i], pct_color(limit.percent), LV_PART_INDICATOR
+                    );
+                    lv_obj_clear_flag(codex_bar[i], LV_OBJ_FLAG_HIDDEN);
+                    format_reset_time(limit.reset_mins, buf, sizeof(buf));
+                    lv_label_set_text(codex_reset[i], buf);
+                } else if (i == 0) {
+                    lv_label_set_text(codex_pct[i], "Codex");
+                    lv_obj_add_flag(codex_label[i], LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_add_flag(codex_bar[i], LV_OBJ_FLAG_HIDDEN);
+                    lv_label_set_text(codex_reset[i], "No limit data");
+                } else {
+                    format_compact_tokens(data->codex.tokens_today, buf, sizeof(buf));
+                    lv_label_set_text(codex_pct[i], buf);
+                    lv_label_set_text(codex_label[i], "Tokens today");
+                    lv_obj_clear_flag(codex_label[i], LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_add_flag(codex_bar[i], LV_OBJ_FLAG_HIDDEN);
+                    lv_label_set_text(codex_reset[i], "");
+                }
             }
+        } else {
+            lv_label_set_text(codex_pct[0], "Codex");
+            lv_label_set_text(codex_reset[0], "Unavailable");
+            lv_obj_add_flag(codex_label[0], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(codex_bar[0], LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(codex_pct[1], "---");
+            lv_label_set_text(codex_label[1], "Tokens today");
+            lv_obj_clear_flag(codex_label[1], LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(codex_reset[1], "Unavailable");
+            lv_obj_add_flag(codex_bar[1], LV_OBJ_FLAG_HIDDEN);
         }
     }
 
-    if (data->activity.valid) {
+    if (updates & DASHBOARD_UPDATE_ACTIVITY) {
         if (data->activity.claude_valid) {
             lv_label_set_text_fmt(
                 lbl_activity_claude,
@@ -719,7 +732,7 @@ void ui_update(const UsageData* data) {
         }
     }
 
-    if (!data->valid) return;
+    if (!(updates & DASHBOARD_UPDATE_CLAUDE) || !data->valid) return;
     last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
     data_received = true;
 
