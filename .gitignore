@@ -21,3 +21,6 @@ __pycache__/
 
 # Isolated implementation worktrees
 .worktrees/
+
+# Subagent execution ledger
+.superpowers/sdd/
