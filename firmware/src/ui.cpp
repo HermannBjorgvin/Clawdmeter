@@ -152,9 +152,9 @@ static const uint32_t ATTENTION_TIMEOUT_MS      = 120000;
 static const uint32_t ATTENTION_DONE_TIMEOUT_MS = 30000;
 
 // Caption, color and creature animation per attention type (index = type - 1).
-static const char* const ATTN_CAPTIONS[4] = { "Клод ждёт ответа", "Нужно разрешение", "Готово!", "Лимит близко!" };
-static const char* const ATTN_ANIMS[4]    = { "idle look around", "expression surprise", "dance bounce", "expression surprise" };
-static const char* const ATTN_STATUS[4]   = { "Ждёт ответа", "Ждёт разрешения", "Готово", "Лимит близко" };
+static const char* const ATTN_CAPTIONS[5] = { "Клод ждёт ответа", "Нужно разрешение", "Готово!", "Лимит близко!", "Лимиты обновились!" };
+static const char* const ATTN_ANIMS[5]    = { "idle look around", "expression surprise", "dance bounce", "expression surprise", "expression wink" };
+static const char* const ATTN_STATUS[5]   = { "Ждёт ответа", "Ждёт разрешения", "Готово", "Лимит близко", "Лимиты обновились" };
 static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage update landed
 static bool      data_received = false; // any valid update since boot
 static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage / 3 attention
@@ -802,7 +802,7 @@ static void global_click_cb(lv_event_t* e) {
 }
 
 void ui_show_attention(uint8_t type, const char* project) {
-    if (type < 1 || type > 4) return;
+    if (type < 1 || type > 5) return;
     idle_note_activity();               // wake the panel if it faded out
     // Re-style the view even if it's already up (a new event may differ).
     bool was_active = attention_active;
@@ -812,8 +812,8 @@ void ui_show_attention(uint8_t type, const char* project) {
     if (lbl_attention) {
         lv_label_set_text(lbl_attention, ATTN_CAPTIONS[type - 1]);
         lv_obj_set_style_text_color(lbl_attention,
-                                    type == 3 ? COL_GREEN :
-                                    type == 4 ? COL_RED   : COL_AMBER, 0);
+                                    (type == 3 || type == 5) ? COL_GREEN :
+                                    type == 4                ? COL_RED   : COL_AMBER, 0);
     }
     if (was_active) {
         if (mini_creature) splash_mini_set_anim(ATTN_ANIMS[type - 1]);

@@ -17,10 +17,12 @@ screen_t ui_get_current_screen(void);
 void ui_update_ble_status(ble_state_t state, const char* name, const char* mac);
 // Show the attention view: wakes the display, jumps to the usage screen and
 // overlays a creature + caption matching the event type (1 = waiting for
-// input, 2 = permission needed, 3 = work done); the header shows `project`
-// (may be "" for none) so it's clear which session wants you. Dismissed by a
-// tap or automatically after a timeout. ui_hide_attention() dismisses it
-// remotely (e.g. the user started typing on the host again).
+// input, 2 = permission needed, 3 = work done, 4 = session limit almost
+// exhausted, 5 = session window reset — firmware-local types 4-5 never come
+// from the daemon); the header shows `project` (may be "" for none) so it's
+// clear which session wants you. Dismissed by a tap or automatically after a
+// timeout. ui_hide_attention() dismisses it remotely (e.g. the user started
+// typing on the host again).
 void ui_show_attention(uint8_t type, const char* project);
 void ui_hide_attention(void);
 // Daemon error beat ("ok":false): force the idle view now (don't render stale

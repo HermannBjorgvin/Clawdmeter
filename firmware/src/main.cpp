@@ -407,9 +407,10 @@ void loop() {
                 // can use Claude again (no-op on boards without a buzzer).
                 // Gated on the daemon's opt-in `chime` config; the `buzz`
                 // serial cmd ignores it.
-                if (session_reset && usage.chime) {
-                    Serial.println("session reset detected — chime");
-                    sound_hal_play_reset();
+                if (session_reset) {
+                    Serial.println("session reset detected — wink");
+                    ui_show_attention(5, "");        // «Лимиты обновились!»
+                    if (usage.chime) sound_hal_play_reset();  // sound stays opt-in
                 }
                 if (g_after != g_before) {
                     Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
