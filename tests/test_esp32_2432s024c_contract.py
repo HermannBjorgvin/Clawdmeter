@@ -39,3 +39,24 @@ def test_board_header_matches_verified_pins() -> None:
     for name, value in expected.items():
         assert f"#define {name}" in header
         assert value in header.split(f"#define {name}", 1)[1].splitlines()[0]
+
+
+def test_board_hal_is_complete_and_uses_st7789() -> None:
+    board_dir = ROOT / "firmware/src/boards/esp32_2432s024c"
+    expected_sources = {
+        "board_init.cpp",
+        "caps.cpp",
+        "display.cpp",
+        "imu.cpp",
+        "input.cpp",
+        "power.cpp",
+        "sound.cpp",
+        "touch.cpp",
+    }
+    assert expected_sources <= {path.name for path in board_dir.glob("*.cpp")}
+
+    display = (board_dir / "display.cpp").read_text(encoding="utf-8")
+    assert "Adafruit_ST7789" in display
+    assert "HSPI" in display
+    assert "LCD_BACKLIGHT" in display
+    assert "drawRGBBitmap" in display
