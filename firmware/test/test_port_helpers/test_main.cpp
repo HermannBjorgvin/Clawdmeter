@@ -8,10 +8,12 @@
 #include "dashboard_carousel.h"
 #include "serial_protocol.h"
 #include "splash_layout.h"
+#include "ui.h"
 #include "ui_layout.h"
 #include "usage_view_state.h"
 
 #include "../../src/dashboard_payload.cpp"
+#include "../../src/ui.cpp"
 
 void test_touch_mapping_keeps_portrait_axes(void) {
     TouchPoint point = map_touch_to_portrait(40, 250);
@@ -147,6 +149,18 @@ void test_missing_codex_window_is_not_invented_and_zero_unread_is_valid(void) {
     TEST_ASSERT_EQUAL_INT(0, data.activity.codex_unread);
 }
 
+void test_codex_window_labels_follow_actual_window_duration(void) {
+    TEST_ASSERT_EQUAL_STRING("5 hours", codex_window_label(300));
+    TEST_ASSERT_EQUAL_STRING("Weekly", codex_window_label(10080));
+    TEST_ASSERT_EQUAL_STRING("Limit", codex_window_label(1440));
+}
+
+void test_daily_tokens_are_formatted_compactly(void) {
+    char buffer[16];
+    format_compact_tokens(12500, buffer, sizeof(buffer));
+    TEST_ASSERT_EQUAL_STRING("12.5k", buffer);
+}
+
 void test_carousel_wraps_in_approved_order(void) {
     CarouselState state{};
     carousel_start(state, DASHBOARD_CLAUDE, 1000);
@@ -191,6 +205,8 @@ void setup() {
     RUN_TEST(test_old_claude_payload_remains_compatible);
     RUN_TEST(test_new_payload_parses_codex_and_activity);
     RUN_TEST(test_missing_codex_window_is_not_invented_and_zero_unread_is_valid);
+    RUN_TEST(test_codex_window_labels_follow_actual_window_duration);
+    RUN_TEST(test_daily_tokens_are_formatted_compactly);
     RUN_TEST(test_carousel_wraps_in_approved_order);
     RUN_TEST(test_carousel_auto_advances_after_twelve_seconds);
     RUN_TEST(test_manual_touch_defers_auto_advance_for_thirty_seconds);

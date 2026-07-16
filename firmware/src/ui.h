@@ -1,7 +1,12 @@
 #pragma once
+#include <stddef.h>
+#include <stdint.h>
 #include "data.h"
 #include "ble.h"
 #include "dashboard_carousel.h"
+
+const char* codex_window_label(int window_mins);
+void format_compact_tokens(uint32_t tokens, char* buffer, size_t length);
 
 void ui_init(void);
 void ui_update(const UsageData* data);

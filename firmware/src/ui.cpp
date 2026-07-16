@@ -126,9 +126,26 @@ static void compute_layout(const BoardCaps& c) {
 #define COL_AMBER     THEME_AMBER
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
+#define COL_MUTED     THEME_DIM
 
-// ---- Usage screen widgets (single non-splash view) ----
-static lv_obj_t* usage_container;
+const char* codex_window_label(int window_mins) {
+    if (window_mins == 300) return "5 hours";
+    if (window_mins == 10080) return "Weekly";
+    return "Limit";
+}
+
+void format_compact_tokens(uint32_t tokens, char* buffer, size_t length) {
+    if (tokens >= 1000000U) {
+        snprintf(buffer, length, "%.1fM", tokens / 1000000.0f);
+    } else if (tokens >= 1000U) {
+        snprintf(buffer, length, "%.1fk", tokens / 1000.0f);
+    } else {
+        snprintf(buffer, length, "%lu", static_cast<unsigned long>(tokens));
+    }
+}
+
+// ---- Claude usage screen widgets ----
+static lv_obj_t* claude_container;
 static lv_obj_t* lbl_title;
 // Clock fed by the daemon: base epoch (local wall-clock seconds) + the lv_tick at
 // which it landed, so the title ticks forward locally between 60s payloads.
@@ -153,6 +170,26 @@ static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
 static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
 static lv_obj_t* lbl_spending_status = nullptr;   // "Under pace" / "On pace" / "Over pace"
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
+
+// ---- Codex usage screen widgets ----
+static lv_obj_t* codex_container;
+static lv_obj_t* codex_pct[2];
+static lv_obj_t* codex_label[2];
+static lv_obj_t* codex_bar[2];
+static lv_obj_t* codex_reset[2];
+
+// ---- Activity screen widgets ----
+static lv_obj_t* activity_container;
+static lv_obj_t* lbl_activity_claude;
+static lv_obj_t* lbl_activity_codex;
+
+// ---- Robot status and metric page indicators ----
+static lv_obj_t* robot_status_label;
+static lv_obj_t* page_indicator_group;
+static lv_obj_t* page_indicator_dots[DASHBOARD_PAGE_COUNT];
+static uint32_t last_received_update_ms = 0;
+static uint32_t last_robot_status_refresh_ms = 0;
+static DashboardTransport last_received_transport = DASHBOARD_TRANSPORT_NONE;
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
@@ -403,15 +440,15 @@ static void build_idle_group(lv_obj_t* parent) {
 }
 
 static void init_usage_screen(lv_obj_t* scr) {
-    usage_container = lv_obj_create(scr);
-    lv_obj_set_size(usage_container, L.scr_w, L.scr_h);
-    lv_obj_set_pos(usage_container, 0, 0);
-    lv_obj_set_style_bg_opa(usage_container, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(usage_container, 0, 0);
-    lv_obj_set_style_pad_all(usage_container, 0, 0);
-    lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
+    claude_container = lv_obj_create(scr);
+    lv_obj_set_size(claude_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(claude_container, 0, 0);
+    lv_obj_set_style_bg_opa(claude_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(claude_container, 0, 0);
+    lv_obj_set_style_pad_all(claude_container, 0, 0);
+    lv_obj_clear_flag(claude_container, LV_OBJ_FLAG_SCROLLABLE);
 
-    lbl_title = lv_label_create(usage_container);
+    lbl_title = lv_label_create(claude_container);
     lv_label_set_text(lbl_title, "Usage");
     lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
@@ -419,7 +456,7 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
-    usage_group = lv_obj_create(usage_container);
+    usage_group = lv_obj_create(claude_container);
     lv_obj_set_size(usage_group, L.scr_w, L.scr_h);
     lv_obj_set_pos(usage_group, 0, 0);
     lv_obj_set_style_bg_opa(usage_group, LV_OPA_TRANSP, 0);
@@ -459,11 +496,11 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
 
-    build_pair_group(usage_container);
-    build_idle_group(usage_container);
+    build_pair_group(claude_container);
+    build_idle_group(claude_container);
 
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
-    lbl_anim = lv_label_create(usage_container);
+    lbl_anim = lv_label_create(claude_container);
     lv_label_set_text(lbl_anim, "");
     lv_obj_set_style_text_font(lbl_anim, L.status_font, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
@@ -483,6 +520,115 @@ void ui_init(void) {
 
     init_usage_screen(scr);
     splash_init(scr);
+
+    codex_container = lv_obj_create(scr);
+    lv_obj_set_size(codex_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(codex_container, 0, 0);
+    lv_obj_set_style_bg_opa(codex_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(codex_container, 0, 0);
+    lv_obj_set_style_pad_all(codex_container, 0, 0);
+    lv_obj_clear_flag(codex_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(codex_container, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t* codex_title = lv_label_create(codex_container);
+    lv_label_set_text(codex_title, "Codex");
+    lv_obj_set_style_text_font(codex_title, L.title_font, 0);
+    lv_obj_set_style_text_color(codex_title, COL_TEXT, 0);
+    lv_obj_align(codex_title, LV_ALIGN_TOP_MID, 0, L.title_y);
+
+    make_usage_panel(codex_container, L.content_y, "Limit",
+                     &codex_pct[0], &codex_label[0],
+                     &codex_bar[0], &codex_reset[0]);
+    make_usage_panel(codex_container,
+                     L.content_y + L.usage_panel_h + L.usage_panel_gap,
+                     "Tokens today", &codex_pct[1], &codex_label[1],
+                     &codex_bar[1], &codex_reset[1]);
+    if (L.scr_h <= 320) {
+        for (lv_obj_t* label : codex_label) {
+            lv_obj_set_style_pad_left(label, 8, 0);
+            lv_obj_set_style_pad_right(label, 8, 0);
+        }
+    }
+    lv_label_set_text(codex_pct[0], "Codex");
+    lv_label_set_text(codex_reset[0], "Unavailable");
+    lv_obj_add_flag(codex_label[0], LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(codex_bar[0], LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(codex_pct[1], "---");
+    lv_label_set_text(codex_reset[1], "Unavailable");
+    lv_obj_add_flag(codex_bar[1], LV_OBJ_FLAG_HIDDEN);
+
+    activity_container = lv_obj_create(scr);
+    lv_obj_set_size(activity_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(activity_container, 0, 0);
+    lv_obj_set_style_bg_opa(activity_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(activity_container, 0, 0);
+    lv_obj_set_style_pad_all(activity_container, 0, 0);
+    lv_obj_clear_flag(activity_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(activity_container, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t* activity_title = lv_label_create(activity_container);
+    lv_label_set_text(activity_title, "Activity");
+    lv_obj_set_style_text_font(activity_title, L.title_font, 0);
+    lv_obj_set_style_text_color(activity_title, COL_TEXT, 0);
+    lv_obj_align(activity_title, LV_ALIGN_TOP_MID, 0, L.title_y);
+
+    lv_obj_t* claude_activity_panel = make_panel(
+        activity_container, L.margin, L.content_y, L.content_w, L.usage_panel_h
+    );
+    lv_obj_t* codex_activity_panel = make_panel(
+        activity_container, L.margin,
+        L.content_y + L.usage_panel_h + L.usage_panel_gap,
+        L.content_w, L.usage_panel_h
+    );
+    if (L.scr_h <= 320) {
+        lv_obj_set_style_pad_all(claude_activity_panel, 8, 0);
+        lv_obj_set_style_pad_all(codex_activity_panel, 8, 0);
+    }
+
+    lbl_activity_claude = lv_label_create(claude_activity_panel);
+    lv_label_set_text(lbl_activity_claude, "Claude Code\nUnavailable");
+    lv_obj_set_width(lbl_activity_claude, L.content_w - (L.scr_h <= 320 ? 16 : 32));
+    lv_obj_set_style_text_font(lbl_activity_claude, L.detail_font, 0);
+    lv_obj_set_style_text_color(lbl_activity_claude, COL_TEXT, 0);
+    lv_obj_set_style_text_line_space(lbl_activity_claude, L.scr_h <= 320 ? 1 : 4, 0);
+
+    lbl_activity_codex = lv_label_create(codex_activity_panel);
+    lv_label_set_text(lbl_activity_codex, "Codex\nUnavailable");
+    lv_obj_set_width(lbl_activity_codex, L.content_w - (L.scr_h <= 320 ? 16 : 32));
+    lv_obj_set_style_text_font(lbl_activity_codex, L.detail_font, 0);
+    lv_obj_set_style_text_color(lbl_activity_codex, COL_TEXT, 0);
+    lv_obj_set_style_text_line_space(lbl_activity_codex, L.scr_h <= 320 ? 1 : 4, 0);
+
+    robot_status_label = lv_label_create(scr);
+    lv_label_set_text(robot_status_label, "No data");
+    lv_obj_set_style_text_font(robot_status_label, L.detail_font, 0);
+    lv_obj_set_style_text_color(robot_status_label, COL_MUTED, 0);
+    lv_obj_align(robot_status_label, LV_ALIGN_TOP_MID, 0, L.footer_y);
+    lv_obj_add_flag(robot_status_label, LV_OBJ_FLAG_HIDDEN);
+
+    constexpr int DOT_SIZE = 5;
+    constexpr int DOT_GAP = 8;
+    constexpr int INDICATOR_WIDTH =
+        (DASHBOARD_PAGE_COUNT * DOT_SIZE) + ((DASHBOARD_PAGE_COUNT - 1) * DOT_GAP);
+    page_indicator_group = lv_obj_create(scr);
+    lv_obj_set_size(page_indicator_group, INDICATOR_WIDTH, DOT_SIZE);
+    lv_obj_set_pos(page_indicator_group, (L.scr_w - INDICATOR_WIDTH) / 2, L.page_indicator_y);
+    lv_obj_set_style_bg_opa(page_indicator_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(page_indicator_group, 0, 0);
+    lv_obj_set_style_pad_all(page_indicator_group, 0, 0);
+    lv_obj_clear_flag(page_indicator_group, LV_OBJ_FLAG_SCROLLABLE);
+    for (int i = 0; i < DASHBOARD_PAGE_COUNT; ++i) {
+        page_indicator_dots[i] = lv_obj_create(page_indicator_group);
+        lv_obj_set_size(page_indicator_dots[i], DOT_SIZE, DOT_SIZE);
+        lv_obj_set_pos(page_indicator_dots[i], i * (DOT_SIZE + DOT_GAP), 0);
+        lv_obj_set_style_radius(page_indicator_dots[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(page_indicator_dots[i], 0, 0);
+        lv_obj_set_style_bg_opa(page_indicator_dots[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(
+            page_indicator_dots[i], i == DASHBOARD_CLAUDE ? COL_TEXT : COL_MUTED, 0
+        );
+        lv_obj_clear_flag(page_indicator_dots[i], LV_OBJ_FLAG_SCROLLABLE);
+    }
 
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
@@ -508,6 +654,71 @@ void ui_init(void) {
 }
 
 void ui_update(const UsageData* data) {
+    if (!data) return;
+
+    last_received_update_ms = millis();
+    last_received_transport = data->transport;
+
+    if (data->codex.valid) {
+        const uint8_t limit_count = data->codex.limit_count > 2
+            ? 2
+            : data->codex.limit_count;
+        char buf[48];
+
+        for (uint8_t i = 0; i < 2; ++i) {
+            if (i < limit_count) {
+                const CodexLimitData& limit = data->codex.limits[i];
+                const int percent = static_cast<int>(limit.percent + 0.5f);
+                lv_label_set_text_fmt(codex_pct[i], "%d%%", percent);
+                lv_label_set_text(codex_label[i], codex_window_label(limit.window_mins));
+                lv_obj_clear_flag(codex_label[i], LV_OBJ_FLAG_HIDDEN);
+                lv_bar_set_value(codex_bar[i], percent, LV_ANIM_ON);
+                lv_obj_set_style_bg_color(
+                    codex_bar[i], pct_color(limit.percent), LV_PART_INDICATOR
+                );
+                lv_obj_clear_flag(codex_bar[i], LV_OBJ_FLAG_HIDDEN);
+                format_reset_time(limit.reset_mins, buf, sizeof(buf));
+                lv_label_set_text(codex_reset[i], buf);
+            } else if (i == 0) {
+                lv_label_set_text(codex_pct[i], "Codex");
+                lv_obj_add_flag(codex_label[i], LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(codex_bar[i], LV_OBJ_FLAG_HIDDEN);
+                lv_label_set_text(codex_reset[i], "No limit data");
+            } else {
+                format_compact_tokens(data->codex.tokens_today, buf, sizeof(buf));
+                lv_label_set_text(codex_pct[i], buf);
+                lv_label_set_text(codex_label[i], "Tokens today");
+                lv_obj_clear_flag(codex_label[i], LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(codex_bar[i], LV_OBJ_FLAG_HIDDEN);
+                lv_label_set_text(codex_reset[i], "");
+            }
+        }
+    }
+
+    if (data->activity.valid) {
+        if (data->activity.claude_valid) {
+            lv_label_set_text_fmt(
+                lbl_activity_claude,
+                "Claude Code\nOpen     %d\nBusy     %d\nWaiting  %d",
+                data->activity.claude_open,
+                data->activity.claude_busy,
+                data->activity.claude_waiting
+            );
+        } else {
+            lv_label_set_text(lbl_activity_claude, "Claude Code\nUnavailable");
+        }
+
+        if (data->activity.codex_valid) {
+            lv_label_set_text_fmt(
+                lbl_activity_codex,
+                "Codex\nUnread   %d",
+                data->activity.codex_unread
+            );
+        } else {
+            lv_label_set_text(lbl_activity_codex, "Codex\nUnavailable");
+        }
+    }
+
     if (!data->valid) return;
     last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
     data_received = true;
@@ -613,6 +824,32 @@ static void update_view_state(void) {
 }
 
 void ui_tick_anim(void) {
+    const uint32_t uptime_now = millis();
+    if (current_page == DASHBOARD_ROBOT && robot_status_label &&
+        uptime_now - last_robot_status_refresh_ms >= 1000) {
+        last_robot_status_refresh_ms = uptime_now;
+        if (last_received_transport == DASHBOARD_TRANSPORT_NONE) {
+            lv_label_set_text(robot_status_label, "No data");
+        } else {
+            const char* transport = last_received_transport == DASHBOARD_TRANSPORT_USB
+                ? "USB data"
+                : "BLE data";
+            const uint32_t age_ms = uptime_now - last_received_update_ms;
+            if (age_ms < 60000) {
+                lv_label_set_text_fmt(
+                    robot_status_label, "%s \xC2\xB7 just now", transport
+                );
+            } else {
+                lv_label_set_text_fmt(
+                    robot_status_label,
+                    "%s \xC2\xB7 %lum ago",
+                    transport,
+                    static_cast<unsigned long>(age_ms / 60000)
+                );
+            }
+        }
+    }
+
     if (current_page != DASHBOARD_CLAUDE) return;
     update_view_state();
     if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
@@ -688,13 +925,28 @@ static void global_click_cb(lv_event_t* e) {
 }
 
 void ui_show_screen(DashboardPage page) {
-    lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(claude_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(codex_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(activity_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
+    if (robot_status_label) lv_obj_add_flag(robot_status_label, LV_OBJ_FLAG_HIDDEN);
 
     switch (page) {
-    case DASHBOARD_CLAUDE: lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
-    case DASHBOARD_ROBOT:  splash_show(); break;
-    default: break;
+    case DASHBOARD_CLAUDE:
+        lv_obj_clear_flag(claude_container, LV_OBJ_FLAG_HIDDEN);
+        break;
+    case DASHBOARD_CODEX:
+        lv_obj_clear_flag(codex_container, LV_OBJ_FLAG_HIDDEN);
+        break;
+    case DASHBOARD_ACTIVITY:
+        lv_obj_clear_flag(activity_container, LV_OBJ_FLAG_HIDDEN);
+        break;
+    case DASHBOARD_ROBOT:
+        splash_show();
+        if (robot_status_label) lv_obj_clear_flag(robot_status_label, LV_OBJ_FLAG_HIDDEN);
+        break;
+    default:
+        break;
     }
 
     if (logo_img) {
@@ -703,6 +955,20 @@ void ui_show_screen(DashboardPage page) {
     }
 
     current_page = page;
+    if (page_indicator_group) {
+        if (page == DASHBOARD_ROBOT) {
+            lv_obj_add_flag(page_indicator_group, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(page_indicator_group, LV_OBJ_FLAG_HIDDEN);
+            for (int i = 0; i < DASHBOARD_PAGE_COUNT; ++i) {
+                lv_obj_set_style_bg_color(
+                    page_indicator_dots[i],
+                    i == static_cast<int>(page) ? COL_TEXT : COL_MUTED,
+                    0
+                );
+            }
+        }
+    }
     apply_battery_visibility();
     if (navigation_layer) lv_obj_move_foreground(navigation_layer);
 }
