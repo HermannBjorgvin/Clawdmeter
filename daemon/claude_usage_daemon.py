@@ -39,8 +39,21 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 DEFAULT_CONFIG_DIR = Path.home() / ".claude"
 SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
 CONFIG_FILE = Path.home() / ".config" / "claude-usage-monitor" / "config"
+# Attention flag: a Claude Code hook writes an event type into this file when
+# Claude needs the user. The connected loop picks it up within one TICK and
+# forwards it as "n":"<type>" so the firmware plays the matching melody/view.
+# Types: input (waiting for an answer), perm (permission prompt), done (turn
+# finished), clear (user is back — dismiss the attention view, no sound).
+# Stale flags (older than ATTN_MAX_AGE) are discarded so a flag written while
+# the daemon was down doesn't chime hours later.
+ATTN_FILE = Path.home() / ".config" / "claude-usage-monitor" / "attention"
+ATTN_MAX_AGE = 60
+ATTN_TYPES = ("input", "perm", "done", "clear")
 
 API_URL = "https://api.anthropic.com/v1/messages"
+# Read-only usage endpoint (what Claude Code's /usage renders). Preferred
+# source: unlike the /v1/messages probe it consumes no usage at all.
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
     "anthropic-beta": "oauth-2025-04-20",
@@ -373,7 +386,100 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
+# Why the last poll failed: "auth" (401/403 — token expired; Claude Code will
+# refresh it next time the user opens it, we deliberately never touch the
+# refresh token ourselves — refresh-token rotation could log the CLI out),
+# "rate" (429), "net", "http". Cleared on every poll_api call, surfaced to the
+# device as the "err" payload field so it can say WHY the data went stale.
+_LAST_ERR: str | None = None
+
+
+def _note_err(code: str) -> None:
+    global _LAST_ERR
+    _LAST_ERR = code
+
+
+def _err_from_status(status: int) -> str:
+    if status in (401, 403):
+        return "auth"
+    if status == 429:
+        return "rate"
+    return "http"
+
+
 async def poll_api(token: str) -> dict | None:
+    """Fetch usage: the free read-only endpoint first, the /v1/messages probe
+    as a fallback (it costs a 1-token Haiku call but knows every account shape
+    the headers describe, e.g. Enterprise overage)."""
+    global _LAST_ERR
+    _LAST_ERR = None
+    payload = await _poll_usage_endpoint(token)
+    if payload is None:
+        payload = await _poll_probe(token)
+        if payload is None:
+            return None
+    add_chime_field(payload)   # adds "c":1 iff the config opts in
+    add_clock_fields(payload)  # adds "t" + "tf" iff the config opts in
+    return payload
+
+
+async def _poll_usage_endpoint(token: str) -> dict | None:
+    """GET /api/oauth/usage → payload, or None on any surprise (HTTP error,
+    unfamiliar response shape, Enterprise-style account) so the caller can
+    fall back to the probe."""
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": API_HEADERS_TEMPLATE["anthropic-beta"],
+        "User-Agent": API_HEADERS_TEMPLATE["User-Agent"],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.get(USAGE_URL, headers=headers)
+    except httpx.HTTPError as e:
+        log(f"Usage endpoint failed: {e}")
+        _note_err("net")
+        return None
+    if resp.status_code != 200:
+        log(f"Usage endpoint HTTP {resp.status_code}: {resp.text[:200]}")
+        _note_err(_err_from_status(resp.status_code))
+        return None
+
+    def mins_until(iso: str | None) -> int:
+        if not iso:
+            return 0
+        try:
+            dt = datetime.datetime.fromisoformat(iso)
+        except ValueError:
+            return 0
+        mins = (dt - datetime.datetime.now(datetime.timezone.utc)).total_seconds() / 60.0
+        return int(round(mins)) if mins > 0 else 0
+
+    try:
+        data = resp.json()
+        five, seven = data.get("five_hour"), data.get("seven_day")
+        if not isinstance(five, dict) or not isinstance(seven, dict):
+            return None   # not the Pro/Max shape — let the probe classify it
+        status = "allowed"
+        for lim in data.get("limits") or []:
+            if isinstance(lim, dict) and lim.get("kind") == "session":
+                sev = lim.get("severity")
+                status = "allowed" if sev == "normal" else str(sev or "unknown")
+                break
+        return {
+            "s": int(round(float(five.get("utilization") or 0))),
+            "sr": mins_until(five.get("resets_at")),
+            "w": int(round(float(seven.get("utilization") or 0))),
+            "wr": mins_until(seven.get("resets_at")),
+            "st": status,
+            "acct": "pro",
+            "ok": True,
+        }
+    except (ValueError, TypeError) as e:
+        log(f"Usage endpoint parse error: {e}")
+        return None
+
+
+async def _poll_probe(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
     try:
@@ -381,9 +487,11 @@ async def poll_api(token: str) -> dict | None:
             resp = await http.post(API_URL, headers=headers, json=API_BODY)
     except httpx.HTTPError as e:
         log(f"API call failed: {e}")
+        _note_err("net")
         return None
     if resp.status_code >= 400:
         log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
+        _note_err(_err_from_status(resp.status_code))
         return None
 
     def hdr(name: str, default: str = "0") -> str:
@@ -429,8 +537,6 @@ async def poll_api(token: str) -> dict | None:
             **_billing_period_info(now, reset_ts),
             "ok": True,
         }
-    add_chime_field(payload)   # adds "c":1 iff the config opts in
-    add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
     return payload
 
 
@@ -504,11 +610,12 @@ class PlanSelector:
 _SELECTOR = PlanSelector()
 
 
-async def poll_active_payload(selector: PlanSelector = _SELECTOR) -> dict | None:
+async def poll_active_payload(selector: PlanSelector = _SELECTOR) -> dict:
     """Poll every configured config dir and return the active plan's payload.
 
-    Returns None when no dir yields a usable payload this cycle. A single
-    configured dir (the default) collapses to exactly the old single-poll path.
+    Returns an {"ok": False, "err": ...} error beat when no dir yields a
+    usable payload this cycle. A single configured dir (the default) collapses
+    to exactly the old single-poll path.
     """
     dirs = read_config_dirs()
     payloads: dict[Path, dict] = {}
@@ -523,7 +630,10 @@ async def poll_active_payload(selector: PlanSelector = _SELECTOR) -> dict | None
             payloads[d] = payload
             sessions[d] = int(payload.get("s", 0) or 0)
     if not payloads:
-        return None
+        # Error beat: tells the firmware to flip to the idle view and show WHY
+        # instead of rendering hours-old numbers as live ("token" = no config
+        # dir had a readable token this cycle).
+        return {"ok": False, "err": _LAST_ERR or "token"}
     active = selector.choose(sessions)
     if len(dirs) > 1:
         log(f"Active plan: {active} (s={sessions[active]})")
@@ -693,17 +803,53 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     last_poll = 0.0
     used_successfully = False
     try:
+        last_payload: dict | None = None
+        poll_interval = POLL_INTERVAL   # grows exponentially while polls fail
         while client.is_connected and not stop_event.is_set():
             now = time.time()
             elapsed = now - last_poll
-            if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
+            attn: str | None = None
+            attn_project = ""
+            if ATTN_FILE.exists():
+                try:
+                    fresh = (now - ATTN_FILE.stat().st_mtime) <= ATTN_MAX_AGE
+                    lines = ATTN_FILE.read_text().splitlines()
+                    ATTN_FILE.unlink(missing_ok=True)
+                    if fresh and lines:
+                        content = lines[0].strip().lower()
+                        attn = content if content in ATTN_TYPES else "input"
+                        if len(lines) > 1:
+                            attn_project = lines[1].strip()[:16]
+                except OSError:
+                    pass
+            if attn == "clear":
+                # Dismiss-only: reuse the last payload, skip the API poll.
+                if last_payload is not None:
+                    log("Attention clear — dismissing the attention view")
+                    await session.write_payload({**last_payload, "n": "clear"})
+            elif session.refresh_requested.is_set() or elapsed >= poll_interval or attn:
                 session.refresh_requested.clear()
                 payload = await poll_active_payload()
-                if payload is None:
-                    log("No usable config dir this cycle")
-                elif await session.write_payload(payload):
+                if payload.get("ok"):
+                    last_payload = dict(payload)
+                    poll_interval = POLL_INTERVAL
+                else:
+                    # Exponential backoff: a dead token means every retry is a
+                    # guaranteed 401, and repeated auth failures escalate to
+                    # 429s — don't hammer the API while there's nothing to win.
+                    poll_interval = min(poll_interval * 2, 600)
+                    log(f"Poll failed ({payload.get('err')}); next attempt in {poll_interval}s")
+                if attn:
+                    # Attention events ride on error beats too — a permission
+                    # chime matters even while the usage data is unavailable.
+                    payload["n"] = attn
+                    if attn_project:
+                        payload["np"] = attn_project
+                    log(f"Attention flag ({attn}, {attn_project or '?'}) — forwarding to device")
+                if await session.write_payload(payload):
                     last_poll = time.time()
-                    used_successfully = True
+                    if payload.get("ok"):
+                        used_successfully = True
 
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
