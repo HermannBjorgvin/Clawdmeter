@@ -36,6 +36,10 @@ struct Layout {
     int16_t usage_panel_gap;
     int16_t usage_bar_y;
     int16_t usage_reset_y;
+    int16_t logo_size;
+    int16_t logo_scale;
+    int16_t footer_y;
+    int16_t page_indicator_y;
 
     // Bluetooth screen
     int16_t bt_info_panel_h;
@@ -71,12 +75,18 @@ static void compute_layout(const BoardCaps& c) {
     L.usage_panel_gap = metrics.usage_panel_gap;
     L.usage_bar_y = metrics.usage_bar_y;
     L.usage_reset_y = metrics.usage_reset_y;
+    L.logo_size = metrics.logo_size;
+    L.logo_scale = metrics.logo_scale;
+    L.footer_y = metrics.footer_y;
+    L.page_indicator_y = metrics.page_indicator_y;
     L.bt_info_panel_h = metrics.bluetooth_panel_h;
     L.bt_reset_zone_h = metrics.bluetooth_reset_zone_h;
     L.idle_creature_size = metrics.idle_creature_size;
 
     L.title_font = metrics.small_display ? &font_tiempos_34 : &font_tiempos_56;
-    L.percentage_font = metrics.small_display ? &font_styrene_28 : &font_styrene_48;
+    L.percentage_font = metrics.percentage_font_px == 24
+        ? &font_styrene_24
+        : &font_styrene_48;
     L.reset_font = metrics.small_display ? &font_styrene_14 : &font_styrene_28;
     L.pill_font = metrics.small_display ? &font_styrene_14 : &font_styrene_28;
     L.detail_font = metrics.small_display ? &font_styrene_14 : &font_styrene_16;
@@ -405,7 +415,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_title, "Usage");
     lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, L.title_y);
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
@@ -457,7 +467,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_anim, "");
     lv_obj_set_style_text_font(lbl_anim, L.status_font, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
-    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+    lv_obj_align(lbl_anim, LV_ALIGN_TOP_MID, 0, L.footer_y);
 }
 
 // ======== Public API ========
@@ -470,18 +480,21 @@ void ui_init(void) {
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
     init_icon_dsc_rgb565a8(&logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data);
-    init_battery_icons();
 
     init_usage_screen(scr);
     splash_init(scr);
 
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
-    lv_obj_set_pos(logo_img, L.margin, L.title_y - 10);
+    lv_image_set_scale(logo_img, L.logo_scale);
+    lv_obj_set_pos(logo_img, L.margin, L.logo_size == 48 ? 6 : L.title_y - 10);
 
-    battery_img = lv_image_create(scr);
-    lv_image_set_src(battery_img, &battery_dscs[0]);
-    lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
+    if (board_caps().has_battery) {
+        init_battery_icons();
+        battery_img = lv_image_create(scr);
+        lv_image_set_src(battery_img, &battery_dscs[0]);
+        lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
+    }
 
     navigation_layer = lv_obj_create(scr);
     lv_obj_set_size(navigation_layer, L.scr_w, L.scr_h);
@@ -718,6 +731,8 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
 }
 
 void ui_update_battery(int percent, bool charging) {
+    if (!battery_img) return;
+
     int idx;
     if (charging) {
         idx = 4;

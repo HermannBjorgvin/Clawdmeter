@@ -49,14 +49,17 @@ void test_long_press_does_not_emit_short_event(void) {
     TEST_ASSERT_TRUE(released.released);
 }
 
-void test_240x320_layout_fits_both_panels(void) {
+void test_240x320_layout_reserves_header_cards_and_footer(void) {
     UiLayoutMetrics metrics = compute_ui_layout_metrics(240, 320);
-    const int bottom = metrics.content_y +
+    const int cards_bottom = metrics.content_y +
         (2 * metrics.usage_panel_h) + metrics.usage_panel_gap;
 
-    TEST_ASSERT_LESS_OR_EQUAL_INT(276, bottom);
     TEST_ASSERT_TRUE(metrics.small_display);
-    TEST_ASSERT_EQUAL_INT(18, metrics.status_font_px);
+    TEST_ASSERT_EQUAL_INT(48, metrics.logo_size);
+    TEST_ASSERT_EQUAL_INT(153, metrics.logo_scale);
+    TEST_ASSERT_EQUAL_INT(24, metrics.percentage_font_px);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(metrics.footer_y, cards_bottom);
+    TEST_ASSERT_LESS_THAN_INT(metrics.screen_height, metrics.page_indicator_y);
 }
 
 void test_existing_layout_breakpoints_remain_distinct(void) {
@@ -177,7 +180,7 @@ void setup() {
     RUN_TEST(test_touch_mapping_clamps_edges);
     RUN_TEST(test_short_press_emits_only_short_event);
     RUN_TEST(test_long_press_does_not_emit_short_event);
-    RUN_TEST(test_240x320_layout_fits_both_panels);
+    RUN_TEST(test_240x320_layout_reserves_header_cards_and_footer);
     RUN_TEST(test_existing_layout_breakpoints_remain_distinct);
     RUN_TEST(test_small_no_psram_splash_keeps_heap_headroom);
     RUN_TEST(test_serial_protocol_recognizes_usage_json);

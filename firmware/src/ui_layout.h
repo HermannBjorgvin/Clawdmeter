@@ -13,6 +13,11 @@ struct UiLayoutMetrics {
     int16_t usage_panel_gap;
     int16_t usage_bar_y;
     int16_t usage_reset_y;
+    int16_t logo_size;
+    int16_t logo_scale;
+    int16_t percentage_font_px;
+    int16_t footer_y;
+    int16_t page_indicator_y;
     int16_t bluetooth_panel_h;
     int16_t bluetooth_reset_zone_h;
     bool small_display;
@@ -29,6 +34,11 @@ inline UiLayoutMetrics compute_ui_layout_metrics(
     metrics.screen_height = height;
     metrics.margin = 20;
     metrics.title_y = 30;
+    metrics.logo_size = 80;
+    metrics.logo_scale = 256;
+    metrics.percentage_font_px = 48;
+    metrics.footer_y = height - 45;
+    metrics.page_indicator_y = height - 16;
     metrics.small_display = false;
     metrics.status_font_px = 32;
     metrics.idle_creature_size = 160;
@@ -36,16 +46,21 @@ inline UiLayoutMetrics compute_ui_layout_metrics(
     if (height <= 320) {
         metrics.margin = 10;
         metrics.title_y = 12;
-        metrics.content_y = 58;
-        metrics.usage_panel_h = 100;
+        metrics.content_y = 64;
+        metrics.usage_panel_h = 88;
         metrics.usage_panel_gap = 8;
-        metrics.usage_bar_y = 40;
-        metrics.usage_reset_y = 67;
-        metrics.bluetooth_panel_h = 105;
-        metrics.bluetooth_reset_zone_h = 75;
+        metrics.usage_bar_y = 36;
+        metrics.usage_reset_y = 61;
+        metrics.logo_size = 48;
+        metrics.logo_scale = 153;
+        metrics.percentage_font_px = 24;
+        metrics.footer_y = 276;
+        metrics.page_indicator_y = 304;
+        metrics.bluetooth_panel_h = 92;
+        metrics.bluetooth_reset_zone_h = 65;
         metrics.small_display = true;
-        metrics.status_font_px = 18;
-        metrics.idle_creature_size = 100;
+        metrics.status_font_px = 14;
+        metrics.idle_creature_size = 92;
     } else if (height >= 460) {
         metrics.content_y = 100;
         metrics.usage_panel_h = 150;

@@ -60,3 +60,9 @@ def test_board_hal_is_complete_and_uses_st7789() -> None:
     assert "HSPI" in display
     assert "LCD_BACKLIGHT" in display
     assert "drawRGBBitmap" in display
+
+
+def test_battery_ui_is_guarded_by_board_capability():
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    assert "if (board_caps().has_battery)" in ui
+    assert "init_battery_icons();" in ui
