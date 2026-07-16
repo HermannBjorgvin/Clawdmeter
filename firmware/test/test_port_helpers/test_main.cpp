@@ -2,6 +2,7 @@
 #include <unity.h>
 
 #include "boards/esp32_2432s024c/power_button.h"
+#include "boards/esp32_2432s024c/display_color_order.h"
 #include "boards/esp32_2432s024c/touch_mapping.h"
 #include "serial_protocol.h"
 #include "splash_layout.h"
@@ -77,6 +78,10 @@ void test_serial_protocol_recognizes_identify_command(void) {
     TEST_ASSERT_EQUAL(SERIAL_LINE_IDENTIFY, classify_serial_line("identify"));
 }
 
+void test_st7789_portrait_mode_uses_bgr_color_order(void) {
+    TEST_ASSERT_EQUAL_HEX8(0xC8, st7789_portrait_bgr_madctl());
+}
+
 void setup() {
     delay(2000);
     UNITY_BEGIN();
@@ -89,6 +94,7 @@ void setup() {
     RUN_TEST(test_small_no_psram_splash_keeps_heap_headroom);
     RUN_TEST(test_serial_protocol_recognizes_usage_json);
     RUN_TEST(test_serial_protocol_recognizes_identify_command);
+    RUN_TEST(test_st7789_portrait_mode_uses_bgr_color_order);
     UNITY_END();
 }
 

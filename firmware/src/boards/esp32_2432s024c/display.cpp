@@ -1,5 +1,6 @@
 #include "../../hal/display_hal.h"
 #include "board.h"
+#include "display_color_order.h"
 
 #include <Adafruit_ST7789.h>
 #include <Arduino.h>
@@ -34,6 +35,8 @@ void display_hal_begin(void) {
     display.init(LCD_WIDTH, LCD_HEIGHT, SPI_MODE0);
     display.setSPISpeed(40000000);
     display.setRotation(0);
+    uint8_t madctl = st7789_portrait_bgr_madctl();
+    display.sendCommand(ST77XX_MADCTL, &madctl, 1);
     display.invertDisplay(false);
     display.fillScreen(ST77XX_BLACK);
     display_hal_set_brightness(200);
