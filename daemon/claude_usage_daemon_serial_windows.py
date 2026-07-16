@@ -7,6 +7,7 @@ import os
 import signal
 import threading
 import time
+from pathlib import Path
 
 import serial
 from serial.tools import list_ports
@@ -20,6 +21,7 @@ from daemon.claude_usage_daemon_windows import (
     poll_api,
     read_token,
 )
+from daemon.dashboard_payload import build_dashboard_payload
 
 BAUD_RATE = 115200
 IDENTIFY_TIMEOUT = 4.0
@@ -127,26 +129,31 @@ async def connect_and_run(session: SerialSession, stop_event: asyncio.Event, tra
     try:
         while not stop_event.is_set():
             if time.time() - last_poll >= POLL_INTERVAL:
+                claude_payload = None
                 token = read_token()
                 if not token:
-                    log("No token; skipping poll")
+                    log("No token; sending local dashboard data only")
                     if tray_state:
                         tray_state.set_error("token expired - run claude login")
                 else:
                     try:
-                        payload = await poll_api(token)
+                        claude_payload = await poll_api(token)
                     except AuthError:
                         if tray_state:
                             tray_state.set_error("token expired - run claude login")
-                        payload = None
-                    if payload is not None:
-                        if not await asyncio.to_thread(session.write_payload, payload):
-                            log("USB serial acknowledgement failed; reconnecting")
-                            break
-                        last_poll = time.time()
-                        used_successfully = True
-                        if tray_state:
-                            tray_state.set_connected(last_poll)
+
+                payload = await asyncio.to_thread(
+                    build_dashboard_payload,
+                    claude_payload,
+                    Path.home(),
+                )
+                if not await asyncio.to_thread(session.write_payload, payload):
+                    log("USB serial acknowledgement failed; reconnecting")
+                    break
+                last_poll = time.time()
+                used_successfully = True
+                if tray_state and claude_payload is not None:
+                    tray_state.set_connected(last_poll)
             await _wait_first(stop_event, timeout=TICK)
     finally:
         await asyncio.to_thread(session.close)

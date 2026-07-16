@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Tests for the Windows USB serial transport."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from daemon import claude_usage_daemon_serial_windows as serial_daemon
 from daemon.claude_usage_daemon_serial_windows import (
     SerialSession,
     candidate_serial_ports,
@@ -52,3 +54,49 @@ def test_serial_session_rejects_negative_ack():
     port.readline.return_value = b'{"ack":false}\n'
 
     assert not SerialSession(port).write_payload({"s": 1})
+
+
+def test_connect_and_run_sends_local_dashboard_data_without_token(monkeypatch):
+    stop_event = asyncio.Event()
+    session = SimpleNamespace(write_payload=MagicMock(return_value=True), close=MagicMock())
+
+    async def stop_after_first_iteration(_event, timeout):
+        stop_event.set()
+
+    monkeypatch.setattr(serial_daemon, "read_token", lambda: None)
+    monkeypatch.setattr(
+        serial_daemon,
+        "build_dashboard_payload",
+        lambda claude_payload, _home: {"v": 2, "claude": claude_payload},
+        raising=False,
+    )
+    monkeypatch.setattr(serial_daemon, "_wait_first", stop_after_first_iteration)
+
+    result = asyncio.run(serial_daemon.connect_and_run(session, stop_event))
+
+    assert result is True
+    session.write_payload.assert_called_once_with({"v": 2, "claude": None})
+
+
+def test_extended_dashboard_payload_fits_firmware_command_buffer():
+    payload = {
+        "s": 100,
+        "sr": 10080,
+        "w": 100,
+        "wr": 10080,
+        "st": "allowed",
+        "ok": True,
+        "v": 2,
+        "ts": 2147483647,
+        "x": {
+            "l": [
+                {"p": 100, "wm": 10080, "rm": 10080},
+                {"p": 100, "wm": 10080, "rm": 10080},
+            ],
+            "td": 2147483647,
+            "pl": "enterprise",
+        },
+        "a": {"cl": {"o": 999, "b": 999, "w": 999}, "cx": {"u": 999}, "ts": 2147483647},
+    }
+    wire = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
+    assert len(wire) < 768
