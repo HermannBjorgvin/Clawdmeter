@@ -163,6 +163,7 @@ static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within t
 static lv_image_dsc_t logo_dsc;
 static CarouselState carousel = {};
 static DashboardPage current_page = DASHBOARD_CLAUDE;
+static lv_obj_t* navigation_layer = nullptr;
 static bool     s_ble_connected = false;   // cached BLE connection state
 static uint32_t connected_at_ms = 0;       // when we last entered CONNECTED ("Connected" dwell)
 
@@ -399,7 +400,6 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_border_width(usage_container, 0, 0);
     lv_obj_set_style_pad_all(usage_container, 0, 0);
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
@@ -475,10 +475,6 @@ void ui_init(void) {
     init_usage_screen(scr);
     splash_init(scr);
 
-    if (splash_get_root()) {
-        lv_obj_add_event_cb(splash_get_root(), global_click_cb, LV_EVENT_CLICKED, NULL);
-    }
-
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
     lv_obj_set_pos(logo_img, L.margin, L.title_y - 10);
@@ -487,6 +483,15 @@ void ui_init(void) {
     lv_image_set_src(battery_img, &battery_dscs[0]);
     lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
 
+    navigation_layer = lv_obj_create(scr);
+    lv_obj_set_size(navigation_layer, L.scr_w, L.scr_h);
+    lv_obj_set_pos(navigation_layer, 0, 0);
+    lv_obj_set_style_bg_opa(navigation_layer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(navigation_layer, 0, 0);
+    lv_obj_set_style_pad_all(navigation_layer, 0, 0);
+    lv_obj_clear_flag(navigation_layer, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(navigation_layer, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(navigation_layer, global_click_cb, LV_EVENT_CLICKED, NULL);
 }
 
 void ui_update(const UsageData* data) {
@@ -686,6 +691,7 @@ void ui_show_screen(DashboardPage page) {
 
     current_page = page;
     apply_battery_visibility();
+    if (navigation_layer) lv_obj_move_foreground(navigation_layer);
 }
 
 void ui_start_dashboard(uint32_t now_ms) {
