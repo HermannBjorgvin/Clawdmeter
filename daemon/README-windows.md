@@ -132,6 +132,21 @@ Press **Ctrl+C** in the terminal. The daemon logs `Daemon stopping` and exits cl
 
 ---
 
+## Dashboard data
+
+- Claude rate limits still come from the existing authenticated poll.
+- Claude Code activity reads only aggregate `status` fields from `.claude\sessions`.
+- Codex usage reads aggregate `token_count` events and rate-limit windows from
+  `.codex\sessions`.
+- Codex unread count comes from `.codex-global-state.json`.
+- `Waiting` means the Claude CLI status is `idle`; `Unread` does not necessarily mean
+  a reply is required.
+- Codex local JSON is an internal format. If its schema does not match, Codex values
+  appear unavailable while Claude continues working.
+- Prompt text, responses, paths, and task titles are never included in the serial payload.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
