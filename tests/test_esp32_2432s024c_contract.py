@@ -88,3 +88,9 @@ def test_battery_ui_is_guarded_by_board_capability():
     ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
     assert "if (board_caps().has_battery)" in ui
     assert "init_battery_icons();" in ui
+
+
+def test_landscape_usage_and_activity_builders_use_second_panel_x() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    selection = "L.horizontal_cards ? L.second_panel_x : L.margin"
+    assert ui.count(selection) >= 2

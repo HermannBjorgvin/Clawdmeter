@@ -31,6 +31,8 @@ struct Layout {
     int16_t title_y;
     int16_t content_y;
     int16_t content_w;
+    int16_t panel_width;
+    int16_t second_panel_x;
 
     // Usage screen
     int16_t usage_panel_h;
@@ -39,6 +41,8 @@ struct Layout {
     int16_t usage_reset_y;
     int16_t logo_size;
     int16_t logo_scale;
+    int16_t logo_rendered_width;
+    bool horizontal_cards;
     int16_t footer_y;
     int16_t page_indicator_y;
 
@@ -72,12 +76,16 @@ static void compute_layout(const BoardCaps& c) {
     L.title_y = metrics.title_y;
     L.content_y = metrics.content_y;
     L.content_w = metrics.content_width;
+    L.panel_width = metrics.panel_width;
+    L.second_panel_x = metrics.second_panel_x;
     L.usage_panel_h = metrics.usage_panel_h;
     L.usage_panel_gap = metrics.usage_panel_gap;
     L.usage_bar_y = metrics.usage_bar_y;
     L.usage_reset_y = metrics.usage_reset_y;
     L.logo_size = metrics.logo_size;
     L.logo_scale = metrics.logo_scale;
+    L.logo_rendered_width = metrics.logo_rendered_width;
+    L.horizontal_cards = metrics.horizontal_cards;
     L.footer_y = metrics.footer_y;
     L.page_indicator_y = metrics.page_indicator_y;
     L.bt_info_panel_h = metrics.bluetooth_panel_h;
@@ -356,21 +364,36 @@ static void init_battery_icons(void) {
 
 // ======== Usage Screen ========
 
-static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
-                                  lv_obj_t** out_pct, lv_obj_t** out_pill,
-                                  lv_obj_t** out_bar, lv_obj_t** out_reset) {
-    lv_obj_t* panel = make_panel(parent, L.margin, y, L.content_w, L.usage_panel_h);
+static lv_obj_t* make_usage_panel(
+    lv_obj_t* parent,
+    int x,
+    int y,
+    int width,
+    const char* pill_text,
+    lv_obj_t** out_pct,
+    lv_obj_t** out_pill,
+    lv_obj_t** out_bar,
+    lv_obj_t** out_reset
+) {
+    lv_obj_t* panel = make_panel(parent, x, y, width, L.usage_panel_h);
+    const int panel_padding = L.horizontal_cards ? 8 : 16;
+    if (L.horizontal_cards) lv_obj_set_style_pad_all(panel, panel_padding, 0);
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "---%");
     lv_obj_set_style_text_font(*out_pct, L.percentage_font, 0);
     lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
-    lv_obj_set_pos(*out_pct, 0, 0);
+    lv_obj_set_pos(*out_pct, 0, L.horizontal_cards ? 28 : 0);
 
     *out_pill = make_pill(panel, pill_text);
-    lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
+    lv_obj_align(
+        *out_pill,
+        L.horizontal_cards ? LV_ALIGN_TOP_LEFT : LV_ALIGN_TOP_RIGHT,
+        0,
+        L.horizontal_cards ? 0 : 1
+    );
 
-    *out_bar = make_bar(panel, 0, L.usage_bar_y, L.content_w - 32, 24);
+    *out_bar = make_bar(panel, 0, L.usage_bar_y, width - (2 * panel_padding), 24);
 
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
@@ -466,7 +489,8 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    panel_session = make_usage_panel(usage_group, L.content_y, "Current",
+    panel_session = make_usage_panel(
+                     usage_group, L.margin, L.content_y, L.panel_width, "Current",
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
 
@@ -490,8 +514,12 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_pos(lbl_spending_status, 0, L.usage_reset_y + 20);
     lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
 
-    panel_weekly = make_usage_panel(usage_group,
-                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
+    const int second_x = L.horizontal_cards ? L.second_panel_x : L.margin;
+    const int second_y = L.horizontal_cards
+        ? L.content_y
+        : L.content_y + L.usage_panel_h + L.usage_panel_gap;
+    panel_weekly = make_usage_panel(
+                     usage_group, second_x, second_y, L.panel_width, "Weekly",
                      &lbl_weekly_pct, &lbl_weekly_label,
                      &bar_weekly, &lbl_weekly_reset);
     // Recolor enabled so enterprise period box can color pace and reset separately
@@ -537,11 +565,14 @@ void ui_init(void) {
     lv_obj_set_style_text_color(codex_title, COL_TEXT, 0);
     lv_obj_align(codex_title, LV_ALIGN_TOP_MID, 0, L.title_y);
 
-    make_usage_panel(codex_container, L.content_y, "Limit",
+    make_usage_panel(codex_container, L.margin, L.content_y, L.panel_width, "Limit",
                      &codex_pct[0], &codex_label[0],
                      &codex_bar[0], &codex_reset[0]);
-    make_usage_panel(codex_container,
-                     L.content_y + L.usage_panel_h + L.usage_panel_gap,
+    const int second_x = L.horizontal_cards ? L.second_panel_x : L.margin;
+    const int second_y = L.horizontal_cards
+        ? L.content_y
+        : L.content_y + L.usage_panel_h + L.usage_panel_gap;
+    make_usage_panel(codex_container, second_x, second_y, L.panel_width,
                      "Tokens today", &codex_pct[1], &codex_label[1],
                      &codex_bar[1], &codex_reset[1]);
     if (L.scr_h <= 320) {
@@ -574,12 +605,10 @@ void ui_init(void) {
     lv_obj_align(activity_title, LV_ALIGN_TOP_MID, 0, L.title_y);
 
     lv_obj_t* claude_activity_panel = make_panel(
-        activity_container, L.margin, L.content_y, L.content_w, L.usage_panel_h
+        activity_container, L.margin, L.content_y, L.panel_width, L.usage_panel_h
     );
     lv_obj_t* codex_activity_panel = make_panel(
-        activity_container, L.margin,
-        L.content_y + L.usage_panel_h + L.usage_panel_gap,
-        L.content_w, L.usage_panel_h
+        activity_container, second_x, second_y, L.panel_width, L.usage_panel_h
     );
     if (L.scr_h <= 320) {
         lv_obj_set_style_pad_all(claude_activity_panel, 8, 0);
@@ -588,14 +617,14 @@ void ui_init(void) {
 
     lbl_activity_claude = lv_label_create(claude_activity_panel);
     lv_label_set_text(lbl_activity_claude, "Claude Code\nUnavailable");
-    lv_obj_set_width(lbl_activity_claude, L.content_w - (L.scr_h <= 320 ? 16 : 32));
+    lv_obj_set_width(lbl_activity_claude, L.panel_width - (L.scr_h <= 320 ? 16 : 32));
     lv_obj_set_style_text_font(lbl_activity_claude, L.detail_font, 0);
     lv_obj_set_style_text_color(lbl_activity_claude, COL_TEXT, 0);
     lv_obj_set_style_text_line_space(lbl_activity_claude, L.scr_h <= 320 ? 1 : 4, 0);
 
     lbl_activity_codex = lv_label_create(codex_activity_panel);
     lv_label_set_text(lbl_activity_codex, "Codex\nUnavailable");
-    lv_obj_set_width(lbl_activity_codex, L.content_w - (L.scr_h <= 320 ? 16 : 32));
+    lv_obj_set_width(lbl_activity_codex, L.panel_width - (L.scr_h <= 320 ? 16 : 32));
     lv_obj_set_style_text_font(lbl_activity_codex, L.detail_font, 0);
     lv_obj_set_style_text_color(lbl_activity_codex, COL_TEXT, 0);
     lv_obj_set_style_text_line_space(lbl_activity_codex, L.scr_h <= 320 ? 1 : 4, 0);
@@ -634,7 +663,11 @@ void ui_init(void) {
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
     lv_image_set_scale(logo_img, L.logo_scale);
-    lv_obj_set_pos(logo_img, L.margin, L.logo_size == 48 ? 6 : L.title_y - 10);
+    lv_obj_set_pos(
+        logo_img,
+        L.margin,
+        (L.horizontal_cards || L.logo_size == 48) ? 6 : L.title_y - 10
+    );
 
     if (board_caps().has_battery) {
         init_battery_icons();
@@ -652,6 +685,7 @@ void ui_init(void) {
     lv_obj_clear_flag(navigation_layer, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(navigation_layer, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(navigation_layer, global_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_move_foreground(navigation_layer);
 }
 
 void ui_update(const UsageData* data, uint8_t updates) {

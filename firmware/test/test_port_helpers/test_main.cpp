@@ -73,7 +73,8 @@ void test_240x320_layout_reserves_header_cards_and_footer(void) {
 
     TEST_ASSERT_TRUE(metrics.small_display);
     TEST_ASSERT_EQUAL_INT(48, metrics.logo_size);
-    TEST_ASSERT_EQUAL_INT(153, metrics.logo_scale);
+    TEST_ASSERT_EQUAL_INT(134, metrics.logo_scale);
+    TEST_ASSERT_EQUAL_INT(42, metrics.logo_rendered_width);
     TEST_ASSERT_EQUAL_INT(24, metrics.percentage_font_px);
     TEST_ASSERT_LESS_OR_EQUAL_INT(metrics.footer_y, cards_bottom);
     TEST_ASSERT_LESS_THAN_INT(metrics.screen_height, metrics.page_indicator_y);
@@ -105,6 +106,26 @@ void test_serial_protocol_recognizes_identify_command(void) {
 
 void test_st7789_portrait_mode_uses_bgr_color_order(void) {
     TEST_ASSERT_EQUAL_HEX8(0x88, st7789_bgr_madctl(0));
+}
+
+void test_320x240_layout_uses_two_horizontal_cards(void) {
+    UiLayoutMetrics m = compute_ui_layout_metrics(320, 240);
+    TEST_ASSERT_TRUE(m.horizontal_cards);
+    TEST_ASSERT_EQUAL_INT(10, m.margin);
+    TEST_ASSERT_EQUAL_INT(52, m.content_y);
+    TEST_ASSERT_EQUAL_INT(145, m.panel_width);
+    TEST_ASSERT_EQUAL_INT(165, m.second_panel_x);
+    TEST_ASSERT_EQUAL_INT(126, m.usage_panel_h);
+    TEST_ASSERT_EQUAL_INT(196, m.footer_y);
+    TEST_ASSERT_EQUAL_INT(227, m.page_indicator_y);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.footer_y, m.page_indicator_y - 18);
+}
+
+void test_240x320_activity_title_clears_logo(void) {
+    UiLayoutMetrics m = compute_ui_layout_metrics(240, 320);
+    const int logo_right = m.margin + m.logo_rendered_width;
+    const int activity_title_left = (m.screen_width - 127) / 2;
+    TEST_ASSERT_LESS_OR_EQUAL_INT(logo_right + 4, activity_title_left);
 }
 
 void test_st7789_landscape_usb_left_mode_uses_bgr_color_order(void) {
@@ -251,6 +272,8 @@ void setup() {
     RUN_TEST(test_short_press_emits_only_short_event);
     RUN_TEST(test_long_press_does_not_emit_short_event);
     RUN_TEST(test_240x320_layout_reserves_header_cards_and_footer);
+    RUN_TEST(test_320x240_layout_uses_two_horizontal_cards);
+    RUN_TEST(test_240x320_activity_title_clears_logo);
     RUN_TEST(test_existing_layout_breakpoints_remain_distinct);
     RUN_TEST(test_small_no_psram_splash_keeps_heap_headroom);
     RUN_TEST(test_serial_protocol_recognizes_usage_json);
