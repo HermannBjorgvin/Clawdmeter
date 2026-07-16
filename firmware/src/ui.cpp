@@ -161,7 +161,8 @@ static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within t
 
 // ---- Shared ----
 static lv_image_dsc_t logo_dsc;
-static screen_t current_screen = SCREEN_USAGE;
+static CarouselState carousel = {};
+static DashboardPage current_page = DASHBOARD_CLAUDE;
 static bool     s_ble_connected = false;   // cached BLE connection state
 static uint32_t connected_at_ms = 0;       // when we last entered CONNECTED ("Connected" dwell)
 
@@ -594,7 +595,7 @@ static void update_view_state(void) {
 }
 
 void ui_tick_anim(void) {
-    if (current_screen != SCREEN_USAGE) return;
+    if (current_page != DASHBOARD_CLAUDE) return;
     update_view_state();
     if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
 
@@ -655,46 +656,49 @@ void ui_tick_anim(void) {
     lv_label_set_text(lbl_anim, buf);
 }
 
-static screen_t prev_non_splash_screen = SCREEN_USAGE;
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
-    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    if (current_page == DASHBOARD_ROBOT) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
     else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void global_click_cb(lv_event_t* e) {
     (void)e;
-    if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
-    else                                  ui_show_screen(SCREEN_SPLASH);
+    uint32_t now = millis();
+    if (!carousel.started) carousel_start(carousel, current_page, now);
+    ui_show_screen(carousel_manual_next(carousel, now));
 }
 
-void ui_show_screen(screen_t screen) {
+void ui_show_screen(DashboardPage page) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
-    switch (screen) {
-    case SCREEN_SPLASH:  splash_show(); break;
-    case SCREEN_USAGE:   lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    switch (page) {
+    case DASHBOARD_CLAUDE: lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case DASHBOARD_ROBOT:  splash_show(); break;
     default: break;
     }
 
     if (logo_img) {
-        if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        if (page == DASHBOARD_ROBOT) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
         else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
     }
 
-    if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
-    current_screen = screen;
+    current_page = page;
     apply_battery_visibility();
 }
 
-void ui_toggle_splash(void) {
-    if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
-    else                                  ui_show_screen(SCREEN_SPLASH);
+void ui_start_dashboard(uint32_t now_ms) {
+    carousel_start(carousel, DASHBOARD_CLAUDE, now_ms);
+    ui_show_screen(DASHBOARD_CLAUDE);
 }
 
-screen_t ui_get_current_screen(void) {
-    return current_screen;
+void ui_tick_navigation(uint32_t now_ms) {
+    if (carousel_tick(carousel, now_ms)) ui_show_screen(carousel.page);
+}
+
+DashboardPage ui_get_current_screen(void) {
+    return current_page;
 }
 
 void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) {

@@ -111,6 +111,11 @@ static bool apply_usage_json(const char* json, DashboardTransport transport) {
         if (g_after != g_before && splash_is_active()) splash_pick_for_current_rate();
     }
     ui_update(&usage);
+    static bool dashboard_started = false;
+    if (!dashboard_started) {
+        ui_start_dashboard(millis());
+        dashboard_started = true;
+    }
     return true;
 }
 
@@ -118,7 +123,6 @@ static bool apply_usage_json(const char* json, DashboardTransport transport) {
 #define CMD_BUF_SIZE 768
 static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_pos = 0;
-static bool serial_usage_screen_shown = false;
 
 static void send_screenshot() {
 #ifndef BOARD_HAS_PSRAM
@@ -176,10 +180,6 @@ static void check_serial_cmd() {
                     break;
                 case SERIAL_LINE_USAGE_JSON:
                     if (apply_usage_json(cmd_buf, DASHBOARD_TRANSPORT_USB)) {
-                        if (!serial_usage_screen_shown) {
-                            ui_show_screen(SCREEN_USAGE);
-                            serial_usage_screen_shown = true;
-                        }
                         Serial.println("{\"ack\":true}");
                     } else {
                         Serial.println("{\"ack\":false}");
@@ -245,7 +245,7 @@ void setup() {
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
-    ui_show_screen(SCREEN_SPLASH);
+    ui_show_screen(DASHBOARD_ROBOT);
 
     Serial.printf("Dashboard ready (%s, %dx%d), waiting for data on BLE or USB serial...\n",
         board_caps().name, W, H);
@@ -303,6 +303,7 @@ void loop() {
     idle_tick();
     lv_timer_handler();
     ui_tick_anim();
+    ui_tick_navigation(millis());
     ble_tick();
     power_hal_tick();
     imu_hal_tick();
@@ -357,8 +358,8 @@ void loop() {
             if (!idle_consume_wake_press()) {
                 // On splash: cycle animations. On the usage view: cycle
                 // screen brightness (single non-splash view, no more screens).
-                if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
-                else                                          brightness_cycle();
+                if (ui_get_current_screen() == DASHBOARD_ROBOT) splash_next();
+                else                                            brightness_cycle();
             }
         }
 

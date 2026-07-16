@@ -5,6 +5,7 @@
 #include "boards/esp32_2432s024c/display_color_order.h"
 #include "boards/esp32_2432s024c/touch_mapping.h"
 #include "dashboard_payload.h"
+#include "dashboard_carousel.h"
 #include "serial_protocol.h"
 #include "splash_layout.h"
 #include "ui_layout.h"
@@ -143,6 +144,32 @@ void test_missing_codex_window_is_not_invented_and_zero_unread_is_valid(void) {
     TEST_ASSERT_EQUAL_INT(0, data.activity.codex_unread);
 }
 
+void test_carousel_wraps_in_approved_order(void) {
+    CarouselState state{};
+    carousel_start(state, DASHBOARD_CLAUDE, 1000);
+    TEST_ASSERT_EQUAL(DASHBOARD_CODEX, carousel_manual_next(state, 2000));
+    TEST_ASSERT_EQUAL(DASHBOARD_ACTIVITY, carousel_manual_next(state, 3000));
+    TEST_ASSERT_EQUAL(DASHBOARD_ROBOT, carousel_manual_next(state, 4000));
+    TEST_ASSERT_EQUAL(DASHBOARD_CLAUDE, carousel_manual_next(state, 5000));
+}
+
+void test_carousel_auto_advances_after_twelve_seconds(void) {
+    CarouselState state{};
+    carousel_start(state, DASHBOARD_CLAUDE, 1000);
+    TEST_ASSERT_FALSE(carousel_tick(state, 12999));
+    TEST_ASSERT_TRUE(carousel_tick(state, 13000));
+    TEST_ASSERT_EQUAL(DASHBOARD_CODEX, state.page);
+}
+
+void test_manual_touch_defers_auto_advance_for_thirty_seconds(void) {
+    CarouselState state{};
+    carousel_start(state, DASHBOARD_CLAUDE, 1000);
+    carousel_manual_next(state, 5000);
+    TEST_ASSERT_FALSE(carousel_tick(state, 34999));
+    TEST_ASSERT_TRUE(carousel_tick(state, 35000));
+    TEST_ASSERT_EQUAL(DASHBOARD_ACTIVITY, state.page);
+}
+
 void setup() {
     delay(2000);
     UNITY_BEGIN();
@@ -161,6 +188,9 @@ void setup() {
     RUN_TEST(test_old_claude_payload_remains_compatible);
     RUN_TEST(test_new_payload_parses_codex_and_activity);
     RUN_TEST(test_missing_codex_window_is_not_invented_and_zero_unread_is_valid);
+    RUN_TEST(test_carousel_wraps_in_approved_order);
+    RUN_TEST(test_carousel_auto_advances_after_twelve_seconds);
+    RUN_TEST(test_manual_touch_defers_auto_advance_for_thirty_seconds);
     UNITY_END();
 }
 
