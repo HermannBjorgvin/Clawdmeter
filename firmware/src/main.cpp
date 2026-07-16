@@ -108,8 +108,10 @@ static bool parse_json(const char* json, UsageData* out) {
 
     out->session_pct = doc["s"] | 0.0f;
     out->session_reset_mins = doc["sr"] | -1;
+    strlcpy(out->session_reset_at, doc["srt"] | "", sizeof(out->session_reset_at));
     out->weekly_pct = doc["w"] | 0.0f;
     out->weekly_reset_mins = doc["wr"] | -1;
+    strlcpy(out->weekly_reset_at, doc["wrt"] | "", sizeof(out->weekly_reset_at));
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     // NB: the daemon sends "c" as an integer, and ArduinoJson's `| false`
     // fallback rejects non-bool types — as<bool>() coerces both int and bool,

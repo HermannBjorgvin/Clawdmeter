@@ -4,8 +4,10 @@
 struct UsageData {
     float session_pct;       // utilization 0-100 (5h window Pro/Max; spending % Enterprise)
     int session_reset_mins;  // minutes until reset
+    char session_reset_at[12]; // wall-clock reset time, "21:00" / "ср 19:00"; "" unknown
     float weekly_pct;        // 7-day utilization (Pro/Max only; 0 for Enterprise)
     int weekly_reset_mins;   // minutes until weekly reset (Pro/Max only)
+    char weekly_reset_at[12];  // wall-clock weekly reset; "" unknown
     char status[16];         // "allowed", "limited", etc.
     bool chime;              // play the session-reset chime; false unless daemon opts in
     uint8_t notify_type;     // hook-driven event: 0 none / 1 input / 2 permission / 3 done / 4 clear

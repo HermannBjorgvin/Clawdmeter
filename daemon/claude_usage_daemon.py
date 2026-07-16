@@ -507,6 +507,21 @@ async def _poll_usage_endpoint(token: str) -> dict | None:
         mins = (dt - datetime.datetime.now(datetime.timezone.utc)).total_seconds() / 60.0
         return int(round(mins)) if mins > 0 else 0
 
+    def local_reset_at(iso: str | None) -> str:
+        """Wall-clock reset time for the display: "21:00" today, "ср 19:00"
+        on another day. Empty string when unknown."""
+        if not iso:
+            return ""
+        try:
+            dt = datetime.datetime.fromisoformat(iso).astimezone()
+        except ValueError:
+            return ""
+        hm = dt.strftime("%H:%M")
+        if dt.date() == datetime.datetime.now().astimezone().date():
+            return hm
+        days = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+        return f"{days[dt.weekday()]} {hm}"
+
     try:
         data = resp.json()
         five, seven = data.get("five_hour"), data.get("seven_day")
@@ -521,8 +536,10 @@ async def _poll_usage_endpoint(token: str) -> dict | None:
         return {
             "s": int(round(float(five.get("utilization") or 0))),
             "sr": mins_until(five.get("resets_at")),
+            "srt": local_reset_at(five.get("resets_at")),
             "w": int(round(float(seven.get("utilization") or 0))),
             "wr": mins_until(seven.get("resets_at")),
+            "wrt": local_reset_at(seven.get("resets_at")),
             "st": status,
             "acct": "pro",
             "ok": True,
@@ -566,14 +583,30 @@ async def _poll_probe(token: str) -> dict | None:
         except ValueError:
             return 0
 
+    def reset_at(reset_ts: str) -> str:
+        try:
+            r = float(reset_ts)
+        except ValueError:
+            return ""
+        if r <= now:
+            return ""
+        dt = datetime.datetime.fromtimestamp(r).astimezone()
+        hm = dt.strftime("%H:%M")
+        if dt.date() == datetime.datetime.now().astimezone().date():
+            return hm
+        days = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+        return f"{days[dt.weekday()]} {hm}"
+
     # Pro/Max accounts expose 5h/7d windows; Enterprise/overage use a single
     # spending-limit model reported via overage-utilization.
     if resp.headers.get("anthropic-ratelimit-unified-5h-utilization"):
         payload = {
             "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
             "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
+            "srt": reset_at(hdr("anthropic-ratelimit-unified-5h-reset")),
             "w": pct(hdr("anthropic-ratelimit-unified-7d-utilization")),
             "wr": reset_minutes(hdr("anthropic-ratelimit-unified-7d-reset")),
+            "wrt": reset_at(hdr("anthropic-ratelimit-unified-7d-reset")),
             "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
             "acct": "pro",
             "ok": True,

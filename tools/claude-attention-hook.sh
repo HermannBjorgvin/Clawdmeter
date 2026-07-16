@@ -17,6 +17,19 @@ mkdir -p "$DIR" "$SESS"
 
 jqr() { printf '%s' "$IN" | jq -r "$1 // \"\"" 2>/dev/null; }
 
+# Does the session still have a live background task? A running task keeps its
+# .output file open — lsof sees that. The tasks dir is keyed by the session's
+# ORIGINAL project dir while the hook's cwd follows shell cd's, so locate it
+# by globbing the unique session id. (NB: lsof's exit code is useless — 1 even
+# with matches — test stdout.)
+has_running_tasks() {
+    local t
+    for t in /private/tmp/claude-$(id -u)/*/"$1"/tasks; do
+        [[ -d "$t" ]] && lsof -w +d "$t" 2>/dev/null | grep -q . && return 0
+    done
+    return 1
+}
+
 # Flag format: line 1 = event type, line 2 (optional) = project name shown on
 # the device. Project = git repo root basename, falling back to cwd basename.
 write_flag() {
@@ -39,24 +52,23 @@ notification)
     if [[ "$msg" == *permission* || "$msg" == *разрешен* ]]; then
         write_flag perm
     else
+        # Idle notifications also fire for autonomous sessions parked on their
+        # own background work (builds, monitors, loops) — they're waiting for
+        # the task, not for the user. Don't ring the bell for those.
+        sid=$(jqr '.session_id')
+        [[ -n "$sid" ]] && has_running_tasks "$sid" && exit 0
         write_flag input
     fi
     ;;
 stop)
     sid=$(jqr '.session_id')
     # Don't celebrate a turn that merely yielded to a still-running background
-    # task (build, flash, monitor) — the harness resumes it later. A running
-    # task keeps its .output file open, which lsof can see. The tasks dir is
-    # keyed by the session's ORIGINAL project dir while the hook's cwd follows
-    # shell cd's — so locate it by globbing the unique session id instead.
+    # task (build, flash, monitor) — the harness resumes it later.
     if [[ -n "$sid" ]]; then
-        for tasks in /private/tmp/claude-$(id -u)/*/"$sid"/tasks; do
-            # NB: lsof's exit code is useless here (1 even with matches) — test stdout.
-            if [[ -d "$tasks" ]] && lsof -w +d "$tasks" 2>/dev/null | grep -q .; then
-                echo bg > "$SESS/$sid"   # still working, just in the background
-                exit 0
-            fi
-        done
+        if has_running_tasks "$sid"; then
+            echo bg > "$SESS/$sid"       # still working, just in the background
+            exit 0
+        fi
         rm -f "$SESS/$sid"               # turn really finished — session is idle
     fi
     # Skip short interactive turns — the user is at the keyboard anyway.

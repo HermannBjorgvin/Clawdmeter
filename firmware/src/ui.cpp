@@ -226,15 +226,19 @@ static lv_color_t pct_color(float pct) {
     return COL_GREEN;
 }
 
-static void format_reset_time(int mins, char* buf, size_t len) {
+// "Сброс через 2ч 49м (21:00)" — the countdown plus, when the daemon supplied
+// it, the wall-clock moment in parentheses so nobody has to do the math.
+static void format_reset_time(int mins, const char* at, char* buf, size_t len) {
+    char when[24] = "";
+    if (at && at[0]) snprintf(when, sizeof(when), " (%s)", at);
     if (mins < 0) {
         snprintf(buf, len, "---");
     } else if (mins < 60) {
-        snprintf(buf, len, "Сброс через %dм", mins);
+        snprintf(buf, len, "Сброс через %dм%s", mins, when);
     } else if (mins < 1440) {
-        snprintf(buf, len, "Сброс через %dч %dм", mins / 60, mins % 60);
+        snprintf(buf, len, "Сброс через %dч %dм%s", mins / 60, mins % 60, when);
     } else {
-        snprintf(buf, len, "Сброс через %dд %dч", mins / 1440, (mins % 1440) / 60);
+        snprintf(buf, len, "Сброс через %dд %dч%s", mins / 1440, (mins % 1440) / 60, when);
     }
 }
 
@@ -597,7 +601,7 @@ void ui_update(const UsageData* data) {
                         LV_ALIGN_OUT_RIGHT_TOP, 4, 12);
     } else {
         lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
-        format_reset_time(data->session_reset_mins, buf, sizeof(buf));
+        format_reset_time(data->session_reset_mins, data->session_reset_at, buf, sizeof(buf));
         lv_label_set_text(lbl_session_reset, buf);
     }
 
@@ -621,7 +625,7 @@ void ui_update(const UsageData* data) {
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
         lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
         lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
-        format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
+        format_reset_time(data->weekly_reset_mins, data->weekly_reset_at, buf, sizeof(buf));
         lv_label_set_text(lbl_weekly_reset, buf);
     }
 }
