@@ -84,21 +84,14 @@ bool idle_is_asleep(void) {
 void idle_tick(void) {
     uint32_t now = millis();
 
-    // A working Claude session counts as continuous activity — and lights the
-    // panel back up if it had gone dark.
-    if (claude_sessions > 0) {
-        last_activity_ms = now;
-        if (state == STATE_ASLEEP || state == STATE_FADING_OUT) {
-            begin_fade(awake_brightness, now);
-            state = STATE_FADING_IN;
-        }
-    }
-
-    // While on USB power (if configured), don't sleep — and wake from sleep
-    // when power comes back. Treats USB-in as continuous activity. Skipped
-    // when the daemon reports live activity state: a known-idle Claude gets
-    // the short screen-off timer below even on USB power.
-    if (!IDLE_SLEEP_WHEN_CHARGING && power_hal_is_vbus_in() && claude_sessions < 0) {
+    // Hold the panel awake (and light it back up): a working Claude session
+    // counts as continuous activity, and so does USB power (if configured) —
+    // but only while the activity state is unknown (old daemon / BLE down);
+    // a known-idle Claude gets the short screen-off timer below even on USB.
+    bool hold_awake = (claude_sessions > 0) ||
+                      (!IDLE_SLEEP_WHEN_CHARGING && power_hal_is_vbus_in() &&
+                       claude_sessions < 0);
+    if (hold_awake) {
         last_activity_ms = now;
         if (state == STATE_ASLEEP || state == STATE_FADING_OUT) {
             begin_fade(awake_brightness, now);

@@ -143,18 +143,27 @@ static lv_obj_t* attention_group;       // the "Claude is waiting for you" view
 static lv_obj_t* lbl_attention;         // its caption (text/color vary by type)
 static lv_obj_t* mini_creature;         // the single shared mini creature canvas
 static bool      attention_active = false;
-static uint8_t   attention_type   = 1;  // 1 input / 2 permission / 3 done / 4 limit warning
+static uint8_t   attention_type   = ATTN_INPUT;
 static char      attention_project[17] = "";   // shown in the header while active
 static uint32_t  attention_since  = 0;
-// The waiting states nag for 2 min; "done" and the limit warning are
-// informational — dismiss them quickly.
-static const uint32_t ATTENTION_TIMEOUT_MS      = 120000;
-static const uint32_t ATTENTION_DONE_TIMEOUT_MS = 30000;
 
-// Caption, color and creature animation per attention type (index = type - 1).
-static const char* const ATTN_CAPTIONS[5] = { "Клод ждёт ответа", "Нужно разрешение", "Готово!", "Лимит близко!", "Лимиты обновились!" };
-static const char* const ATTN_ANIMS[5]    = { "idle look around", "expression surprise", "dance bounce", "expression surprise", "expression wink" };
-static const char* const ATTN_STATUS[5]   = { "Ждёт ответа", "Ждёт разрешения", "Готово", "Лимит близко", "Лимиты обновились" };
+// Everything type-specific in one row (index = ATTN_* - 1): the waiting
+// states nag for 2 min, informational ones dismiss themselves quickly.
+struct AttnStyle {
+    const char* caption;   // big line on the attention view
+    const char* anim;      // mini-creature animation
+    const char* status;    // bottom status-line text
+    lv_color_t  color;     // caption color
+    uint32_t    timeout_ms;
+};
+static const AttnStyle ATTN_STYLES[5] = {
+    { "Клод ждёт ответа",   "idle look around",    "Ждёт ответа",       COL_AMBER, 120000 },  // ATTN_INPUT
+    { "Нужно разрешение",   "expression surprise", "Ждёт разрешения",   COL_AMBER, 120000 },  // ATTN_PERM
+    { "Готово!",            "dance bounce",        "Готово",            COL_GREEN, 30000  },  // ATTN_DONE
+    { "Лимит близко!",      "expression surprise", "Лимит близко",      COL_RED,   30000  },  // ATTN_LIMIT
+    { "Лимиты обновились!", "expression wink",     "Лимиты обновились", COL_GREEN, 30000  },  // ATTN_RESET
+};
+static inline const AttnStyle& attn_style(void) { return ATTN_STYLES[attention_type - 1]; }
 static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage update landed
 static bool      data_received = false; // any valid update since boot
 static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage / 3 attention
@@ -406,7 +415,7 @@ static void build_attention_group(lv_obj_t* parent) {
     lv_obj_add_flag(attention_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     lbl_attention = lv_label_create(attention_group);
-    lv_label_set_text(lbl_attention, ATTN_CAPTIONS[0]);
+    lv_label_set_text(lbl_attention, ATTN_STYLES[0].caption);
     lv_obj_set_style_text_font(lbl_attention, L.bt_status_font, 0);
     lv_obj_set_style_text_color(lbl_attention, COL_AMBER, 0);
     lv_obj_align(lbl_attention, LV_ALIGN_CENTER, 0, 90);
@@ -670,7 +679,7 @@ static void update_view_state(void) {
     if (mini_creature) {
         if (v == 3) {
             lv_obj_set_parent(mini_creature, attention_group);
-            splash_mini_set_anim(ATTN_ANIMS[attention_type - 1]);
+            splash_mini_set_anim(attn_style().anim);
             lv_obj_align(mini_creature, LV_ALIGN_CENTER, 0, -40);
         } else if (view_state == 3) {
             lv_obj_set_parent(mini_creature, idle_group);
@@ -706,8 +715,7 @@ static void update_view_state(void) {
 void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
     if (attention_active &&
-        lv_tick_get() - attention_since >= (attention_type >= 3 ? ATTENTION_DONE_TIMEOUT_MS
-                                                                : ATTENTION_TIMEOUT_MS)) {
+        lv_tick_get() - attention_since >= attn_style().timeout_ms) {
         attention_active = false;   // nobody came — stop nagging
     }
     update_view_state();
@@ -763,7 +771,7 @@ void ui_tick_anim(void) {
     if (!s_ble_connected) {
         text = "Ожидание";             // advertising / waiting for a host connection
     } else if (view_state == 3) {      // attention — spell out why the device chimed
-        text = ATTN_STATUS[attention_type - 1];
+        text = attn_style().status;
     } else if (view_state == 1 && data_err[0]) {  // idle with a known cause — name it
         text = !strcmp(data_err, "auth")  ? "Обновите токен" :
                !strcmp(data_err, "token") ? "Нет токена" :
@@ -780,11 +788,18 @@ void ui_tick_anim(void) {
     }
 
     // All states share the whimsical style: "<glyph> <Title-case word>…".
-    // The active-session count lives in its own bottom-left label.
+    // The active-session count lives in its own bottom-left label. Skip the
+    // set_text when nothing changed — LVGL invalidates (and re-flushes over
+    // QSPI) the label area on every set, which matters while resting, where
+    // the composed text is identical second after second.
     static char buf[96];
+    static char last_buf[96] = "";
     snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6",
              spinner_frames[anim_spinner_idx], text);
-    lv_label_set_text(lbl_anim, buf);
+    if (strcmp(buf, last_buf) != 0) {
+        strcpy(last_buf, buf);
+        lv_label_set_text(lbl_anim, buf);
+    }
 }
 
 static screen_t prev_non_splash_screen = SCREEN_USAGE;
@@ -806,7 +821,7 @@ static void global_click_cb(lv_event_t* e) {
 }
 
 void ui_show_attention(uint8_t type, const char* project) {
-    if (type < 1 || type > 5) return;
+    if (type < ATTN_INPUT || type > ATTN_RESET) return;
     idle_note_activity();               // wake the panel if it faded out
     // Re-style the view even if it's already up (a new event may differ).
     bool was_active = attention_active;
@@ -814,13 +829,11 @@ void ui_show_attention(uint8_t type, const char* project) {
     attention_type   = type;
     strlcpy(attention_project, project ? project : "", sizeof(attention_project));
     if (lbl_attention) {
-        lv_label_set_text(lbl_attention, ATTN_CAPTIONS[type - 1]);
-        lv_obj_set_style_text_color(lbl_attention,
-                                    (type == 3 || type == 5) ? COL_GREEN :
-                                    type == 4                ? COL_RED   : COL_AMBER, 0);
+        lv_label_set_text(lbl_attention, attn_style().caption);
+        lv_obj_set_style_text_color(lbl_attention, attn_style().color, 0);
     }
-    if (was_active) {
-        if (mini_creature) splash_mini_set_anim(ATTN_ANIMS[type - 1]);
+    if (was_active) {   // already on the view — update_view_state won't re-enter
+        if (mini_creature) splash_mini_set_anim(attn_style().anim);
         attention_style_title();   // header project may differ between events too
     }
     attention_since = lv_tick_get();

@@ -30,9 +30,8 @@ bool chime_init(const ChimeConfig& cfg);
 void chime_play(void);
 
 // Short synthesized alert melodies (sine tones through the same I2S/codec
-// path — no extra PCM clips in flash). Kinds 1-3 match the daemon's "n"
-// field (input / permission / done); 4 is the firmware-local "session limit
-// almost exhausted" warning.
+// path — no extra PCM clips in flash). `kind` is an ATTN_* value from
+// data.h: ATTN_INPUT, ATTN_PERM, ATTN_DONE or ATTN_LIMIT.
 void chime_play_alert(uint8_t kind);
 
 // Currently a no-op (playback runs in its own task); kept for HAL symmetry.

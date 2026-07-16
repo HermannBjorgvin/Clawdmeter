@@ -117,11 +117,14 @@ static void mini_render(void) {
     if (mini_canvas) lv_obj_invalidate(mini_canvas);
 }
 
+static const splash_anim_def_t* find_anim(const char* name) {
+    for (int i = 0; i < SPLASH_ANIM_COUNT; i++)
+        if (strcmp(splash_anims[i].name, name) == 0) return &splash_anims[i];
+    return NULL;
+}
+
 lv_obj_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px) {
-    mini_anim = NULL;
-    for (int i = 0; i < SPLASH_ANIM_COUNT; i++) {
-        if (strcmp(splash_anims[i].name, anim_name) == 0) { mini_anim = &splash_anims[i]; break; }
-    }
+    mini_anim = find_anim(anim_name);
     if (!mini_anim) return NULL;
     mini_cell = px / GRID;
     if (mini_cell < 1) mini_cell = 1;
@@ -143,17 +146,14 @@ lv_obj_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px) {
 
 bool splash_mini_set_anim(const char *anim_name) {
     if (!mini_buf) return false;
-    for (int i = 0; i < SPLASH_ANIM_COUNT; i++) {
-        if (strcmp(splash_anims[i].name, anim_name) == 0) {
-            if (mini_anim == &splash_anims[i]) return true;
-            mini_anim = &splash_anims[i];
-            mini_frame = 0;
-            mini_started = millis();
-            mini_render();
-            return true;
-        }
-    }
-    return false;
+    const splash_anim_def_t* a = find_anim(anim_name);
+    if (!a) return false;
+    if (mini_anim == a) return true;
+    mini_anim = a;
+    mini_frame = 0;
+    mini_started = millis();
+    mini_render();
+    return true;
 }
 
 void splash_mini_tick(void) {
@@ -242,19 +242,38 @@ void splash_init(lv_obj_t *parent) {
 
 // Live activity from the host daemon: -1 unknown (old daemon — keep the
 // usage-rate picks), else the count of working Claude sessions. When known,
-// it owns the splash rotation, escalating with the workload:
-//   0 → Idle rotation, 1-2 → Work rotation (coding/thinking), then fixed
-//   DJ tracks: 3 → dance sway dj, 4 → dance bounce dj, 5+ → dance djmix
-//   at double tempo (the disco).
-// pick_for_activity is defined near splash_pick_for_current_rate.
+// it owns the splash rotation, escalating with the workload — see ACT_TIERS.
 static int activity_state = -1;
 static void pick_for_activity(void);
 
-static int activity_tier(void) {   // -1 unknown / 0 idle / 1 work / 3,4,5 dj steps
+// Tier table: rotate within `category`, or play the one `exact` track.
+// The last tier (djmix, 5+ sessions) is the disco — double tempo.
+static const struct { const char* category; const char* exact; } ACT_TIERS[] = {
+    { "Idle", NULL },              // 0 sessions
+    { "Work", NULL },              // 1-2
+    { NULL, "dance sway dj" },     // 3
+    { NULL, "dance bounce dj" },   // 4
+    { NULL, "dance djmix" },       // 5+
+};
+#define ACT_TIER_DISCO 4
+
+static int activity_tier(void) {   // -1 unknown, else index into ACT_TIERS
     if (activity_state < 0) return -1;
     if (activity_state == 0) return 0;
     if (activity_state <= 2) return 1;
-    return (activity_state < 5) ? activity_state : 5;
+    if (activity_state == 3) return 2;
+    if (activity_state == 4) return 3;
+    return ACT_TIER_DISCO;
+}
+
+// Switch the main splash canvas to animation `idx` and restart it.
+static void start_anim(uint16_t idx) {
+    cur_anim = idx;
+    cur_frame = 0;
+    frame_started_ms = millis();
+    last_pick_ms = frame_started_ms;
+    const splash_anim_def_t *a = &splash_anims[cur_anim];
+    render_frame(a->frames[0], a->palette);
 }
 
 void splash_tick(void) {
@@ -262,9 +281,7 @@ void splash_tick(void) {
 
     // Auto-rotate: within the activity category when the daemon reports a
     // live working/idle state, else within the usage-rate group as before.
-    bool disco = (activity_tier() == 5);
-    uint32_t rotate_ms = SPLASH_ROTATE_INTERVAL_MS;
-    if (millis() - last_pick_ms >= rotate_ms) {
+    if (millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
         if (activity_state >= 0) pick_for_activity();
         else                     splash_pick_for_current_rate();
     }
@@ -273,7 +290,7 @@ void splash_tick(void) {
     if (a->frame_count == 0) return;
 
     uint16_t hold = a->holds[cur_frame];
-    if (disco) hold /= 2;   // double tempo on the dance floor
+    if (activity_tier() == ACT_TIER_DISCO) hold /= 2;   // double tempo on the dance floor
     if (millis() - frame_started_ms >= hold) {
         cur_frame = (cur_frame + 1) % a->frame_count;
         frame_started_ms = millis();
@@ -283,29 +300,21 @@ void splash_tick(void) {
 
 void splash_next(void) {
     if (SPLASH_ANIM_COUNT == 0) return;
-    cur_anim = (cur_anim + 1) % SPLASH_ANIM_COUNT;
-    cur_frame = 0;
-    frame_started_ms = millis();
-    last_pick_ms = frame_started_ms;
-    const splash_anim_def_t *a = &splash_anims[cur_anim];
-    render_frame(a->frames[0], a->palette);
-    Serial.printf("splash: -> %s\n", a->name);
+    start_anim((cur_anim + 1) % SPLASH_ANIM_COUNT);
+    Serial.printf("splash: -> %s\n", splash_anims[cur_anim].name);
 }
 
 static void pick_for_activity(void) {
     int tier = activity_tier();
-    // The DJ steps are fixed tracks — one animation per crowd size.
-    const char* exact = (tier == 3) ? "dance sway dj" :
-                        (tier == 4) ? "dance bounce dj" :
-                        (tier == 5) ? "dance djmix" : NULL;
+    if (tier < 0) { splash_pick_for_current_rate(); return; }
+    const char* category = ACT_TIERS[tier].category;
+    const char* exact    = ACT_TIERS[tier].exact;
     uint8_t list[SPLASH_ANIM_COUNT];
     uint8_t n = 0;
     for (uint8_t i = 0; i < SPLASH_ANIM_COUNT; i++) {
         const splash_anim_def_t* a = &splash_anims[i];
         bool match = exact ? (strcmp(a->name, exact) == 0)
-                   : (tier == 0) ? (strcmp(a->category, "Idle") == 0)
-                   : (tier == 1) ? (strcmp(a->category, "Work") == 0)
-                   : false;
+                           : (strcmp(a->category, category) == 0);
         if (match) list[n++] = i;
     }
     if (n == 0) { splash_pick_for_current_rate(); return; }
@@ -316,12 +325,7 @@ static void pick_for_activity(void) {
         last_pick_ms = millis();     // restart it from frame 0 every rotate
         return;
     }
-    cur_anim = pick;
-    cur_frame = 0;
-    frame_started_ms = millis();
-    last_pick_ms = frame_started_ms;
-    const splash_anim_def_t *a = &splash_anims[cur_anim];
-    render_frame(a->frames[0], a->palette);
+    start_anim(pick);
 }
 
 void splash_set_activity(int working_sessions) {
@@ -341,13 +345,7 @@ void splash_pick_for_current_rate(void) {
     group_rotation[g]++;
     int8_t idx = group_lists[g][slot];
     if (idx < 0) return;
-
-    cur_anim = (uint16_t)idx;
-    cur_frame = 0;
-    frame_started_ms = millis();
-    last_pick_ms = frame_started_ms;
-    const splash_anim_def_t *a = &splash_anims[cur_anim];
-    render_frame(a->frames[0], a->palette);
+    start_anim((uint16_t)idx);
 }
 
 bool splash_is_active(void) { return active; }

@@ -118,8 +118,10 @@ static bool parse_json(const char* json, UsageData* out) {
     // and yields false for absent/null.
     out->chime = doc["c"].as<bool>();   // session-reset chime opt-in
     const char* n = doc["n"] | "";      // hook-driven attention event
-    out->notify_type = !strcmp(n, "input") ? 1 : !strcmp(n, "perm") ? 2 :
-                       !strcmp(n, "done")  ? 3 : !strcmp(n, "clear") ? 4 : 0;
+    out->notify_type = !strcmp(n, "input") ? ATTN_INPUT :
+                       !strcmp(n, "perm")  ? ATTN_PERM  :
+                       !strcmp(n, "done")  ? ATTN_DONE  :
+                       !strcmp(n, "clear") ? ATTN_CLEAR : ATTN_NONE;
     strlcpy(out->notify_project, doc["np"] | "", sizeof(out->notify_project));
     out->active_sessions = doc["a"] | -1;
     const char* acct = doc["acct"] | "pro";
@@ -133,6 +135,23 @@ static bool parse_json(const char* json, UsageData* out) {
     strlcpy(out->err, doc["err"] | "", sizeof(out->err));
     out->valid = true;
     return true;
+}
+
+// Session-limit thresholds: warn once when crossing 80%, and again at 95%
+// (a jump over both in one payload alerts once, at the higher tier).
+// Re-armed by a session-window reset. Only the previous payload's value is
+// tracked here — the full sample history lives in usage_rate.cpp.
+static void check_limit_thresholds(bool session_reset, float pct) {
+    static int prev = -1;
+    int s_now = (int)(pct + 0.5f);
+    if (session_reset) prev = -1;
+    if (prev >= 0 && ((prev < 95 && s_now >= 95) ||
+                      (prev < 80 && s_now >= 80 && s_now < 95))) {
+        Serial.printf("session limit warning: %d%% -> %d%%\n", prev, s_now);
+        sound_hal_play_alert(ATTN_LIMIT);
+        ui_show_attention(ATTN_LIMIT, "");
+    }
+    prev = s_now;
 }
 
 // ---- Serial command buffer ----
@@ -389,12 +408,12 @@ void loop() {
             // payload per hook event, so no edge detection is needed here.
             // Handled before the ok-check: a permission chime matters even
             // while the usage data itself is unavailable.
-            if (usage.notify_type >= 1 && usage.notify_type <= 3) {
+            if (usage.notify_type >= ATTN_INPUT && usage.notify_type <= ATTN_DONE) {
                 Serial.printf("attention request type %d (%s) — melody + view\n",
                               usage.notify_type, usage.notify_project);
                 sound_hal_play_alert(usage.notify_type);
                 ui_show_attention(usage.notify_type, usage.notify_project);
-            } else if (usage.notify_type == 4) {
+            } else if (usage.notify_type == ATTN_CLEAR) {
                 Serial.println("attention clear — user is back at the keyboard");
                 ui_hide_attention();
             }
@@ -414,7 +433,7 @@ void loop() {
                 // serial cmd ignores it.
                 if (session_reset) {
                     Serial.println("session reset detected — wink");
-                    ui_show_attention(5, "");        // «Лимиты обновились!»
+                    ui_show_attention(ATTN_RESET, "");
                     if (usage.chime) sound_hal_play_reset();  // sound stays opt-in
                 }
                 if (g_after != g_before) {
@@ -422,23 +441,7 @@ void loop() {
                         g_before, g_after, usage.session_pct);
                     if (splash_is_active()) splash_pick_for_current_rate();
                 }
-                // Session-limit thresholds: warn once when crossing 80%, and
-                // again at 95%. A jump over both in one payload alerts once.
-                // Re-armed by the session reset above (history restarts).
-                {
-                    static int prev_s_pct = -1;
-                    int s_now = (int)(usage.session_pct + 0.5f);
-                    if (session_reset) prev_s_pct = -1;
-                    if (prev_s_pct >= 0 &&
-                        ((prev_s_pct < 95 && s_now >= 95) ||
-                         (prev_s_pct < 80 && s_now >= 80 && s_now < 95))) {
-                        Serial.printf("session limit warning: %d%% -> %d%%\n",
-                                      prev_s_pct, s_now);
-                        sound_hal_play_alert(4);
-                        ui_show_attention(4, "");
-                    }
-                    prev_s_pct = s_now;
-                }
+                check_limit_thresholds(session_reset, usage.session_pct);
                 ui_update(&usage);
                 splash_set_activity(usage.active_sessions);
                 idle_set_claude_active(usage.active_sessions);
