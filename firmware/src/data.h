@@ -1,6 +1,37 @@
 #pragma once
 #include <Arduino.h>
 
+enum DashboardTransport : uint8_t {
+    DASHBOARD_TRANSPORT_NONE,
+    DASHBOARD_TRANSPORT_USB,
+    DASHBOARD_TRANSPORT_BLE,
+};
+
+struct CodexLimitData {
+    float percent;
+    int window_mins;
+    int reset_mins;
+};
+
+struct CodexData {
+    CodexLimitData limits[2];
+    uint8_t limit_count;
+    uint32_t tokens_today;
+    char plan[12];
+    bool valid;
+};
+
+struct ActivityData {
+    int claude_open;
+    int claude_busy;
+    int claude_waiting;
+    int codex_unread;
+    bool claude_valid;
+    bool codex_valid;
+    long scanned_epoch;
+    bool valid;
+};
+
 struct UsageData {
     float session_pct;       // utilization 0-100 (5h window Pro/Max; spending % Enterprise)
     int session_reset_mins;  // minutes until reset
@@ -16,4 +47,8 @@ struct UsageData {
     int  clock_fmt;          // 12 or 24 (hour format from daemon); defaults to 24
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
+    CodexData codex;
+    ActivityData activity;
+    long updated_epoch;
+    DashboardTransport transport;
 };

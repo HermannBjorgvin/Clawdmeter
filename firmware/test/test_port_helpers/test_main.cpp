@@ -4,10 +4,13 @@
 #include "boards/esp32_2432s024c/power_button.h"
 #include "boards/esp32_2432s024c/display_color_order.h"
 #include "boards/esp32_2432s024c/touch_mapping.h"
+#include "dashboard_payload.h"
 #include "serial_protocol.h"
 #include "splash_layout.h"
 #include "ui_layout.h"
 #include "usage_view_state.h"
+
+#include "../../src/dashboard_payload.cpp"
 
 void test_touch_mapping_keeps_portrait_axes(void) {
     TouchPoint point = map_touch_to_portrait(40, 250);
@@ -97,6 +100,49 @@ void test_stale_data_without_ble_selects_waiting_view(void) {
     );
 }
 
+void test_old_claude_payload_remains_compatible(void) {
+    UsageData data{};
+    uint8_t mask = parse_dashboard_json(
+        "{\"s\":12.5,\"sr\":30,\"w\":34,\"wr\":60,\"ok\":true}",
+        &data
+    );
+
+    TEST_ASSERT_BITS_HIGH(DASHBOARD_UPDATE_CLAUDE, mask);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 12.5f, data.session_pct);
+    TEST_ASSERT_FALSE(data.codex.valid);
+    TEST_ASSERT_FALSE(data.activity.valid);
+}
+
+void test_new_payload_parses_codex_and_activity(void) {
+    UsageData data{};
+    uint8_t mask = parse_dashboard_json(
+        "{\"v\":2,\"ts\":1000,\"x\":{\"l\":[{\"p\":2,\"wm\":10080,\"rm\":10}],\"td\":120,\"pl\":\"pro\"},\"a\":{\"cl\":{\"o\":3,\"b\":1,\"w\":1},\"cx\":{\"u\":5},\"ts\":1000}}",
+        &data
+    );
+
+    TEST_ASSERT_BITS_HIGH(DASHBOARD_UPDATE_CODEX, mask);
+    TEST_ASSERT_BITS_HIGH(DASHBOARD_UPDATE_ACTIVITY, mask);
+    TEST_ASSERT_EQUAL_UINT8(1, data.codex.limit_count);
+    TEST_ASSERT_EQUAL_INT(10080, data.codex.limits[0].window_mins);
+    TEST_ASSERT_EQUAL_UINT32(120, data.codex.tokens_today);
+    TEST_ASSERT_EQUAL_INT(3, data.activity.claude_open);
+    TEST_ASSERT_EQUAL_INT(5, data.activity.codex_unread);
+}
+
+void test_missing_codex_window_is_not_invented_and_zero_unread_is_valid(void) {
+    UsageData data{};
+    uint8_t mask = parse_dashboard_json(
+        "{\"x\":{\"l\":[],\"td\":0},\"a\":{\"cx\":{\"u\":0},\"ts\":1000}}",
+        &data
+    );
+
+    TEST_ASSERT_BITS_HIGH(DASHBOARD_UPDATE_CODEX, mask);
+    TEST_ASSERT_EQUAL_UINT8(0, data.codex.limit_count);
+    TEST_ASSERT_BITS_HIGH(DASHBOARD_UPDATE_ACTIVITY, mask);
+    TEST_ASSERT_TRUE(data.activity.codex_valid);
+    TEST_ASSERT_EQUAL_INT(0, data.activity.codex_unread);
+}
+
 void setup() {
     delay(2000);
     UNITY_BEGIN();
@@ -112,6 +158,9 @@ void setup() {
     RUN_TEST(test_st7789_portrait_mode_uses_bgr_color_order);
     RUN_TEST(test_fresh_serial_data_selects_live_usage_without_ble);
     RUN_TEST(test_stale_data_without_ble_selects_waiting_view);
+    RUN_TEST(test_old_claude_payload_remains_compatible);
+    RUN_TEST(test_new_payload_parses_codex_and_activity);
+    RUN_TEST(test_missing_codex_window_is_not_invented_and_zero_unread_is_valid);
     UNITY_END();
 }
 

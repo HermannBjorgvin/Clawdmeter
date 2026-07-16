@@ -1,11 +1,11 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <lvgl.h>
-#include <ArduinoJson.h>
 #include "serial_protocol.h"
 #include <esp_heap_caps.h>
 
 #include "data.h"
+#include "dashboard_payload.h"
 #include "ui.h"
 #include "ble.h"
 #include "splash.h"
@@ -98,54 +98,24 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 }
 
-// Parse a JSON line into UsageData.
-static bool parse_json(const char* json, UsageData* out) {
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, json);
-    if (err) {
-        Serial.printf("JSON parse error: %s\n", err.c_str());
-        return false;
-    }
+static bool apply_usage_json(const char* json, DashboardTransport transport) {
+    uint8_t updates = parse_dashboard_json(json, &usage);
+    if (updates == DASHBOARD_UPDATE_NONE) return false;
+    usage.transport = transport;
 
-    out->session_pct = doc["s"] | 0.0f;
-    out->session_reset_mins = doc["sr"] | -1;
-    out->weekly_pct = doc["w"] | 0.0f;
-    out->weekly_reset_mins = doc["wr"] | -1;
-    strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
-    out->chime = doc["c"] | false;   // absent (old daemon / chime off) → stay silent
-    const char* acct = doc["acct"] | "pro";
-    out->enterprise = (strcmp(acct, "ent") == 0);
-    out->time_pct = doc["tp"] | 0;
-    out->period_days = doc["pd"] | 30;
-    strlcpy(out->reset_date, doc["rd"] | "", sizeof(out->reset_date));
-    out->clock_epoch = doc["t"] | 0L;
-    out->clock_fmt = doc["tf"] | 24;
-    out->ok = doc["ok"] | false;
-    out->valid = true;
-    return true;
-}
-
-static bool apply_usage_json(const char* json) {
-    if (!parse_json(json, &usage)) return false;
-
-    int g_before = usage_rate_group();
-    bool session_reset = usage_rate_sample(usage.session_pct);
-    int g_after = usage_rate_group();
-    if (session_reset && usage.chime) {
-        Serial.println("session reset detected - chime");
-        sound_hal_play_reset();
-    }
-    if (g_after != g_before) {
-        Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-            g_before, g_after, usage.session_pct);
-        if (splash_is_active()) splash_pick_for_current_rate();
+    if (updates & DASHBOARD_UPDATE_CLAUDE) {
+        int g_before = usage_rate_group();
+        bool session_reset = usage_rate_sample(usage.session_pct);
+        int g_after = usage_rate_group();
+        if (session_reset && usage.chime) sound_hal_play_reset();
+        if (g_after != g_before && splash_is_active()) splash_pick_for_current_rate();
     }
     ui_update(&usage);
     return true;
 }
 
 // ---- Serial command buffer ----
-#define CMD_BUF_SIZE 384
+#define CMD_BUF_SIZE 768
 static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_pos = 0;
 static bool serial_usage_screen_shown = false;
@@ -205,7 +175,7 @@ static void check_serial_cmd() {
                                   board_caps().name);
                     break;
                 case SERIAL_LINE_USAGE_JSON:
-                    if (apply_usage_json(cmd_buf)) {
+                    if (apply_usage_json(cmd_buf, DASHBOARD_TRANSPORT_USB)) {
                         if (!serial_usage_screen_shown) {
                             ui_show_screen(SCREEN_USAGE);
                             serial_usage_screen_shown = true;
@@ -414,7 +384,7 @@ void loop() {
     check_serial_cmd();
 
     if (ble_has_data()) {
-        if (apply_usage_json(ble_get_data())) {
+        if (apply_usage_json(ble_get_data(), DASHBOARD_TRANSPORT_BLE)) {
             ble_send_ack();
         } else {
             ble_send_nack();
