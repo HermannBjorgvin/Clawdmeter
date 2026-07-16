@@ -4,6 +4,12 @@
 // All tunables live here so nothing is hard-coded in main.cpp / idle.cpp.
 
 #define IDLE_TIMEOUT_MS             (30UL * 60UL * 1000UL)  // 30 min
+
+// When the daemon reports live Claude activity ("a" field), the screen goes
+// dark after this much combined inactivity (no working session AND no user
+// input) — even on USB power, since an idle Claude doesn't need a lit AMOLED.
+// A session starting to work (or any attention event) wakes it back up.
+#define CLAUDE_IDLE_SLEEP_MS        (5UL * 60UL * 1000UL)   // 5 min
 #define IDLE_FADE_OUT_MS            400      // fade-to-black duration
 #define IDLE_FADE_IN_MS             180      // wake fade-in (snappier)
 #define IDLE_FADE_STEP_MS           20       // tick interval per fade step

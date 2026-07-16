@@ -4,6 +4,11 @@
 void idle_init(void);
 void idle_tick(void);
 void idle_note_activity(void);
+// Live Claude activity from the daemon: <0 unknown (old daemon / BLE down —
+// classic power rules apply), 0 idle, >0 sessions working. Working keeps the
+// panel awake (and wakes it); known-idle arms the short CLAUDE_IDLE_SLEEP_MS
+// screen-off timer that overrides the never-sleep-on-USB rule.
+void idle_set_claude_active(int sessions);
 
 // Set the "awake" brightness target (0..255). idle owns display brightness
 // (it fades between this and 0), so user brightness control routes through

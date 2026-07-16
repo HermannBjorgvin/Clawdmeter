@@ -43,6 +43,12 @@ void idle_set_awake_brightness(uint8_t level) {
     if (state == STATE_AWAKE) apply_brightness(level);
 }
 
+static int claude_sessions = -1;   // <0 unknown / 0 idle / >0 working
+
+void idle_set_claude_active(int sessions) {
+    claude_sessions = sessions;
+}
+
 void idle_note_activity(void) {
     last_activity_ms = millis();
     if (state == STATE_FADING_IN) return;
@@ -78,9 +84,21 @@ bool idle_is_asleep(void) {
 void idle_tick(void) {
     uint32_t now = millis();
 
+    // A working Claude session counts as continuous activity — and lights the
+    // panel back up if it had gone dark.
+    if (claude_sessions > 0) {
+        last_activity_ms = now;
+        if (state == STATE_ASLEEP || state == STATE_FADING_OUT) {
+            begin_fade(awake_brightness, now);
+            state = STATE_FADING_IN;
+        }
+    }
+
     // While on USB power (if configured), don't sleep — and wake from sleep
-    // when power comes back. Treats USB-in as continuous activity.
-    if (!IDLE_SLEEP_WHEN_CHARGING && power_hal_is_vbus_in()) {
+    // when power comes back. Treats USB-in as continuous activity. Skipped
+    // when the daemon reports live activity state: a known-idle Claude gets
+    // the short screen-off timer below even on USB power.
+    if (!IDLE_SLEEP_WHEN_CHARGING && power_hal_is_vbus_in() && claude_sessions < 0) {
         last_activity_ms = now;
         if (state == STATE_ASLEEP || state == STATE_FADING_OUT) {
             begin_fade(awake_brightness, now);
@@ -89,12 +107,15 @@ void idle_tick(void) {
     }
 
     switch (state) {
-    case STATE_AWAKE:
-        if (now - last_activity_ms >= IDLE_TIMEOUT_MS) {
+    case STATE_AWAKE: {
+        uint32_t timeout = (claude_sessions >= 0) ? CLAUDE_IDLE_SLEEP_MS
+                                                  : IDLE_TIMEOUT_MS;
+        if (now - last_activity_ms >= timeout) {
             begin_fade(0, now);
             state = STATE_FADING_OUT;
         }
         break;
+    }
 
     case STATE_FADING_OUT:
     case STATE_FADING_IN: {

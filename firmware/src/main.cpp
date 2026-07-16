@@ -364,6 +364,9 @@ void loop() {
     if (bs != last_ble_state) {
         last_ble_state = bs;
         ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());
+        // Without a live daemon the activity state is unknowable — fall back
+        // to the classic power rules (and stay lit for the pairing hint).
+        if (bs != BLE_STATE_CONNECTED) idle_set_claude_active(-1);
     }
 
     static int  last_pct      = -2;
@@ -436,6 +439,7 @@ void loop() {
                 }
                 ui_update(&usage);
                 splash_set_activity(usage.active_sessions);
+                idle_set_claude_active(usage.active_sessions);
             }
             ble_send_ack();
         } else {
