@@ -3,6 +3,7 @@
 #include "theme.h"
 #include "usage_rate.h"
 #include "hal/board_caps.h"
+#include "splash_layout.h"
 #include <Arduino.h>
 #include <string.h>
 #include <esp_heap_caps.h>
@@ -161,10 +162,9 @@ static void show_placeholder() {
 void splash_init(lv_obj_t *parent) {
     const BoardCaps& c = board_caps();
     int min_dim = (c.width < c.height) ? c.width : c.height;
-    cell     = min_dim / GRID;       // fits within the smaller display dimension
-    if (cell < 4) cell = 4;
 
 #ifdef BOARD_HAS_PSRAM
+    cell = compute_splash_cell(min_dim, true);
     const uint32_t canvas_caps = MALLOC_CAP_SPIRAM;
 #else
     // Without PSRAM the full 480×480 RGB565 canvas (460 KB) won't fit. Cap
@@ -173,8 +173,7 @@ void splash_init(lv_obj_t *parent) {
     // canvas is centered, so the cost is extra black border around the
     // pixel art — not cropping.
     const uint32_t canvas_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-    const int MAX_CELL_NO_PSRAM = 10;  // 10*20=200; 200*200*2=78 KB
-    if (cell > MAX_CELL_NO_PSRAM) cell = MAX_CELL_NO_PSRAM;
+    cell = compute_splash_cell(min_dim, false);
 #endif
 
     canvas_w = GRID * cell;
@@ -186,6 +185,13 @@ void splash_init(lv_obj_t *parent) {
         Serial.println("splash: failed to alloc canvas buffer");
         return;
     }
+    Serial.printf(
+        "Splash canvas ready (%dx%d, free=%u, largest=%u)\n",
+        canvas_w,
+        canvas_h,
+        static_cast<unsigned>(heap_caps_get_free_size(canvas_caps)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(canvas_caps))
+    );
 
     splash_container = lv_obj_create(parent);
     lv_obj_set_size(splash_container, c.width, c.height);

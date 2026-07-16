@@ -3,6 +3,7 @@
 
 #include "boards/esp32_2432s024c/power_button.h"
 #include "boards/esp32_2432s024c/touch_mapping.h"
+#include "splash_layout.h"
 #include "ui_layout.h"
 
 void test_touch_mapping_keeps_portrait_axes(void) {
@@ -60,6 +61,12 @@ void test_existing_layout_breakpoints_remain_distinct(void) {
     TEST_ASSERT_EQUAL_INT(150, large.usage_panel_h);
 }
 
+void test_small_no_psram_splash_keeps_heap_headroom(void) {
+    TEST_ASSERT_EQUAL_INT(8, compute_splash_cell(240, false));
+    TEST_ASSERT_EQUAL_INT(10, compute_splash_cell(480, false));
+    TEST_ASSERT_EQUAL_INT(12, compute_splash_cell(240, true));
+}
+
 void setup() {
     delay(2000);
     UNITY_BEGIN();
@@ -69,6 +76,7 @@ void setup() {
     RUN_TEST(test_long_press_does_not_emit_short_event);
     RUN_TEST(test_240x320_layout_fits_both_panels);
     RUN_TEST(test_existing_layout_breakpoints_remain_distinct);
+    RUN_TEST(test_small_no_psram_splash_keeps_heap_headroom);
     UNITY_END();
 }
 
