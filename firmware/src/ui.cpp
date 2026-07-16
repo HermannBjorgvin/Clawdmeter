@@ -5,6 +5,7 @@
 #include "logo.h"
 #include "icons.h"
 #include "hal/board_caps.h"
+#include "ui_layout.h"
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
@@ -15,6 +16,7 @@ LV_FONT_DECLARE(font_styrene_24);
 LV_FONT_DECLARE(font_styrene_20);
 LV_FONT_DECLARE(font_styrene_16);
 LV_FONT_DECLARE(font_styrene_14);
+LV_FONT_DECLARE(font_mono_18);
 LV_FONT_DECLARE(font_mono_32);
 
 // Layout values computed from the active board's geometry. Populated once
@@ -42,6 +44,13 @@ struct Layout {
     const lv_font_t* bt_device_font;
     const lv_font_t* bt_credit_1_font;
     const lv_font_t* bt_credit_2_font;
+    const lv_font_t* title_font;
+    const lv_font_t* percentage_font;
+    const lv_font_t* reset_font;
+    const lv_font_t* pill_font;
+    const lv_font_t* detail_font;
+    const lv_font_t* status_font;
+    int16_t idle_creature_size;
 };
 static Layout L = {};
 
@@ -50,20 +59,36 @@ static Layout L = {};
 // inherit the closer one — visually OK, may need a polish pass for
 // pixel-perfect alignment but never blocks the port from booting.
 static void compute_layout(const BoardCaps& c) {
-    L.scr_w = c.width;
-    L.scr_h = c.height;
-    L.margin = 20;
-    L.title_y = 30;
+    const UiLayoutMetrics metrics = compute_ui_layout_metrics(c.width, c.height);
+    L.scr_w = metrics.screen_width;
+    L.scr_h = metrics.screen_height;
+    L.margin = metrics.margin;
+    L.title_y = metrics.title_y;
+    L.content_y = metrics.content_y;
+    L.content_w = metrics.content_width;
+    L.usage_panel_h = metrics.usage_panel_h;
+    L.usage_panel_gap = metrics.usage_panel_gap;
+    L.usage_bar_y = metrics.usage_bar_y;
+    L.usage_reset_y = metrics.usage_reset_y;
+    L.bt_info_panel_h = metrics.bluetooth_panel_h;
+    L.bt_reset_zone_h = metrics.bluetooth_reset_zone_h;
+    L.idle_creature_size = metrics.idle_creature_size;
 
-    if (c.height >= 460) {
+    L.title_font = metrics.small_display ? &font_tiempos_34 : &font_tiempos_56;
+    L.percentage_font = metrics.small_display ? &font_styrene_28 : &font_styrene_48;
+    L.reset_font = metrics.small_display ? &font_styrene_14 : &font_styrene_28;
+    L.pill_font = metrics.small_display ? &font_styrene_14 : &font_styrene_28;
+    L.detail_font = metrics.small_display ? &font_styrene_14 : &font_styrene_16;
+    L.status_font = metrics.small_display ? &font_mono_18 : &font_mono_32;
+
+    if (metrics.small_display) {
+        L.bt_title_font    = &font_tiempos_34;
+        L.bt_status_font   = &font_styrene_28;
+        L.bt_device_font   = &font_styrene_14;
+        L.bt_credit_1_font = &font_styrene_14;
+        L.bt_credit_2_font = &font_styrene_14;
+    } else if (c.height >= 460) {
         // Large layout — tuned for 480x480 (AMOLED-2.16).
-        L.content_y = 100;
-        L.usage_panel_h = 150;
-        L.usage_panel_gap = 16;
-        L.usage_bar_y = 56;
-        L.usage_reset_y = 94;
-        L.bt_info_panel_h = 160;
-        L.bt_reset_zone_h = 110;
         L.bt_title_font    = &font_tiempos_56;
         L.bt_status_font   = &font_styrene_48;
         L.bt_device_font   = &font_styrene_28;
@@ -71,21 +96,12 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_credit_2_font = &font_styrene_20;
     } else {
         // Compact layout — tuned for 368x448 (AMOLED-1.8).
-        L.content_y = 85;
-        L.usage_panel_h = 130;
-        L.usage_panel_gap = 12;
-        L.usage_bar_y = 48;
-        L.usage_reset_y = 78;
-        L.bt_info_panel_h = 140;
-        L.bt_reset_zone_h = 90;
         L.bt_title_font    = &font_tiempos_34;
         L.bt_status_font   = &font_styrene_28;
         L.bt_device_font   = &font_styrene_20;
         L.bt_credit_1_font = &font_styrene_16;
         L.bt_credit_2_font = &font_styrene_14;
     }
-
-    L.content_w = L.scr_w - 2 * L.margin;
 }
 
 // Anthropic brand palette — design tokens live in theme.h
@@ -267,7 +283,7 @@ static void init_icon_dsc_rgb565a8(lv_image_dsc_t* dsc, int w, int h, const uint
 static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_font(lbl, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl, L.pill_font, 0);
     lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
     lv_obj_set_style_bg_color(lbl, COL_BAR_BG, 0);
     lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
@@ -296,7 +312,7 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "---%");
-    lv_obj_set_style_text_font(*out_pct, &font_styrene_48, 0);
+    lv_obj_set_style_text_font(*out_pct, L.percentage_font, 0);
     lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
     lv_obj_set_pos(*out_pct, 0, 0);
 
@@ -307,7 +323,7 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
 
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
-    lv_obj_set_style_text_font(*out_reset, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(*out_reset, L.reset_font, 0);
     lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
     lv_obj_set_pos(*out_reset, 0, L.usage_reset_y);
 
@@ -363,7 +379,11 @@ static void build_idle_group(lv_obj_t* parent) {
     // A shrunk-down sleeping creature (reused claudepix "expression sleep" art)
     // sits between the header and the status line; the animated "Listening…"
     // status line carries the words, so no extra text is needed here.
-    lv_obj_t* creature = splash_mini_create(idle_group, "expression sleep", 160);
+    lv_obj_t* creature = splash_mini_create(
+        idle_group,
+        "expression sleep",
+        L.idle_creature_size
+    );
     if (creature) lv_obj_align(creature, LV_ALIGN_CENTER, 0, -20);
 
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
@@ -381,7 +401,7 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
-    lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
     lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
 
@@ -403,20 +423,20 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Enterprise-only overlays inside panel_session — hidden until enterprise data arrives
     lbl_session_pct_sym = lv_label_create(panel_session);
     lv_label_set_text(lbl_session_pct_sym, "%");
-    lv_obj_set_style_text_font(lbl_session_pct_sym, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl_session_pct_sym, L.reset_font, 0);
     lv_obj_set_style_text_color(lbl_session_pct_sym, COL_TEXT, 0);
     lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
 
     lbl_spending_desc = lv_label_create(panel_session);
     lv_label_set_text(lbl_spending_desc, "of your monthly budget");
-    lv_obj_set_style_text_font(lbl_spending_desc, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl_spending_desc, L.reset_font, 0);
     lv_obj_set_style_text_color(lbl_spending_desc, COL_DIM, 0);
     lv_obj_set_pos(lbl_spending_desc, 0, L.usage_reset_y);
     lv_obj_add_flag(lbl_spending_desc, LV_OBJ_FLAG_HIDDEN);
 
     lbl_spending_status = lv_label_create(panel_session);
     lv_label_set_text(lbl_spending_status, "");
-    lv_obj_set_style_text_font(lbl_spending_status, &font_styrene_16, 0);
+    lv_obj_set_style_text_font(lbl_spending_status, L.detail_font, 0);
     lv_obj_set_pos(lbl_spending_status, 0, L.usage_reset_y + 20);
     lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
 
@@ -433,7 +453,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
-    lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
+    lv_obj_set_style_text_font(lbl_anim, L.status_font, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
 }
@@ -486,7 +506,7 @@ void ui_update(const UsageData* data) {
 
     if (data->enterprise) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
-        lv_obj_set_style_text_font(lbl_session_pct, &font_tiempos_56, 0);
+        lv_obj_set_style_text_font(lbl_session_pct, L.title_font, 0);
         lv_label_set_text(lbl_session_label, "Spending");
         lv_obj_add_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
@@ -494,7 +514,7 @@ void ui_update(const UsageData* data) {
         lv_obj_add_flag(lbl_spending_status,   LV_OBJ_FLAG_HIDDEN);
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_set_style_text_font(lbl_session_pct, &font_styrene_48, 0);
+        lv_obj_set_style_text_font(lbl_session_pct, L.percentage_font, 0);
         lv_label_set_text(lbl_session_label, "Current");
         lv_obj_clear_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);

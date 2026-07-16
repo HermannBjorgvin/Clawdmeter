@@ -3,6 +3,7 @@
 
 #include "boards/esp32_2432s024c/power_button.h"
 #include "boards/esp32_2432s024c/touch_mapping.h"
+#include "ui_layout.h"
 
 void test_touch_mapping_keeps_portrait_axes(void) {
     TouchPoint point = map_touch_to_portrait(40, 250);
@@ -40,6 +41,25 @@ void test_long_press_does_not_emit_short_event(void) {
     TEST_ASSERT_TRUE(released.released);
 }
 
+void test_240x320_layout_fits_both_panels(void) {
+    UiLayoutMetrics metrics = compute_ui_layout_metrics(240, 320);
+    const int bottom = metrics.content_y +
+        (2 * metrics.usage_panel_h) + metrics.usage_panel_gap;
+
+    TEST_ASSERT_LESS_OR_EQUAL_INT(276, bottom);
+    TEST_ASSERT_TRUE(metrics.small_display);
+    TEST_ASSERT_EQUAL_INT(18, metrics.status_font_px);
+}
+
+void test_existing_layout_breakpoints_remain_distinct(void) {
+    UiLayoutMetrics compact = compute_ui_layout_metrics(368, 448);
+    UiLayoutMetrics large = compute_ui_layout_metrics(480, 480);
+
+    TEST_ASSERT_FALSE(compact.small_display);
+    TEST_ASSERT_EQUAL_INT(130, compact.usage_panel_h);
+    TEST_ASSERT_EQUAL_INT(150, large.usage_panel_h);
+}
+
 void setup() {
     delay(2000);
     UNITY_BEGIN();
@@ -47,6 +67,8 @@ void setup() {
     RUN_TEST(test_touch_mapping_clamps_edges);
     RUN_TEST(test_short_press_emits_only_short_event);
     RUN_TEST(test_long_press_does_not_emit_short_event);
+    RUN_TEST(test_240x320_layout_fits_both_panels);
+    RUN_TEST(test_existing_layout_breakpoints_remain_distinct);
     UNITY_END();
 }
 
