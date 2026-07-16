@@ -57,7 +57,27 @@ ATTN_TYPES = ("input", "perm", "done", "clear")
 # creature and the "·N" session counter.
 SESS_DIR = Path.home() / ".config" / "claude-usage-monitor" / "sessions"
 SESS_TTL_FG = 4 * 60
-SESS_TTL_BG = 45 * 60
+
+
+def _bg_session_still_running(sid: str) -> bool:
+    """Is a bg-marked session's background task really still running?
+
+    A running task keeps its .output file open in the session's tasks dir —
+    lsof sees that. (Its exit code is useless: 1 even with matches; test
+    stdout instead.) No open files = the session died or never came back.
+    """
+    root = Path(f"/private/tmp/claude-{os.getuid()}")
+    try:
+        for tasks_dir in root.glob(f"*/{sid}/tasks"):
+            out = subprocess.run(
+                ["lsof", "-w", "+d", str(tasks_dir)],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+            if out.strip():
+                return True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return False
 
 
 def count_active_sessions() -> int:
@@ -68,7 +88,14 @@ def count_active_sessions() -> int:
             try:
                 age = now - f.stat().st_mtime
                 mode = f.read_text().strip()
-                if age <= (SESS_TTL_BG if mode == "bg" else SESS_TTL_FG):
+                if mode == "bg":
+                    # Trust, but verify: count only while the background task
+                    # is genuinely alive; drop ghosts on the spot.
+                    if _bg_session_still_running(f.name):
+                        n += 1
+                    else:
+                        f.unlink(missing_ok=True)
+                elif age <= SESS_TTL_FG:
                     n += 1
             except OSError:
                 continue
