@@ -7,6 +7,7 @@
 #include "serial_protocol.h"
 #include "splash_layout.h"
 #include "ui_layout.h"
+#include "usage_view_state.h"
 
 void test_touch_mapping_keeps_portrait_axes(void) {
     TouchPoint point = map_touch_to_portrait(40, 250);
@@ -82,6 +83,20 @@ void test_st7789_portrait_mode_uses_bgr_color_order(void) {
     TEST_ASSERT_EQUAL_HEX8(0xC8, st7789_portrait_bgr_madctl());
 }
 
+void test_fresh_serial_data_selects_live_usage_without_ble(void) {
+    TEST_ASSERT_EQUAL(
+        USAGE_VIEW_LIVE,
+        select_usage_view_state(false, true, 1000, 950, 90000)
+    );
+}
+
+void test_stale_data_without_ble_selects_waiting_view(void) {
+    TEST_ASSERT_EQUAL(
+        USAGE_VIEW_WAITING,
+        select_usage_view_state(false, true, 100000, 1000, 90000)
+    );
+}
+
 void setup() {
     delay(2000);
     UNITY_BEGIN();
@@ -95,6 +110,8 @@ void setup() {
     RUN_TEST(test_serial_protocol_recognizes_usage_json);
     RUN_TEST(test_serial_protocol_recognizes_identify_command);
     RUN_TEST(test_st7789_portrait_mode_uses_bgr_color_order);
+    RUN_TEST(test_fresh_serial_data_selects_live_usage_without_ble);
+    RUN_TEST(test_stale_data_without_ble_selects_waiting_view);
     UNITY_END();
 }
 

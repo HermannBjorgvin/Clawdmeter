@@ -148,6 +148,7 @@ static bool apply_usage_json(const char* json) {
 #define CMD_BUF_SIZE 384
 static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_pos = 0;
+static bool serial_usage_screen_shown = false;
 
 static void send_screenshot() {
 #ifndef BOARD_HAS_PSRAM
@@ -204,8 +205,15 @@ static void check_serial_cmd() {
                                   board_caps().name);
                     break;
                 case SERIAL_LINE_USAGE_JSON:
-                    Serial.println(apply_usage_json(cmd_buf)
-                        ? "{\"ack\":true}" : "{\"ack\":false}");
+                    if (apply_usage_json(cmd_buf)) {
+                        if (!serial_usage_screen_shown) {
+                            ui_show_screen(SCREEN_USAGE);
+                            serial_usage_screen_shown = true;
+                        }
+                        Serial.println("{\"ack\":true}");
+                    } else {
+                        Serial.println("{\"ack\":false}");
+                    }
                     break;
                 default:
                     break;
