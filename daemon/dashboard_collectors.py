@@ -24,6 +24,8 @@ def collect_claude_activity(claude_home: Path) -> dict[str, int]:
         value = _read_json(path)
         if isinstance(value, dict) and isinstance(value.get("status"), str):
             statuses.append(value["status"])
+    if not statuses:
+        return {}
     return {
         "open": len(statuses),
         "busy": sum(status == "busy" for status in statuses),

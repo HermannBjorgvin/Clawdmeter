@@ -34,6 +34,14 @@ def test_collect_claude_activity_counts_open_busy_and_waiting(tmp_path: Path) ->
     }
 
 
+def test_collect_claude_activity_returns_empty_when_no_valid_statuses(tmp_path: Path) -> None:
+    sessions = tmp_path / ".claude" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "broken.json").write_text("{", encoding="utf-8")
+
+    assert collect_claude_activity(tmp_path / ".claude") == {}
+
+
 def test_collect_codex_activity_counts_unread_without_titles(tmp_path: Path) -> None:
     state = {
         "electron-persisted-atom-state": {
