@@ -12,6 +12,9 @@ def test_platformio_environment_targets_verified_board() -> None:
     assert "board_build.partitions = huge_app.csv" in section
     assert "+<boards/esp32_2432s024c/>" in section
     assert "-DBOARD_HAS_PSRAM" not in section.split("[env:", 1)[0]
+    assert "lib_ignore =" in section
+    assert "Adafruit seesaw Library" in section
+    assert "SD" in section
 
 
 def test_board_header_matches_verified_pins() -> None:
