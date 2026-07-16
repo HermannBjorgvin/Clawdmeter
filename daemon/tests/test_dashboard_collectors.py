@@ -84,6 +84,24 @@ def test_collect_codex_usage_reads_available_windows_and_daily_tokens(tmp_path: 
     }
 
 
+def test_collect_codex_usage_preserves_valid_zero_daily_tokens(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 16, 18, 0, tzinfo=timezone.utc).timestamp()
+    event = {
+        "timestamp": "2026-07-16T17:55:00+00:00",
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {"last_token_usage": {"total_tokens": 0}},
+        },
+    }
+    write_jsonl(
+        tmp_path / ".codex" / "sessions" / "2026" / "07" / "16" / "rollout.jsonl",
+        [event],
+    )
+
+    assert collect_codex_usage(tmp_path / ".codex", now=now) == {"tokens_today": 0}
+
+
 def test_missing_or_malformed_state_returns_empty_aggregates(tmp_path: Path) -> None:
     assert collect_claude_activity(tmp_path / ".claude") == {}
     assert collect_codex_activity(tmp_path / ".codex") == {}

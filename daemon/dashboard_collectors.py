@@ -90,6 +90,7 @@ def collect_codex_usage(codex_home: Path, now: float | None = None) -> dict[str,
         return {}
     latest_rate_limits: dict[str, Any] | None = None
     tokens_today = 0
+    saw_daily_token_event = False
     local_now = datetime.fromtimestamp(scan_time)
     local_day = local_now.date()
     day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
@@ -121,11 +122,12 @@ def collect_codex_usage(codex_home: Path, now: float | None = None) -> dict[str,
             except (TypeError, ValueError):
                 continue
             if event_day == local_day and isinstance(total, int):
+                saw_daily_token_event = True
                 tokens_today += max(0, total)
         if latest_rate_limits is None and file_rate_limits is not None:
             latest_rate_limits = file_rate_limits
     if latest_rate_limits is None:
-        return {"tokens_today": tokens_today} if tokens_today else {}
+        return {"tokens_today": tokens_today} if saw_daily_token_event else {}
     limits = [
         parsed
         for key in ("primary", "secondary")

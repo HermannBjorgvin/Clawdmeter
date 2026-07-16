@@ -21,6 +21,7 @@ def build_dashboard_payload(
     payload["ts"] = int(scan_time)
 
     codex = collect_codex_usage(profile_dir / ".codex", now=scan_time)
+    payload["x"] = None
     if codex:
         payload["x"] = {
             "l": [
@@ -34,14 +35,17 @@ def build_dashboard_payload(
 
     claude_activity = collect_claude_activity(profile_dir / ".claude")
     codex_activity = collect_codex_activity(profile_dir / ".codex")
-    if claude_activity or codex_activity:
-        payload["a"] = {"ts": int(scan_time)}
-        if claude_activity:
-            payload["a"]["cl"] = {
-                "o": claude_activity["open"],
-                "b": claude_activity["busy"],
-                "w": claude_activity["waiting"],
-            }
-        if codex_activity:
-            payload["a"]["cx"] = {"u": codex_activity["unread"]}
+    payload["a"] = {
+        "ts": int(scan_time),
+        "cl": None,
+        "cx": None,
+    }
+    if claude_activity:
+        payload["a"]["cl"] = {
+            "o": claude_activity["open"],
+            "b": claude_activity["busy"],
+            "w": claude_activity["waiting"],
+        }
+    if codex_activity:
+        payload["a"]["cx"] = {"u": codex_activity["unread"]}
     return payload
