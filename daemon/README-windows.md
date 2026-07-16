@@ -4,17 +4,21 @@ This guide covers running the Clawdmeter Windows daemon on native Windows hardwa
 It includes the turnkey `install-windows.ps1` bootstrap (tray icon + login autostart),
 the manual-run fallback, and how to manage or remove autostart.
 
+The tray application now uses **USB serial by default**. Keep the ESP32 connected to
+the computer with a USB data cable; Bluetooth pairing is not required for displaying
+usage. The original BLE daemon remains available as
+`claude_usage_daemon_windows.py` for boards that need it.
+
 ---
 
 ## Prerequisites
 
 | Requirement | Details |
 |-------------|---------|
-| **Native Windows** | Must run on real Windows — not WSL. The script prints a warning and BLE will not work under WSL. |
+| **Native Windows** | Must run on real Windows — not WSL. |
 | **Python 3.11+** | Download from [python.org](https://www.python.org/downloads/) if not already installed. Ensure "Add python.exe to PATH" is checked during install. |
 | **Claude Code installed** | Install Claude Code and complete `claude login` so credentials exist on disk. |
-| **Clawdmeter powered on** | The device must be powered on and in range before the daemon starts. |
-| **Paired with Windows Bluetooth** | Pair the device once via **Settings → Bluetooth & devices → Add device** (see [Pair the device](#pair-the-device-one-time)). This is required — the device is a bonded BLE HID keyboard, so pairing enables its physical buttons and keeps a persistent connection that shows your last usage even when the daemon is stopped. |
+| **Clawdmeter connected by USB** | Use a data-capable USB cable. The same cable powers the display and carries usage data. |
 
 ### Where are my credentials?
 
@@ -33,9 +37,13 @@ absolute path or `CLAUDE_CONFIG_DIR` to a directory to override the search entir
 
 ---
 
-## Pair the device (one time)
+## Bluetooth pairing (optional)
 
-The Clawdmeter is a **bonded BLE HID keyboard** as well as a usage display — its firmware
+The upstream Clawdmeter is a **bonded BLE HID keyboard** as well as a usage display. Pairing
+is optional in the USB-serial setup and is only useful on boards whose buttons send
+keyboard shortcuts. The ESP32-2432S024C usage display does not need this step.
+
+For a BLE-based board, its firmware
 enables bonding (`NimBLEDevice::setSecurityAuth`) and advertises the HID service so its
 physical buttons act as a keyboard (Space / Shift+Tab). Pair it with Windows **once**,
 before running the daemon:
@@ -87,7 +95,7 @@ Then repeat the `Activate.ps1` step.
 pip install -r daemon\requirements-windows.txt
 ```
 
-This installs `bleak` (WinRT BLE) and `httpx` (async HTTP for the Anthropic API).
+This installs `pyserial`, `httpx`, the tray dependencies, and the legacy BLE dependency.
 
 ---
 
@@ -96,38 +104,27 @@ This installs `bleak` (WinRT BLE) and `httpx` (async HTTP for the Anthropic API)
 With the venv active and the Clawdmeter powered on:
 
 ```powershell
-python daemon\claude_usage_daemon_windows.py
+python daemon\claude_usage_daemon_serial_windows.py
 ```
 
 ### Expected console output
 
 ```
-[HH:MM:SS] === Claude Usage Tracker Daemon (BLE, Windows) ===
-[HH:MM:SS] Poll interval: 60s
-[HH:MM:SS] Scanning for 'Clawdmeter' (8.0s)...
-[HH:MM:SS] Not advertising; connecting to bonded address XX:XX:XX:XX:XX:XX
-[HH:MM:SS] Connecting to XX:XX:XX:XX:XX:XX...
-[HH:MM:SS] Connected
-[HH:MM:SS] Sending: {"s":42,"sr":180,"w":17,"wr":8820,"st":"active","ok":true}
+[HH:MM:SS] === Claude Usage Tracker Daemon (USB serial, Windows) ===
+[HH:MM:SS] Clawdmeter identified on COM3
+[HH:MM:SS] Sending by USB serial: {"s":42,"sr":180,"w":17,"wr":8820,"st":"active","ok":true}
 ```
 
-- **The device must be paired with Windows first** (see [Pair the device](#pair-the-device-one-time)).
-  The daemon then connects over that existing link via `BleakScanner` + `BleakClient`; it does
-  not pop its own pairing dialog.
-- **`Scanning…` → `Not advertising; connecting to bonded address …` is normal.** Once paired,
-  Windows keeps the device connected, so it stops advertising and an advertisement scan can't
-  see it. The daemon detects this and connects directly to the device's address (recovered from
-  the Windows PnP table). The 8-second scan that precedes the fallback happens once per session.
-  Set `CLAWDMETER_BLE_ADDRESS=AA:BB:CC:DD:EE:FF` to pin the address and skip PnP lookup.
-- After `Connected`, the daemon polls the Anthropic API immediately and sends the first
+- The daemon probes physical USB serial ports and asks each device to identify itself;
+  Windows Bluetooth COM ports are ignored.
+- Set `CLAWDMETER_SERIAL_PORT=COM3` to pin the port if automatic detection is undesirable.
+- After identifying the device, the daemon polls the Anthropic API immediately and sends the first
   payload within a few seconds of connect (warm token path). With a valid, non-expired token
   the device should leave its waiting screen and show session + weekly percentages within
   about 10 seconds of launch.
-- The daemon then re-polls every 60 seconds while connected. If the device fires a refresh
-  request (e.g., after a button press), an immediate re-poll occurs without waiting for the
-  60-second interval.
-- If the device disconnects or goes out of range, the daemon logs `Device disconnected` and
-  re-scans automatically with exponential backoff (starting at 1 second, capped at 60 seconds).
+- The daemon then re-polls every 60 seconds while connected.
+- If the USB cable disconnects, the daemon releases the failed session and probes again with
+  exponential backoff.
 
 ### Stopping
 
@@ -199,10 +196,8 @@ Right-click the tray icon for the menu:
 - **Status header** (non-clickable) — live status + last data sync time.
 - **Start at login** (checkable toggle) — enables or disables autostart at runtime.
   Reflects the current registry state each time the menu opens.
-- **Quit** — stops the daemon cleanly and exits with no lingering process. It releases the
-  daemon's own data connection but does **not** drop the Windows Bluetooth pairing — the
-  device stays connected to Windows and keeps showing your last-synced usage (point-in-time
-  view).
+- **Quit** — stops the daemon cleanly, releases the COM port, and exits with no lingering
+  process. The device keeps showing the last-synced usage.
 
 ### Disabling or removing autostart
 
@@ -215,10 +210,9 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
 ### WSL independence
 
 The daemon operates fully independently of WSL. The token is read from native Windows
-credential paths (`%USERPROFILE%\.claude\.credentials.json` and fallbacks); BLE uses
-the WinRT stack directly. Running `wsl --shutdown` does not affect the BLE link, and
-the daemon starts correctly even in a fresh Windows session where WSL has never been
-launched.
+credential paths (`%USERPROFILE%\.claude\.credentials.json` and fallbacks), and serial
+communication uses the native Windows COM port. Running `wsl --shutdown` does not affect
+the daemon.
 
 ---
 

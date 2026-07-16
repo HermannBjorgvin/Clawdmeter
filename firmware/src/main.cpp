@@ -2,6 +2,7 @@
 #include <Wire.h>
 #include <lvgl.h>
 #include <ArduinoJson.h>
+#include "serial_protocol.h"
 #include <esp_heap_caps.h>
 
 #include "data.h"
@@ -124,8 +125,27 @@ static bool parse_json(const char* json, UsageData* out) {
     return true;
 }
 
+static bool apply_usage_json(const char* json) {
+    if (!parse_json(json, &usage)) return false;
+
+    int g_before = usage_rate_group();
+    bool session_reset = usage_rate_sample(usage.session_pct);
+    int g_after = usage_rate_group();
+    if (session_reset && usage.chime) {
+        Serial.println("session reset detected - chime");
+        sound_hal_play_reset();
+    }
+    if (g_after != g_before) {
+        Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
+            g_before, g_after, usage.session_pct);
+        if (splash_is_active()) splash_pick_for_current_rate();
+    }
+    ui_update(&usage);
+    return true;
+}
+
 // ---- Serial command buffer ----
-#define CMD_BUF_SIZE 64
+#define CMD_BUF_SIZE 384
 static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_pos = 0;
 
@@ -172,8 +192,24 @@ static void check_serial_cmd() {
         char c = Serial.read();
         if (c == '\n' || c == '\r') {
             cmd_buf[cmd_pos] = '\0';
-            if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
-            else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
+            switch (classify_serial_line(cmd_buf)) {
+                case SERIAL_LINE_SCREENSHOT:
+                    send_screenshot();
+                    break;
+                case SERIAL_LINE_BUZZ:
+                    sound_hal_play_reset();
+                    break;
+                case SERIAL_LINE_IDENTIFY:
+                    Serial.printf("{\"device\":\"Clawdmeter\",\"board\":\"%s\"}\n",
+                                  board_caps().name);
+                    break;
+                case SERIAL_LINE_USAGE_JSON:
+                    Serial.println(apply_usage_json(cmd_buf)
+                        ? "{\"ack\":true}" : "{\"ack\":false}");
+                    break;
+                default:
+                    break;
+            }
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -233,7 +269,7 @@ void setup() {
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
     ui_show_screen(SCREEN_SPLASH);
 
-    Serial.printf("Dashboard ready (%s, %dx%d), waiting for data on BLE...\n",
+    Serial.printf("Dashboard ready (%s, %dx%d), waiting for data on BLE or USB serial...\n",
         board_caps().name, W, H);
 }
 
@@ -370,23 +406,7 @@ void loop() {
     check_serial_cmd();
 
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
-            int g_before = usage_rate_group();
-            bool session_reset = usage_rate_sample(usage.session_pct);
-            int g_after = usage_rate_group();
-            // 5-hour session limit refilled → chime so the user knows they can
-            // use Claude again (no-op on boards without a buzzer). Gated on the
-            // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
-            if (session_reset && usage.chime) {
-                Serial.println("session reset detected — chime");
-                sound_hal_play_reset();
-            }
-            if (g_after != g_before) {
-                Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
-                if (splash_is_active()) splash_pick_for_current_rate();
-            }
-            ui_update(&usage);
+        if (apply_usage_json(ble_get_data())) {
             ble_send_ack();
         } else {
             ble_send_nack();

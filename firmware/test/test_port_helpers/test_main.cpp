@@ -3,6 +3,7 @@
 
 #include "boards/esp32_2432s024c/power_button.h"
 #include "boards/esp32_2432s024c/touch_mapping.h"
+#include "serial_protocol.h"
 #include "splash_layout.h"
 #include "ui_layout.h"
 
@@ -67,6 +68,15 @@ void test_small_no_psram_splash_keeps_heap_headroom(void) {
     TEST_ASSERT_EQUAL_INT(12, compute_splash_cell(240, true));
 }
 
+void test_serial_protocol_recognizes_usage_json(void) {
+    TEST_ASSERT_EQUAL(SERIAL_LINE_USAGE_JSON,
+                      classify_serial_line("{\"s\":12.5,\"w\":34.0}"));
+}
+
+void test_serial_protocol_recognizes_identify_command(void) {
+    TEST_ASSERT_EQUAL(SERIAL_LINE_IDENTIFY, classify_serial_line("identify"));
+}
+
 void setup() {
     delay(2000);
     UNITY_BEGIN();
@@ -77,6 +87,8 @@ void setup() {
     RUN_TEST(test_240x320_layout_fits_both_panels);
     RUN_TEST(test_existing_layout_breakpoints_remain_distinct);
     RUN_TEST(test_small_no_psram_splash_keeps_heap_headroom);
+    RUN_TEST(test_serial_protocol_recognizes_usage_json);
+    RUN_TEST(test_serial_protocol_recognizes_identify_command);
     UNITY_END();
 }
 

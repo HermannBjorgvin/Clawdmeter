@@ -4,3 +4,4 @@ bleak
 httpx
 pystray
 Pillow
+pyserial

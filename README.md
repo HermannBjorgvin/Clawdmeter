@@ -123,7 +123,9 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 
 ## Windows installation
 
-Runs natively on Windows — no WSL required. A system-tray app polls your usage and pushes it over BLE, and starts automatically at login.
+Runs natively on Windows — no WSL required. The system-tray app polls your usage,
+pushes it through the same USB cable that powers the ESP32, and starts automatically
+at login. Bluetooth pairing is not required for the usage display.
 
 ### Prerequisites
 
@@ -131,18 +133,22 @@ Runs natively on Windows — no WSL required. A system-tray app polls your usage
 - **Python 3.11+** from [python.org](https://www.python.org/downloads/) — check *"Add python.exe to PATH"* during install.
 - **Claude Code** installed, with `claude login` completed. The token is read from `%USERPROFILE%\.claude\.credentials.json` (falling back to `%LOCALAPPDATA%\Claude\` then `%APPDATA%\Claude\`).
 - The repo on a **native Windows path** (e.g. `%USERPROFILE%\Clawdmeter`), **not** a `\\wsl$` share — the installer refuses a WSL path.
+- The ESP32 connected to the computer with a **USB data cable**. The daemon detects
+  the physical USB serial port automatically and ignores Bluetooth COM ports.
 
 ### Flash the firmware
 
 ```powershell
-pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port COM5   # use your device's COM port
+pio run -d firmware -e esp32_2432s024c -t upload --upload-port COM3   # use your device's COM port
 ```
 
 Run `pio run -d firmware` with no env to see the available board envs.
 
-### Pair the device
+### Bluetooth pairing (optional)
 
-The device is a bonded BLE HID keyboard, so pair it once: **Settings → Bluetooth & devices → Add device → Bluetooth**, then select "Clawdmeter". Pairing is **required** — it enables the physical buttons and keeps a persistent connection (the device keeps showing your last-synced usage even after the daemon quits). To undo, use **Remove device** (this disables the buttons).
+Pairing is unnecessary when the display remains connected by USB. It is only needed
+on boards whose physical buttons are used as a BLE keyboard. The ESP32-2432S024C port
+uses its BOOT button for local display controls and sends usage over USB serial.
 
 ### Install the daemon (recommended)
 
@@ -152,7 +158,9 @@ From the repo root in PowerShell:
 powershell -ExecutionPolicy Bypass -File install-windows.ps1
 ```
 
-This creates a venv, installs `bleak`/`httpx`/`pystray`/`Pillow` from the in-repo requirements (no internet downloads), registers a per-user login-autostart entry (`HKCU\…\Run`, no admin needed), and launches the tray app headlessly (no console window).
+This creates a venv, installs the dependencies including `pyserial`, registers a
+per-user login-autostart entry (`HKCU\…\Run`, no admin needed), and launches the tray
+app headlessly (no console window).
 
 ### Run manually instead (optional)
 
@@ -160,7 +168,7 @@ This creates a venv, installs `bleak`/`httpx`/`pystray`/`Pillow` from the in-rep
 python -m venv .venv
 .venv\Scripts\Activate.ps1        # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned, then retry
 pip install -r daemon\requirements-windows.txt
-python daemon\claude_usage_daemon_windows.py        # runs in the foreground; Ctrl+C to stop
+python daemon\claude_usage_daemon_serial_windows.py # runs in the foreground; Ctrl+C to stop
 ```
 
 ### Tray icon and menu
@@ -169,7 +177,7 @@ The icon's corner bubble shows state — **green** Connected, **amber** Scanning
 
 - **Status header** — live state + last sync time.
 - **Start at login** — toggle autostart on/off.
-- **Quit** — stops the daemon cleanly; leaves the Windows pairing intact (device keeps its last reading).
+- **Quit** — stops the daemon cleanly and releases the serial port; the device keeps its last reading.
 
 ### Logs and troubleshooting
 
@@ -180,9 +188,9 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
 
 | Symptom | Fix |
 |---------|-----|
-| `Device not found` | Power on the device; make sure it's in range and paired. |
+| `Clawdmeter USB serial not found` | Check that the USB cable carries data, reconnect the board, and confirm its COM port in Device Manager. |
 | `token expired` toast / `API HTTP 401` | Re-run `claude login`, then restart the daemon. |
-| `Connection failed` | Toggle Windows Bluetooth off/on in Settings. |
+| The wrong COM port is selected | Set `CLAWDMETER_SERIAL_PORT=COM3` before starting the daemon. |
 | `Warning: running under Linux/WSL` | Run from a native PowerShell window, not a WSL shell. |
 
 ## How it works
@@ -190,7 +198,7 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
 1. The daemon reads your Claude Code OAuth token — from the macOS Keychain (service `Claude Code-credentials`) on macOS, or from `~/.claude/.credentials.json` on Linux (`%USERPROFILE%\.claude\.credentials.json` on Windows).
 2. It makes a minimal API call to `api.anthropic.com/v1/messages` — one token of Haiku, basically free.
 3. The usage numbers come straight out of the response headers (`anthropic-ratelimit-unified-5h-utilization` and friends).
-4. The daemon connects to the ESP32 over BLE and writes a JSON payload to the GATT RX characteristic.
+4. On this Windows/ESP32-2432S024C setup, the daemon writes a compact JSON line to the ESP32 over USB serial. Other supported setups can continue using BLE.
 5. The firmware parses it and updates the LVGL dashboard.
 6. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.
 7. The two side buttons are independent of all of this — they send Space and Shift+Tab as BLE HID keyboard input to the paired host directly.

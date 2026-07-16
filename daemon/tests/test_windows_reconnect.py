@@ -565,6 +565,7 @@ def test_requirements_windows_contains_required_deps():
     assert "httpx" in lines, "httpx must be in requirements-windows.txt"
     assert "pystray" in lines, "pystray must be in requirements-windows.txt (Phase 4)"
     assert "pillow" in lines, "Pillow must be in requirements-windows.txt (Phase 4)"
+    assert "pyserial" in lines, "pyserial must be in requirements-windows.txt (USB serial transport)"
     assert "winreg" not in lines, "winreg is stdlib — must NOT be in requirements-windows.txt"
 
 

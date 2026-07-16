@@ -180,7 +180,8 @@ def main() -> None:
     from pystray import Menu, MenuItem
 
     import daemon.autostart_windows as autostart
-    from daemon.claude_usage_daemon_windows import main as daemon_main, log as daemon_log
+    from daemon.claude_usage_daemon_windows import log as daemon_log
+    from daemon.claude_usage_daemon_serial_windows import main as daemon_main
     from daemon.icon_assets import load_logo_rgba, build_state_icons
 
     # Build per-state icons once at startup; swap icon.icon per tick (never recomposite).
