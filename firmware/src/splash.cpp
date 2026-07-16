@@ -240,19 +240,32 @@ void splash_init(lv_obj_t *parent) {
     lv_obj_add_flag(splash_container, LV_OBJ_FLAG_HIDDEN);
 }
 
-// Live activity state from the host daemon: -1 unknown (old daemon — keep the
-// usage-rate picks), 0 no Claude session is working, 1+ at least one is. When
-// known, it owns the splash rotation: Work animations while working, Idle
-// while resting. pick_for_activity is defined near splash_pick_for_current_rate.
+// Live activity from the host daemon: -1 unknown (old daemon — keep the
+// usage-rate picks), else the count of working Claude sessions. When known,
+// it owns the splash rotation, escalating with the workload:
+//   0 → Idle, 1-2 → Work (coding/thinking), 3-4 → the DJ set, 5+ → full
+//   disco (every Dance animation, double tempo, frantic rotation).
+// pick_for_activity is defined near splash_pick_for_current_rate.
 static int activity_state = -1;
 static void pick_for_activity(void);
+
+static int activity_tier(void) {   // -1 unknown / 0 idle / 1 work / 2 dj / 3 disco
+    if (activity_state < 0) return -1;
+    if (activity_state == 0) return 0;
+    if (activity_state <= 2) return 1;
+    return (activity_state < 5) ? 2 : 3;
+}
 
 void splash_tick(void) {
     if (!active || SPLASH_ANIM_COUNT == 0) return;
 
     // Auto-rotate: within the activity category when the daemon reports a
     // live working/idle state, else within the usage-rate group as before.
-    if (millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
+    // Disco (5+ sessions) switches tracks four times as often.
+    bool disco = (activity_tier() == 3);
+    uint32_t rotate_ms = disco ? SPLASH_ROTATE_INTERVAL_MS / 4
+                               : SPLASH_ROTATE_INTERVAL_MS;
+    if (millis() - last_pick_ms >= rotate_ms) {
         if (activity_state >= 0) pick_for_activity();
         else                     splash_pick_for_current_rate();
     }
@@ -261,6 +274,7 @@ void splash_tick(void) {
     if (a->frame_count == 0) return;
 
     uint16_t hold = a->holds[cur_frame];
+    if (disco) hold /= 2;   // double tempo on the dance floor
     if (millis() - frame_started_ms >= hold) {
         cur_frame = (cur_frame + 1) % a->frame_count;
         frame_started_ms = millis();
@@ -280,11 +294,21 @@ void splash_next(void) {
 }
 
 static void pick_for_activity(void) {
-    const char* cat = (activity_state >= 1) ? "Work" : "Idle";
+    int tier = activity_tier();
     uint8_t list[SPLASH_ANIM_COUNT];
     uint8_t n = 0;
-    for (uint8_t i = 0; i < SPLASH_ANIM_COUNT; i++)
-        if (strcmp(splash_anims[i].category, cat) == 0) list[n++] = i;
+    for (uint8_t i = 0; i < SPLASH_ANIM_COUNT; i++) {
+        const splash_anim_def_t* a = &splash_anims[i];
+        bool match = false;
+        switch (tier) {
+        case 0:  match = strcmp(a->category, "Idle") == 0;  break;
+        case 1:  match = strcmp(a->category, "Work") == 0;  break;
+        case 2:  match = strstr(a->name, "dj") != NULL;     break;  // the DJ set
+        case 3:  match = strcmp(a->category, "Dance") == 0; break;  // full disco
+        default: break;
+        }
+        if (match) list[n++] = i;
+    }
     if (n == 0) { splash_pick_for_current_rate(); return; }
     static uint8_t rot = 0;
     uint8_t pick = list[rot++ % n];
@@ -298,10 +322,10 @@ static void pick_for_activity(void) {
 }
 
 void splash_set_activity(int working_sessions) {
-    int st = (working_sessions < 0) ? -1 : (working_sessions > 0 ? 1 : 0);
-    if (st == activity_state) return;
-    activity_state = st;
-    if (st >= 0 && active) pick_for_activity();
+    int prev_tier = activity_tier();
+    activity_state = (working_sessions < 0) ? -1 : working_sessions;
+    int new_tier = activity_tier();
+    if (new_tier != prev_tier && new_tier >= 0 && active) pick_for_activity();
 }
 
 void splash_pick_for_current_rate(void) {
