@@ -80,7 +80,7 @@ void test_serial_protocol_recognizes_identify_command(void) {
 }
 
 void test_st7789_portrait_mode_uses_bgr_color_order(void) {
-    TEST_ASSERT_EQUAL_HEX8(0xC8, st7789_portrait_bgr_madctl());
+    TEST_ASSERT_EQUAL_HEX8(0x88, st7789_portrait_bgr_madctl());
 }
 
 void test_fresh_serial_data_selects_live_usage_without_ble(void) {

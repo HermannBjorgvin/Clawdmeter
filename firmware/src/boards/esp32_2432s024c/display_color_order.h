@@ -2,8 +2,9 @@
 
 #include <stdint.h>
 
-// Rotation 0 uses MX|MY. This panel's ST7789 is wired for BGR color order,
-// so MADCTL bit 3 must also be set or red and blue are exchanged.
+// This panel needs MY for portrait scan direction and BGR color order.
+// Setting MX as the generic Adafruit rotation-0 path does mirror the image
+// horizontally on the ESP32-2432S024C.
 constexpr uint8_t st7789_portrait_bgr_madctl(void) {
-    return 0x80 | 0x40 | 0x08;
+    return 0x80 | 0x08;
 }
