@@ -17,13 +17,22 @@ def test_platformio_environment_targets_verified_board() -> None:
     assert "SD" in section
 
 
+def test_landscape_environment_inherits_portrait_and_adds_board_flag() -> None:
+    ini = (ROOT / "firmware/platformio.ini").read_text(encoding="utf-8")
+    assert "[env:esp32_2432s024c_landscape]" in ini
+    section = ini.split("[env:esp32_2432s024c_landscape]", 1)[1]
+    assert "extends = env:esp32_2432s024c" in section
+    assert "${env:esp32_2432s024c.build_flags}" in section
+    assert "-DBOARD_LANDSCAPE" in section
+
+
 def test_board_header_matches_verified_pins() -> None:
     header = (
         ROOT / "firmware/src/boards/esp32_2432s024c/board.h"
     ).read_text(encoding="utf-8")
     expected = {
-        "LCD_WIDTH": "240",
-        "LCD_HEIGHT": "320",
+        "LCD_NATIVE_WIDTH": "240",
+        "LCD_NATIVE_HEIGHT": "320",
         "LCD_SCLK": "14",
         "LCD_MOSI": "13",
         "LCD_MISO": "12",
@@ -39,6 +48,19 @@ def test_board_header_matches_verified_pins() -> None:
     for name, value in expected.items():
         assert f"#define {name}" in header
         assert value in header.split(f"#define {name}", 1)[1].splitlines()[0]
+
+
+def test_board_header_separates_native_and_logical_dimensions() -> None:
+    header = (
+        ROOT / "firmware/src/boards/esp32_2432s024c/board.h"
+    ).read_text(encoding="utf-8")
+    assert "#define LCD_NATIVE_WIDTH 240" in header
+    assert "#define LCD_NATIVE_HEIGHT 320" in header
+    assert "#ifdef BOARD_LANDSCAPE" in header
+    assert "#define LCD_WIDTH 320" in header
+    assert "#define LCD_HEIGHT 240" in header
+    assert "#define LCD_ROTATION 1" in header
+    assert "#define LCD_ROTATION 0" in header
 
 
 def test_board_hal_is_complete_and_uses_st7789() -> None:

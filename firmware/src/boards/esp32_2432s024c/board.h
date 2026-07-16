@@ -2,8 +2,18 @@
 
 #define BOARD_NAME "ESP32-2432S024C"
 
+#define LCD_NATIVE_WIDTH 240
+#define LCD_NATIVE_HEIGHT 320
+
+#ifdef BOARD_LANDSCAPE
+#define LCD_WIDTH 320
+#define LCD_HEIGHT 240
+#define LCD_ROTATION 1
+#else
 #define LCD_WIDTH 240
 #define LCD_HEIGHT 320
+#define LCD_ROTATION 0
+#endif
 
 #define LCD_SCLK 14
 #define LCD_MOSI 13

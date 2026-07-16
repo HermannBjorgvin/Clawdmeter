@@ -32,10 +32,10 @@ void display_hal_init(void) {
 }
 
 void display_hal_begin(void) {
-    display.init(LCD_WIDTH, LCD_HEIGHT, SPI_MODE0);
+    display.init(LCD_NATIVE_WIDTH, LCD_NATIVE_HEIGHT, SPI_MODE0);
     display.setSPISpeed(40000000);
-    display.setRotation(0);
-    uint8_t madctl = st7789_portrait_bgr_madctl();
+    display.setRotation(LCD_ROTATION);
+    uint8_t madctl = st7789_bgr_madctl(LCD_ROTATION);
     display.sendCommand(ST77XX_MADCTL, &madctl, 1);
     display.invertDisplay(false);
     display.fillScreen(ST77XX_BLACK);

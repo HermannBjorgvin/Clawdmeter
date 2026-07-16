@@ -29,6 +29,21 @@ void test_touch_mapping_clamps_edges(void) {
     TEST_ASSERT_EQUAL_UINT16(319, point.y);
 }
 
+void test_landscape_touch_mapping_rotates_with_usb_left(void) {
+    TouchPoint top_left = map_touch_to_landscape(0, 319);
+    TouchPoint top_right = map_touch_to_landscape(0, 0);
+    TouchPoint bottom_left = map_touch_to_landscape(239, 319);
+    TouchPoint bottom_right = map_touch_to_landscape(239, 0);
+    TEST_ASSERT_EQUAL_UINT16(0, top_left.x);
+    TEST_ASSERT_EQUAL_UINT16(0, top_left.y);
+    TEST_ASSERT_EQUAL_UINT16(319, top_right.x);
+    TEST_ASSERT_EQUAL_UINT16(0, top_right.y);
+    TEST_ASSERT_EQUAL_UINT16(0, bottom_left.x);
+    TEST_ASSERT_EQUAL_UINT16(239, bottom_left.y);
+    TEST_ASSERT_EQUAL_UINT16(319, bottom_right.x);
+    TEST_ASSERT_EQUAL_UINT16(239, bottom_right.y);
+}
+
 void test_short_press_emits_only_short_event(void) {
     PowerButtonState state{};
     update_power_button(state, false, 0);
@@ -89,7 +104,11 @@ void test_serial_protocol_recognizes_identify_command(void) {
 }
 
 void test_st7789_portrait_mode_uses_bgr_color_order(void) {
-    TEST_ASSERT_EQUAL_HEX8(0x88, st7789_portrait_bgr_madctl());
+    TEST_ASSERT_EQUAL_HEX8(0x88, st7789_bgr_madctl(0));
+}
+
+void test_st7789_landscape_usb_left_mode_uses_bgr_color_order(void) {
+    TEST_ASSERT_EQUAL_HEX8(0xA8, st7789_bgr_madctl(1));
 }
 
 void test_fresh_serial_data_selects_live_usage_without_ble(void) {
@@ -228,6 +247,7 @@ void setup() {
     UNITY_BEGIN();
     RUN_TEST(test_touch_mapping_keeps_portrait_axes);
     RUN_TEST(test_touch_mapping_clamps_edges);
+    RUN_TEST(test_landscape_touch_mapping_rotates_with_usb_left);
     RUN_TEST(test_short_press_emits_only_short_event);
     RUN_TEST(test_long_press_does_not_emit_short_event);
     RUN_TEST(test_240x320_layout_reserves_header_cards_and_footer);
@@ -236,6 +256,7 @@ void setup() {
     RUN_TEST(test_serial_protocol_recognizes_usage_json);
     RUN_TEST(test_serial_protocol_recognizes_identify_command);
     RUN_TEST(test_st7789_portrait_mode_uses_bgr_color_order);
+    RUN_TEST(test_st7789_landscape_usb_left_mode_uses_bgr_color_order);
     RUN_TEST(test_fresh_serial_data_selects_live_usage_without_ble);
     RUN_TEST(test_stale_data_without_ble_selects_waiting_view);
     RUN_TEST(test_old_claude_payload_remains_compatible);

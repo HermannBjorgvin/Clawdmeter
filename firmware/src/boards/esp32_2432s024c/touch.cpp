@@ -55,7 +55,11 @@ void touch_hal_read(uint16_t* x, uint16_t* y, bool* pressed) {
         (static_cast<uint16_t>(data[2] & 0x0F) << 8) | data[3];
     const uint16_t raw_y =
         (static_cast<uint16_t>(data[4] & 0x0F) << 8) | data[5];
+#ifdef BOARD_LANDSCAPE
+    const TouchPoint point = map_touch_to_landscape(raw_x, raw_y);
+#else
     const TouchPoint point = map_touch_to_portrait(raw_x, raw_y);
+#endif
     touch_x = point.x;
     touch_y = point.y;
 
