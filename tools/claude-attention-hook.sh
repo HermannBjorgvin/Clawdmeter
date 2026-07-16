@@ -1,0 +1,74 @@
+#!/bin/bash
+# Claude Code hook → Clawdmeter attention flag.
+# Wire it in ~/.claude/settings.json:
+#   Notification      → claude-attention-hook.sh notification
+#   Stop              → claude-attention-hook.sh stop
+#   UserPromptSubmit  → claude-attention-hook.sh prompt
+# Writes an event type (input|perm|done|clear) into the flag file the BLE
+# daemon watches. Reads the hook JSON from stdin.
+
+set -u
+DIR="$HOME/.config/claude-usage-monitor"
+FLAG="$DIR/attention"
+MIN_TURN_S=45          # "done" only for turns longer than this — short Q&A means you're right there
+IN=$(cat)
+mkdir -p "$DIR"
+
+jqr() { printf '%s' "$IN" | jq -r "$1 // \"\"" 2>/dev/null; }
+
+# Flag format: line 1 = event type, line 2 (optional) = project name shown on
+# the device. Project = git repo root basename, falling back to cwd basename.
+write_flag() {
+    local type="$1" cwd; cwd=$(jqr '.cwd')
+    local root=""
+    [[ -n "$cwd" ]] && root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+    [[ -z "$root" ]] && root="$cwd"
+    printf '%s\n%s\n' "$type" "$(basename "${root:-}")" > "$FLAG"
+}
+
+case "${1:-}" in
+notification)
+    # Claude is waiting: a permission prompt or an idle "waiting for your input".
+    msg=$(jqr '.message' | tr '[:upper:]' '[:lower:]')
+    if [[ "$msg" == *permission* || "$msg" == *разрешен* ]]; then
+        write_flag perm
+    else
+        write_flag input
+    fi
+    ;;
+stop)
+    sid=$(jqr '.session_id')
+    # Don't celebrate a turn that merely yielded to a still-running background
+    # task (build, flash, monitor) — the harness resumes it later. A running
+    # task keeps its .output file open, which lsof can see. The tasks dir is
+    # keyed by the session's ORIGINAL project dir while the hook's cwd follows
+    # shell cd's — so locate it by globbing the unique session id instead.
+    if [[ -n "$sid" ]]; then
+        for tasks in /private/tmp/claude-$(id -u)/*/"$sid"/tasks; do
+            # NB: lsof's exit code is useless here (1 even with matches) — test stdout.
+            if [[ -d "$tasks" ]] && lsof -w +d "$tasks" 2>/dev/null | grep -q .; then
+                exit 0
+            fi
+        done
+    fi
+    # Skip short interactive turns — the user is at the keyboard anyway.
+    if [[ -n "$sid" && -f "$DIR/turn-start-$sid" ]]; then
+        started=$(cat "$DIR/turn-start-$sid" 2>/dev/null || echo 0)
+        (( $(date +%s) - started < MIN_TURN_S )) && exit 0
+    fi
+    write_flag done
+    ;;
+prompt)
+    # Harness-generated turns (background-task notifications, scheduled
+    # wakeups) also fire UserPromptSubmit — they are NOT the user coming back,
+    # so they must neither dismiss an alert nor restart the turn clock.
+    p=$(jqr '.prompt')
+    case "$p" in *"[SYSTEM NOTIFICATION"*|*"<task-notification>"*|*"<system-reminder>"*) exit 0;; esac
+    # The user is typing: stamp the turn start and dismiss any pending alert.
+    sid=$(jqr '.session_id')
+    [[ -n "$sid" ]] && date +%s > "$DIR/turn-start-$sid"
+    echo clear > "$FLAG"
+    find "$DIR" -name 'turn-start-*' -mtime +1 -delete 2>/dev/null
+    ;;
+esac
+exit 0
