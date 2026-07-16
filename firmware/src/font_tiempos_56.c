@@ -8024,6 +8024,8 @@ static const lv_font_fmt_txt_dsc_t font_dsc = {
  *  PUBLIC FONT
  *----------------*/
 
+LV_FONT_DECLARE(font_ptserif_56_cyr);
+
 /*Initialize a public general font descriptor*/
 const lv_font_t font_tiempos_56 = {
     .get_glyph_dsc = lv_font_get_glyph_dsc_fmt_txt,    /*Function pointer to get glyph's data*/
@@ -8037,7 +8039,7 @@ const lv_font_t font_tiempos_56 = {
     .underline_position = -5,
     .underline_thickness = 2,
     .dsc = &font_dsc,          /*The custom font data. Will be accessed by `get_glyph_bitmap/dsc` */
-    .fallback = NULL,
+    .fallback = &font_ptserif_56_cyr,
     .user_data = NULL,
 };
 
