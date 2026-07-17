@@ -15,6 +15,8 @@ struct UiLayoutMetrics {
     int16_t usage_panel_gap;
     int16_t usage_bar_y;
     int16_t usage_reset_y;
+    int16_t usage_description_y;
+    int16_t usage_status_y;
     int16_t logo_size;
     int16_t logo_scale;
     int16_t logo_rendered_width;
@@ -23,6 +25,9 @@ struct UiLayoutMetrics {
     int16_t page_indicator_y;
     int16_t bluetooth_panel_h;
     int16_t bluetooth_reset_zone_h;
+    int16_t pairing_title_y;
+    int16_t pairing_instruction_y;
+    int16_t pairing_release_y;
     bool small_display;
     bool horizontal_cards;
     int16_t status_font_px;
@@ -47,6 +52,9 @@ inline UiLayoutMetrics compute_ui_layout_metrics(
     metrics.small_display = false;
     metrics.status_font_px = 32;
     metrics.idle_creature_size = 160;
+    metrics.pairing_title_y = 40;
+    metrics.pairing_instruction_y = 120;
+    metrics.pairing_release_y = 160;
 
     if (width == 320 && height == 240) {
         metrics.margin = 10;
@@ -58,6 +66,8 @@ inline UiLayoutMetrics compute_ui_layout_metrics(
         metrics.usage_panel_gap = 10;
         metrics.usage_bar_y = 68;
         metrics.usage_reset_y = 92;
+        metrics.usage_description_y = 52;
+        metrics.usage_status_y = 92;
         metrics.logo_size = 40;
         metrics.logo_scale = 128;
         metrics.logo_rendered_width = 40;
@@ -70,6 +80,9 @@ inline UiLayoutMetrics compute_ui_layout_metrics(
         metrics.horizontal_cards = true;
         metrics.status_font_px = 14;
         metrics.idle_creature_size = 92;
+        metrics.pairing_title_y = 18;
+        metrics.pairing_instruction_y = 72;
+        metrics.pairing_release_y = 94;
     } else if (width == 240 && height == 320) {
         metrics.margin = 10;
         metrics.title_y = 12;
@@ -89,6 +102,31 @@ inline UiLayoutMetrics compute_ui_layout_metrics(
         metrics.small_display = true;
         metrics.status_font_px = 14;
         metrics.idle_creature_size = 92;
+    } else if (height <= 320) {
+        metrics.margin = 10;
+        metrics.title_y = 8;
+        metrics.content_y = 52;
+        metrics.usage_panel_h = height - 115;
+        metrics.usage_panel_gap = 10;
+        metrics.usage_bar_y = 68;
+        metrics.usage_reset_y = 92;
+        metrics.usage_description_y = 52;
+        metrics.usage_status_y = 92;
+        metrics.logo_size = 40;
+        metrics.logo_scale = 128;
+        metrics.logo_rendered_width = 40;
+        metrics.percentage_font_px = 24;
+        metrics.footer_y = height - 45;
+        metrics.page_indicator_y = height - 16;
+        metrics.bluetooth_panel_h = 92;
+        metrics.bluetooth_reset_zone_h = 65;
+        metrics.small_display = true;
+        metrics.horizontal_cards = true;
+        metrics.status_font_px = 14;
+        metrics.idle_creature_size = 92;
+        metrics.pairing_title_y = 18;
+        metrics.pairing_instruction_y = 72;
+        metrics.pairing_release_y = 94;
     } else if (height >= 460) {
         metrics.content_y = 100;
         metrics.usage_panel_h = 150;
@@ -108,9 +146,14 @@ inline UiLayoutMetrics compute_ui_layout_metrics(
     }
 
     metrics.content_width = width - (2 * metrics.margin);
-    if (!metrics.horizontal_cards) {
+    if (metrics.horizontal_cards && metrics.panel_width == 0) {
+        metrics.panel_width = (width - (3 * metrics.margin)) / 2;
+        metrics.second_panel_x = (2 * metrics.margin) + metrics.panel_width;
+    } else if (!metrics.horizontal_cards) {
         metrics.panel_width = metrics.content_width;
         metrics.second_panel_x = metrics.margin;
+        metrics.usage_description_y = metrics.usage_reset_y;
+        metrics.usage_status_y = metrics.usage_reset_y + 20;
     }
     return metrics;
 }

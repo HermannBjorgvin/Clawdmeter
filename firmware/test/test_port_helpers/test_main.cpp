@@ -123,9 +123,61 @@ void test_320x240_layout_uses_two_horizontal_cards(void) {
 
 void test_240x320_activity_title_clears_logo(void) {
     UiLayoutMetrics m = compute_ui_layout_metrics(240, 320);
-    const int logo_right = m.margin + m.logo_rendered_width;
+    const int transformed_width =
+        (LOGO_WIDTH * m.logo_scale + LV_SCALE_NONE - 1) / LV_SCALE_NONE;
+    const int logo_right = m.margin + transformed_width;
     const int activity_title_left = (m.screen_width - 127) / 2;
+    TEST_ASSERT_EQUAL_INT(m.logo_rendered_width, transformed_width);
     TEST_ASSERT_LESS_OR_EQUAL_INT(logo_right + 4, activity_title_left);
+}
+
+void test_320x240_logo_bounds_match_top_left_scaled_image(void) {
+    UiLayoutMetrics m = compute_ui_layout_metrics(320, 240);
+    const int transformed_width =
+        (LOGO_WIDTH * m.logo_scale + LV_SCALE_NONE - 1) / LV_SCALE_NONE;
+    const int transformed_height =
+        (LOGO_HEIGHT * m.logo_scale + LV_SCALE_NONE - 1) / LV_SCALE_NONE;
+
+    TEST_ASSERT_EQUAL_INT(40, transformed_width);
+    TEST_ASSERT_EQUAL_INT(40, transformed_height);
+    TEST_ASSERT_EQUAL_INT(50, m.margin + transformed_width);
+    TEST_ASSERT_EQUAL_INT(46, 6 + transformed_height);
+}
+
+void test_320x240_enterprise_content_fits_card_content_box(void) {
+    UiLayoutMetrics m = compute_ui_layout_metrics(320, 240);
+    const int useful_height = m.usage_panel_h - 16;
+
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.usage_description_y + 14, m.usage_bar_y);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.usage_bar_y + 24, m.usage_status_y);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.usage_status_y + 14, useful_height);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.usage_reset_y + 14, useful_height);
+}
+
+void test_320x240_pairing_text_clears_status_and_page_dots(void) {
+    UiLayoutMetrics m = compute_ui_layout_metrics(320, 240);
+    const int title_top = m.content_y + m.pairing_title_y;
+    const int instruction_top = m.content_y + m.pairing_instruction_y;
+    const int release_top = m.content_y + m.pairing_release_y;
+    const int waiting_bottom = m.footer_y + 18;
+
+    TEST_ASSERT_LESS_OR_EQUAL_INT(title_top + 28 + 4, instruction_top);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(instruction_top + 14 + 4, release_top);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(release_top + 14 + 4, m.footer_y);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(waiting_bottom + 4, m.page_indicator_y);
+}
+
+void test_240x240_small_fallback_stays_inside_viewport(void) {
+    UiLayoutMetrics m = compute_ui_layout_metrics(240, 240);
+    const int cards_bottom = m.content_y + m.usage_panel_h;
+    const int second_panel_right = m.second_panel_x + m.panel_width;
+
+    TEST_ASSERT_TRUE(m.small_display);
+    TEST_ASSERT_TRUE(m.horizontal_cards);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(second_panel_right + m.margin, m.screen_width);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(cards_bottom + 18, m.footer_y);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.footer_y + 18, m.page_indicator_y);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.page_indicator_y + 5, m.screen_height);
 }
 
 void test_st7789_landscape_usb_left_mode_uses_bgr_color_order(void) {
@@ -274,6 +326,10 @@ void setup() {
     RUN_TEST(test_240x320_layout_reserves_header_cards_and_footer);
     RUN_TEST(test_320x240_layout_uses_two_horizontal_cards);
     RUN_TEST(test_240x320_activity_title_clears_logo);
+    RUN_TEST(test_320x240_logo_bounds_match_top_left_scaled_image);
+    RUN_TEST(test_320x240_enterprise_content_fits_card_content_box);
+    RUN_TEST(test_320x240_pairing_text_clears_status_and_page_dots);
+    RUN_TEST(test_240x240_small_fallback_stays_inside_viewport);
     RUN_TEST(test_existing_layout_breakpoints_remain_distinct);
     RUN_TEST(test_small_no_psram_splash_keeps_heap_headroom);
     RUN_TEST(test_serial_protocol_recognizes_usage_json);

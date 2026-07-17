@@ -39,6 +39,8 @@ struct Layout {
     int16_t usage_panel_gap;
     int16_t usage_bar_y;
     int16_t usage_reset_y;
+    int16_t usage_description_y;
+    int16_t usage_status_y;
     int16_t logo_size;
     int16_t logo_scale;
     int16_t logo_rendered_width;
@@ -49,6 +51,9 @@ struct Layout {
     // Bluetooth screen
     int16_t bt_info_panel_h;
     int16_t bt_reset_zone_h;
+    int16_t pairing_title_y;
+    int16_t pairing_instruction_y;
+    int16_t pairing_release_y;
     const lv_font_t* bt_title_font;
     const lv_font_t* bt_status_font;
     const lv_font_t* bt_device_font;
@@ -82,6 +87,8 @@ static void compute_layout(const BoardCaps& c) {
     L.usage_panel_gap = metrics.usage_panel_gap;
     L.usage_bar_y = metrics.usage_bar_y;
     L.usage_reset_y = metrics.usage_reset_y;
+    L.usage_description_y = metrics.usage_description_y;
+    L.usage_status_y = metrics.usage_status_y;
     L.logo_size = metrics.logo_size;
     L.logo_scale = metrics.logo_scale;
     L.logo_rendered_width = metrics.logo_rendered_width;
@@ -90,6 +97,9 @@ static void compute_layout(const BoardCaps& c) {
     L.page_indicator_y = metrics.page_indicator_y;
     L.bt_info_panel_h = metrics.bluetooth_panel_h;
     L.bt_reset_zone_h = metrics.bluetooth_reset_zone_h;
+    L.pairing_title_y = metrics.pairing_title_y;
+    L.pairing_instruction_y = metrics.pairing_instruction_y;
+    L.pairing_release_y = metrics.pairing_release_y;
     L.idle_creature_size = metrics.idle_creature_size;
 
     L.title_font = metrics.small_display ? &font_tiempos_34 : &font_tiempos_56;
@@ -377,6 +387,7 @@ static lv_obj_t* make_usage_panel(
 ) {
     lv_obj_t* panel = make_panel(parent, x, y, width, L.usage_panel_h);
     const int panel_padding = L.horizontal_cards ? 8 : 16;
+    const int content_width = width - (2 * panel_padding);
     if (L.horizontal_cards) lv_obj_set_style_pad_all(panel, panel_padding, 0);
 
     *out_pct = lv_label_create(panel);
@@ -386,6 +397,10 @@ static lv_obj_t* make_usage_panel(
     lv_obj_set_pos(*out_pct, 0, L.horizontal_cards ? 28 : 0);
 
     *out_pill = make_pill(panel, pill_text);
+    if (L.horizontal_cards) {
+        lv_obj_set_width(*out_pill, content_width);
+        lv_label_set_long_mode(*out_pill, LV_LABEL_LONG_DOT);
+    }
     lv_obj_align(
         *out_pill,
         L.horizontal_cards ? LV_ALIGN_TOP_LEFT : LV_ALIGN_TOP_RIGHT,
@@ -393,13 +408,17 @@ static lv_obj_t* make_usage_panel(
         L.horizontal_cards ? 0 : 1
     );
 
-    *out_bar = make_bar(panel, 0, L.usage_bar_y, width - (2 * panel_padding), 24);
+    *out_bar = make_bar(panel, 0, L.usage_bar_y, content_width, 24);
 
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
     lv_obj_set_style_text_font(*out_reset, L.reset_font, 0);
     lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
     lv_obj_set_pos(*out_reset, 0, L.usage_reset_y);
+    if (L.horizontal_cards) {
+        lv_obj_set_width(*out_reset, content_width);
+        lv_label_set_long_mode(*out_reset, LV_LABEL_LONG_DOT);
+    }
 
     return panel;
 }
@@ -420,19 +439,19 @@ static void build_pair_group(lv_obj_t* parent) {
     lv_label_set_text(l1, "To pair");
     lv_obj_set_style_text_font(l1, L.bt_status_font, 0);
     lv_obj_set_style_text_color(l1, COL_TEXT, 0);
-    lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, L.pairing_title_y);
 
     lv_obj_t* l2 = lv_label_create(pair_group);
     lv_label_set_text(l2, "hold the power button");
     lv_obj_set_style_text_font(l2, L.bt_device_font, 0);
     lv_obj_set_style_text_color(l2, COL_DIM, 0);
-    lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, 120);
+    lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, L.pairing_instruction_y);
 
     lv_obj_t* l3 = lv_label_create(pair_group);
     lv_label_set_text(l3, "for 3 seconds, then release");
     lv_obj_set_style_text_font(l3, L.bt_device_font, 0);
     lv_obj_set_style_text_color(l3, COL_DIM, 0);
-    lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, 160);
+    lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, L.pairing_release_y);
 
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);  // ui_update_ble_status decides
 }
@@ -505,13 +524,19 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_spending_desc, "of your monthly budget");
     lv_obj_set_style_text_font(lbl_spending_desc, L.reset_font, 0);
     lv_obj_set_style_text_color(lbl_spending_desc, COL_DIM, 0);
-    lv_obj_set_pos(lbl_spending_desc, 0, L.usage_reset_y);
+    const int usage_content_width =
+        L.panel_width - (2 * (L.horizontal_cards ? 8 : 16));
+    lv_obj_set_width(lbl_spending_desc, usage_content_width);
+    lv_label_set_long_mode(lbl_spending_desc, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(lbl_spending_desc, 0, L.usage_description_y);
     lv_obj_add_flag(lbl_spending_desc, LV_OBJ_FLAG_HIDDEN);
 
     lbl_spending_status = lv_label_create(panel_session);
     lv_label_set_text(lbl_spending_status, "");
     lv_obj_set_style_text_font(lbl_spending_status, L.detail_font, 0);
-    lv_obj_set_pos(lbl_spending_status, 0, L.usage_reset_y + 20);
+    lv_obj_set_width(lbl_spending_status, usage_content_width);
+    lv_label_set_long_mode(lbl_spending_status, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(lbl_spending_status, 0, L.usage_status_y);
     lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
 
     const int second_x = L.horizontal_cards ? L.second_panel_x : L.margin;
@@ -662,6 +687,7 @@ void ui_init(void) {
 
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
+    lv_image_set_pivot(logo_img, 0, 0);
     lv_image_set_scale(logo_img, L.logo_scale);
     lv_obj_set_pos(
         logo_img,
@@ -784,12 +810,24 @@ void ui_update(const UsageData* data, uint8_t updates) {
 
     if (data->enterprise) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
-        lv_obj_set_style_text_font(lbl_session_pct, L.title_font, 0);
+        lv_obj_set_style_text_font(
+            lbl_session_pct,
+            L.horizontal_cards ? L.percentage_font : L.title_font,
+            0
+        );
         lv_label_set_text(lbl_session_label, "Spending");
+        lv_label_set_text(
+            lbl_spending_desc,
+            L.horizontal_cards ? "monthly budget" : "of your monthly budget"
+        );
         lv_obj_add_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_spending_status,   LV_OBJ_FLAG_HIDDEN);
+        if (L.horizontal_cards) {
+            lv_obj_clear_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
+        }
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_set_style_text_font(lbl_session_pct, L.percentage_font, 0);
@@ -817,6 +855,10 @@ void ui_update(const UsageData* data, uint8_t updates) {
         lv_label_set_text_fmt(lbl_session_pct, "%d", s_pct);
         lv_obj_align_to(lbl_session_pct_sym, lbl_session_pct,
                         LV_ALIGN_OUT_RIGHT_TOP, 4, 12);
+        if (L.horizontal_cards) {
+            lv_label_set_text(lbl_spending_status, pace_text);
+            lv_obj_set_style_text_color(lbl_spending_status, pace_color, 0);
+        }
     } else {
         lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
         format_reset_time(data->session_reset_mins, buf, sizeof(buf));
@@ -835,8 +877,12 @@ void ui_update(const UsageData* data, uint8_t updates) {
                               (data->session_pct <= (float)data->time_pct + 15.0f) ? COL_AMBER :
                               COL_RED;
         lv_obj_set_style_bg_color(bar_weekly, bar_pace, LV_PART_INDICATOR);
-        snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Resets %s#",
-                 pace_hex, pace_text, data->reset_date);
+        if (L.horizontal_cards) {
+            snprintf(buf, sizeof(buf), "Resets %s", data->reset_date);
+        } else {
+            snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Resets %s#",
+                     pace_hex, pace_text, data->reset_date);
+        }
         lv_label_set_text(lbl_weekly_reset, buf);
     } else {
         int w_pct = (int)(data->weekly_pct + 0.5f);

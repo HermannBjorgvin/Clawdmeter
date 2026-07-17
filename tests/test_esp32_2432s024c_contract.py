@@ -90,7 +90,81 @@ def test_battery_ui_is_guarded_by_board_capability():
     assert "init_battery_icons();" in ui
 
 
-def test_landscape_usage_and_activity_builders_use_second_panel_x() -> None:
+def test_landscape_claude_usage_uses_second_card_coordinates() -> None:
     ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
-    selection = "L.horizontal_cards ? L.second_panel_x : L.margin"
-    assert ui.count(selection) >= 2
+    usage = ui.split("static void init_usage_screen", 1)[1].split(
+        "// ======== Public API", 1
+    )[0]
+    normalized = " ".join(usage.split())
+    assert "const int second_x = L.horizontal_cards ? L.second_panel_x : L.margin;" in normalized
+    assert "const int second_y = L.horizontal_cards ? L.content_y :" in normalized
+    assert "usage_group, second_x, second_y, L.panel_width, \"Weekly\"" in normalized
+
+
+def test_landscape_codex_uses_second_card_coordinates() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    codex = ui.split("codex_container = lv_obj_create", 1)[1].split(
+        "activity_container = lv_obj_create", 1
+    )[0]
+    normalized = " ".join(codex.split())
+    assert "const int second_x = L.horizontal_cards ? L.second_panel_x : L.margin;" in normalized
+    assert "const int second_y = L.horizontal_cards ? L.content_y :" in normalized
+    assert "make_usage_panel(codex_container, second_x, second_y, L.panel_width," in normalized
+
+
+def test_landscape_activity_uses_second_card_coordinates() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    activity = ui.split("activity_container = lv_obj_create", 1)[1].split(
+        "robot_status_label = lv_label_create", 1
+    )[0]
+    normalized = " ".join(activity.split())
+    assert "activity_container, L.margin, L.content_y, L.panel_width" in normalized
+    assert "activity_container, second_x, second_y, L.panel_width" in normalized
+
+
+def test_logo_uses_top_left_pivot_before_scaling_and_positioning() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    logo = ui.split("logo_img = lv_image_create", 1)[1].split(
+        "if (board_caps().has_battery)", 1
+    )[0]
+    source_index = logo.index("lv_image_set_src(logo_img, &logo_dsc);")
+    pivot_index = logo.index("lv_image_set_pivot(logo_img, 0, 0);")
+    scale_index = logo.index("lv_image_set_scale(logo_img, L.logo_scale);")
+    position_index = logo.index("lv_obj_set_pos(")
+    assert source_index < pivot_index < scale_index < position_index
+
+
+def test_landscape_enterprise_copy_and_labels_are_bounded() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    assert 'L.horizontal_cards ? "monthly budget" : "of your monthly budget"' in ui
+    assert "lv_obj_set_pos(lbl_spending_desc, 0, L.usage_description_y);" in ui
+    assert "lv_obj_set_pos(lbl_spending_status, 0, L.usage_status_y);" in ui
+    assert "lv_obj_set_width(lbl_spending_desc, usage_content_width);" in ui
+    assert "lv_obj_set_width(lbl_spending_status, usage_content_width);" in ui
+    assert "lv_label_set_long_mode(lbl_spending_desc, LV_LABEL_LONG_DOT);" in ui
+    assert "lv_label_set_long_mode(lbl_spending_status, LV_LABEL_LONG_DOT);" in ui
+    assert "lv_label_set_text(lbl_spending_status, pace_text);" in ui
+    assert 'snprintf(buf, sizeof(buf), "Resets %s", data->reset_date);' in ui
+
+
+def test_landscape_usage_labels_have_explicit_width_and_long_mode() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    assert "lv_obj_set_width(*out_pill, content_width);" in ui
+    assert "lv_label_set_long_mode(*out_pill, LV_LABEL_LONG_DOT);" in ui
+    assert "lv_obj_set_width(*out_reset, content_width);" in ui
+    assert "lv_label_set_long_mode(*out_reset, LV_LABEL_LONG_DOT);" in ui
+
+
+def test_landscape_pairing_uses_profile_offsets() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    assert "lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, L.pairing_title_y);" in ui
+    assert "lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, L.pairing_instruction_y);" in ui
+    assert "lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, L.pairing_release_y);" in ui
+
+
+def test_generic_small_display_fallback_follows_exact_profiles() -> None:
+    header = (ROOT / "firmware" / "src" / "ui_layout.h").read_text(encoding="utf-8")
+    landscape = header.index("if (width == 320 && height == 240)")
+    portrait = header.index("else if (width == 240 && height == 320)")
+    fallback = header.index("else if (height <= 320)")
+    assert landscape < portrait < fallback
