@@ -31,10 +31,10 @@ void test_touch_mapping_clamps_edges(void) {
 }
 
 void test_landscape_touch_mapping_rotates_with_usb_left(void) {
-    TouchPoint top_left = map_touch_to_landscape(0, 319);
-    TouchPoint top_right = map_touch_to_landscape(0, 0);
-    TouchPoint bottom_left = map_touch_to_landscape(239, 319);
-    TouchPoint bottom_right = map_touch_to_landscape(239, 0);
+    TouchPoint top_left = map_touch_to_landscape(239, 0);
+    TouchPoint top_right = map_touch_to_landscape(239, 319);
+    TouchPoint bottom_left = map_touch_to_landscape(0, 0);
+    TouchPoint bottom_right = map_touch_to_landscape(0, 319);
     TEST_ASSERT_EQUAL_UINT16(0, top_left.x);
     TEST_ASSERT_EQUAL_UINT16(0, top_left.y);
     TEST_ASSERT_EQUAL_UINT16(319, top_right.x);
@@ -182,7 +182,7 @@ void test_240x240_small_fallback_stays_inside_viewport(void) {
 }
 
 void test_st7789_landscape_usb_left_mode_uses_bgr_color_order(void) {
-    TEST_ASSERT_EQUAL_HEX8(0xA8, st7789_bgr_madctl(1));
+    TEST_ASSERT_EQUAL_HEX8(0x68, st7789_bgr_madctl(3));
 }
 
 void test_fresh_serial_data_selects_live_usage_without_ble(void) {

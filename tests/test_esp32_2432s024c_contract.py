@@ -59,8 +59,20 @@ def test_board_header_separates_native_and_logical_dimensions() -> None:
     assert "#ifdef BOARD_LANDSCAPE" in header
     assert "#define LCD_WIDTH 320" in header
     assert "#define LCD_HEIGHT 240" in header
-    assert "#define LCD_ROTATION 1" in header
+    assert "#define LCD_ROTATION 3" in header
     assert "#define LCD_ROTATION 0" in header
+
+
+def test_usb_left_landscape_rotation_color_and_touch_contract() -> None:
+    board_dir = ROOT / "firmware/src/boards/esp32_2432s024c"
+    color = (board_dir / "display_color_order.h").read_text(encoding="utf-8")
+    touch = (board_dir / "touch_mapping.h").read_text(encoding="utf-8")
+    normalized_color = " ".join(color.split())
+    normalized_touch = " ".join(touch.split())
+
+    assert "rotation == 3 ? 0x68 : 0x88" in normalized_color
+    assert "static_cast<uint16_t>(y)" in normalized_touch
+    assert "static_cast<uint16_t>(239 - x)" in normalized_touch
 
 
 def test_board_hal_is_complete_and_uses_st7789() -> None:

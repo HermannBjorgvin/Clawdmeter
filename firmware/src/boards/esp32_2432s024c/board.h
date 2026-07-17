@@ -8,7 +8,7 @@
 #ifdef BOARD_LANDSCAPE
 #define LCD_WIDTH 320
 #define LCD_HEIGHT 240
-#define LCD_ROTATION 1
+#define LCD_ROTATION 3
 #else
 #define LCD_WIDTH 240
 #define LCD_HEIGHT 320
