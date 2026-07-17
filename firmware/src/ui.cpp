@@ -232,6 +232,7 @@ static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within t
 static lv_image_dsc_t claude_logo_dsc;
 static lv_image_dsc_t codex_logo_dsc;
 static CarouselState carousel = {};
+static DashboardVisibilityState dashboard_visibility = {};
 static DashboardPage current_page = DASHBOARD_CLAUDE;
 static lv_obj_t* navigation_layer = nullptr;
 static bool     s_ble_connected = false;   // cached BLE connection state
@@ -1050,7 +1051,7 @@ void ui_tick_anim(void) {
 
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
-    if (dashboard_battery_visible(current_page)) {
+    if (dashboard_battery_visible(dashboard_visibility, current_page)) {
         lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
@@ -1098,6 +1099,7 @@ static void global_click_cb(lv_event_t* e) {
 }
 
 void ui_show_boot_splash(void) {
+    dashboard_visibility_show_boot_splash(dashboard_visibility);
     lv_obj_add_flag(claude_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(codex_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(activity_container, LV_OBJ_FLAG_HIDDEN);
@@ -1110,6 +1112,7 @@ void ui_show_boot_splash(void) {
 }
 
 void ui_show_screen(DashboardPage page) {
+    dashboard_visibility_show_dashboard(dashboard_visibility);
     lv_obj_add_flag(claude_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(codex_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(activity_container, LV_OBJ_FLAG_HIDDEN);

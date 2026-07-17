@@ -190,7 +190,39 @@ def test_activity_battery_visibility_uses_page_overlap_policy() -> None:
     battery = ui.split("static void apply_battery_visibility", 1)[1].split(
         "static void apply_brand_visibility", 1
     )[0]
-    assert "dashboard_battery_visible(current_page)" in battery
+    assert "dashboard_battery_visible(dashboard_visibility, current_page)" in battery
+
+
+def test_battery_updates_follow_splash_and_dashboard_state_sequence() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    assert "static DashboardVisibilityState dashboard_visibility = {};" in ui
+
+    boot_splash = ui.split("void ui_show_boot_splash(void) {", 1)[1].split(
+        "\n}", 1
+    )[0]
+    boot_transition = boot_splash.index(
+        "dashboard_visibility_show_boot_splash(dashboard_visibility);"
+    )
+    boot_battery_hide = boot_splash.index(
+        "lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);"
+    )
+    assert boot_transition < boot_battery_hide
+
+    show_screen = ui.split("void ui_show_screen(DashboardPage page) {", 1)[1].split(
+        "void ui_start_dashboard", 1
+    )[0]
+    dashboard_transition = show_screen.index(
+        "dashboard_visibility_show_dashboard(dashboard_visibility);"
+    )
+    policy_apply = show_screen.index("apply_battery_visibility();")
+    assert dashboard_transition < policy_apply
+
+    update_battery = ui.split("void ui_update_battery(int percent, bool charging) {", 1)[
+        1
+    ].split("\n}", 1)[0]
+    assert update_battery.index("lv_image_set_src") < update_battery.index(
+        "apply_battery_visibility();"
+    )
 
 
 def test_dashboard_carousel_has_no_robot_page() -> None:

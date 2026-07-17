@@ -365,10 +365,21 @@ void test_provider_branding_matches_each_dashboard_page(void) {
     );
 }
 
-void test_battery_visibility_avoids_activity_branding_overlap(void) {
-    TEST_ASSERT_TRUE(dashboard_battery_visible(DASHBOARD_CLAUDE));
-    TEST_ASSERT_TRUE(dashboard_battery_visible(DASHBOARD_CODEX));
-    TEST_ASSERT_FALSE(dashboard_battery_visible(DASHBOARD_ACTIVITY));
+void test_battery_visibility_follows_splash_and_dashboard_transitions(void) {
+    DashboardVisibilityState visibility{};
+
+    TEST_ASSERT_FALSE(dashboard_battery_visible(visibility, DASHBOARD_CLAUDE));
+
+    dashboard_visibility_show_boot_splash(visibility);
+    TEST_ASSERT_FALSE(dashboard_battery_visible(visibility, DASHBOARD_CLAUDE));
+
+    dashboard_visibility_show_dashboard(visibility);
+    TEST_ASSERT_TRUE(dashboard_battery_visible(visibility, DASHBOARD_CLAUDE));
+    TEST_ASSERT_TRUE(dashboard_battery_visible(visibility, DASHBOARD_CODEX));
+    TEST_ASSERT_FALSE(dashboard_battery_visible(visibility, DASHBOARD_ACTIVITY));
+
+    dashboard_visibility_show_boot_splash(visibility);
+    TEST_ASSERT_FALSE(dashboard_battery_visible(visibility, DASHBOARD_CODEX));
 }
 
 void test_touch_halves_select_previous_and_next(void) {
@@ -441,7 +452,7 @@ void setup() {
     RUN_TEST(test_carousel_wraps_across_exactly_three_pages);
     RUN_TEST(test_three_page_carousel_wraps_in_reverse_order);
     RUN_TEST(test_provider_branding_matches_each_dashboard_page);
-    RUN_TEST(test_battery_visibility_avoids_activity_branding_overlap);
+    RUN_TEST(test_battery_visibility_follows_splash_and_dashboard_transitions);
     RUN_TEST(test_touch_halves_select_previous_and_next);
     RUN_TEST(test_previous_touch_defers_auto_advance_for_thirty_seconds);
     RUN_TEST(test_carousel_auto_advances_after_twelve_seconds);

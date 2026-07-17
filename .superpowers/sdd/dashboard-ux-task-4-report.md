@@ -121,6 +121,50 @@ Firmware builds:
 - No daemon or payload diff exists.
 - No COM3, tray, flash, upload, or push action was performed.
 
+## Post-review correction: battery refresh during boot splash
+
+Global review found a dynamic visibility gap after the Task 4 commit. The boot
+helper hid `battery_img`, but `current_page` remained `DASHBOARD_CLAUDE` while
+the splash was active. On boards with a battery, a later battery percentage or
+charging change called `ui_update_battery()`, which reapplied the page-only
+policy and made the battery visible over the splash.
+
+The root cause was that dashboard visibility had been inferred solely from the
+current carousel page. The correction adds a zero-initialized
+`DashboardVisibilityState`, marks it inactive before showing the boot splash,
+marks it active when any dashboard page is shown, and requires both an active
+dashboard and a non-Activity page before the battery can be visible. This also
+keeps the first `ui_update_battery()` in setup hidden before
+`ui_show_boot_splash()` runs.
+
+TDD RED evidence:
+
+- Focused contracts: `2 failed, 26 passed`. The failures showed the old
+  page-only battery policy and missing dynamic transition wiring.
+- Serial Unity compile/link reached the new pure test and failed on the missing
+  `DashboardVisibilityState` and transition helpers, as expected. The
+  PlatformIO Python wrapper returned process code 0 despite reporting the
+  target `ERRORED`; the compiler diagnostics and target status were used as the
+  RED evidence.
+
+GREEN evidence:
+
+- Focused contracts: `28 passed in 0.04s`.
+- A temporary host Unity runner using the production header executed the full
+  sequence inactive splash -> Claude/Codex dashboard -> Activity -> splash and
+  reported `1 Tests, 0 Failures`. Temporary artifacts were removed.
+- Serial firmware Unity compile/link: `test_port_helpers [PASSED]` in 35.60
+  seconds. No parallel ICE occurred because the runner was forced to one job.
+- Full Python suite: `158 passed, 2 skipped`; only the known unawaited
+  `Event.wait` warning appeared.
+- Portrait build: `SUCCESS` in 252.50 seconds; RAM 32.3% (105,964 bytes), flash
+  42.4% (1,334,415 bytes).
+- Landscape build: `SUCCESS` in 39.44 seconds; RAM 32.3% (105,964 bytes), flash
+  42.4% (1,334,551 bytes).
+- Both builds retained only the known non-fatal `_fixdfdi.o` linker warning.
+- No payload, daemon, splash animation, pairing, idle, COM3, tray, flash,
+  upload, or push behavior was changed or invoked.
+
 ## Remaining concern
 
 The automated contracts, Unity compile/link, and both firmware builds are green.

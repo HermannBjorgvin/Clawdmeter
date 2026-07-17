@@ -10,6 +10,18 @@ enum DashboardBrandMask : uint8_t {
     DASHBOARD_BRAND_CODEX = 2,
 };
 
+struct DashboardVisibilityState {
+    bool dashboard_active;
+};
+
+inline void dashboard_visibility_show_boot_splash(DashboardVisibilityState& state) {
+    state.dashboard_active = false;
+}
+
+inline void dashboard_visibility_show_dashboard(DashboardVisibilityState& state) {
+    state.dashboard_active = true;
+}
+
 inline uint8_t dashboard_brand_mask(DashboardPage page) {
     if (page == DASHBOARD_CLAUDE) return DASHBOARD_BRAND_CLAUDE;
     if (page == DASHBOARD_CODEX) return DASHBOARD_BRAND_CODEX;
@@ -19,6 +31,9 @@ inline uint8_t dashboard_brand_mask(DashboardPage page) {
     return DASHBOARD_BRAND_NONE;
 }
 
-inline bool dashboard_battery_visible(DashboardPage page) {
-    return page != DASHBOARD_ACTIVITY;
+inline bool dashboard_battery_visible(
+    const DashboardVisibilityState& state,
+    DashboardPage page
+) {
+    return state.dashboard_active && page != DASHBOARD_ACTIVITY;
 }
