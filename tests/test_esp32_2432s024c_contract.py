@@ -133,7 +133,7 @@ def test_landscape_codex_uses_second_card_coordinates() -> None:
 def test_landscape_activity_uses_second_card_coordinates() -> None:
     ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
     activity = ui.split("activity_container = lv_obj_create", 1)[1].split(
-        "robot_status_label = lv_label_create", 1
+        "activity_footer_label = lv_label_create", 1
     )[0]
     normalized = " ".join(activity.split())
     assert "activity_container, L.margin, L.content_y, L.panel_width" in normalized
@@ -191,6 +191,56 @@ def test_activity_battery_visibility_uses_page_overlap_policy() -> None:
         "static void apply_brand_visibility", 1
     )[0]
     assert "dashboard_battery_visible(current_page)" in battery
+
+
+def test_dashboard_carousel_has_no_robot_page() -> None:
+    header = (ROOT / "firmware" / "src" / "dashboard_carousel.h").read_text(
+        encoding="utf-8"
+    )
+    assert "DASHBOARD_ROBOT" not in header
+
+
+def test_ui_has_no_robot_status_or_transport_freshness_copy() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    assert "robot_status_label" not in ui
+    assert "last_received_update_ms" not in ui
+    assert "last_robot_status_refresh_ms" not in ui
+    assert "last_received_transport" not in ui
+    assert '"USB data"' not in ui
+    assert '"BLE data"' not in ui
+
+
+def test_global_click_routes_left_and_right_after_reading_touch_point() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    callback = ui.split("static void global_click_cb(lv_event_t* e) {", 1)[1].split(
+        "\n}", 1
+    )[0]
+
+    active_index = callback.index("lv_indev_active()")
+    point_index = callback.index("lv_indev_get_point")
+    previous_index = callback.index("carousel_manual_previous")
+    next_index = callback.index("carousel_manual_next")
+
+    assert active_index < point_index
+    assert point_index < previous_index
+    assert point_index < next_index
+
+
+def test_boot_splash_stays_outside_dashboard_carousel() -> None:
+    main = (ROOT / "firmware" / "src" / "main.cpp").read_text(encoding="utf-8")
+    ui_header = (ROOT / "firmware" / "src" / "ui.h").read_text(encoding="utf-8")
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+
+    assert "DASHBOARD_ROBOT" not in main
+    assert "ui_show_boot_splash();" in main
+    assert "splash_is_active()" in main
+    assert "void ui_show_boot_splash(void);" in ui_header
+
+    boot_splash = ui.split("void ui_show_boot_splash(void) {", 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert "splash_show();" in boot_splash
+    assert "lv_obj_add_flag(navigation_layer, LV_OBJ_FLAG_HIDDEN);" in boot_splash
 
 
 def test_landscape_enterprise_copy_and_labels_are_bounded() -> None:

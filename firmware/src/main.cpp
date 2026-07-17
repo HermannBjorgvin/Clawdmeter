@@ -245,7 +245,7 @@ void setup() {
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
-    ui_show_screen(DASHBOARD_ROBOT);
+    ui_show_boot_splash();
 
     Serial.printf("Dashboard ready (%s, %dx%d), waiting for data on BLE or USB serial...\n",
         board_caps().name, W, H);
@@ -356,10 +356,10 @@ void loop() {
 
         if (power_hal_pwr_pressed()) {
             if (!idle_consume_wake_press()) {
-                // On splash: cycle animations. On the usage view: cycle
-                // screen brightness (single non-splash view, no more screens).
-                if (ui_get_current_screen() == DASHBOARD_ROBOT) splash_next();
-                else                                            brightness_cycle();
+                // On the boot splash: cycle animations. On the dashboard:
+                // cycle screen brightness.
+                if (splash_is_active()) splash_next();
+                else                    brightness_cycle();
             }
         }
 

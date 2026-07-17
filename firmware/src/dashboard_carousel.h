@@ -9,7 +9,6 @@ enum DashboardPage : uint8_t {
     DASHBOARD_CLAUDE,
     DASHBOARD_CODEX,
     DASHBOARD_ACTIVITY,
-    DASHBOARD_ROBOT,
     DASHBOARD_PAGE_COUNT,
 };
 

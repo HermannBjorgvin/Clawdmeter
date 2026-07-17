@@ -9,6 +9,7 @@ const char* codex_window_label(int window_mins);
 void format_compact_tokens(uint32_t tokens, char* buffer, size_t length);
 
 void ui_init(void);
+void ui_show_boot_splash(void);
 void ui_update(const UsageData* data, uint8_t updates);
 void ui_tick_anim(void);
 void ui_show_screen(DashboardPage page);

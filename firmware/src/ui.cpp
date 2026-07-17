@@ -208,13 +208,9 @@ static lv_obj_t* activity_footer_label;
 static ActivityFreshnessState activity_freshness = {};
 static uint32_t last_activity_footer_refresh_ms = 0;
 
-// ---- Robot status and metric page indicators ----
-static lv_obj_t* robot_status_label;
+// ---- Metric page indicators ----
 static lv_obj_t* page_indicator_group;
 static lv_obj_t* page_indicator_dots[DASHBOARD_PAGE_COUNT];
-static uint32_t last_received_update_ms = 0;
-static uint32_t last_robot_status_refresh_ms = 0;
-static DashboardTransport last_received_transport = DASHBOARD_TRANSPORT_NONE;
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
@@ -738,13 +734,6 @@ void ui_init(void) {
     lv_obj_set_style_text_color(activity_footer_label, COL_MUTED, 0);
     lv_obj_align(activity_footer_label, LV_ALIGN_TOP_MID, 0, L.footer_y);
 
-    robot_status_label = lv_label_create(scr);
-    lv_label_set_text(robot_status_label, "No data");
-    lv_obj_set_style_text_font(robot_status_label, L.detail_font, 0);
-    lv_obj_set_style_text_color(robot_status_label, COL_MUTED, 0);
-    lv_obj_align(robot_status_label, LV_ALIGN_TOP_MID, 0, L.footer_y);
-    lv_obj_add_flag(robot_status_label, LV_OBJ_FLAG_HIDDEN);
-
     constexpr int DOT_SIZE = 5;
     constexpr int DOT_GAP = 8;
     constexpr int INDICATOR_WIDTH =
@@ -811,8 +800,6 @@ void ui_init(void) {
 void ui_update(const UsageData* data, uint8_t updates) {
     if (!data) return;
 
-    last_received_update_ms = millis();
-    last_received_transport = data->transport;
     activity_freshness_apply(activity_freshness, updates, millis());
 
     if (updates & DASHBOARD_UPDATE_CODEX) {
@@ -1021,31 +1008,6 @@ void ui_tick_anim(void) {
         lv_label_set_text(activity_footer_label, footer);
     }
 
-    if (current_page == DASHBOARD_ROBOT && robot_status_label &&
-        uptime_now - last_robot_status_refresh_ms >= 1000) {
-        last_robot_status_refresh_ms = uptime_now;
-        if (last_received_transport == DASHBOARD_TRANSPORT_NONE) {
-            lv_label_set_text(robot_status_label, "No data");
-        } else {
-            const char* transport = last_received_transport == DASHBOARD_TRANSPORT_USB
-                ? "USB data"
-                : "BLE data";
-            const uint32_t age_ms = uptime_now - last_received_update_ms;
-            if (age_ms < 60000) {
-                lv_label_set_text_fmt(
-                    robot_status_label, "%s \xC2\xB7 just now", transport
-                );
-            } else {
-                lv_label_set_text_fmt(
-                    robot_status_label,
-                    "%s \xC2\xB7 %lum ago",
-                    transport,
-                    static_cast<unsigned long>(age_ms / 60000)
-                );
-            }
-        }
-    }
-
     if (current_page != DASHBOARD_CLAUDE) return;
     update_view_state();
     if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
@@ -1117,9 +1079,34 @@ static void apply_brand_visibility(DashboardPage page) {
 
 static void global_click_cb(lv_event_t* e) {
     (void)e;
-    uint32_t now = millis();
+    lv_indev_t* indev = lv_indev_active();
+    if (!indev) return;
+
+    lv_point_t point{};
+    lv_indev_get_point(indev, &point);
+    const uint32_t now = millis();
     if (!carousel.started) carousel_start(carousel, current_page, now);
-    ui_show_screen(carousel_manual_next(carousel, now));
+
+    const DashboardNavigationDirection direction = dashboard_direction_for_x(
+        static_cast<uint16_t>(point.x < 0 ? 0 : point.x),
+        static_cast<uint16_t>(L.scr_w)
+    );
+    const DashboardPage page = direction == DASHBOARD_NAV_PREVIOUS
+        ? carousel_manual_previous(carousel, now)
+        : carousel_manual_next(carousel, now);
+    ui_show_screen(page);
+}
+
+void ui_show_boot_splash(void) {
+    lv_obj_add_flag(claude_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(codex_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(activity_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(claude_logo_img, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(codex_logo_img, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(page_indicator_group, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(navigation_layer, LV_OBJ_FLAG_HIDDEN);
+    if (battery_img) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    splash_show();
 }
 
 void ui_show_screen(DashboardPage page) {
@@ -1127,7 +1114,6 @@ void ui_show_screen(DashboardPage page) {
     lv_obj_add_flag(codex_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(activity_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
-    if (robot_status_label) lv_obj_add_flag(robot_status_label, LV_OBJ_FLAG_HIDDEN);
 
     switch (page) {
     case DASHBOARD_CLAUDE:
@@ -1139,10 +1125,6 @@ void ui_show_screen(DashboardPage page) {
     case DASHBOARD_ACTIVITY:
         lv_obj_clear_flag(activity_container, LV_OBJ_FLAG_HIDDEN);
         break;
-    case DASHBOARD_ROBOT:
-        splash_show();
-        if (robot_status_label) lv_obj_clear_flag(robot_status_label, LV_OBJ_FLAG_HIDDEN);
-        break;
     default:
         break;
     }
@@ -1151,23 +1133,22 @@ void ui_show_screen(DashboardPage page) {
 
     current_page = page;
     if (page_indicator_group) {
-        if (page == DASHBOARD_ROBOT) {
-            lv_obj_add_flag(page_indicator_group, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_clear_flag(page_indicator_group, LV_OBJ_FLAG_HIDDEN);
-            for (int i = 0; i < DASHBOARD_PAGE_COUNT; ++i) {
-                lv_obj_set_style_bg_color(
-                    page_indicator_dots[i],
-                    i == static_cast<int>(page) ? COL_TEXT : COL_MUTED,
-                    0
-                );
-            }
+        lv_obj_clear_flag(page_indicator_group, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < DASHBOARD_PAGE_COUNT; ++i) {
+            lv_obj_set_style_bg_color(
+                page_indicator_dots[i],
+                i == static_cast<int>(page) ? COL_TEXT : COL_MUTED,
+                0
+            );
         }
     }
     apply_battery_visibility();
     lv_obj_move_foreground(claude_logo_img);
     lv_obj_move_foreground(codex_logo_img);
-    if (navigation_layer) lv_obj_move_foreground(navigation_layer);
+    if (navigation_layer) {
+        lv_obj_clear_flag(navigation_layer, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(navigation_layer);
+    }
 }
 
 void ui_start_dashboard(uint32_t now_ms) {
