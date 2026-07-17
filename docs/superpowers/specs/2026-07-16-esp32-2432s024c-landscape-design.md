@@ -16,7 +16,7 @@ The board port will distinguish native panel dimensions from logical UI dimensio
 
 - native ST7789 panel: 240x320 in both builds;
 - portrait logical canvas: 240x320, rotation 0;
-- landscape logical canvas: 320x240, rotation 1, with the USB connector physically on the left.
+- landscape logical canvas: 320x240, rotation 3, with the USB connector physically on the left.
 
 The physical display is always initialized with its native dimensions. Rotation is applied afterward. Flush clipping uses the logical dimensions.
 
@@ -24,7 +24,7 @@ The physical display is always initialized with its native dimensions. Rotation 
 
 Portrait keeps the existing raw-to-portrait mapping. Landscape adds a dedicated raw-to-landscape transform selected by `BOARD_LANDSCAPE`. It must map the same physical point to the corresponding 320x240 LVGL coordinate after display rotation.
 
-Hardware acceptance is authoritative: with USB on the left, touches at all four corners and the center must land in the matching logical regions. A short touch anywhere advances exactly one page. If the ST7789/CST820 rotation convention differs from the initial rotation-1 mapping, only the board-local rotation constant and transform are adjusted; shared carousel code is not changed.
+Hardware acceptance is authoritative. It established that USB-left landscape uses ST7789 rotation 3, BGR MADCTL `0x68` (`MX | MV | BGR`), and the CST820 transform `(x, y) = (raw_y, 239 - raw_x)`. The raw center `(120, 160)` maps to logical `(160, 119)`, and touches at all four corners and the center land in the matching logical regions. A short touch anywhere advances exactly one page. These corrections remain isolated to the board-local rotation constant, color-order helper, and touch transform; shared carousel code is unchanged.
 
 ## Landscape layout
 

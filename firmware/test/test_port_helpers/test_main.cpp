@@ -35,6 +35,7 @@ void test_landscape_touch_mapping_rotates_with_usb_left(void) {
     TouchPoint top_right = map_touch_to_landscape(239, 319);
     TouchPoint bottom_left = map_touch_to_landscape(0, 0);
     TouchPoint bottom_right = map_touch_to_landscape(0, 319);
+    TouchPoint center = map_touch_to_landscape(120, 160);
     TEST_ASSERT_EQUAL_UINT16(0, top_left.x);
     TEST_ASSERT_EQUAL_UINT16(0, top_left.y);
     TEST_ASSERT_EQUAL_UINT16(319, top_right.x);
@@ -43,6 +44,8 @@ void test_landscape_touch_mapping_rotates_with_usb_left(void) {
     TEST_ASSERT_EQUAL_UINT16(239, bottom_left.y);
     TEST_ASSERT_EQUAL_UINT16(319, bottom_right.x);
     TEST_ASSERT_EQUAL_UINT16(239, bottom_right.y);
+    TEST_ASSERT_EQUAL_UINT16(160, center.x);
+    TEST_ASSERT_EQUAL_UINT16(119, center.y);
 }
 
 void test_short_press_emits_only_short_event(void) {
