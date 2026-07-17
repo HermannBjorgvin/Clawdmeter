@@ -185,6 +185,14 @@ def test_ui_owns_separate_claude_and_codex_logo_images() -> None:
     assert "static lv_image_dsc_t codex_logo_dsc;" in ui
 
 
+def test_activity_battery_visibility_uses_page_overlap_policy() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    battery = ui.split("static void apply_battery_visibility", 1)[1].split(
+        "static void apply_brand_visibility", 1
+    )[0]
+    assert "dashboard_battery_visible(current_page)" in battery
+
+
 def test_landscape_enterprise_copy_and_labels_are_bounded() -> None:
     ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
     assert 'L.horizontal_cards ? "monthly budget" : "of your monthly budget"' in ui

@@ -91,3 +91,41 @@ Build commands:
 - Search confirmed the old shared `logo_img`/`logo_dsc` identifiers are gone.
 - No push, upload, COM3 access, tray changes, or payload/daemon changes were
   performed.
+
+## Review correction: battery overlap on Activity
+
+Review found that the Activity-page Blossom and the optional battery indicator
+shared the same right edge. The Blossom used
+`scr_w - margin - logo_rendered_width`, while the 48px battery used
+`scr_w - 48 - margin`; `apply_battery_visibility()` hid the battery only on
+Robot. Consequently, the two objects overlapped deterministically on every
+`has_battery` variant.
+
+The correction centralizes the page policy in
+`dashboard_battery_visible(DashboardPage)`:
+
+- Claude and Codex preserve the previous visible-battery behavior.
+- Activity now hides the battery so the right-side Blossom remains clear.
+- Robot preserves the previous hidden-battery behavior.
+
+TDD RED:
+
+- Pytest: `1 failed, 20 passed`, because `ui.cpp` did not yet use
+  `dashboard_battery_visible(current_page)`.
+- Unity compile/link: exit `1`, because `dashboard_battery_visible` did not yet
+  exist.
+
+Correction GREEN:
+
+```powershell
+& 'C:\Users\Gustavo\Documents\esp32-claude\.venv\Scripts\python.exe' -m pytest tests\test_esp32_2432s024c_contract.py -q
+& 'C:\Users\Gustavo\.platformio\penv\Scripts\pio.exe' test -d firmware -e esp32_2432s024c -f test_port_helpers --without-uploading --without-testing
+```
+
+- Pytest: `21 passed in 0.03s`, exit `0`.
+- Unity compile/link: `PASSED` in `30.52s`, exit `0`.
+- The same pre-existing `_fixdfdi.o` `.note.GNU-stack` linker warning remained
+  non-fatal.
+- Full builds were not repeated: the correction changes only the page-based
+  visibility branch already compiled and linked by the focused target; it does
+  not change assets, layout metrics, orientation flags, or board-specific code.

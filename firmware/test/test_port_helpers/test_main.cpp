@@ -347,6 +347,13 @@ void test_provider_branding_matches_each_dashboard_page(void) {
     );
 }
 
+void test_battery_visibility_avoids_activity_branding_overlap(void) {
+    TEST_ASSERT_TRUE(dashboard_battery_visible(DASHBOARD_CLAUDE));
+    TEST_ASSERT_TRUE(dashboard_battery_visible(DASHBOARD_CODEX));
+    TEST_ASSERT_FALSE(dashboard_battery_visible(DASHBOARD_ACTIVITY));
+    TEST_ASSERT_FALSE(dashboard_battery_visible(DASHBOARD_ROBOT));
+}
+
 void test_carousel_previous_moves_in_reverse_order(void) {
     CarouselState state{};
     carousel_start(state, DASHBOARD_ACTIVITY, 1000);
@@ -423,6 +430,7 @@ void setup() {
     RUN_TEST(test_daily_tokens_are_formatted_compactly);
     RUN_TEST(test_carousel_wraps_in_approved_order);
     RUN_TEST(test_provider_branding_matches_each_dashboard_page);
+    RUN_TEST(test_battery_visibility_avoids_activity_branding_overlap);
     RUN_TEST(test_carousel_previous_moves_in_reverse_order);
     RUN_TEST(test_touch_halves_select_previous_and_next);
     RUN_TEST(test_previous_touch_defers_auto_advance_for_thirty_seconds);

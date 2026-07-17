@@ -1017,8 +1017,11 @@ void ui_tick_anim(void) {
 
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
-    if (current_page == DASHBOARD_ROBOT) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-    else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    if (dashboard_battery_visible(current_page)) {
+        lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static void apply_brand_visibility(DashboardPage page) {

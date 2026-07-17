@@ -18,3 +18,7 @@ inline uint8_t dashboard_brand_mask(DashboardPage page) {
     }
     return DASHBOARD_BRAND_NONE;
 }
+
+inline bool dashboard_battery_visible(DashboardPage page) {
+    return page != DASHBOARD_ACTIVITY && page != DASHBOARD_ROBOT;
+}
