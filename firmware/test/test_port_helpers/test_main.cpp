@@ -118,7 +118,7 @@ void test_320x240_layout_uses_two_horizontal_cards(void) {
     TEST_ASSERT_EQUAL_INT(126, m.usage_panel_h);
     TEST_ASSERT_EQUAL_INT(196, m.footer_y);
     TEST_ASSERT_EQUAL_INT(227, m.page_indicator_y);
-    TEST_ASSERT_LESS_OR_EQUAL_INT(m.footer_y, m.page_indicator_y - 18);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.page_indicator_y - 18, m.footer_y);
 }
 
 void test_240x320_activity_title_clears_logo(void) {
@@ -128,7 +128,7 @@ void test_240x320_activity_title_clears_logo(void) {
     const int logo_right = m.margin + transformed_width;
     const int activity_title_left = (m.screen_width - 127) / 2;
     TEST_ASSERT_EQUAL_INT(m.logo_rendered_width, transformed_width);
-    TEST_ASSERT_LESS_OR_EQUAL_INT(logo_right + 4, activity_title_left);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(activity_title_left, logo_right + 4);
 }
 
 void test_320x240_logo_bounds_match_top_left_scaled_image(void) {
@@ -148,10 +148,10 @@ void test_320x240_enterprise_content_fits_card_content_box(void) {
     UiLayoutMetrics m = compute_ui_layout_metrics(320, 240);
     const int useful_height = m.usage_panel_h - 16;
 
-    TEST_ASSERT_LESS_OR_EQUAL_INT(m.usage_description_y + 14, m.usage_bar_y);
-    TEST_ASSERT_LESS_OR_EQUAL_INT(m.usage_bar_y + 24, m.usage_status_y);
-    TEST_ASSERT_LESS_OR_EQUAL_INT(m.usage_status_y + 14, useful_height);
-    TEST_ASSERT_LESS_OR_EQUAL_INT(m.usage_reset_y + 14, useful_height);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.usage_bar_y, m.usage_description_y + 14);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.usage_status_y, m.usage_bar_y + 24);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(useful_height, m.usage_status_y + 14);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(useful_height, m.usage_reset_y + 14);
 }
 
 void test_320x240_pairing_text_clears_status_and_page_dots(void) {
@@ -161,10 +161,10 @@ void test_320x240_pairing_text_clears_status_and_page_dots(void) {
     const int release_top = m.content_y + m.pairing_release_y;
     const int waiting_bottom = m.footer_y + 18;
 
-    TEST_ASSERT_LESS_OR_EQUAL_INT(title_top + 28 + 4, instruction_top);
-    TEST_ASSERT_LESS_OR_EQUAL_INT(instruction_top + 14 + 4, release_top);
-    TEST_ASSERT_LESS_OR_EQUAL_INT(release_top + 14 + 4, m.footer_y);
-    TEST_ASSERT_LESS_OR_EQUAL_INT(waiting_bottom + 4, m.page_indicator_y);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(instruction_top, title_top + 28 + 4);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(release_top, instruction_top + 14 + 4);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.footer_y, release_top + 14 + 4);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.page_indicator_y, waiting_bottom + 4);
 }
 
 void test_240x240_small_fallback_stays_inside_viewport(void) {
@@ -174,10 +174,10 @@ void test_240x240_small_fallback_stays_inside_viewport(void) {
 
     TEST_ASSERT_TRUE(m.small_display);
     TEST_ASSERT_TRUE(m.horizontal_cards);
-    TEST_ASSERT_LESS_OR_EQUAL_INT(second_panel_right + m.margin, m.screen_width);
-    TEST_ASSERT_LESS_OR_EQUAL_INT(cards_bottom + 18, m.footer_y);
-    TEST_ASSERT_LESS_OR_EQUAL_INT(m.footer_y + 18, m.page_indicator_y);
-    TEST_ASSERT_LESS_OR_EQUAL_INT(m.page_indicator_y + 5, m.screen_height);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.screen_width, second_panel_right + m.margin);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.footer_y, cards_bottom + 18);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.page_indicator_y, m.footer_y + 18);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(m.screen_height, m.page_indicator_y + 5);
 }
 
 void test_st7789_landscape_usb_left_mode_uses_bgr_color_order(void) {
