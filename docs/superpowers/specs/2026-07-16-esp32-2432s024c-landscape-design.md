@@ -24,7 +24,7 @@ The physical display is always initialized with its native dimensions. Rotation 
 
 Portrait keeps the existing raw-to-portrait mapping. Landscape adds a dedicated raw-to-landscape transform selected by `BOARD_LANDSCAPE`. It must map the same physical point to the corresponding 320x240 LVGL coordinate after display rotation.
 
-Hardware acceptance is authoritative. It established that USB-left landscape uses ST7789 rotation 3, BGR MADCTL `0x68` (`MX | MV | BGR`), and the CST820 transform `(x, y) = (raw_y, 239 - raw_x)`. The raw center `(120, 160)` maps to logical `(160, 119)`, and touches at all four corners and the center land in the matching logical regions. A short touch anywhere advances exactly one page. These corrections remain isolated to the board-local rotation constant, color-order helper, and touch transform; shared carousel code is unchanged.
+Physical feedback is authoritative. Rotation 3 with MADCTL `0x68` corrected the upside-down image but left text horizontally mirrored. The current board-local correction therefore keeps rotation 3, adds `MY`, and uses BGR MADCTL `0xE8` (`MX | MY | MV | BGR`) with the matching CST820 transform `(x, y) = (319 - raw_y, 239 - raw_x)`. The raw center `(120, 160)` maps to logical `(159, 119)`. Final upright/unmirrored visual and touch acceptance remains pending physical validation; this correction does not claim it. Shared carousel code remains unchanged.
 
 ## Landscape layout
 

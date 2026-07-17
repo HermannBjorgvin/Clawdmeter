@@ -63,15 +63,21 @@ def test_board_header_separates_native_and_logical_dimensions() -> None:
     assert "#define LCD_ROTATION 0" in header
 
 
-def test_usb_left_landscape_rotation_color_and_touch_contract() -> None:
+def test_usb_left_landscape_rotation_color_contract() -> None:
     board_dir = ROOT / "firmware/src/boards/esp32_2432s024c"
     color = (board_dir / "display_color_order.h").read_text(encoding="utf-8")
-    touch = (board_dir / "touch_mapping.h").read_text(encoding="utf-8")
     normalized_color = " ".join(color.split())
+
+    assert "rotation == 3 ? 0xE8 : 0x88" in normalized_color
+
+
+def test_usb_left_landscape_touch_contract() -> None:
+    touch = (
+        ROOT / "firmware/src/boards/esp32_2432s024c/touch_mapping.h"
+    ).read_text(encoding="utf-8")
     normalized_touch = " ".join(touch.split())
 
-    assert "rotation == 3 ? 0x68 : 0x88" in normalized_color
-    assert "static_cast<uint16_t>(y)" in normalized_touch
+    assert "static_cast<uint16_t>(319 - y)" in normalized_touch
     assert "static_cast<uint16_t>(239 - x)" in normalized_touch
 
 

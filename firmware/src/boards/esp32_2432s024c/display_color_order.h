@@ -6,5 +6,5 @@
 // Setting MX as the generic Adafruit rotation-0 path does mirror the image
 // horizontally on the ESP32-2432S024C.
 constexpr uint8_t st7789_bgr_madctl(uint8_t rotation) {
-    return rotation == 3 ? 0x68 : 0x88;
+    return rotation == 3 ? 0xE8 : 0x88;
 }
