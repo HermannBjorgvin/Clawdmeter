@@ -240,6 +240,44 @@ def test_activity_footer_uses_activity_specific_freshness_state() -> None:
     assert "L.footer_y" in ui
 
 
+def test_activity_uses_independent_semantic_metric_widgets() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+
+    for widget in (
+        "lbl_activity_open",
+        "lbl_activity_busy",
+        "lbl_activity_waiting",
+        "lbl_activity_unread",
+    ):
+        assert f"static lv_obj_t* {widget};" in ui
+        assert f"{widget} = lv_label_create" in ui
+
+    assert '"Open     %d\\nBusy     %d\\nWaiting  %d"' not in ui
+    assert 'lv_label_set_text_fmt(lbl_activity_open, "Open  %d"' in ui
+    assert 'lv_label_set_text_fmt(lbl_activity_busy, "Busy  %d"' in ui
+    assert 'lv_label_set_text_fmt(lbl_activity_waiting, "Waiting  %d"' in ui
+    assert 'lv_label_set_text_fmt(lbl_activity_unread, "Unread  %d"' in ui
+
+
+def test_activity_rows_handle_layout_and_provider_availability() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    normalized = " ".join(ui.split())
+
+    assert "const bool compact_activity = L.usage_panel_h <= 90;" in normalized
+    assert "compact_activity ? 20 : 28" in normalized
+    assert "compact_activity ? 40 : 52" in normalized
+    assert "compact_activity ? 60 : 76" in normalized
+    assert "compact_activity ? 28 : 36" in normalized
+    assert "lbl_activity_claude_unavailable" in ui
+    assert "lbl_activity_codex_unavailable" in ui
+    assert "lv_obj_add_flag(lbl_activity_open, LV_OBJ_FLAG_HIDDEN);" in ui
+    assert "lv_obj_clear_flag(lbl_activity_open, LV_OBJ_FLAG_HIDDEN);" in ui
+    assert "lv_obj_add_flag(lbl_activity_unread, LV_OBJ_FLAG_HIDDEN);" in ui
+    assert "lv_obj_clear_flag(lbl_activity_unread, LV_OBJ_FLAG_HIDDEN);" in ui
+    assert "lv_obj_set_style_text_color(lbl_activity_claude_unavailable, COL_MUTED, 0);" in ui
+    assert "lv_obj_set_style_text_color(lbl_activity_codex_unavailable, COL_MUTED, 0);" in ui
+
+
 def test_display_ready_log_reports_selected_orientation_and_dimensions() -> None:
     display = (
         ROOT / "firmware/src/boards/esp32_2432s024c/display.cpp"

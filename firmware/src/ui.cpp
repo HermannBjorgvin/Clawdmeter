@@ -1,5 +1,6 @@
 #include "ui.h"
 #include "activity_freshness.h"
+#include "activity_style.h"
 #include "dashboard_branding.h"
 #include "dashboard_payload.h"
 #include "splash.h"
@@ -195,8 +196,14 @@ static lv_obj_t* codex_reset[2];
 
 // ---- Activity screen widgets ----
 static lv_obj_t* activity_container;
-static lv_obj_t* lbl_activity_claude;
-static lv_obj_t* lbl_activity_codex;
+static lv_obj_t* lbl_activity_claude_title;
+static lv_obj_t* lbl_activity_claude_unavailable;
+static lv_obj_t* lbl_activity_open;
+static lv_obj_t* lbl_activity_busy;
+static lv_obj_t* lbl_activity_waiting;
+static lv_obj_t* lbl_activity_codex_title;
+static lv_obj_t* lbl_activity_codex_unavailable;
+static lv_obj_t* lbl_activity_unread;
 static lv_obj_t* activity_footer_label;
 static ActivityFreshnessState activity_freshness = {};
 static uint32_t last_activity_footer_refresh_ms = 0;
@@ -646,19 +653,81 @@ void ui_init(void) {
         lv_obj_set_style_pad_all(codex_activity_panel, 8, 0);
     }
 
-    lbl_activity_claude = lv_label_create(claude_activity_panel);
-    lv_label_set_text(lbl_activity_claude, "Claude Code\nUnavailable");
-    lv_obj_set_width(lbl_activity_claude, L.panel_width - (L.scr_h <= 320 ? 16 : 32));
-    lv_obj_set_style_text_font(lbl_activity_claude, L.detail_font, 0);
-    lv_obj_set_style_text_color(lbl_activity_claude, COL_TEXT, 0);
-    lv_obj_set_style_text_line_space(lbl_activity_claude, L.scr_h <= 320 ? 1 : 4, 0);
+    const bool compact_activity = L.usage_panel_h <= 90;
+    const int activity_content_width =
+        L.panel_width - (L.scr_h <= 320 ? 16 : 32);
 
-    lbl_activity_codex = lv_label_create(codex_activity_panel);
-    lv_label_set_text(lbl_activity_codex, "Codex\nUnavailable");
-    lv_obj_set_width(lbl_activity_codex, L.panel_width - (L.scr_h <= 320 ? 16 : 32));
-    lv_obj_set_style_text_font(lbl_activity_codex, L.detail_font, 0);
-    lv_obj_set_style_text_color(lbl_activity_codex, COL_TEXT, 0);
-    lv_obj_set_style_text_line_space(lbl_activity_codex, L.scr_h <= 320 ? 1 : 4, 0);
+    lbl_activity_claude_title = lv_label_create(claude_activity_panel);
+    lv_label_set_text(lbl_activity_claude_title, "Claude Code");
+    lv_obj_set_width(lbl_activity_claude_title, activity_content_width);
+    lv_obj_set_style_text_font(lbl_activity_claude_title, L.detail_font, 0);
+    lv_obj_set_style_text_color(lbl_activity_claude_title, COL_TEXT, 0);
+    lv_obj_set_pos(lbl_activity_claude_title, 0, 0);
+
+    lbl_activity_claude_unavailable = lv_label_create(claude_activity_panel);
+    lv_label_set_text(lbl_activity_claude_unavailable, "Unavailable");
+    lv_obj_set_width(lbl_activity_claude_unavailable, activity_content_width);
+    lv_obj_set_style_text_font(lbl_activity_claude_unavailable, L.detail_font, 0);
+    lv_obj_set_style_text_color(lbl_activity_claude_unavailable, COL_MUTED, 0);
+    lv_obj_set_pos(
+        lbl_activity_claude_unavailable, 0, compact_activity ? 20 : 28
+    );
+
+    lbl_activity_open = lv_label_create(claude_activity_panel);
+    lv_label_set_text(lbl_activity_open, "");
+    lv_obj_set_width(lbl_activity_open, activity_content_width);
+    lv_obj_set_style_text_font(lbl_activity_open, L.detail_font, 0);
+    lv_obj_set_style_text_color(
+        lbl_activity_open, lv_color_hex(ACTIVITY_OPEN_HEX), 0
+    );
+    lv_obj_set_pos(lbl_activity_open, 0, compact_activity ? 20 : 28);
+    lv_obj_add_flag(lbl_activity_open, LV_OBJ_FLAG_HIDDEN);
+
+    lbl_activity_busy = lv_label_create(claude_activity_panel);
+    lv_label_set_text(lbl_activity_busy, "");
+    lv_obj_set_width(lbl_activity_busy, activity_content_width);
+    lv_obj_set_style_text_font(lbl_activity_busy, L.detail_font, 0);
+    lv_obj_set_style_text_color(
+        lbl_activity_busy, lv_color_hex(ACTIVITY_BUSY_HEX), 0
+    );
+    lv_obj_set_pos(lbl_activity_busy, 0, compact_activity ? 40 : 52);
+    lv_obj_add_flag(lbl_activity_busy, LV_OBJ_FLAG_HIDDEN);
+
+    lbl_activity_waiting = lv_label_create(claude_activity_panel);
+    lv_label_set_text(lbl_activity_waiting, "");
+    lv_obj_set_width(lbl_activity_waiting, activity_content_width);
+    lv_obj_set_style_text_font(lbl_activity_waiting, L.detail_font, 0);
+    lv_obj_set_style_text_color(
+        lbl_activity_waiting, lv_color_hex(ACTIVITY_WAITING_HEX), 0
+    );
+    lv_obj_set_pos(lbl_activity_waiting, 0, compact_activity ? 60 : 76);
+    lv_obj_add_flag(lbl_activity_waiting, LV_OBJ_FLAG_HIDDEN);
+
+    lbl_activity_codex_title = lv_label_create(codex_activity_panel);
+    lv_label_set_text(lbl_activity_codex_title, "Codex");
+    lv_obj_set_width(lbl_activity_codex_title, activity_content_width);
+    lv_obj_set_style_text_font(lbl_activity_codex_title, L.detail_font, 0);
+    lv_obj_set_style_text_color(lbl_activity_codex_title, COL_TEXT, 0);
+    lv_obj_set_pos(lbl_activity_codex_title, 0, 0);
+
+    lbl_activity_codex_unavailable = lv_label_create(codex_activity_panel);
+    lv_label_set_text(lbl_activity_codex_unavailable, "Unavailable");
+    lv_obj_set_width(lbl_activity_codex_unavailable, activity_content_width);
+    lv_obj_set_style_text_font(lbl_activity_codex_unavailable, L.detail_font, 0);
+    lv_obj_set_style_text_color(lbl_activity_codex_unavailable, COL_MUTED, 0);
+    lv_obj_set_pos(
+        lbl_activity_codex_unavailable, 0, compact_activity ? 28 : 36
+    );
+
+    lbl_activity_unread = lv_label_create(codex_activity_panel);
+    lv_label_set_text(lbl_activity_unread, "");
+    lv_obj_set_width(lbl_activity_unread, activity_content_width);
+    lv_obj_set_style_text_font(lbl_activity_unread, L.detail_font, 0);
+    lv_obj_set_style_text_color(
+        lbl_activity_unread, lv_color_hex(ACTIVITY_UNREAD_HEX), 0
+    );
+    lv_obj_set_pos(lbl_activity_unread, 0, compact_activity ? 28 : 36);
+    lv_obj_add_flag(lbl_activity_unread, LV_OBJ_FLAG_HIDDEN);
 
     activity_footer_label = lv_label_create(activity_container);
     lv_label_set_text(activity_footer_label, "Not scanned");
@@ -796,25 +865,27 @@ void ui_update(const UsageData* data, uint8_t updates) {
 
     if (updates & DASHBOARD_UPDATE_ACTIVITY) {
         if (data->activity.claude_valid) {
-            lv_label_set_text_fmt(
-                lbl_activity_claude,
-                "Claude Code\nOpen     %d\nBusy     %d\nWaiting  %d",
-                data->activity.claude_open,
-                data->activity.claude_busy,
-                data->activity.claude_waiting
-            );
+            lv_label_set_text_fmt(lbl_activity_open, "Open  %d", data->activity.claude_open);
+            lv_label_set_text_fmt(lbl_activity_busy, "Busy  %d", data->activity.claude_busy);
+            lv_label_set_text_fmt(lbl_activity_waiting, "Waiting  %d", data->activity.claude_waiting);
+            lv_obj_add_flag(lbl_activity_claude_unavailable, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(lbl_activity_open, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(lbl_activity_busy, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(lbl_activity_waiting, LV_OBJ_FLAG_HIDDEN);
         } else {
-            lv_label_set_text(lbl_activity_claude, "Claude Code\nUnavailable");
+            lv_obj_add_flag(lbl_activity_open, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(lbl_activity_busy, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(lbl_activity_waiting, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(lbl_activity_claude_unavailable, LV_OBJ_FLAG_HIDDEN);
         }
 
         if (data->activity.codex_valid) {
-            lv_label_set_text_fmt(
-                lbl_activity_codex,
-                "Codex\nUnread   %d",
-                data->activity.codex_unread
-            );
+            lv_label_set_text_fmt(lbl_activity_unread, "Unread  %d", data->activity.codex_unread);
+            lv_obj_add_flag(lbl_activity_codex_unavailable, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(lbl_activity_unread, LV_OBJ_FLAG_HIDDEN);
         } else {
-            lv_label_set_text(lbl_activity_codex, "Codex\nUnavailable");
+            lv_obj_add_flag(lbl_activity_unread, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(lbl_activity_codex_unavailable, LV_OBJ_FLAG_HIDDEN);
         }
 
         char footer[32];

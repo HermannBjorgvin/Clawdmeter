@@ -5,6 +5,7 @@
 #include "boards/esp32_2432s024c/display_color_order.h"
 #include "boards/esp32_2432s024c/touch_mapping.h"
 #include "activity_freshness.h"
+#include "activity_style.h"
 #include "dashboard_payload.h"
 #include "dashboard_carousel.h"
 #include "dashboard_branding.h"
@@ -16,6 +17,15 @@
 
 #include "../../src/dashboard_payload.cpp"
 #include "../../src/ui.cpp"
+
+void test_activity_status_colors_are_semantically_distinct(void) {
+    TEST_ASSERT_EQUAL_HEX32(0x55A868, ACTIVITY_OPEN_HEX);
+    TEST_ASSERT_EQUAL_HEX32(0xD97757, ACTIVITY_BUSY_HEX);
+    TEST_ASSERT_EQUAL_HEX32(0x5B8FF9, ACTIVITY_WAITING_HEX);
+    TEST_ASSERT_EQUAL_HEX32(0x8B7CF6, ACTIVITY_UNREAD_HEX);
+    TEST_ASSERT_NOT_EQUAL(ACTIVITY_OPEN_HEX, ACTIVITY_BUSY_HEX);
+    TEST_ASSERT_NOT_EQUAL(ACTIVITY_BUSY_HEX, ACTIVITY_WAITING_HEX);
+}
 
 void test_touch_mapping_keeps_portrait_axes(void) {
     TouchPoint point = map_touch_to_portrait(40, 250);
@@ -399,6 +409,7 @@ void test_manual_touch_defers_auto_advance_for_thirty_seconds(void) {
 void setup() {
     delay(2000);
     UNITY_BEGIN();
+    RUN_TEST(test_activity_status_colors_are_semantically_distinct);
     RUN_TEST(test_touch_mapping_keeps_portrait_axes);
     RUN_TEST(test_touch_mapping_clamps_edges);
     RUN_TEST(test_landscape_touch_mapping_rotates_with_usb_left);
