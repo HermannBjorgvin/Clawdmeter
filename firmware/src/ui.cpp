@@ -1,9 +1,11 @@
 #include "ui.h"
 #include "activity_freshness.h"
+#include "dashboard_branding.h"
 #include "dashboard_payload.h"
 #include "splash.h"
 #include <lvgl.h>
 #include "logo.h"
+#include "codex_logo.h"
 #include "icons.h"
 #include "hal/board_caps.h"
 #include "ui_layout.h"
@@ -209,7 +211,8 @@ static DashboardTransport last_received_transport = DASHBOARD_TRANSPORT_NONE;
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
-static lv_obj_t* logo_img;
+static lv_obj_t* claude_logo_img;
+static lv_obj_t* codex_logo_img;
 static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 
 // ---- Live-data freshness → which usage sub-view to show ----
@@ -223,7 +226,8 @@ static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usag
 static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within this window (daemon sends ~60s)
 
 // ---- Shared ----
-static lv_image_dsc_t logo_dsc;
+static lv_image_dsc_t claude_logo_dsc;
+static lv_image_dsc_t codex_logo_dsc;
 static CarouselState carousel = {};
 static DashboardPage current_page = DASHBOARD_CLAUDE;
 static lv_obj_t* navigation_layer = nullptr;
@@ -567,7 +571,12 @@ void ui_init(void) {
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-    init_icon_dsc_rgb565a8(&logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data);
+    init_icon_dsc_rgb565a8(
+        &claude_logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data
+    );
+    init_icon_dsc_rgb565a8(
+        &codex_logo_dsc, CODEX_LOGO_WIDTH, CODEX_LOGO_HEIGHT, codex_logo_data
+    );
 
     init_usage_screen(scr);
     splash_init(scr);
@@ -691,12 +700,22 @@ void ui_init(void) {
         lv_obj_clear_flag(page_indicator_dots[i], LV_OBJ_FLAG_SCROLLABLE);
     }
 
-    logo_img = lv_image_create(scr);
-    lv_image_set_src(logo_img, &logo_dsc);
-    lv_image_set_pivot(logo_img, 0, 0);
-    lv_image_set_scale(logo_img, L.logo_scale);
+    claude_logo_img = lv_image_create(scr);
+    lv_image_set_src(claude_logo_img, &claude_logo_dsc);
+    lv_image_set_pivot(claude_logo_img, 0, 0);
+    lv_image_set_scale(claude_logo_img, L.logo_scale);
     lv_obj_set_pos(
-        logo_img,
+        claude_logo_img,
+        L.margin,
+        (L.horizontal_cards || L.logo_size == 48) ? 6 : L.title_y - 10
+    );
+
+    codex_logo_img = lv_image_create(scr);
+    lv_image_set_src(codex_logo_img, &codex_logo_dsc);
+    lv_image_set_pivot(codex_logo_img, 0, 0);
+    lv_image_set_scale(codex_logo_img, L.logo_scale);
+    lv_obj_set_pos(
+        codex_logo_img,
         L.margin,
         (L.horizontal_cards || L.logo_size == 48) ? 6 : L.title_y - 10
     );
@@ -1002,6 +1021,26 @@ static void apply_battery_visibility(void) {
     else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
+static void apply_brand_visibility(DashboardPage page) {
+    const uint8_t mask = dashboard_brand_mask(page);
+    const bool activity = page == DASHBOARD_ACTIVITY;
+    lv_obj_set_pos(
+        codex_logo_img,
+        activity ? L.scr_w - L.margin - L.logo_rendered_width : L.margin,
+        (L.horizontal_cards || L.logo_size == 48) ? 6 : L.title_y - 10
+    );
+    if (mask & DASHBOARD_BRAND_CLAUDE) {
+        lv_obj_clear_flag(claude_logo_img, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(claude_logo_img, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (mask & DASHBOARD_BRAND_CODEX) {
+        lv_obj_clear_flag(codex_logo_img, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(codex_logo_img, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 static void global_click_cb(lv_event_t* e) {
     (void)e;
     uint32_t now = millis();
@@ -1034,10 +1073,7 @@ void ui_show_screen(DashboardPage page) {
         break;
     }
 
-    if (logo_img) {
-        if (page == DASHBOARD_ROBOT) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-    }
+    apply_brand_visibility(page);
 
     current_page = page;
     if (page_indicator_group) {
@@ -1055,6 +1091,8 @@ void ui_show_screen(DashboardPage page) {
         }
     }
     apply_battery_visibility();
+    lv_obj_move_foreground(claude_logo_img);
+    lv_obj_move_foreground(codex_logo_img);
     if (navigation_layer) lv_obj_move_foreground(navigation_layer);
 }
 

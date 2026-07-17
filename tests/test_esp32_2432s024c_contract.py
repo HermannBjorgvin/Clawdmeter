@@ -140,16 +140,49 @@ def test_landscape_activity_uses_second_card_coordinates() -> None:
     assert "activity_container, second_x, second_y, L.panel_width" in normalized
 
 
-def test_logo_uses_top_left_pivot_before_scaling_and_positioning() -> None:
+def test_provider_logos_use_top_left_pivot_before_scaling_and_positioning() -> None:
     ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
-    logo = ui.split("logo_img = lv_image_create", 1)[1].split(
-        "if (board_caps().has_battery)", 1
-    )[0]
-    source_index = logo.index("lv_image_set_src(logo_img, &logo_dsc);")
-    pivot_index = logo.index("lv_image_set_pivot(logo_img, 0, 0);")
-    scale_index = logo.index("lv_image_set_scale(logo_img, L.logo_scale);")
-    position_index = logo.index("lv_obj_set_pos(")
-    assert source_index < pivot_index < scale_index < position_index
+    start = ui.index("claude_logo_img = lv_image_create")
+    end = ui.index("if (board_caps().has_battery)", start)
+    logo = ui[start:end]
+    for provider in ("claude", "codex"):
+        provider_logo = logo.split(
+            f"{provider}_logo_img = lv_image_create", 1
+        )[1]
+        if provider == "claude":
+            provider_logo = provider_logo.split(
+                "codex_logo_img = lv_image_create", 1
+            )[0]
+        source_index = provider_logo.index(
+            f"lv_image_set_src({provider}_logo_img, &{provider}_logo_dsc);"
+        )
+        pivot_index = provider_logo.index(
+            f"lv_image_set_pivot({provider}_logo_img, 0, 0);"
+        )
+        scale_index = provider_logo.index(
+            f"lv_image_set_scale({provider}_logo_img, L.logo_scale);"
+        )
+        position_index = provider_logo.index("lv_obj_set_pos(")
+        assert source_index < pivot_index < scale_index < position_index
+
+
+def test_codex_logo_is_80x80_rgb565a8() -> None:
+    header = (ROOT / "firmware" / "src" / "codex_logo.h").read_text(
+        encoding="utf-8"
+    )
+    assert "#define CODEX_LOGO_WIDTH 80" in header
+    assert "#define CODEX_LOGO_HEIGHT 80" in header
+    assert "static const uint8_t codex_logo_data[19200]" in header
+    payload = header.split("codex_logo_data[19200] = {", 1)[1].split("};", 1)[0]
+    assert payload.count("0x") == 19200
+
+
+def test_ui_owns_separate_claude_and_codex_logo_images() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    assert "static lv_obj_t* claude_logo_img;" in ui
+    assert "static lv_obj_t* codex_logo_img;" in ui
+    assert "static lv_image_dsc_t claude_logo_dsc;" in ui
+    assert "static lv_image_dsc_t codex_logo_dsc;" in ui
 
 
 def test_landscape_enterprise_copy_and_labels_are_bounded() -> None:
