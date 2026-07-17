@@ -4,6 +4,7 @@
 #include "boards/esp32_2432s024c/power_button.h"
 #include "boards/esp32_2432s024c/display_color_order.h"
 #include "boards/esp32_2432s024c/touch_mapping.h"
+#include "activity_freshness.h"
 #include "dashboard_payload.h"
 #include "dashboard_carousel.h"
 #include "serial_protocol.h"
@@ -272,6 +273,41 @@ void test_explicit_tombstones_clear_only_local_providers(void) {
     TEST_ASSERT_FALSE(data.activity.codex_valid);
 }
 
+void test_activity_freshness_uses_only_activity_updates_and_formats_age(void) {
+    UsageData data{};
+    ActivityFreshnessState freshness{};
+    char footer[32];
+
+    uint8_t mask = parse_dashboard_json(
+        "{\"a\":{\"cl\":{\"o\":0,\"b\":0,\"w\":0},\"cx\":{\"u\":0}}}",
+        &data
+    );
+    activity_freshness_apply(freshness, mask, 1000);
+    format_activity_freshness(freshness, 1000, footer, sizeof(footer));
+    TEST_ASSERT_EQUAL_STRING("Scanned just now", footer);
+    TEST_ASSERT_TRUE(data.activity.claude_valid);
+    TEST_ASSERT_TRUE(data.activity.codex_valid);
+    TEST_ASSERT_EQUAL_INT(0, data.activity.claude_open);
+    TEST_ASSERT_EQUAL_INT(0, data.activity.codex_unread);
+
+    mask = parse_dashboard_json("{\"s\":25,\"ok\":true}", &data);
+    activity_freshness_apply(freshness, mask, 61000);
+    format_activity_freshness(freshness, 61000, footer, sizeof(footer));
+    TEST_ASSERT_EQUAL_STRING("Scanned 1m ago", footer);
+
+    mask = parse_dashboard_json("{\"x\":{\"l\":[],\"td\":0}}", &data);
+    activity_freshness_apply(freshness, mask, 121000);
+    format_activity_freshness(freshness, 121000, footer, sizeof(footer));
+    TEST_ASSERT_EQUAL_STRING("Scanned 2m ago", footer);
+
+    mask = parse_dashboard_json("{\"a\":{\"cl\":null,\"cx\":null}}", &data);
+    activity_freshness_apply(freshness, mask, 122000);
+    format_activity_freshness(freshness, 122000, footer, sizeof(footer));
+    TEST_ASSERT_EQUAL_STRING("Scanned just now", footer);
+    TEST_ASSERT_FALSE(data.activity.claude_valid);
+    TEST_ASSERT_FALSE(data.activity.codex_valid);
+}
+
 void test_ui_update_accepts_provider_mask(void) {
     void (*masked_update)(const UsageData*, uint8_t) = ui_update;
     TEST_ASSERT_NOT_NULL(masked_update);
@@ -343,6 +379,7 @@ void setup() {
     RUN_TEST(test_missing_codex_window_is_not_invented_and_zero_unread_is_valid);
     RUN_TEST(test_local_only_payload_does_not_update_claude);
     RUN_TEST(test_explicit_tombstones_clear_only_local_providers);
+    RUN_TEST(test_activity_freshness_uses_only_activity_updates_and_formats_age);
     RUN_TEST(test_ui_update_accepts_provider_mask);
     RUN_TEST(test_codex_window_labels_follow_actual_window_duration);
     RUN_TEST(test_daily_tokens_are_formatted_compactly);

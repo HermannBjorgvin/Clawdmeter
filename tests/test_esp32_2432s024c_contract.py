@@ -168,3 +168,24 @@ def test_generic_small_display_fallback_follows_exact_profiles() -> None:
     portrait = header.index("else if (width == 240 && height == 320)")
     fallback = header.index("else if (height <= 320)")
     assert landscape < portrait < fallback
+
+
+def test_activity_footer_uses_activity_specific_freshness_state() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    normalized = " ".join(ui.split())
+    assert 'lv_label_set_text(lbl_title, "Claude");' in ui
+    assert "lv_label_set_text(lbl_title, tbuf);" not in ui
+    assert "activity_freshness_apply(activity_freshness, updates, millis());" in normalized
+    assert "format_activity_freshness(" in ui
+    assert "activity_footer_label" in ui
+    assert "L.footer_y" in ui
+
+
+def test_display_ready_log_reports_selected_orientation_and_dimensions() -> None:
+    display = (
+        ROOT / "firmware/src/boards/esp32_2432s024c/display.cpp"
+    ).read_text(encoding="utf-8")
+    assert "LCD_WIDTH" in display
+    assert "LCD_HEIGHT" in display
+    assert "landscape" in display
+    assert "portrait" in display

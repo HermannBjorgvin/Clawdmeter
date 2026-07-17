@@ -40,7 +40,16 @@ void display_hal_begin(void) {
     display.invertDisplay(false);
     display.fillScreen(ST77XX_BLACK);
     display_hal_set_brightness(200);
-    Serial.println("Display ST7789 ready (240x320 portrait, HSPI 40MHz)");
+    Serial.printf(
+        "Display ST7789 ready (%dx%d %s, HSPI 40MHz)\n",
+        LCD_WIDTH,
+        LCD_HEIGHT,
+#ifdef BOARD_LANDSCAPE
+        "landscape"
+#else
+        "portrait"
+#endif
+    );
 }
 
 void display_hal_set_brightness(uint8_t level) {

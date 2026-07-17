@@ -1,8 +1,8 @@
 #include "ui.h"
+#include "activity_freshness.h"
 #include "dashboard_payload.h"
 #include "splash.h"
 #include <lvgl.h>
-#include <time.h>
 #include "logo.h"
 #include "icons.h"
 #include "hal/board_caps.h"
@@ -166,12 +166,6 @@ void format_compact_tokens(uint32_t tokens, char* buffer, size_t length) {
 // ---- Claude usage screen widgets ----
 static lv_obj_t* claude_container;
 static lv_obj_t* lbl_title;
-// Clock fed by the daemon: base epoch (local wall-clock seconds) + the lv_tick at
-// which it landed, so the title ticks forward locally between 60s payloads.
-static long     clock_base_epoch = 0;
-static uint32_t clock_base_ms = 0;
-static int      clock_fmt = 24;   // 12 or 24, set from the daemon payload
-static int      clock_last_min = -1;   // last rendered minute; avoids redrawing the title every tick
 static lv_obj_t* usage_group;   // the two usage panels — shown when connected
 static lv_obj_t* pair_group;    // pairing hint — shown when disconnected
 static lv_obj_t* bar_session;
@@ -201,6 +195,9 @@ static lv_obj_t* codex_reset[2];
 static lv_obj_t* activity_container;
 static lv_obj_t* lbl_activity_claude;
 static lv_obj_t* lbl_activity_codex;
+static lv_obj_t* activity_footer_label;
+static ActivityFreshnessState activity_freshness = {};
+static uint32_t last_activity_footer_refresh_ms = 0;
 
 // ---- Robot status and metric page indicators ----
 static lv_obj_t* robot_status_label;
@@ -492,7 +489,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(claude_container, LV_OBJ_FLAG_SCROLLABLE);
 
     lbl_title = lv_label_create(claude_container);
-    lv_label_set_text(lbl_title, "Usage");
+    lv_label_set_text(lbl_title, "Claude");
     lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
     lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, L.title_y);
@@ -654,6 +651,15 @@ void ui_init(void) {
     lv_obj_set_style_text_color(lbl_activity_codex, COL_TEXT, 0);
     lv_obj_set_style_text_line_space(lbl_activity_codex, L.scr_h <= 320 ? 1 : 4, 0);
 
+    activity_footer_label = lv_label_create(activity_container);
+    lv_label_set_text(activity_footer_label, "Not scanned");
+    lv_obj_set_width(activity_footer_label, L.content_w);
+    lv_label_set_long_mode(activity_footer_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(activity_footer_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(activity_footer_label, L.detail_font, 0);
+    lv_obj_set_style_text_color(activity_footer_label, COL_MUTED, 0);
+    lv_obj_align(activity_footer_label, LV_ALIGN_TOP_MID, 0, L.footer_y);
+
     robot_status_label = lv_label_create(scr);
     lv_label_set_text(robot_status_label, "No data");
     lv_obj_set_style_text_font(robot_status_label, L.detail_font, 0);
@@ -719,6 +725,7 @@ void ui_update(const UsageData* data, uint8_t updates) {
 
     last_received_update_ms = millis();
     last_received_transport = data->transport;
+    activity_freshness_apply(activity_freshness, updates, millis());
 
     if (updates & DASHBOARD_UPDATE_CODEX) {
         if (data->codex.valid) {
@@ -790,21 +797,17 @@ void ui_update(const UsageData* data, uint8_t updates) {
         } else {
             lv_label_set_text(lbl_activity_codex, "Codex\nUnavailable");
         }
+
+        char footer[32];
+        format_activity_freshness(
+            activity_freshness, millis(), footer, sizeof(footer)
+        );
+        lv_label_set_text(activity_footer_label, footer);
     }
 
     if (!(updates & DASHBOARD_UPDATE_CLAUDE) || !data->valid) return;
     last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
     data_received = true;
-
-    if (data->clock_epoch > 0) {    // daemon supplied wall-clock time → drive the title clock
-        clock_base_epoch = data->clock_epoch;
-        clock_base_ms = last_data_ms;
-        clock_fmt = data->clock_fmt;
-    } else if (clock_base_epoch != 0) {   // clock turned off daemon-side → revert title to "Usage"
-        clock_base_epoch = 0;
-        clock_last_min = -1;
-        lv_label_set_text(lbl_title, "Usage");
-    }
 
     int s_pct = (int)(data->session_pct + 0.5f);
 
@@ -918,6 +921,16 @@ static void update_view_state(void) {
 
 void ui_tick_anim(void) {
     const uint32_t uptime_now = millis();
+    if (current_page == DASHBOARD_ACTIVITY && activity_footer_label &&
+        uptime_now - last_activity_footer_refresh_ms >= 1000) {
+        last_activity_footer_refresh_ms = uptime_now;
+        char footer[32];
+        format_activity_freshness(
+            activity_freshness, uptime_now, footer, sizeof(footer)
+        );
+        lv_label_set_text(activity_footer_label, footer);
+    }
+
     if (current_page == DASHBOARD_ROBOT && robot_status_label &&
         uptime_now - last_robot_status_refresh_ms >= 1000) {
         last_robot_status_refresh_ms = uptime_now;
@@ -948,27 +961,6 @@ void ui_tick_anim(void) {
     if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
 
     uint32_t now = lv_tick_get();
-
-    // Title clock: once the daemon has sent wall-clock time, replace "Usage" with
-    // the live time, advanced locally so it ticks every minute between payloads.
-    if (clock_base_epoch > 0) {
-        time_t cur = (time_t)(clock_base_epoch + (now - clock_base_ms) / 1000);
-        struct tm tmv;
-        gmtime_r(&cur, &tmv);   // epoch is already local wall-clock → gmtime keeps it as-is
-        if (tmv.tm_min != clock_last_min) {   // only rewrite the title when the minute changes
-            clock_last_min = tmv.tm_min;
-            char tbuf[12];
-            if (clock_fmt == 12) {
-                int h12 = tmv.tm_hour % 12;
-                if (h12 == 0) h12 = 12;
-                snprintf(tbuf, sizeof(tbuf), "%d:%02d %s", h12, tmv.tm_min,
-                         tmv.tm_hour < 12 ? "AM" : "PM");
-            } else {
-                snprintf(tbuf, sizeof(tbuf), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
-            }
-            lv_label_set_text(lbl_title, tbuf);
-        }
-    }
 
     if (now - anim_msg_start >= ANIM_MSG_MS) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;

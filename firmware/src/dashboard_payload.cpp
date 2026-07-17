@@ -27,12 +27,13 @@ uint8_t parse_dashboard_json(const char* json, UsageData* out) {
         mask |= DASHBOARD_UPDATE_CLAUDE;
     }
 
-    if (doc.containsKey("x")) {
+    JsonVariantConst codex_value = doc["x"];
+    if (!codex_value.isUnbound()) {
         mask |= DASHBOARD_UPDATE_CODEX;
         out->codex = {};
-        JsonObject codex = doc["x"].as<JsonObject>();
+        JsonObjectConst codex = codex_value.as<JsonObjectConst>();
         if (!codex.isNull()) {
-            for (JsonObject limit : codex["l"].as<JsonArray>()) {
+            for (JsonObjectConst limit : codex["l"].as<JsonArrayConst>()) {
                 if (out->codex.limit_count >= 2) break;
                 CodexLimitData& target = out->codex.limits[out->codex.limit_count++];
                 target.percent = limit["p"] | 0.0f;
@@ -45,12 +46,14 @@ uint8_t parse_dashboard_json(const char* json, UsageData* out) {
         }
     }
 
-    if (doc.containsKey("a")) {
-        JsonObject activity = doc["a"].as<JsonObject>();
+    JsonVariantConst activity_value = doc["a"];
+    if (!activity_value.isUnbound()) {
+        JsonObjectConst activity = activity_value.as<JsonObjectConst>();
         if (!activity.isNull()) {
-            if (activity.containsKey("cl")) {
+            JsonVariantConst claude_value = activity["cl"];
+            if (!claude_value.isUnbound()) {
                 out->activity.claude_valid = false;
-                JsonObject claude = activity["cl"].as<JsonObject>();
+                JsonObjectConst claude = claude_value.as<JsonObjectConst>();
                 if (!claude.isNull()) {
                     out->activity.claude_open = claude["o"] | 0;
                     out->activity.claude_busy = claude["b"] | 0;
@@ -58,9 +61,11 @@ uint8_t parse_dashboard_json(const char* json, UsageData* out) {
                     out->activity.claude_valid = true;
                 }
             }
-            if (activity.containsKey("cx")) {
+            JsonVariantConst codex_activity_value = activity["cx"];
+            if (!codex_activity_value.isUnbound()) {
                 out->activity.codex_valid = false;
-                JsonObject codex_activity = activity["cx"].as<JsonObject>();
+                JsonObjectConst codex_activity =
+                    codex_activity_value.as<JsonObjectConst>();
                 if (!codex_activity.isNull()) {
                     out->activity.codex_unread = codex_activity["u"] | 0;
                     out->activity.codex_valid = true;
