@@ -35,7 +35,7 @@ inline DashboardPage dashboard_next_page(DashboardPage page) {
 inline DashboardPage dashboard_previous_page(DashboardPage page) {
     const uint8_t value = static_cast<uint8_t>(page);
     return static_cast<DashboardPage>(
-        value == 0 ? DASHBOARD_PAGE_COUNT - 1 : value - 1
+        page == DASHBOARD_CLAUDE ? DASHBOARD_ACTIVITY : value - 1
     );
 }
 

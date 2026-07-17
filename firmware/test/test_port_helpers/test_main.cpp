@@ -342,6 +342,7 @@ void test_carousel_previous_moves_in_reverse_order(void) {
     carousel_start(state, DASHBOARD_ACTIVITY, 1000);
     TEST_ASSERT_EQUAL(DASHBOARD_CODEX, carousel_manual_previous(state, 2000));
     TEST_ASSERT_EQUAL(DASHBOARD_CLAUDE, carousel_manual_previous(state, 3000));
+    TEST_ASSERT_EQUAL(DASHBOARD_ACTIVITY, carousel_manual_previous(state, 4000));
 }
 
 void test_touch_halves_select_previous_and_next(void) {
