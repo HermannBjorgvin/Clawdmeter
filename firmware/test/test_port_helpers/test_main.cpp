@@ -337,6 +337,30 @@ void test_carousel_wraps_in_approved_order(void) {
     TEST_ASSERT_EQUAL(DASHBOARD_CLAUDE, carousel_manual_next(state, 5000));
 }
 
+void test_carousel_previous_moves_in_reverse_order(void) {
+    CarouselState state{};
+    carousel_start(state, DASHBOARD_ACTIVITY, 1000);
+    TEST_ASSERT_EQUAL(DASHBOARD_CODEX, carousel_manual_previous(state, 2000));
+    TEST_ASSERT_EQUAL(DASHBOARD_CLAUDE, carousel_manual_previous(state, 3000));
+}
+
+void test_touch_halves_select_previous_and_next(void) {
+    TEST_ASSERT_EQUAL(DASHBOARD_NAV_PREVIOUS, dashboard_direction_for_x(0, 320));
+    TEST_ASSERT_EQUAL(DASHBOARD_NAV_PREVIOUS, dashboard_direction_for_x(159, 320));
+    TEST_ASSERT_EQUAL(DASHBOARD_NAV_NEXT, dashboard_direction_for_x(160, 320));
+    TEST_ASSERT_EQUAL(DASHBOARD_NAV_NEXT, dashboard_direction_for_x(319, 320));
+    TEST_ASSERT_EQUAL(DASHBOARD_NAV_PREVIOUS, dashboard_direction_for_x(119, 240));
+    TEST_ASSERT_EQUAL(DASHBOARD_NAV_NEXT, dashboard_direction_for_x(120, 240));
+}
+
+void test_previous_touch_defers_auto_advance_for_thirty_seconds(void) {
+    CarouselState state{};
+    carousel_start(state, DASHBOARD_CODEX, 1000);
+    carousel_manual_previous(state, 5000);
+    TEST_ASSERT_FALSE(carousel_tick(state, 34999));
+    TEST_ASSERT_TRUE(carousel_tick(state, 35000));
+}
+
 void test_carousel_auto_advances_after_twelve_seconds(void) {
     CarouselState state{};
     carousel_start(state, DASHBOARD_CLAUDE, 1000);
@@ -387,6 +411,9 @@ void setup() {
     RUN_TEST(test_codex_window_labels_follow_actual_window_duration);
     RUN_TEST(test_daily_tokens_are_formatted_compactly);
     RUN_TEST(test_carousel_wraps_in_approved_order);
+    RUN_TEST(test_carousel_previous_moves_in_reverse_order);
+    RUN_TEST(test_touch_halves_select_previous_and_next);
+    RUN_TEST(test_previous_touch_defers_auto_advance_for_thirty_seconds);
     RUN_TEST(test_carousel_auto_advances_after_twelve_seconds);
     RUN_TEST(test_manual_touch_defers_auto_advance_for_thirty_seconds);
     UNITY_END();

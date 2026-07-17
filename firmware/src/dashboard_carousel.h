@@ -13,6 +13,11 @@ enum DashboardPage : uint8_t {
     DASHBOARD_PAGE_COUNT,
 };
 
+enum DashboardNavigationDirection : uint8_t {
+    DASHBOARD_NAV_PREVIOUS,
+    DASHBOARD_NAV_NEXT,
+};
+
 struct CarouselState {
     DashboardPage page;
     uint32_t next_advance_ms;
@@ -27,6 +32,22 @@ inline DashboardPage dashboard_next_page(DashboardPage page) {
     return static_cast<DashboardPage>((static_cast<uint8_t>(page) + 1) % DASHBOARD_PAGE_COUNT);
 }
 
+inline DashboardPage dashboard_previous_page(DashboardPage page) {
+    const uint8_t value = static_cast<uint8_t>(page);
+    return static_cast<DashboardPage>(
+        value == 0 ? DASHBOARD_PAGE_COUNT - 1 : value - 1
+    );
+}
+
+inline DashboardNavigationDirection dashboard_direction_for_x(
+    uint16_t x,
+    uint16_t screen_width
+) {
+    return x < screen_width / 2
+        ? DASHBOARD_NAV_PREVIOUS
+        : DASHBOARD_NAV_NEXT;
+}
+
 inline void carousel_start(CarouselState& state, DashboardPage page, uint32_t now) {
     state.page = page;
     state.next_advance_ms = now + DASHBOARD_AUTO_MS;
@@ -35,6 +56,13 @@ inline void carousel_start(CarouselState& state, DashboardPage page, uint32_t no
 
 inline DashboardPage carousel_manual_next(CarouselState& state, uint32_t now) {
     state.page = dashboard_next_page(state.page);
+    state.next_advance_ms = now + DASHBOARD_MANUAL_HOLDOFF_MS;
+    state.started = true;
+    return state.page;
+}
+
+inline DashboardPage carousel_manual_previous(CarouselState& state, uint32_t now) {
+    state.page = dashboard_previous_page(state.page);
     state.next_advance_ms = now + DASHBOARD_MANUAL_HOLDOFF_MS;
     state.started = true;
     return state.page;
