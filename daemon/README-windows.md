@@ -107,6 +107,16 @@ With the venv active and the Clawdmeter powered on:
 python daemon\claude_usage_daemon_serial_windows.py
 ```
 
+### ESP32-2432S024C orientation builds
+
+```powershell
+Portrait:  pio run -d firmware -e esp32_2432s024c -j 1
+Landscape: pio run -d firmware -e esp32_2432s024c_landscape -j 1
+```
+
+Use the landscape build with USB on the left. Each orientation requires its matching
+touch transform, so keep the selected firmware environment and touch mapping paired.
+
 ### Expected console output
 
 ```
