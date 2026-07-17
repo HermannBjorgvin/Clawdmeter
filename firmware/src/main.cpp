@@ -58,10 +58,30 @@ static void rounder_cb(lv_event_t* e) {
 //   false → touch never counts as activity and is fully swallowed while the
 //           panel is dark, so pets/sleeves can't wake it overnight and LVGL
 //           can't quietly toggle splash<->usage on a black panel.
+// touch_hal_read() reports in the panel's physical frame, but the display draws
+// LVGL content rotated by imu_hal_rotation_quadrant() quarter-turns CW (see
+// display_hal_draw_bitmap). Undo that rotation so LVGL's coordinate space is the
+// one the user is actually looking at. Without this, every touch is expressed in
+// a frame the UI doesn't use: taps hit the wrong widgets and gestures report the
+// wrong axis (a swipe the user reads as "left" arrives as LV_DIR_TOP, etc).
+// Boards without IMU rotation report 0 and get the identity mapping.
+static void rotate_touch_to_content(uint16_t* x, uint16_t* y) {
+    const uint16_t W = board_caps().width;
+    const uint16_t H = board_caps().height;
+    const uint16_t px = *x, py = *y;
+    switch (imu_hal_rotation_quadrant() & 3) {
+    case 1:  *x = py;                       *y = (uint16_t)(W - 1 - px); break;
+    case 2:  *x = (uint16_t)(W - 1 - px);   *y = (uint16_t)(H - 1 - py); break;
+    case 3:  *x = (uint16_t)(H - 1 - py);   *y = px;                     break;
+    default: break;
+    }
+}
+
 static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     uint16_t x, y;
     bool pressed;
     touch_hal_read(&x, &y, &pressed);
+    rotate_touch_to_content(&x, &y);
     const bool raw_pressed = pressed;
 
     if (IDLE_WAKE_ON_TOUCH) {
@@ -97,13 +117,42 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 }
 
-// Parse a JSON line into UsageData.
-static bool parse_json(const char* json, UsageData* out) {
+static StatsData stats_claude = {};
+static StatsData stats_codex = {};
+static StatsData stats_antigravity = {};
+
+// Parse a payload. Returns 0 = bad JSON, 1 = usage payload, 2 = stats payload.
+// The daemon marks stats with "sv"; stats land in their own struct and must
+// never touch UsageData (they'd blank the live bars between usage polls).
+#define PAYLOAD_BAD   0
+#define PAYLOAD_USAGE 1
+#define PAYLOAD_STATS 2
+
+static int parse_json(const char* json, UsageData* out) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
         Serial.printf("JSON parse error: %s\n", err.c_str());
-        return false;
+        return PAYLOAD_BAD;
+    }
+
+    if (!doc["sv"].isNull()) {
+        const char* p = doc["p"] | "c";
+        StatsData* s = (strcmp(p, "x") == 0) ? &stats_codex :
+                       (strcmp(p, "g") == 0) ? &stats_antigravity : &stats_claude;
+        s->total_tokens_m = doc["tt"] | -1.0f;
+        strlcpy(s->model, doc["fm"] | "", sizeof(s->model));
+        s->sessions     = doc["ns"] | 0;
+        s->longest_secs = doc["ls"] | 0L;
+        s->active_days  = doc["ad"] | 0;
+        s->span_days    = doc["as"] | 0;
+        s->streak       = doc["cs"] | 0;
+        s->best_streak  = doc["bs"] | 0;
+        strlcpy(s->last_active, doc["la"] | "", sizeof(s->last_active));
+        s->dune = doc["dn"] | 0;
+        strlcpy(s->heat, doc["hm"] | "", sizeof(s->heat));
+        s->valid = (s->total_tokens_m >= 0.0f);
+        return PAYLOAD_STATS;
     }
 
     out->session_pct = doc["s"] | 0.0f;
@@ -119,9 +168,35 @@ static bool parse_json(const char* json, UsageData* out) {
     strlcpy(out->reset_date, doc["rd"] | "", sizeof(out->reset_date));
     out->clock_epoch = doc["t"] | 0L;
     out->clock_fmt = doc["tf"] | 24;
+    // Codex block is optional: absent "cx" → -1 → codex_valid false → Claude-only view.
+    // No separate validity key; the sentinel is the flag.
+    out->codex_pct = doc["cx"] | -1.0f;
+    out->codex_reset_mins = doc["cxr"] | -1;
+    out->codex_window_mins = doc["cxw"] | 10080;
+    out->codex_valid = (out->codex_pct >= 0.0f);
+    out->codex_context_tokens = doc["ctx"] | -1L;
+    out->codex_context_window = doc["ctxw"] | -1;
+    out->codex_context_valid = (out->codex_context_tokens >= 0 &&
+                                 out->codex_context_window > 0);
+    out->antigravity_5h_pct = doc["ag5"] | -1.0f;
+    out->antigravity_5h_reset_mins = doc["ag5r"] | -1;
+    out->antigravity_weekly_pct = doc["agw"] | -1.0f;
+    out->antigravity_weekly_reset_mins = doc["agwr"] | -1;
+    out->antigravity_valid = (out->antigravity_5h_pct >= 0.0f &&
+                              out->antigravity_weekly_pct >= 0.0f);
+    out->cpu_pct = doc["cpu"] | -1.0f;
+    out->cpu_temp_c = doc["ct"] | -1;
+    out->gpu_pct = doc["gpu"] | -1.0f;
+    out->gpu_temp_c = doc["gt"] | -1;
+    out->ram_pct = doc["ram"] | -1.0f;
+    out->system_valid = (out->cpu_pct >= 0.0f && out->gpu_pct >= 0.0f &&
+                         out->ram_pct >= 0.0f);
+    strlcpy(out->plan, doc["pl"] | "", sizeof(out->plan));
+    strlcpy(out->codex_plan, doc["cxpl"] | "", sizeof(out->codex_plan));
+    strlcpy(out->antigravity_plan, doc["agpl"] | "", sizeof(out->antigravity_plan));
     out->ok = doc["ok"] | false;
     out->valid = true;
-    return true;
+    return PAYLOAD_USAGE;
 }
 
 // ---- Serial command buffer ----
@@ -370,7 +445,11 @@ void loop() {
     check_serial_cmd();
 
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
+        int kind = parse_json(ble_get_data(), &usage);
+        if (kind == PAYLOAD_STATS) {
+            ui_update_stats(&stats_claude, &stats_codex, &stats_antigravity);
+            ble_send_ack();
+        } else if (kind == PAYLOAD_USAGE) {
             int g_before = usage_rate_group();
             bool session_reset = usage_rate_sample(usage.session_pct);
             int g_after = usage_rate_group();

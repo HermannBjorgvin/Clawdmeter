@@ -80,7 +80,7 @@ firmware/src/
     waveshare_amoled_206/   — CO5300 + FT3168 + AXP PKEY, no IO expander, 32 MB, no rotation
     template/               — copy this to bootstrap a new port
   main.cpp                  — setup() + loop(): HAL calls only, zero #ifdef BOARD_*
-  ui.{h,cpp}                — 3-screen UI (splash, usage, bluetooth). compute_layout() picks fonts/positions from board_caps() (responsive — current breakpoint: H >= 460 → large, else compact)
+  ui.{h,cpp}                — 2-screen UI: SCREEN_SPLASH + SCREEN_USAGE (that's the whole screen_t enum — there is no SCREEN_BLUETOOTH/SCREEN_CONTROLLER; the bluetooth screen collapsed into the usage screen's pair/idle/live sub-views, chosen by update_view_state()). compute_layout() picks fonts/positions from board_caps() (responsive — current breakpoint: H >= 460 → large, else compact) and carries two usage geometries: 2-panel (Claude only) and 3-panel (Claude + Codex), switched at runtime by apply_usage_geometry()
   splash.{h,cpp}            — 20×20 pixel-art engine. CELL = min(W,H)/20, centered.
   ble.{h,cpp}               — NimBLE peripheral: custom data service + HID keyboard
   data.h                    — UsageData struct
@@ -119,7 +119,7 @@ Device path differs by OS: `/dev/cu.usbmodem*` on macOS, `/dev/ttyACM0` on Linux
 
 The firmware ships a `screenshot` serial command that dumps the LVGL framebuffer. `./screenshot.sh out.png [port]` captures a PNG sized to the active display (480×480 or 368×448). **Use this on every UI iteration** — Read the PNG with the Read tool, verify the change visually, iterate. Script auto-picks the macOS/Linux default port and falls back to pio's bundled Python if pyserial isn't on the system Python.
 
-The boot screen is `SCREEN_SPLASH` and only advances on a physical button press, so a fresh flash will sit on the splash. To screenshot the screen you're actually editing without asking the user to press a button, **temporarily change the default boot screen** in `main.cpp` (search for `ui_show_screen(SCREEN_SPLASH);`) to `SCREEN_USAGE` / `SCREEN_CONTROLLER` / `SCREEN_BLUETOOTH`, do your iteration, then revert before committing.
+The boot screen is `SCREEN_SPLASH` and only advances on a physical button press, so a fresh flash will sit on the splash. To screenshot the screen you're actually editing without asking the user to press a button, **temporarily change the default boot screen** in `main.cpp` (search for `ui_show_screen(SCREEN_SPLASH);`) to `SCREEN_USAGE`, do your iteration, then revert before committing. (`SCREEN_USAGE` is the only other value — `SCREEN_CONTROLLER`/`SCREEN_BLUETOOTH` don't exist and won't compile.)
 
 ## Critical gotchas
 
@@ -129,10 +129,15 @@ The boot screen is `SCREEN_SPLASH` and only advances on a physical button press,
 4. **LVGL 9 font patching.** `lv_font_conv` outputs LVGL 8 format. Must remove `#if LVGL_VERSION_MAJOR >= 8` guards, drop `.cache` field, add `.release_glyph`, `.kerning`, `.static_bitmap`, `.fallback`, `.user_data`. Without patching, fonts render invisible.
 5. **Touch reading is centralized inside each board's `touch.cpp`.** The HAL `touch_hal_read()` is called once per loop from `my_touch_cb`; the board's implementation owns its latched `touch_pressed/x/y` state. Don't call the underlying controller from anywhere else — CST9220's `getPoint()` etc. do a full I2C transaction and concurrent callers consume each other's data.
 6. **Even-aligned flush regions.** `display_hal_round_area` (called from `rounder_cb`) is what each board uses to enforce this. Required on CO5300, harmless on SH8601.
-7. **Touch axis swap/mirror is per-board.** The 2.16's CST9220 needs `setSwapXY(true)` + `setMirrorXY(true, false)` — applied inside `boards/waveshare_amoled_216/touch.cpp::touch_hal_init()`. New ports apply their own.
+7. **Touch must land in the same frame the user is looking at — two separate corrections.**
+   - **Per-board axis fix.** The 2.16's CST9220 gets `setSwapXY(true)` + `setMirrorXY(true, false)` in `touch.cpp::touch_hal_init()`, but that pair still leaves it reporting **90° CW from the panel's own frame**. `touch_hal_read()` undoes it (`x=oy; y=W-1-ox`). Measured by tapping the four screen corners and reading back the points — before the fix, a tap on the perceived top-left reported ~(50,447). The bug hid for a long time because the only touch handler is a full-screen tap, so no hit-test ever depended on the coordinate. **`touch_hal_read()` must return true panel coordinates** — that's the HAL contract. New ports: verify with a corner-tap test, don't trust the vendor flags.
+   - **Rotation fix (shared).** `my_touch_cb`'s `rotate_touch_to_content()` in `main.cpp` then undoes `imu_hal_rotation_quadrant()` quarter-turns, because `display_hal_draw_bitmap` rotates the *image* while touch does not follow. Without it LVGL's coordinates are in a frame the UI never uses.
+   - Get either wrong and gestures report the wrong axis — a swipe read as "left" arrives as `LV_DIR_TOP`. Don't "fix" that by rotating gesture directions; fix the input.
 8. **LVGL RGB565A8 is planar.** `w*h` RGB565 pixels followed by `w*h` alpha bytes; `data_size = w*h*3`, `stride = w*2`. Use `init_icon_dsc_rgb565a8()` for icons that overlap non-uniform backgrounds (e.g. battery over splash). Lucide source PNGs are black-on-transparent — converter must tint to white or icons render invisible. See `tools/png_to_lvgl.js`.
 9. **Per-board pre-init is `board_init()`.** Each board's `board_init.cpp` brings up `Wire` and any reset-gating IO expander BEFORE `display_hal_init()`. Skipping the IO expander release on AMOLED-1.8 leaves SH8601 + FT3168 in reset and they silently fail to probe.
-10. **No `#ifdef BOARD_*` in shared code.** The whole point of the refactor — if you're about to add one, you probably want a `BoardCaps` field or a per-board file instead. See `docs/porting/capability-flags.md`.
+10. **Gestures are delivered to the SCREEN, not to your container.** LVGL's `indev_gesture()` walks up from the pressed object while each ancestor has `LV_OBJ_FLAG_GESTURE_BUBBLE` — and `lv_obj_create()` sets that flag on **every object that has a parent**. So the walk climbs past every container and stops only at the active screen (no parent → no flag). Register `LV_EVENT_GESTURE` on `lv_screen_active()`; a handler anywhere below it is never called. Note this is a *different* flag from `LV_OBJ_FLAG_EVENT_BUBBLE`. Also call `lv_indev_wait_release()` for **every** gesture before any direction test — LVGL fires `CLICKED` on release regardless, so an unhandled swipe falls through to your click handler (symptom: a slightly diagonal swipe "randomly" acts like a tap).
+
+11. **No `#ifdef BOARD_*` in shared code.** The whole point of the refactor — if you're about to add one, you probably want a `BoardCaps` field or a per-board file instead. See `docs/porting/capability-flags.md`.
 
 ## Icons
 
@@ -172,9 +177,18 @@ Bash daemon (`daemon/claude-usage-daemon.sh`) reads OAuth token, polls Anthropic
 
 **Discovery & resilience:**
 
-- Connects by name (`"Clawdmeter"`) on first run, caches resolved MAC at `~/.config/claude-usage-monitor/ble-address`. ESP32 BLE addresses are factory-burned per-chip, so swapping any board invalidates the cache.
-- On connect failure: cache is dropped AND device is removed from bluez (`bluetoothctl remove`) so the next scan won't re-pick a dead MAC. Multi-candidate scans pick `head -1` and let the failure cycle converge.
+- **The daemon never scans.** `find_system_device_mac()` only ever targets a device bluez already knows — `bluetoothctl devices Paired`, then `Connected` — so it can't grab a stranger's advertising unit. **On a host that has never bonded to the board, the daemon backs off forever logging `No paired/connected 'Clawdmeter'; waiting Ns (not scanning)`.** Fix: pair once by hand (`bluetoothctl` → `scan on`, wait for the device to appear, then `pair <MAC>` / `trust <MAC>` in the *same* session — bluez evicts the device from its cache when the scan stops, and a bare `pair` then fails with "not available").
+- Resolved MAC is cached at `~/.config/claude-usage-monitor/ble-address`. ESP32 BLE addresses are factory-burned per-chip, so swapping any board invalidates the cache.
+- On connect failure the cached MAC is dropped, but the device is **deliberately NOT** removed from bluez (`connect_device()` says so explicitly) — unpairing on a transient failure would strand the daemon, since it only ever connects to already-known devices.
 - `POLL_INTERVAL=60`, `TICK=5`. Inner loop wakes every 5s to detect disconnects fast; polls Anthropic when 60s elapsed OR when ESP fires a refresh request.
+- Serial port on Linux needs no `dialout` fiddling: systemd-logind grants the seat user a direct ACL on `/dev/ttyACM0`.
+
+**Usage sources (two providers, one payload):**
+
+- **Claude** usage is NOT a usage API. The daemon POSTs a 1-token Haiku call to `api.anthropic.com/v1/messages`, throws the body away (`curl -D - -o /dev/null`), and reads the `anthropic-ratelimit-unified-*` response *headers*.
+- **Codex** usage IS a real endpoint: `GET https://chatgpt.com/backend-api/wham/usage` with the ChatGPT OAuth token from `${CODEX_HOME:-~/.codex}/auth.json` (`tokens.access_token`). Undocumented — it's what the Codex CLI itself polls. **Only ever read `auth.json`**: the CLI owns token refresh (240h JWT + refresh_token) and a second writer would race it. OpenAI's published usage APIs are useless here — they only see pay-per-token API keys, not ChatGPT-subscription Codex.
+- Codex on Plus exposes **one** window: `primary_window` (7d), `secondary_window` null. Don't assume "primary = 5h" — read `limit_window_seconds`. Hence 3 bars, not 4.
+- Codex is strictly optional: any failure omits `cx`/`cxr`/`cxw` and the firmware falls back to the 2-bar Claude view. `daemon/tests/test_bash_codex.sh` pins every degradation path.
 
 **GATT characteristics on service `4c41555a-...0001`:**
 
