@@ -121,6 +121,7 @@ static bool parse_json(const char* json, UsageData* out) {
     out->notify_type = !strcmp(n, "input") ? ATTN_INPUT :
                        !strcmp(n, "perm")  ? ATTN_PERM  :
                        !strcmp(n, "done")  ? ATTN_DONE  :
+                       !strcmp(n, "cal")   ? ATTN_CAL   :
                        !strcmp(n, "clear") ? ATTN_CLEAR : ATTN_NONE;
     strlcpy(out->notify_project, doc["np"] | "", sizeof(out->notify_project));
     out->active_sessions = doc["a"] | -1;
@@ -408,7 +409,7 @@ void loop() {
             // payload per hook event, so no edge detection is needed here.
             // Handled before the ok-check: a permission chime matters even
             // while the usage data itself is unavailable.
-            if (usage.notify_type >= ATTN_INPUT && usage.notify_type <= ATTN_DONE) {
+            if (usage.notify_type >= ATTN_INPUT && usage.notify_type <= ATTN_CAL) {
                 Serial.printf("attention request type %d (%s) — melody + view\n",
                               usage.notify_type, usage.notify_project);
                 sound_hal_play_alert(usage.notify_type);

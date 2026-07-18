@@ -67,11 +67,151 @@ def read_attention_flag() -> tuple[str | None, str]:
         if fresh and lines:
             kind = lines[0].strip().lower()
             kind = kind if kind in ATTN_TYPES else "input"
-            project = lines[1].strip()[:16] if len(lines) > 1 else ""
+            project = lines[1].strip()[:48] if len(lines) > 1 else ""
             return kind, project
     except OSError:
         pass
     return None, ""
+
+
+# ── Calendar reminders ──────────────────────────────────────────────────────
+# Optional: `cal_ics_url = <источник>` in CONFIG_FILE turns on meeting
+# reminders. Sources: an https ICS feed (Outlook/Google "publish calendar"),
+# an absolute path to a local .ics, or the literal `eventkit` — the macOS
+# system calendar read via the signed `calnext` helper (build_calnext.sh;
+# plain python can't show the TCC calendar prompt, a binary with an embedded
+# Info.plist can). Events are refetched every CAL_FETCH_S with recurring
+# events expanded; when a meeting start crosses a `cal_remind` threshold the
+# connected loop sends an "n":"cal" payload with "np" = "HH:MM <title>".
+# Only the smallest active threshold fires (a daemon restart 7' before a
+# meeting sends the 5' reminder once, not the 15' one too), and a slot is
+# marked sent only after the BLE write succeeds so a dropped connection
+# doesn't eat the reminder.
+
+CAL_FETCH_S = 300
+CAL_HORIZON_S = 26 * 3600   # keep in sync with the horizon in calnext.swift
+CAL_THRESHOLDS_MIN = (15, 5)
+CALNEXT_BIN = Path(__file__).resolve().parent / "calnext"
+
+_cal_events: list[tuple[float, str]] = []   # (start_epoch, title), sorted
+_cal_fetched = 0.0
+_cal_sent: set[tuple[float, int]] = set()   # (start_epoch, threshold_min)
+_cal_err_logged = 0.0
+
+
+def read_cal_config() -> tuple[str, tuple[int, ...]]:
+    """(ics_url, reminder thresholds in minutes); url "" = feature off."""
+    url = ""
+    thresholds = CAL_THRESHOLDS_MIN
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key, val = key.strip().lower(), val.strip()
+                if key == "cal_ics_url":
+                    url = val
+                elif key == "cal_remind":
+                    mins = sorted({int(m) for m in re.split(r"[,\s]+", val)
+                                   if m.isdigit() and int(m) > 0}, reverse=True)
+                    if mins:
+                        thresholds = tuple(mins)
+    except OSError:
+        pass
+    return url, thresholds
+
+
+async def refresh_cal_events(url: str) -> None:
+    """Refetch the ICS feed into _cal_events if CAL_FETCH_S elapsed.
+
+    Failures only log (rate-limited): the calendar is an optional extra and
+    must never take down or delay the usage loop beyond this one await.
+    """
+    global _cal_events, _cal_fetched, _cal_sent, _cal_err_logged
+    if time.time() - _cal_fetched < CAL_FETCH_S:
+        return
+    _cal_fetched = time.time()   # even on failure — don't hammer every TICK
+    try:
+        if url == "eventkit":
+            events = await asyncio.to_thread(_events_from_eventkit)
+        else:
+            events = await _events_from_ics(url)
+        _cal_events = sorted(events)
+        _cal_sent = {(s, m) for (s, m) in _cal_sent if s > time.time() - 3600}
+    except Exception as e:  # noqa: BLE001 — any parse/net/tz problem: log & keep going
+        if time.time() - _cal_err_logged > 600:
+            _cal_err_logged = time.time()
+            log(f"Calendar fetch failed: {e}")
+
+
+def _events_from_eventkit() -> set[tuple[float, str]]:
+    """macOS system calendar via the signed calnext helper (blocking).
+
+    130s timeout: the very first run blocks on the TCC permission dialog
+    (helper-side cap is 120s); every later run returns instantly.
+    """
+    proc = subprocess.run([str(CALNEXT_BIN)], capture_output=True, timeout=130)
+    if proc.returncode != 0:
+        err = proc.stderr.decode(errors="replace").strip()
+        raise RuntimeError(err or f"calnext rc={proc.returncode}")
+    return {(float(ev["start"]), " ".join(str(ev["title"]).split()) or "Встреча")
+            for ev in json.loads(proc.stdout)}
+
+
+async def _events_from_ics(url: str) -> set[tuple[float, str]]:
+    """ICS feed (https or absolute local path) with recurrence expanded."""
+    import icalendar
+    import recurring_ical_events
+    if url.startswith("/"):
+        raw = await asyncio.to_thread(Path(url).read_bytes)
+    else:
+        resp = await _http().get(url, follow_redirects=True)
+        resp.raise_for_status()
+        raw = resp.content
+    cal = icalendar.Calendar.from_ical(raw)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    horizon = now + datetime.timedelta(seconds=CAL_HORIZON_S)
+    events = set()
+    for ev in recurring_ical_events.of(cal).between(now, horizon):
+        start = ev.get("DTSTART")
+        # date (not datetime) = all-day entry — nothing to remind about
+        if start is None or not isinstance(start.dt, datetime.datetime):
+            continue
+        if str(ev.get("STATUS", "")).upper() == "CANCELLED":
+            continue
+        title = " ".join(str(ev.get("SUMMARY", "")).split()) or "Встреча"
+        events.add((start.dt.timestamp(), title))
+    return events
+
+
+def check_cal_reminder(thresholds: tuple[int, ...]) -> tuple[str, float, int] | None:
+    """First unsent reminder due now → ("HH:MM title", start, threshold_min).
+
+    Doesn't mark anything sent — call cal_mark_sent() after the payload is
+    actually delivered. Concurrent meetings resolve one per TICK.
+    """
+    now = time.time()
+    for start, title in _cal_events:
+        if start <= now:
+            continue
+        active = [m for m in thresholds if start - m * 60 <= now]
+        if not active:
+            continue
+        m = min(active)   # closest threshold wins; larger ones are stale
+        if (start, m) in _cal_sent:
+            continue
+        text = f"{datetime.datetime.fromtimestamp(start):%H:%M} {title}"
+        # 48 chars = the firmware's context-line budget (two wrapped lines)
+        return text[:48], start, m
+    return None
+
+
+def cal_mark_sent(start: float, threshold: int, thresholds: tuple[int, ...]) -> None:
+    """Mark this reminder slot and every larger (already-stale) one sent."""
+    _cal_sent.update((start, m) for m in thresholds if m >= threshold)
+
 
 # Per-session liveness files written by the Claude Code hooks: mtime = last
 # heartbeat (PostToolUse / prompt), content "fg" (in a turn) or "bg" (turn
@@ -791,7 +931,10 @@ class Session:
             log("Refresh subscription timed out; polling without it")
 
     async def write_payload(self, payload: dict) -> bool:
-        data = json.dumps(payload, separators=(",", ":")).encode()
+        # ensure_ascii=False: meeting titles are Cyrillic — raw UTF-8 is 2
+        # bytes/char over the wire vs 6 for \uXXXX escapes (BLE_BUF_SIZE=512).
+        data = json.dumps(payload, separators=(",", ":"),
+                          ensure_ascii=False).encode()
         log(f"Sending: {data.decode()}")
         try:
             await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
@@ -932,6 +1075,13 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
             now = time.time()
             elapsed = now - last_poll
             attn, attn_project = read_attention_flag()
+            cal_url, cal_thresholds = read_cal_config()
+            cal = None
+            if not attn and cal_url:
+                # Hook events outrank the calendar; an unsent reminder just
+                # waits for the next TICK (nothing is marked sent yet).
+                await refresh_cal_events(cal_url)
+                cal = check_cal_reminder(cal_thresholds)
             if attn == "clear":
                 # Dismiss-only: reuse the last payload, skip the API poll.
                 if last_payload is not None:
@@ -939,7 +1089,8 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                     a = await asyncio.to_thread(count_active_sessions)
                     await session.write_payload({**last_payload, "n": "clear",
                                                  "a": a})
-            elif session.refresh_requested.is_set() or elapsed >= poll_interval or attn:
+            elif (session.refresh_requested.is_set() or elapsed >= poll_interval
+                  or attn or cal):
                 session.refresh_requested.clear()
                 payload = await poll_active_payload()
                 if payload.get("ok"):
@@ -960,8 +1111,14 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                     if attn_project:
                         payload["np"] = attn_project
                     log(f"Attention flag ({attn}, {attn_project or '?'}) — forwarding to device")
+                elif cal:
+                    payload["n"] = "cal"
+                    payload["np"] = cal[0]
+                    log(f"Calendar reminder — {cal[0]} ({cal[2]}')")
                 if await session.write_payload(payload):
                     last_poll = time.time()
+                    if cal and not attn:
+                        cal_mark_sent(cal[1], cal[2], cal_thresholds)
                     if payload.get("ok"):
                         used_successfully = True
 

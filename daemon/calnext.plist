@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.user.clawdmeter.calnext</string>
+    <key>CFBundleName</key>
+    <string>calnext</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Clawdmeter показывает напоминания о встречах на настольном устройстве.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Clawdmeter показывает напоминания о встречах на настольном устройстве.</string>
+</dict>
+</plist>

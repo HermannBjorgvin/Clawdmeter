@@ -15,6 +15,6 @@ void sound_hal_init(void);
 void sound_hal_tick(void);
 void sound_hal_play_reset(void);
 // Synthesized alert melody; `kind` is an ATTN_* value from data.h
-// (ATTN_INPUT / ATTN_PERM / ATTN_DONE / ATTN_LIMIT). No-op on boards
-// without a speaker.
+// (ATTN_INPUT / ATTN_PERM / ATTN_DONE / ATTN_CAL / ATTN_LIMIT). No-op on
+// boards without a speaker.
 void sound_hal_play_alert(uint8_t kind);

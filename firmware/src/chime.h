@@ -31,7 +31,7 @@ void chime_play(void);
 
 // Short synthesized alert melodies (sine tones through the same I2S/codec
 // path — no extra PCM clips in flash). `kind` is an ATTN_* value from
-// data.h: ATTN_INPUT, ATTN_PERM, ATTN_DONE or ATTN_LIMIT.
+// data.h: ATTN_INPUT, ATTN_PERM, ATTN_DONE, ATTN_CAL or ATTN_LIMIT.
 void chime_play_alert(uint8_t kind);
 
 // Currently a no-op (playback runs in its own task); kept for HAL symmetry.

@@ -99,6 +99,7 @@ static void compute_layout(const BoardCaps& c) {
 #define COL_GREEN     THEME_GREEN
 #define COL_AMBER     THEME_AMBER
 #define COL_RED       THEME_RED
+#define COL_BLUE      THEME_BLUE
 #define COL_BAR_BG    THEME_BAR_BG
 
 // ---- Usage screen widgets (single non-splash view) ----
@@ -131,6 +132,7 @@ static lv_obj_t* lbl_sessions;  // bottom-left "·N" active-session counter
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
+static lv_obj_t* battery_lbl;   // numeric percent left of the icon
 static lv_obj_t* logo_img;
 static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 
@@ -141,10 +143,11 @@ static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 static lv_obj_t* idle_group;            // the "Zzz" idle screen
 static lv_obj_t* attention_group;       // the "Claude is waiting for you" view
 static lv_obj_t* lbl_attention;         // its caption (text/color vary by type)
+static lv_obj_t* lbl_attn_ctx;          // event context line under the header
 static lv_obj_t* mini_creature;         // the single shared mini creature canvas
 static bool      attention_active = false;
 static uint8_t   attention_type   = ATTN_INPUT;
-static char      attention_project[17] = "";   // shown in the header while active
+static char      attention_project[97] = "";   // context line while active (mirrors UsageData::notify_project)
 static uint32_t  attention_since  = 0;
 
 // Everything type-specific in one row (index = ATTN_* - 1): the waiting
@@ -156,10 +159,11 @@ struct AttnStyle {
     lv_color_t  color;     // caption color
     uint32_t    timeout_ms;
 };
-static const AttnStyle ATTN_STYLES[5] = {
+static const AttnStyle ATTN_STYLES[6] = {
     { "Клод ждёт ответа",   "idle look around",    "Ждёт ответа",       COL_AMBER, 120000 },  // ATTN_INPUT
     { "Нужно разрешение",   "expression surprise", "Ждёт разрешения",   COL_AMBER, 120000 },  // ATTN_PERM
     { "Готово!",            "dance bounce",        "Готово",            COL_GREEN, 30000  },  // ATTN_DONE
+    { "Скоро встреча!",     "dance sway",          "Скоро встреча",     COL_BLUE,  120000 },  // ATTN_CAL
     { "Лимит близко!",      "expression surprise", "Лимит близко",      COL_RED,   30000  },  // ATTN_LIMIT
     { "Лимиты обновились!", "expression wink",     "Лимиты обновились", COL_GREEN, 30000  },  // ATTN_RESET
 };
@@ -420,6 +424,17 @@ static void build_attention_group(lv_obj_t* parent) {
     lv_obj_set_style_text_color(lbl_attention, COL_AMBER, 0);
     lv_obj_align(lbl_attention, LV_ALIGN_CENTER, 0, 90);
 
+    // Event context (project name / "HH:MM meeting title") on its own line
+    // right below the header, full width — up to two wrapped lines, "…" when
+    // even that overflows. The header title itself stays hidden meanwhile.
+    lbl_attn_ctx = lv_label_create(attention_group);
+    lv_obj_set_style_text_font(lbl_attn_ctx, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_attn_ctx, COL_DIM, 0);
+    lv_obj_set_style_text_align(lbl_attn_ctx, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(lbl_attn_ctx, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(lbl_attn_ctx, L.scr_w - 2 * L.margin, 80);
+    lv_obj_align(lbl_attn_ctx, LV_ALIGN_TOP_MID, 0, 0);
+
     lv_obj_add_flag(attention_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
 }
 
@@ -529,6 +544,10 @@ void ui_init(void) {
     lv_image_set_src(battery_img, &battery_dscs[0]);
     lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
 
+    battery_lbl = lv_label_create(scr);
+    lv_obj_set_style_text_font(battery_lbl, &font_styrene_16, 0);
+    lv_obj_set_style_text_color(battery_lbl, COL_DIM, 0);
+    lv_label_set_text(battery_lbl, "");
 }
 
 static char data_err[8] = "";   // daemon error beat code; "" = data flows fine
@@ -643,19 +662,17 @@ void ui_update(const UsageData* data) {
 // (connected but data has gone stale), or the live usage panels. Only re-lays-out
 // on an actual change. The animated status line stays visible everywhere — it
 // reads "Listening…" on the idle screen, keeping it alive rather than frozen.
-// Header while the attention view is up: the project name in a smaller, dim
-// face (Tiempos 56 collides with the corner logo and battery icon), or hidden
-// when the project is unknown.
+// While the attention view is up the header title is hidden (logo + battery
+// stay); the event context renders full-width on lbl_attn_ctx instead — the
+// header slot is too narrow between the two corner icons.
 static void attention_style_title(void) {
-    if (!lbl_title) return;
+    if (lbl_title) lv_obj_add_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
+    if (!lbl_attn_ctx) return;
     if (attention_project[0]) {
-        lv_label_set_text(lbl_title, attention_project);
-        lv_obj_set_style_text_font(lbl_title, &font_styrene_28, 0);
-        lv_obj_set_style_text_color(lbl_title, COL_DIM, 0);
-        lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y + 14);
-        lv_obj_clear_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(lbl_attn_ctx, attention_project);
+        lv_obj_clear_flag(lbl_attn_ctx, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_add_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_attn_ctx, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -680,7 +697,9 @@ static void update_view_state(void) {
         if (v == 3) {
             lv_obj_set_parent(mini_creature, attention_group);
             splash_mini_set_anim(attn_style().anim);
-            lv_obj_align(mini_creature, LV_ALIGN_CENTER, 0, -40);
+            // -16 (not the idle view's -20): leaves room for two wrapped
+            // context lines above without touching the caption below.
+            lv_obj_align(mini_creature, LV_ALIGN_CENTER, 0, -16);
         } else if (view_state == 3) {
             lv_obj_set_parent(mini_creature, idle_group);
             splash_mini_set_anim("expression sleep");
@@ -805,8 +824,13 @@ void ui_tick_anim(void) {
 static screen_t prev_non_splash_screen = SCREEN_USAGE;
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
-    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-    else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    if (current_screen == SCREEN_SPLASH) {
+        lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+        if (battery_lbl) lv_obj_add_flag(battery_lbl, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+        if (battery_lbl) lv_obj_clear_flag(battery_lbl, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static void global_click_cb(lv_event_t* e) {
@@ -902,5 +926,13 @@ void ui_update_battery(int percent, bool charging) {
         idx = 3;
     }
     lv_image_set_src(battery_img, &battery_dscs[idx]);
+    if (battery_lbl) {
+        // Numeric percent, charging included; hidden only when the PMU
+        // doesn't report a level. Re-align after the text: the label grows
+        // leftwards from the icon.
+        if (percent >= 0) lv_label_set_text_fmt(battery_lbl, "%d%%", percent);
+        else              lv_label_set_text(battery_lbl, "");
+        lv_obj_align_to(battery_lbl, battery_img, LV_ALIGN_OUT_LEFT_MID, -6, 0);
+    }
     apply_battery_visibility();
 }
