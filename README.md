@@ -1,312 +1,374 @@
-# Clawdmeter
+# Clawdmeter — Claude Code + Codex on a low-cost ESP32 display
 
-A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
+This repository is a hardware and Windows-focused fork of
+[Hermann Bjorgvin's Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter).
+The original project created the ESP32 Claude Code usage dashboard and Clawd
+pixel-art experience. This fork adds Codex and combined activity pages, a tested
+USB-serial Windows service, and support for the capacitive 2.4-inch
+ESP32-2432S024C in portrait and landscape.
 
-It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) as well as a few other alternative boards and pairs over Bluetooth, the splash screen plays pixel-art Clawd animations that get
-busier when your usage rate climbs. The two side buttons send Space and
-Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
+This is an independent community fork. It is not endorsed by Anthropic or
+OpenAI.
 
-|              Usage meter              |              Clawd animation screen              |
-| :-----------------------------------: | :----------------------------------------------: |
-| ![Usage meter](assets/demo.jpeg) | ![Clawd animation screen](assets/demo.gif) |
+## Gallery
 
-The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaanbuilds](https://x.com/amaanbuilds)'s library of pixel-art Clawd sprites, check it out, it's lovely.
+The Clawd animations react to Claude usage and rotate while the splash is
+visible. The assets below come from the original Clawdmeter experience; they are
+not photographs of the ESP32-2432S024C port.
 
-## Screens
+| Usage interface | Animated Clawd splash |
+| :---: | :---: |
+| ![Original Clawdmeter usage interface](assets/demo.jpeg) | ![Animated Clawd splash](assets/demo.gif) |
 
-The device boots into the splash. Tap the screen anywhere to switch to the Usage view; tap again to flip back to the splash.
+| 2.16-inch AMOLED splash | 1.8-inch AMOLED splash |
+| :---: | :---: |
+| ![Original 2.16-inch AMOLED splash](screenshots/splash.png) | ![Original 1.8-inch AMOLED splash](screenshots/amoled_18/splash.png) |
 
-|              Splash               |              Usage              |
-| :-------------------------------: | :-----------------------------: |
-| ![Splash](screenshots/splash.png) | ![Usage](screenshots/usage.png) |
-|   Splash; touch-toggle anytime    | Session and weekly utilization  |
+## What this fork adds
 
-While the splash is up, the middle (PWR) button cycles animations. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
+The comparison is against the upstream baseline used to build this fork.
+Upstream may gain related capabilities independently.
+
+| Area | Original baseline | This fork |
+| --- | --- | --- |
+| Providers | Claude Code usage | Claude Code plus local Codex usage and activity |
+| Dashboard | Usage and splash flow | Claude, Codex, and combined Activity pages |
+| Navigation | Original screen behavior | Left/right touch navigation, 12-second automatic cycle, 30-second manual holdoff |
+| Windows transport | Primarily BLE-oriented | Tested USB serial service and tray app; Bluetooth is not required for the ESP32-2432S024C |
+| Hardware | Waveshare AMOLED boards and upstream ports | Capacitive 2.4-inch ESP32-2432S024C, 240×320, portrait and USB-left landscape |
+| Activity | Claude-oriented state | Claude Open/Busy/Waiting plus Codex Unread, semantic colors, and freshness |
+
+## Dashboard pages and navigation
+
+The display has three pages:
+
+- **Claude** — current five-hour session and weekly utilization, including reset
+  time.
+- **Codex** — up to two locally observed rate-limit windows, tokens used today,
+  and plan name when available.
+- **Activity** — aggregate Claude Code Open, Busy, and Waiting counts together
+  with Codex Unread and the local scan freshness.
+
+Tap the **left half** of the screen to go back and the **right half** to go
+forward. Navigation wraps in both directions. Without interaction, the pages
+advance every 12 seconds. A manual tap pauses automatic cycling for 30 seconds.
+
+If a local provider cannot be read, its metrics show **Unavailable** rather than
+a fabricated zero. The boot/pairing splash remains separate from the three-page
+dashboard.
 
 ## Hardware
 
-Boards supported out of the box:
+### Tested low-cost board: ESP32-2432S024C
+
+The port developed and physically validated in this fork targets the
+**Sunton/Jingcai ESP32-2432S024C**:
+
+- 2.4-inch 240×320 color TFT;
+- capacitive touch — verify the final model suffix is **C**;
+- classic ESP32-WROOM-class module with Wi-Fi and Bluetooth;
+- microSD slot and exposed GPIO;
+- USB serial for power, firmware upload, and dashboard data;
+- portrait and landscape builds; the tested landscape position has USB on the
+  left.
+
+References and purchase searches:
+
+- [CircuitPython technical board reference](https://circuitpython.org/board/sunton_esp32_2432S024C/)
+- [Exact-model retail example](https://www.amazon.com/dp/B0CLGD2DG6)
+- [AliExpress marketplace search](https://www.aliexpress.com/w/wholesale-esp32--2432s024c.html)
+- [Waveshare ESP32-S3-Touch-AMOLED-2.16 used by the original project](https://www.waveshare.com/product/esp32-s3-touch-amoled-2.16.htm)
+
+This TFT/classic-ESP32 design is commonly a lower-cost alternative to the
+higher-resolution Waveshare AMOLED board. Prices and inventory change, so check
+the exact model before ordering. The lower cost also means a 240×320 TFT, less
+memory and integration, and no equivalent 480×480 AMOLED panel, audio subsystem,
+IMU, or advanced battery management.
+
+Do not confuse the capacitive **ESP32-2432S024C** with similarly named **R**
+variants, which use resistive touch.
+
+### Other upstream-supported boards
+
+The inherited HAL also includes these upstream targets:
 
 - [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786)
-- [Waveshare ESP32-C6-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-c6-touch-amoled-2.16.htm?&aff_id=149786) 
+- [Waveshare ESP32-C6-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-c6-touch-amoled-2.16.htm?&aff_id=149786)
 - [Waveshare ESP32-S3-Touch-AMOLED-1.8](https://www.waveshare.com/esp32-s3-touch-amoled-1.8.htm?&aff_id=149786)
 - [Waveshare ESP32-C6-Touch-AMOLED-1.8](https://www.waveshare.com/esp32-c6-touch-amoled-1.8.htm?&aff_id=149786)
 - [Waveshare ESP32-S3-Touch-AMOLED-2.06](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm?&aff_id=149786)
 
-> Please check if a pull request exists for your alternative hardware port before opening a new one, providing QA feedback and testing on the same hardware is more valuable than duplicate pull requests.
+See [Adding a board](docs/porting/adding-a-board.md),
+[HAL contract](docs/porting/hal-contract.md), and
+[capability flags](docs/porting/capability-flags.md) before starting another
+hardware port.
 
-**Porting to another board:** the firmware is a thin HAL with per-board folders under `firmware/src/boards/`. Drop in a new folder and a new PlatformIO env — `main.cpp`, `ui.cpp`, and `splash.cpp` never need to change. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md) for the walk-through and [`docs/porting/hal-contract.md`](docs/porting/hal-contract.md) for the interfaces a port must implement.
+## Quick start: Windows + ESP32-2432S024C
 
-## Prerequisites
+This is the fully tested path. It runs on native Windows 10/11; WSL is not
+required.
 
-- Linux (tested on Ubuntu), macOS, or Windows 10/11
-- [PlatformIO CLI](https://docs.platformio.org/en/latest/core/installation/index.html)
-- Linux: `curl`, `bluetoothctl`, `busctl` (BlueZ Bluetooth stack)
-- macOS: `python3` (the installer sets up a venv with `bleak` and `httpx`)
-- Windows: `python3` 3.11+ (the installer sets up a venv with `bleak`, `httpx`, and `pystray`)
-- Claude Code with an active subscription
+### What the PC needs
+
+- Python 3.11+ from [python.org](https://www.python.org/downloads/);
+- Claude Code installed and authenticated with `claude login`;
+- Codex installed and used locally if you want Codex metrics;
+- this repository on a native Windows path;
+- a USB **data** cable;
+- PlatformIO only if you need to build or flash firmware.
+
+### Install the tray service
+
+Once the fork is published, clone its verified default branch:
+
+```powershell
+git clone https://github.com/Atzingen/Clawdmeter.git
+cd Clawdmeter
+git switch esp32-2432s024c-codex
+powershell -ExecutionPolicy Bypass -File install-windows.ps1
+```
+
+The installer creates `.venv`, installs the Windows dependencies, registers a
+per-user startup entry, and launches the tray app without a console window.
+
+The same USB cable powers the ESP32 and carries dashboard data. Bluetooth
+pairing is not required for this board.
+
+Moving the board to another computer is not enough by itself. Install and run
+the tray service on each PC that should provide data. An already flashed board
+does not need PlatformIO or another firmware upload.
+
+### Build or flash the firmware
+
+Install [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html),
+then choose the orientation:
+
+```powershell
+# Portrait
+pio run -d firmware -e esp32_2432s024c -j 1
+
+# Landscape — tested with USB on the left
+pio run -d firmware -e esp32_2432s024c_landscape -j 1
+```
+
+Upload to the board, replacing `COM3` when needed:
+
+```powershell
+# Portrait
+pio run -d firmware -e esp32_2432s024c -t upload --upload-port COM3
+
+# Landscape
+pio run -d firmware -e esp32_2432s024c_landscape -t upload --upload-port COM3
+```
+
+Keep the build environment and its touch transform paired. If the image
+orientation is wrong, confirm that you flashed the intended environment before
+changing display or touch code.
+
+### Tray status and logs
+
+The tray icon shows its state:
+
+- green: connected;
+- amber: scanning;
+- red: error.
+
+View the log:
+
+```powershell
+Get-Content $env:LOCALAPPDATA\Clawdmeter\daemon.log -Tail 30
+```
+
+Set a fixed serial port only when automatic detection is not appropriate:
+
+```powershell
+$env:CLAWDMETER_SERIAL_PORT = "COM3"
+```
+
+For manual execution and detailed recovery steps, see the
+[Windows setup and run guide](daemon/README-windows.md).
+
+### Windows troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| `Clawdmeter USB serial not found` | Use a data-capable cable, reconnect the board, and inspect Device Manager. |
+| Wrong COM port | Set `CLAWDMETER_SERIAL_PORT` before starting the tray. |
+| Claude API HTTP 401 | Run `claude login` again and restart the tray. |
+| Codex shows `Unavailable` | Use Codex locally so `%USERPROFILE%\.codex\sessions` exists; internal schemas may also have changed. |
+| Activity has no Claude rows | Confirm local Claude session state exists under `%USERPROFILE%\.claude\sessions`. |
+| Mirrored or rotated display | Reflash the correct portrait/landscape environment; landscape expects USB on the left. |
+| No updates after moving PCs | Install the tray on the new PC; the firmware does not read Claude/Codex data by itself. |
+
+## How the data flow works
+
+On Windows:
+
+1. The tray reads the existing Claude Code authentication state and polls Claude
+   utilization.
+2. It aggregates only local Claude session statuses from
+   `%USERPROFILE%\.claude\sessions`.
+3. It aggregates Codex `token_count` and rate-limit events from
+   `%USERPROFILE%\.codex\sessions`.
+4. It reads Codex Unread from
+   `%USERPROFILE%\.codex\.codex-global-state.json`.
+5. It sends a compact aggregate payload to the ESP32 over USB serial roughly
+   every 60 seconds.
+6. The firmware updates the dashboard and acknowledges the write.
+
+Prompt text, responses, task titles, and session contents are not sent to the
+display.
+
+Codex local session/state JSON is an internal format, **not a documented public
+OpenAI telemetry API**. If the expected schema is absent or changes, Codex
+values become `Unavailable` while Claude data can continue working. For Codex
+product and installation information, see the official
+[OpenAI Codex repository](https://github.com/openai/codex).
 
 ## macOS installation
 
-The macOS host pieces — Python daemon, LaunchAgent, and flash helper — were ported by [Chris Davidson (@lorddavidson)](https://github.com/lorddavidson). Thanks Chris!
+The inherited macOS host pieces were ported by
+[Chris Davidson (@lorddavidson)](https://github.com/lorddavidson).
 
-### Flash the firmware
+Flash a supported board:
 
 ```bash
-./flash-mac.sh waveshare_amoled_216                       # auto-detects /dev/cu.usbmodem*
-./flash-mac.sh waveshare_amoled_18  /dev/cu.usbmodem1101  # or pass an explicit USB serial port
+./flash-mac.sh waveshare_amoled_216
+./flash-mac.sh waveshare_amoled_18 /dev/cu.usbmodem1101
 ```
 
-The board env name is required. Run `./flash-mac.sh` with no args to see the available envs (scraped from `firmware/platformio.ini`).
-
-### Pair the device
-
-After flashing, open **System Settings → Bluetooth** and click *Connect* next to "Clawdmeter". The daemon only ever connects to the peripheral this Mac is paired/connected to — it never scans for a nearby device — so once it's connected here the daemon picks it up on its next poll (~60 s).
-
-### Install the daemon
-
-The daemon reads your Claude OAuth token from the macOS Keychain (service `Claude Code-credentials`), polls usage every 60 s, and pushes it to the display over BLE.
+Install the daemon:
 
 ```bash
 ./install-mac.sh
 ```
 
-The installer creates a Python venv in `daemon/.venv/`, installs `bleak` and `httpx`, renders a LaunchAgent into `~/Library/LaunchAgents/com.user.claude-usage-daemon.plist`, and loads it. The first run is launched interactively so macOS prompts for Bluetooth permission.
+The installer creates a Python environment, installs the BLE dependencies, and
+loads a LaunchAgent. Pair the device in macOS Bluetooth settings first when
+using a BLE-based board.
 
 Useful commands:
 
 ```bash
-launchctl list | grep claude-usage                                          # check it's running
-tail -F ~/Library/Logs/claude-usage-daemon.out.log                          # live logs
-launchctl unload ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist  # stop
-launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # start
+launchctl list | grep claude-usage
+tail -F ~/Library/Logs/claude-usage-daemon.out.log
+launchctl unload ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist
+launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist
 ```
 
 ## Linux installation
 
-### Flash the firmware
+Flash a supported board:
 
 ```bash
-./flash.sh waveshare_amoled_216                  # defaults to /dev/ttyACM0
-./flash.sh waveshare_amoled_18  /dev/ttyACM1     # or pass an explicit USB serial port
+./flash.sh waveshare_amoled_216
+./flash.sh waveshare_amoled_18 /dev/ttyACM1
 ```
 
-The board env name is required. Run `./flash.sh` with no args to see the available envs (scraped from `firmware/platformio.ini`).
-
-### Pair the device
-
-After flashing, the device advertises as "Clawdmeter". Pair it once:
+Pair and trust a BLE-based Clawdmeter once:
 
 ```bash
-# Scan for the device
 bluetoothctl scan le
-
-# When "Clawdmeter" appears, pair and trust it
-bluetoothctl pair F4:12:FA:C0:8F:E5    # use your device's MAC
+bluetoothctl pair F4:12:FA:C0:8F:E5
 bluetoothctl trust F4:12:FA:C0:8F:E5
 ```
 
-To re-pair later, hold the power button for 3 seconds then release — the device clears its saved bond and re-advertises.
-
-### Install the daemon
-
-The daemon polls your Claude usage every 60 seconds and sends it to the display over BLE.
+Install and start the daemon:
 
 ```bash
 ./install.sh
 systemctl --user start claude-usage-daemon
+systemctl --user status claude-usage-daemon
 ```
 
-Check status: `systemctl --user status claude-usage-daemon`
+Follow logs with:
 
-View logs: `journalctl --user -u claude-usage-daemon -f`
-
-## Windows installation
-
-Runs natively on Windows — no WSL required. The system-tray app polls your usage,
-pushes it through the same USB cable that powers the ESP32, and starts automatically
-at login. Bluetooth pairing is not required for the usage display.
-
-### Prerequisites
-
-- **Native Windows** (not WSL).
-- **Python 3.11+** from [python.org](https://www.python.org/downloads/) — check *"Add python.exe to PATH"* during install.
-- **Claude Code** installed, with `claude login` completed. The token is read from `%USERPROFILE%\.claude\.credentials.json` (falling back to `%LOCALAPPDATA%\Claude\` then `%APPDATA%\Claude\`).
-- The repo on a **native Windows path** (e.g. `%USERPROFILE%\Clawdmeter`), **not** a `\\wsl$` share — the installer refuses a WSL path.
-- The ESP32 connected to the computer with a **USB data cable**. The daemon detects
-  the physical USB serial port automatically and ignores Bluetooth COM ports.
-
-### Flash the firmware
-
-```powershell
-pio run -d firmware -e esp32_2432s024c -t upload --upload-port COM3   # use your device's COM port
+```bash
+journalctl --user -u claude-usage-daemon -f
 ```
 
-Run `pio run -d firmware` with no env to see the available board envs.
+## Bluetooth and physical buttons
 
-### Bluetooth pairing (optional)
+Bluetooth is optional for the ESP32-2432S024C dashboard because its data uses
+USB serial. On upstream boards that expose BLE HID buttons, the side buttons
+send Space and Shift+Tab to the paired host and the power button can control
+splash/pairing behavior.
 
-Pairing is unnecessary when the display remains connected by USB. It is only needed
-on boards whose physical buttons are used as a BLE keyboard. The ESP32-2432S024C port
-uses its BOOT button for local display controls and sends usage over USB serial.
+The ESP32-2432S024C port does not claim the Waveshare button layout. Its BOOT
+button is used for local display controls.
 
-### Install the daemon (recommended)
+The inherited custom data service uses these UUIDs on BLE-capable targets:
 
-From the repo root in PowerShell:
+| Service | UUID |
+| --- | --- |
+| Data Service | `4c41555a-4465-7669-6365-000000000001` |
+| RX Characteristic | `4c41555a-4465-7669-6365-000000000002` |
+| TX Characteristic | `4c41555a-4465-7669-6365-000000000003` |
+| HID Service | `00001812-0000-1000-8000-00805f9b34fb` |
 
-```powershell
-powershell -ExecutionPolicy Bypass -File install-windows.ps1
-```
+## Development and porting
 
-This creates a venv, installs the dependencies including `pyserial`, registers a
-per-user login-autostart entry (`HKCU\…\Run`, no admin needed), and launches the tray
-app headlessly (no console window).
+The firmware uses a thin board HAL under `firmware/src/boards/`. A board port
+normally adds a board folder and PlatformIO environment while keeping shared UI
+logic board-independent.
 
-### Run manually instead (optional)
+### Recompiling fonts
 
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1        # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned, then retry
-pip install -r daemon\requirements-windows.txt
-python daemon\claude_usage_daemon_serial_windows.py # runs in the foreground; Ctrl+C to stop
-```
-
-### Tray icon and menu
-
-The icon's corner bubble shows state — **green** Connected, **amber** Scanning, **red** Error — and hovering shows the status (`Connected · last update HH:MM`). A notification fires once when it enters Error (e.g. an expired token). Right-click for the menu:
-
-- **Status header** — live state + last sync time.
-- **Start at login** — toggle autostart on/off.
-- **Quit** — stops the daemon cleanly and releases the serial port; the device keeps its last reading.
-
-### Logs and troubleshooting
-
-```powershell
-Get-Content $env:LOCALAPPDATA\Clawdmeter\daemon.log -Tail 30        # view logs
-reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f   # remove autostart
-```
-
-| Symptom | Fix |
-|---------|-----|
-| `Clawdmeter USB serial not found` | Check that the USB cable carries data, reconnect the board, and confirm its COM port in Device Manager. |
-| `token expired` toast / `API HTTP 401` | Re-run `claude login`, then restart the daemon. |
-| The wrong COM port is selected | Set `CLAWDMETER_SERIAL_PORT=COM3` before starting the daemon. |
-| `Warning: running under Linux/WSL` | Run from a native PowerShell window, not a WSL shell. |
-
-## How it works
-
-1. The daemon reads your Claude Code OAuth token — from the macOS Keychain (service `Claude Code-credentials`) on macOS, or from `~/.claude/.credentials.json` on Linux (`%USERPROFILE%\.claude\.credentials.json` on Windows).
-2. It makes a minimal API call to `api.anthropic.com/v1/messages` — one token of Haiku, basically free.
-3. The usage numbers come straight out of the response headers (`anthropic-ratelimit-unified-5h-utilization` and friends).
-4. On this Windows/ESP32-2432S024C setup, the daemon writes a compact JSON line to the ESP32 over USB serial. Other supported setups can continue using BLE.
-5. The firmware parses it and updates the LVGL dashboard.
-6. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.
-7. The two side buttons are independent of all of this — they send Space and Shift+Tab as BLE HID keyboard input to the paired host directly.
-
-## Physical buttons
-
-The board has three side buttons. Left and right send HID keys; the middle (PWR) button cycles splash animations and, held for 3 seconds, triggers pairing mode.
-
-| Button           | GPIO         | Function                                                       |
-| ---------------- | ------------ | -------------------------------------------------------------- |
-| **Left**         | GPIO 0       | Hold to send Space (Claude Code voice-mode push-to-talk)       |
-| **Middle** (PWR) | AXP2101 PKEY | On splash: cycle animations. Hold 3s + release: pairing mode |
-| **Right**        | GPIO 18      | Press to send Shift+Tab (Claude Code mode toggle)              |
-
-Space and Shift+Tab go out as standard BLE HID keyboard reports, so they trigger in whatever window has focus on the paired host — not just Claude Code.
-
-## BLE protocol
-
-The device advertises a custom GATT service alongside the standard HID keyboard service:
-
-|                            | UUID                                   |
-| -------------------------- | -------------------------------------- |
-| **Data Service**           | `4c41555a-4465-7669-6365-000000000001` |
-| RX Characteristic (write)  | `4c41555a-4465-7669-6365-000000000002` |
-| TX Characteristic (notify) | `4c41555a-4465-7669-6365-000000000003` |
-| **HID Service**            | `00001812-0000-1000-8000-00805f9b34fb` |
-
-JSON payload format (written to RX):
-
-```json
-{ "s": 45, "sr": 120, "w": 28, "wr": 7200, "st": "allowed", "ok": true }
-```
-
-Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
-
-## Recompiling fonts
-
-The `firmware/src/font_*.c` files are pre-compiled LVGL bitmap fonts.
+The `firmware/src/font_*.c` files are precompiled LVGL bitmap fonts. Install
+`lv_font_conv`:
 
 ```bash
 npm install -g lv_font_conv
 ```
 
-Generate each one (one at a time — `lv_font_conv` doesn't like loop-driven invocations) with `--no-compress` (required for LVGL 9):
+The project uses Tiempos Text, Styrene B, and DejaVu Sans Mono assets under
+`assets/`. Generate with `--no-compress`, then apply the LVGL 9 compatibility
+changes documented in the existing generated files: remove LVGL 8 guards and
+`.cache`, then provide the LVGL 9 descriptor fields.
 
-```bash
-# Tiempos Text (titles, 56px)
-lv_font_conv --font assets/TiemposText-400-Regular.otf -r 0x20-0x7E \
-  --size 56 --format lvgl --bpp 4 --no-compress \
-  -o firmware/src/font_tiempos_56.c --lv-include "lvgl.h"
-
-# Styrene B (large numbers 48, panel labels 28, small text 24, minimal 20)
-for size in 48 28 24 20; do
-  lv_font_conv --font assets/StyreneB-Regular.otf -r 0x20-0x7E \
-    --size $size --format lvgl --bpp 4 --no-compress \
-    -o firmware/src/font_styrene_${size}.c --lv-include "lvgl.h"
-done
-
-# DejaVu Sans Mono (32px, with spinner Unicode chars)
-lv_font_conv --font assets/DejaVuSansMono.ttf \
-  -r 0x20-0x7E,0xB7,0x2026,0x2722,0x2733,0x2736,0x273B,0x273D \
-  --size 32 --format lvgl --bpp 4 --no-compress \
-  -o firmware/src/font_mono_32.c --lv-include "lvgl.h"
-```
-
-**Important:** `lv_font_conv` v1.5.3 outputs LVGL 8 format. Each generated file must be patched for LVGL 9 compatibility:
-
-1. Remove `#if LVGL_VERSION_MAJOR >= 8` guards around `font_dsc` and the font struct
-2. Remove the `.cache` field from `font_dsc`
-3. Add `.release_glyph = NULL`, `.kerning = 0`, `.static_bitmap = 0` to the font struct
-4. Add `.fallback = NULL`, `.user_data = NULL` to the font struct
-
-Without these patches, fonts compile but render as invisible.
-
-## Converting Lucide icons
-
-The UI uses a small set of [Lucide](https://lucide.dev) icons (bluetooth + battery states) converted to RGB565 / RGB565A8 C arrays for LVGL.
+### Converting icons and logos
 
 ```bash
 node tools/png_to_lvgl.js assets/icon_bluetooth_48.png icon_bluetooth_data ICON_BLUETOOTH_WIDTH ICON_BLUETOOTH_HEIGHT
 ```
 
-Default tint is white (`0xFFFFFF`); Lucide PNGs ship as black-on-transparent and would render invisible against the dark UI without it. Pass `--no-tint` for pre-coloured artwork like the logo. Battery icons use RGB565A8 (alpha plane) so they blend cleanly over the splash; the rest are baked RGB565 over the panel colour. Paste the converter output into `firmware/src/icons.h`.
+The converter tints black Lucide sources white by default. Use `--no-tint` for
+pre-colored artwork. The Codex page uses a monochrome OpenAI Blossom asset in
+accordance with the [OpenAI brand guidelines](https://openai.com/brand/).
 
-## Splash animations
+### Splash animations
 
 The animations come from [claudepix.vercel.app](https://claudepix.vercel.app),
-a library of Clawd sprites. `tools/scrape_claudepix.js` evaluates the
-site's JavaScript in a Node VM to pull out frame data and palettes, then
-`tools/convert_to_c.js` turns everything into RGB565 C arrays and writes
-`firmware/src/splash_animations.h`.
-
-To re-pull (e.g. when the source library updates):
+a library of Clawd sprites by
+[@amaanbuilds](https://x.com/amaanbuilds). To refresh and rebuild the generated
+arrays:
 
 ```bash
 node tools/scrape_claudepix.js
 node tools/convert_to_c.js
-pio run -d firmware -t upload
 ```
 
-See `tools/README.md` for details.
+See [tools/README.md](tools/README.md) for the conversion details.
 
 ## Credits
 
-- Pixel-art Clawd animation by [@amaanbuilds](https://x.com/amaanbuilds), sourced from [claudepix.vercel.app](https://claudepix.vercel.app). Frame data and palettes scraped + converted by the tooling in `tools/`.
-- Lucide icon set ([lucide.dev](https://lucide.dev), MIT) for bluetooth and battery UI glyphs.
-- Anthropic brand fonts (Tiempos Text, Styrene B) — see licensing warning below.
+- [Hermann Bjorgvin](https://github.com/HermannBjorgvin) and contributors for
+  the original [Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter).
+- [@amaanbuilds](https://x.com/amaanbuilds) for the pixel-art Clawd animation
+  library at [claudepix.vercel.app](https://claudepix.vercel.app).
+- [Lucide](https://lucide.dev) for the MIT-licensed UI glyphs.
+- OpenAI for the Codex product and monochrome Blossom mark; see the
+  [OpenAI brand guidelines](https://openai.com/brand/).
+- Anthropic brand fonts and Clawd assets remain subject to their respective
+  owners' rights.
 
-## Licensing gray area warning
+## Licensing gray-area warning
 
-The software in this repository uses and adheres to the Anthropic brand guidelines and uses the same proprietary fonts that Anthropic has a license for but this software uses without permission as well as using assets from Anthropic such as the copyrighted Clawd mascot so even though the code in this repo is non-proprietary I will not license it myself under a copyleft license since this repo includes proprietary fonts and copyrighted assets. Please be aware of this if you fork or copy the code from this repo. **You have been warned!**
+This repository inherits proprietary fonts and copyrighted mascot/brand assets
+from the original project. The original author deliberately did not apply a
+copyleft license to the repository because those assets are not owned by the
+project. This fork preserves that warning and does not add a license that claims
+rights over inherited fonts, the Clawd mascot, or third-party brand marks.
+
+Review the original project's warning and the relevant brand guidelines before
+redistributing binaries, assets, or derivative commercial products.
