@@ -10,6 +10,8 @@ ESP32-2432S024C in portrait and landscape.
 This is an independent community fork. It is not endorsed by Anthropic or
 OpenAI.
 
+**Documentation:** [Português (Brasil)](docs/README.pt-BR.md) · English (this page)
+
 ## Gallery
 
 The Clawd animations react to Claude usage and rotate while the splash is
