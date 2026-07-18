@@ -46,7 +46,11 @@ struct Layout {
     const lv_font_t* pace_font;      // enterprise "Under/On/Over pace" line
     const lv_font_t* anim_font;      // animated status line
     int16_t anim_y;                  // status line offset from bottom
-    bool    show_logo;               // logo is 80x80 — hidden on small screens
+    bool    small_icons;             // 40px logo + 24px battery (vs 80/48) on small screens
+    int16_t title_nudge;             // title x-shift balancing the corner logo
+    int16_t logo_y;                  // logo top edge
+    int16_t batt_y;                  // battery icon top edge
+    int16_t batt_w;                  // battery icon width, for position math
 
     // Pairing hint / idle screen
     int16_t pair_y1, pair_y2, pair_y3;
@@ -88,7 +92,11 @@ static void compute_layout(const BoardCaps& c) {
     L.pace_font    = &font_styrene_16;
     L.anim_font    = &font_mono_32;
     L.anim_y = -15;
-    L.show_logo = true;
+    L.small_icons = false;
+    L.title_nudge = 16;
+    L.logo_y = L.title_y - 10;
+    L.batt_y = L.title_y;
+    L.batt_w = ICON_BATTERY_W;
     L.pair_y1 = 40;
     L.pair_y2 = 120;
     L.pair_y3 = 160;
@@ -124,8 +132,8 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_credit_2_font = &font_styrene_14;
     } else {
         // Small layout — tuned for 240x240 (LCD-1.54 and similar square TFTs).
-        // Everything shrinks: fonts two steps down, panels ~half height, the
-        // 80x80 logo is hidden (it would cover a third of the screen width).
+        // Everything shrinks: fonts two steps down, panels ~half height, and
+        // the corner logo/battery switch to the 40px/24px small assets.
         L.margin = 8;
         L.title_y = 4;
         L.content_y = 44;
@@ -145,8 +153,14 @@ static void compute_layout(const BoardCaps& c) {
         L.reset_font   = &font_styrene_14;
         L.pace_font    = &font_styrene_12;
         L.anim_font    = &font_mono_18;
-        L.anim_y = -4;
-        L.show_logo = false;
+        // Center the status line in the strip below the weekly panel; flush
+        // against the bottom edge it reads as unevenly spaced.
+        L.anim_y = -10;
+        L.small_icons = true;
+        L.title_nudge = 8;
+        L.logo_y = 2;
+        L.batt_y = 10;
+        L.batt_w = ICON_BATTERY_SMALL_W;
         L.pair_y1 = 12;
         L.pair_y2 = 56;
         L.pair_y3 = 80;
@@ -355,6 +369,14 @@ static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
 }
 
 static void init_battery_icons(void) {
+    if (L.small_icons) {
+        init_icon_dsc_rgb565a8(&battery_dscs[0], ICON_BATTERY_SMALL_W, ICON_BATTERY_SMALL_H, icon_battery_small_data);
+        init_icon_dsc_rgb565a8(&battery_dscs[1], ICON_BATTERY_LOW_SMALL_W, ICON_BATTERY_LOW_SMALL_H, icon_battery_low_small_data);
+        init_icon_dsc_rgb565a8(&battery_dscs[2], ICON_BATTERY_MEDIUM_SMALL_W, ICON_BATTERY_MEDIUM_SMALL_H, icon_battery_medium_small_data);
+        init_icon_dsc_rgb565a8(&battery_dscs[3], ICON_BATTERY_FULL_SMALL_W, ICON_BATTERY_FULL_SMALL_H, icon_battery_full_small_data);
+        init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_SMALL_W, ICON_BATTERY_CHARGING_SMALL_H, icon_battery_charging_small_data);
+        return;
+    }
     init_icon_dsc_rgb565a8(&battery_dscs[0], ICON_BATTERY_W, ICON_BATTERY_H, icon_battery_data);
     init_icon_dsc_rgb565a8(&battery_dscs[1], ICON_BATTERY_LOW_W, ICON_BATTERY_LOW_H, icon_battery_low_data);
     init_icon_dsc_rgb565a8(&battery_dscs[2], ICON_BATTERY_MEDIUM_W, ICON_BATTERY_MEDIUM_H, icon_battery_medium_data);
@@ -459,9 +481,9 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_title, "Usage");
     lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    // The +16 nudge balances the 80x80 logo on the left; without the logo
-    // (small screens) it would push the title into the battery icon instead.
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, L.show_logo ? 16 : 0, L.title_y);
+    // The nudge balances the corner logo on the left; smaller on small
+    // screens where the logo is 40px and the battery icon sits closer.
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, L.title_nudge, L.title_y);
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
@@ -525,7 +547,8 @@ void ui_init(void) {
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-    init_icon_dsc_rgb565a8(&logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data);
+    if (L.small_icons) init_icon_dsc_rgb565a8(&logo_dsc, LOGO_SMALL_WIDTH, LOGO_SMALL_HEIGHT, logo_small_data);
+    else               init_icon_dsc_rgb565a8(&logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data);
     init_battery_icons();
 
     init_usage_screen(scr);
@@ -537,17 +560,11 @@ void ui_init(void) {
 
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
-    lv_obj_set_pos(logo_img, L.margin, L.title_y - 10);
-    if (!L.show_logo) {
-        // 80x80 logo covers a third of a 240-wide screen — drop it entirely
-        // (ui_show_screen also unhides it per screen, so delete, don't hide).
-        lv_obj_del(logo_img);
-        logo_img = nullptr;
-    }
+    lv_obj_set_pos(logo_img, L.margin, L.logo_y);
 
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
-    lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
+    lv_obj_set_pos(battery_img, L.scr_w - L.batt_w - L.margin, L.batt_y);
     // Boards without battery telemetry never show the indicator (per the HAL
     // contract; previously every board drew the empty-battery glyph).
     if (!board_caps().has_battery) {
