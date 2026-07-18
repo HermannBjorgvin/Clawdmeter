@@ -41,7 +41,8 @@
 
 - [ ] **Step 1: Replace the opening with explicit fork attribution and language navigation**
 
-Use this meaning and link structure at the top, without claiming upstream endorsement:
+Use this meaning and link structure at the top, without claiming upstream endorsement.
+Task 2 adds the Portuguese-guide link after that file exists:
 
 ```markdown
 # Clawdmeter — Claude Code + Codex on a low-cost ESP32 display
@@ -52,8 +53,6 @@ The original project created the ESP32 Claude Code usage dashboard and Clawd
 pixel-art experience. This fork adds Codex and combined activity pages, a tested
 USB-serial Windows service, and support for the capacitive 2.4-inch
 ESP32-2432S024C in portrait and landscape.
-
-[Guia em Português](docs/README.pt-BR.md)
 ```
 
 - [ ] **Step 2: Add the visual gallery using only existing assets**
