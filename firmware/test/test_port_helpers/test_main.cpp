@@ -226,6 +226,42 @@ void test_old_claude_payload_remains_compatible(void) {
     TEST_ASSERT_FALSE(data.activity.valid);
 }
 
+void test_fable_payload_preserves_valid_zero_and_reset(void) {
+    UsageData data{};
+    uint8_t mask = parse_dashboard_json(
+        "{\"s\":10,\"w\":20,\"f\":0,\"fr\":120,\"ok\":true}",
+        &data
+    );
+
+    TEST_ASSERT_BITS_HIGH(DASHBOARD_UPDATE_CLAUDE, mask);
+    TEST_ASSERT_TRUE(data.fable_valid);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, data.fable_pct);
+    TEST_ASSERT_EQUAL_INT(120, data.fable_reset_mins);
+}
+
+void test_old_claude_payload_marks_fable_unavailable(void) {
+    UsageData data{};
+    parse_dashboard_json("{\"s\":10,\"w\":20,\"ok\":true}", &data);
+
+    TEST_ASSERT_FALSE(data.fable_valid);
+    TEST_ASSERT_EQUAL_INT(-1, data.fable_reset_mins);
+}
+
+void test_fable_percentage_is_clamped_to_display_range(void) {
+    UsageData data{};
+    parse_dashboard_json("{\"s\":10,\"f\":140,\"ok\":true}", &data);
+
+    TEST_ASSERT_TRUE(data.fable_valid);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 100.0f, data.fable_pct);
+}
+
+void test_malformed_fable_percentage_is_unavailable(void) {
+    UsageData data{};
+    parse_dashboard_json("{\"s\":10,\"f\":\"bad\",\"ok\":true}", &data);
+
+    TEST_ASSERT_FALSE(data.fable_valid);
+}
+
 void test_new_payload_parses_codex_and_activity(void) {
     UsageData data{};
     uint8_t mask = parse_dashboard_json(
@@ -441,6 +477,10 @@ void setup() {
     RUN_TEST(test_fresh_serial_data_selects_live_usage_without_ble);
     RUN_TEST(test_stale_data_without_ble_selects_waiting_view);
     RUN_TEST(test_old_claude_payload_remains_compatible);
+    RUN_TEST(test_fable_payload_preserves_valid_zero_and_reset);
+    RUN_TEST(test_old_claude_payload_marks_fable_unavailable);
+    RUN_TEST(test_fable_percentage_is_clamped_to_display_range);
+    RUN_TEST(test_malformed_fable_percentage_is_unavailable);
     RUN_TEST(test_new_payload_parses_codex_and_activity);
     RUN_TEST(test_missing_codex_window_is_not_invented_and_zero_unread_is_valid);
     RUN_TEST(test_local_only_payload_does_not_update_claude);

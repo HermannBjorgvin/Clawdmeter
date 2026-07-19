@@ -13,6 +13,17 @@ uint8_t parse_dashboard_json(const char* json, UsageData* out) {
         out->session_reset_mins = doc["sr"] | -1;
         out->weekly_pct = doc["w"] | 0.0f;
         out->weekly_reset_mins = doc["wr"] | -1;
+        out->fable_valid = false;
+        out->fable_reset_mins = -1;
+        JsonVariantConst fable = doc["f"];
+        if (!fable.isNull() && fable.is<float>()) {
+            float value = fable.as<float>();
+            if (value < 0.0f) value = 0.0f;
+            if (value > 100.0f) value = 100.0f;
+            out->fable_pct = value;
+            out->fable_reset_mins = doc["fr"] | -1;
+            out->fable_valid = true;
+        }
         strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
         out->chime = doc["c"] | false;
         const char* acct = doc["acct"] | "pro";
