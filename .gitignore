@@ -24,3 +24,6 @@ __pycache__/
 
 # Subagent execution ledger
 .superpowers/sdd/
+
+# Local visual brainstorming sessions
+.superpowers/brainstorm/
