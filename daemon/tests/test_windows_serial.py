@@ -78,12 +78,51 @@ def test_connect_and_run_sends_local_dashboard_data_without_token(monkeypatch):
     session.write_payload.assert_called_once_with({"v": 2, "claude": None})
 
 
+def test_connect_and_run_merges_fable_into_successful_claude_payload(monkeypatch):
+    stop_event = asyncio.Event()
+    session = SimpleNamespace(write_payload=MagicMock(return_value=True), close=MagicMock())
+
+    async def stop_after_first_iteration(_event, timeout):
+        stop_event.set()
+
+    async def fake_poll_api(_token):
+        return {"s": 56, "sr": 120, "w": 33, "wr": 1440, "ok": True}
+
+    async def fake_poll_fable(_token):
+        return {"f": 61, "fr": 120}
+
+    monkeypatch.setattr(serial_daemon, "read_token", lambda: "token")
+    monkeypatch.setattr(serial_daemon, "poll_api", fake_poll_api)
+    monkeypatch.setattr(serial_daemon, "poll_fable_usage", fake_poll_fable, raising=False)
+    monkeypatch.setattr(
+        serial_daemon,
+        "build_dashboard_payload",
+        lambda claude_payload, _home: claude_payload,
+    )
+    monkeypatch.setattr(serial_daemon, "_wait_first", stop_after_first_iteration)
+
+    assert asyncio.run(serial_daemon.connect_and_run(session, stop_event)) is True
+    session.write_payload.assert_called_once_with(
+        {
+            "s": 56,
+            "sr": 120,
+            "w": 33,
+            "wr": 1440,
+            "ok": True,
+            "f": 61,
+            "fr": 120,
+        }
+    )
+
+
 def test_extended_dashboard_payload_fits_firmware_command_buffer():
     payload = {
         "s": 100,
         "sr": 10080,
         "w": 100,
         "wr": 10080,
+        "f": 100,
+        "fr": 10080,
         "st": "allowed",
         "ok": True,
         "v": 2,

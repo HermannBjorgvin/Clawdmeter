@@ -22,6 +22,7 @@ from daemon.claude_usage_daemon_windows import (
     read_token,
 )
 from daemon.dashboard_payload import build_dashboard_payload
+from daemon.fable_usage import poll_fable_usage
 
 BAUD_RATE = 115200
 IDENTIFY_TIMEOUT = 4.0
@@ -138,6 +139,8 @@ async def connect_and_run(session: SerialSession, stop_event: asyncio.Event, tra
                 else:
                     try:
                         claude_payload = await poll_api(token)
+                        if claude_payload is not None:
+                            claude_payload.update(await poll_fable_usage(token))
                     except AuthError:
                         if tray_state:
                             tray_state.set_error("token expired - run claude login")
