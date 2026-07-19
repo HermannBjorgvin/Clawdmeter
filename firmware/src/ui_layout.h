@@ -30,6 +30,14 @@ struct UiLayoutMetrics {
     int16_t pairing_release_y;
     bool small_display;
     bool horizontal_cards;
+    bool claude_compact_rows;
+    int16_t claude_row_y;
+    int16_t claude_row_h;
+    int16_t claude_row_gap;
+    int16_t claude_bar_h;
+    int16_t claude_status_x;
+    int16_t claude_status_y;
+    int16_t claude_status_w;
     int16_t status_font_px;
     int16_t idle_creature_size;
 };
@@ -50,6 +58,7 @@ inline UiLayoutMetrics compute_ui_layout_metrics(
     metrics.footer_y = height - 45;
     metrics.page_indicator_y = height - 16;
     metrics.small_display = false;
+    metrics.claude_compact_rows = false;
     metrics.status_font_px = 32;
     metrics.idle_creature_size = 160;
     metrics.pairing_title_y = 40;
@@ -78,6 +87,14 @@ inline UiLayoutMetrics compute_ui_layout_metrics(
         metrics.bluetooth_reset_zone_h = 65;
         metrics.small_display = true;
         metrics.horizontal_cards = true;
+        metrics.claude_compact_rows = true;
+        metrics.claude_row_y = 52;
+        metrics.claude_row_h = 47;
+        metrics.claude_row_gap = 5;
+        metrics.claude_bar_h = 8;
+        metrics.claude_status_x = 184;
+        metrics.claude_status_y = 219;
+        metrics.claude_status_w = 90;
         metrics.status_font_px = 14;
         metrics.idle_creature_size = 92;
         metrics.pairing_title_y = 18;

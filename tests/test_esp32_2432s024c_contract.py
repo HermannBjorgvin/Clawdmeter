@@ -108,15 +108,26 @@ def test_battery_ui_is_guarded_by_board_capability():
     assert "init_battery_icons();" in ui
 
 
-def test_landscape_claude_usage_uses_second_card_coordinates() -> None:
+def test_landscape_claude_usage_uses_three_compact_rows() -> None:
     ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
     usage = ui.split("static void init_usage_screen", 1)[1].split(
         "// ======== Public API", 1
     )[0]
     normalized = " ".join(usage.split())
-    assert "const int second_x = L.horizontal_cards ? L.second_panel_x : L.margin;" in normalized
-    assert "const int second_y = L.horizontal_cards ? L.content_y :" in normalized
-    assert "usage_group, second_x, second_y, L.panel_width, \"Weekly\"" in normalized
+    assert "if (L.claude_compact_rows)" in normalized
+    assert normalized.count("make_compact_usage_row(") == 3
+    for label in ("Currently", "Weekly", "Fable"):
+        assert f'"{label}"' in normalized
+
+
+def test_landscape_claude_footer_is_compact_next_to_page_dots() -> None:
+    ui = (ROOT / "firmware" / "src" / "ui.cpp").read_text(encoding="utf-8")
+    normalized = " ".join(ui.split())
+
+    assert "lv_obj_set_width(lbl_anim, L.claude_status_w);" in normalized
+    assert "lv_obj_set_pos(lbl_anim, L.claude_status_x, L.claude_status_y);" in normalized
+    assert "lv_obj_set_style_text_font(lbl_anim, &font_styrene_14, 0);" in normalized
+    assert "if (L.claude_compact_rows) { lv_label_set_text(lbl_anim, text);" in normalized
 
 
 def test_landscape_codex_uses_second_card_coordinates() -> None:
