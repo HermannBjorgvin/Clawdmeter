@@ -44,8 +44,8 @@ Upstream may gain related capabilities independently.
 
 The display has three pages:
 
-- **Claude** — current five-hour session and weekly utilization, including reset
-  time.
+- **Claude** — current five-hour session, weekly utilization, and the optional
+  Fable scoped weekly allowance, including reset times.
 - **Codex** — up to two locally observed rate-limit windows, tokens used today,
   and plan name when available.
 - **Activity** — aggregate Claude Code Open, Busy, and Waiting counts together
@@ -208,15 +208,17 @@ On Windows:
 
 1. The tray reads the existing Claude Code authentication state and polls Claude
    utilization.
-2. It aggregates only local Claude session statuses from
+2. It reads the optional Fable scoped weekly allowance from Claude Code's OAuth
+   usage response.
+3. It aggregates only local Claude session statuses from
    `%USERPROFILE%\.claude\sessions`.
-3. It aggregates Codex `token_count` and rate-limit events from
+4. It aggregates Codex `token_count` and rate-limit events from
    `%USERPROFILE%\.codex\sessions`.
-4. It reads Codex Unread from
+5. It reads Codex Unread from
    `%USERPROFILE%\.codex\.codex-global-state.json`.
-5. It sends a compact aggregate payload to the ESP32 over USB serial roughly
+6. It sends a compact aggregate payload to the ESP32 over USB serial roughly
    every 60 seconds.
-6. The firmware updates the dashboard and acknowledges the write.
+7. The firmware updates the dashboard and acknowledges the write.
 
 Prompt text, responses, task titles, and session contents are not sent to the
 display.
@@ -226,6 +228,11 @@ OpenAI telemetry API**. If the expected schema is absent or changes, Codex
 values become `Unavailable` while Claude data can continue working. For Codex
 product and installation information, see the official
 [OpenAI Codex repository](https://github.com/openai/codex).
+
+The Fable allowance also comes from an internal Claude Code OAuth usage
+interface rather than a documented public telemetry API. If its response no
+longer contains an active Fable scoped limit, the Fable row shows
+`Unavailable` without affecting the other metrics.
 
 ## macOS installation
 

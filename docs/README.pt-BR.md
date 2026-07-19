@@ -22,8 +22,8 @@ O projeto não é oficial nem endossado pela Anthropic ou pela OpenAI.
 
 A interface possui três páginas:
 
-1. **Claude** — percentual da sessão de cinco horas, uso semanal e horários de
-   renovação.
+1. **Claude** — percentual da sessão de cinco horas, uso semanal, limite semanal
+   específico do Fable quando disponível e horários de renovação.
 2. **Codex** — até duas janelas de limite encontradas localmente, tokens usados
    no dia e plano, quando essas informações estiverem disponíveis.
 3. **Activity** — sessões Claude Code em Open, Busy e Waiting, além de Codex
@@ -166,6 +166,7 @@ $env:CLAWDMETER_SERIAL_PORT = "COM3"
 O daemon trabalha na própria máquina:
 
 - uso do Claude: caminho autenticado já utilizado pelo daemon original;
+- limite semanal do Fable: resposta OAuth interna de uso do Claude Code;
 - atividade Claude Code:
   `%USERPROFILE%\.claude\sessions`;
 - uso e janelas do Codex:
@@ -181,6 +182,11 @@ estável da OpenAI. Se o formato esperado mudar ou ainda não existir, os campos
 do Codex aparecem como `Unavailable`, mas o Claude pode continuar funcionando.
 Para instalação e informações do produto, consulte o
 [repositório oficial do OpenAI Codex](https://github.com/openai/codex).
+
+O limite do Fable também vem de uma interface OAuth interna do Claude Code, não
+de uma API pública de telemetria. Se a resposta deixar de fornecer um limite
+ativo específico do Fable, essa linha aparece como `Unavailable` sem impedir a
+atualização das outras métricas.
 
 O símbolo Blossom usado na página Codex permanece monocromático conforme as
 [orientações de marca da OpenAI](https://openai.com/brand/). Isso não representa
