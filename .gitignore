@@ -18,3 +18,6 @@ daemon/.venv/
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# Собранный EventKit-хелпер (ad-hoc подпись локальная; сборка: daemon/build_calnext.sh)
+daemon/calnext

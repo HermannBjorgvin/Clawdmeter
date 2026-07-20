@@ -37,10 +37,290 @@ CONNECT_TIMEOUT = 20.0
 # Linux: token lives in ~/.claude/.credentials.json.
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 DEFAULT_CONFIG_DIR = Path.home() / ".claude"
-SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
-CONFIG_FILE = Path.home() / ".config" / "claude-usage-monitor" / "config"
+STATE_DIR = Path.home() / ".config" / "claude-usage-monitor"
+SAVED_ADDR_FILE = STATE_DIR / "ble-address"
+CONFIG_FILE = STATE_DIR / "config"
+# Attention flag: a Claude Code hook writes an event type into this file when
+# Claude needs the user. The connected loop picks it up within one TICK and
+# forwards it as "n":"<type>" so the firmware plays the matching melody/view.
+# Types: input (waiting for an answer), perm (permission prompt), done (turn
+# finished), clear (user is back — dismiss the attention view, no sound).
+# Stale flags (older than ATTN_MAX_AGE) are discarded so a flag written while
+# the daemon was down doesn't chime hours later.
+ATTN_FILE = STATE_DIR / "attention"
+ATTN_MAX_AGE = 60
+ATTN_TYPES = ("input", "perm", "done", "clear")
+# Firmware context-line budget ("np" field): two wrapped lines, 48 chars.
+NP_MAX_CHARS = 48
+
+
+_config_cache: dict[str, str] = {}
+_config_mtime: float | None = None
+
+
+def read_config() -> dict[str, str]:
+    """CONFIG_FILE parsed into {key: value}, re-read only when mtime changes.
+
+    The single config reader for every option (chime/clock/lang/cal/...).
+    Keys lowercased, inline #-comments stripped, duplicate keys keep the last
+    occurrence. Missing/unreadable file → {} (or the previous cache).
+    """
+    global _config_cache, _config_mtime
+    try:
+        mtime = CONFIG_FILE.stat().st_mtime
+    except OSError:
+        _config_cache, _config_mtime = {}, None
+        return _config_cache
+    if mtime == _config_mtime:
+        return _config_cache
+    opts: dict[str, str] = {}
+    try:
+        for line in CONFIG_FILE.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            opts[key.strip().lower()] = val.strip()
+    except OSError:
+        return _config_cache
+    _config_cache, _config_mtime = opts, mtime
+    return opts
+
+
+def read_attention_flag() -> tuple[str | None, str]:
+    """Consume the hook's attention flag → (type, project), or (None, "").
+
+    Stale flags (older than ATTN_MAX_AGE) are discarded so a flag written
+    while the daemon was down doesn't chime hours later.
+    """
+    if not ATTN_FILE.exists():
+        return None, ""
+    try:
+        fresh = (time.time() - ATTN_FILE.stat().st_mtime) <= ATTN_MAX_AGE
+        lines = ATTN_FILE.read_text().splitlines()
+        ATTN_FILE.unlink(missing_ok=True)
+        if fresh and lines:
+            kind = lines[0].strip().lower()
+            kind = kind if kind in ATTN_TYPES else "input"
+            project = lines[1].strip()[:NP_MAX_CHARS] if len(lines) > 1 else ""
+            return kind, project
+    except OSError:
+        pass
+    return None, ""
+
+
+# ── Calendar reminders ──────────────────────────────────────────────────────
+# Optional: `cal_ics_url = <источник>` in CONFIG_FILE turns on meeting
+# reminders. Sources: an https ICS feed (Outlook/Google "publish calendar"),
+# an absolute path to a local .ics, or the literal `eventkit` — the macOS
+# system calendar read via the signed `calnext` helper (build_calnext.sh;
+# plain python can't show the TCC calendar prompt, a binary with an embedded
+# Info.plist can). Events are refetched every CAL_FETCH_S with recurring
+# events expanded; when a meeting start crosses a `cal_remind` threshold the
+# connected loop sends an "n":"cal" payload with "np" = "HH:MM <title>".
+# Only the smallest active threshold fires (a daemon restart 7' before a
+# meeting sends the 5' reminder once, not the 15' one too), and a slot is
+# marked sent only after the BLE write succeeds so a dropped connection
+# doesn't eat the reminder.
+
+CAL_FETCH_S = 300
+CAL_HORIZON_S = 26 * 3600   # keep in sync with the horizon in calnext.swift
+CAL_THRESHOLDS_MIN = (15, 5)
+# "Meeting started" beat: sent within this window after the start ("n":
+# "calstart", threshold slot 0). A daemon that was down through the whole
+# window stays silent — a started-alert 10 minutes late is just noise.
+CAL_STARTED_GRACE_S = 120
+CALNEXT_BIN = Path(__file__).resolve().parent / "calnext"
+
+_cal_events: list[tuple[float, str]] = []   # (start_epoch, title), sorted
+_cal_fetched = 0.0
+_cal_sent: set[tuple[float, int]] = set()   # (start_epoch, threshold_min)
+_cal_err_logged = 0.0
+
+
+def read_cal_config() -> tuple[str, tuple[int, ...]]:
+    """(ics_url, reminder thresholds in minutes); url "" = feature off."""
+    opts = read_config()
+    mins = {int(m) for m in re.split(r"[,\s]+", opts.get("cal_remind", ""))
+            if m.isdigit() and int(m) > 0}
+    return opts.get("cal_ics_url", ""), tuple(sorted(mins)) or CAL_THRESHOLDS_MIN
+
+
+_cal_task: asyncio.Task | None = None
+
+
+def refresh_cal_events(url: str) -> None:
+    """Kick off a background refetch of _cal_events if CAL_FETCH_S elapsed.
+
+    Fire-and-forget: the first eventkit run can block ~2 min on the TCC
+    dialog and an ICS fetch up to 20 s — neither may stall the BLE loop, so
+    the fetch runs as its own task while check_cal_reminder keeps reading
+    whatever _cal_events currently holds.
+    """
+    global _cal_task, _cal_fetched
+    if time.time() - _cal_fetched < CAL_FETCH_S:
+        return
+    if _cal_task is not None and not _cal_task.done():
+        return
+    _cal_fetched = time.time()   # even on failure — don't hammer every TICK
+    _cal_task = asyncio.create_task(_fetch_cal_events(url))
+
+
+async def _fetch_cal_events(url: str) -> None:
+    """The actual refetch; failures only log (rate-limited) — the calendar
+    is an optional extra and must never take down the usage loop."""
+    global _cal_events, _cal_sent, _cal_err_logged
+    try:
+        if url == "eventkit":
+            events = await asyncio.to_thread(_events_from_eventkit)
+        else:
+            events = await _events_from_ics(url)
+        _cal_events = sorted((s, " ".join(t.split()) or "Встреча")
+                             for s, t in events)
+        _cal_sent = {(s, m) for (s, m) in _cal_sent if s > time.time() - 3600}
+    except Exception as e:  # noqa: BLE001 — any parse/net/tz problem: log & keep going
+        if time.time() - _cal_err_logged > 600:
+            _cal_err_logged = time.time()
+            log(f"Calendar fetch failed: {e}")
+
+
+def _events_from_eventkit() -> set[tuple[float, str]]:
+    """macOS system calendar via the signed calnext helper (blocking).
+
+    130s timeout: the very first run blocks on the TCC permission dialog
+    (helper-side cap is 120s); every later run returns instantly.
+    """
+    proc = subprocess.run([str(CALNEXT_BIN)], capture_output=True, timeout=130)
+    if proc.returncode != 0:
+        err = proc.stderr.decode(errors="replace").strip()
+        raise RuntimeError(err or f"calnext rc={proc.returncode}")
+    return {(float(ev["start"]), str(ev["title"]))
+            for ev in json.loads(proc.stdout)}
+
+
+async def _events_from_ics(url: str) -> set[tuple[float, str]]:
+    """ICS feed (https or absolute local path) with recurrence expanded."""
+    import icalendar
+    import recurring_ical_events
+    if url.startswith("/"):
+        raw = await asyncio.to_thread(Path(url).read_bytes)
+    else:
+        resp = await _http().get(url, follow_redirects=True)
+        resp.raise_for_status()
+        raw = resp.content
+    cal = icalendar.Calendar.from_ical(raw)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    horizon = now + datetime.timedelta(seconds=CAL_HORIZON_S)
+    events = set()
+    for ev in recurring_ical_events.of(cal).between(now, horizon):
+        start = ev.get("DTSTART")
+        # date (not datetime) = all-day entry — nothing to remind about
+        if start is None or not isinstance(start.dt, datetime.datetime):
+            continue
+        if str(ev.get("STATUS", "")).upper() == "CANCELLED":
+            continue
+        events.add((start.dt.timestamp(), str(ev.get("SUMMARY", ""))))
+    return events
+
+
+def check_cal_reminder(thresholds: tuple[int, ...]) -> tuple[str, float, int] | None:
+    """First unsent reminder due now → ("HH:MM title", start, threshold_min).
+
+    threshold_min 0 = the meeting just started (grace window); positive =
+    that many minutes before the start. Doesn't mark anything sent — the
+    caller adds (start, threshold) to _cal_sent once the payload is actually
+    delivered. Concurrent meetings resolve one per TICK.
+    """
+    now = time.time()
+    for start, title in _cal_events:      # sorted by start
+        if start - max(thresholds) * 60 > now:
+            break                          # everything further is future-only
+        if start <= now:
+            if now >= start + CAL_STARTED_GRACE_S or (start, 0) in _cal_sent:
+                continue
+            m = 0
+        else:
+            active = [t for t in thresholds if start - t * 60 <= now]
+            if not active:
+                continue
+            m = min(active)   # closest threshold wins; larger ones are stale
+            if (start, m) in _cal_sent:
+                continue
+        when = _fmt_reset_at(datetime.datetime.fromtimestamp(
+            start, tz=datetime.timezone.utc))
+        return f"{when} {title}"[:NP_MAX_CHARS], start, m
+    return None
+
+
+# Per-session liveness files written by the Claude Code hooks: mtime = last
+# heartbeat (PostToolUse / prompt), content "fg" (in a turn) or "bg" (turn
+# yielded to a long background task — builds, monitors — heartbeats pause).
+# fg entries expire after SESS_TTL_FG; bg entries have no TTL — they're
+# verified live via lsof/mtime instead. Count → "a" field → the device's
+# working/idle creature and the "·N" session counter.
+SESS_DIR = STATE_DIR / "sessions"
+SESS_TTL_FG = 4 * 60
+
+
+def _bg_session_still_running(sid: str) -> bool:
+    """Is a bg-marked session's background task really still running?
+
+    A running shell task keeps its .output file open in the session's tasks
+    dir — lsof sees that. (Its exit code is useless: 1 even with matches;
+    test stdout instead.) Async agents don't hold their transcripts open —
+    the main process appends them in bursts — so fresh writes count as
+    running work too. Neither = the session died or never came back.
+    Same heuristic as has_running_tasks in tools/claude-attention-hook.sh —
+    keep the two in sync.
+    """
+    root = Path(f"/private/tmp/claude-{os.getuid()}")
+    now = time.time()
+    try:
+        for tasks_dir in root.glob(f"*/{sid}/tasks"):
+            out = subprocess.run(
+                ["lsof", "-w", "+d", str(tasks_dir)],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+            if out.strip():
+                return True
+            for f in tasks_dir.iterdir():
+                try:
+                    if now - f.stat().st_mtime <= 90:
+                        return True
+                except OSError:
+                    continue
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return False
+
+
+def count_active_sessions() -> int:
+    now = time.time()
+    n = 0
+    try:
+        for f in SESS_DIR.iterdir():
+            try:
+                age = now - f.stat().st_mtime
+                mode = f.read_text().strip()
+                if mode == "bg":
+                    # Trust, but verify: count only while the background task
+                    # is genuinely alive; drop ghosts on the spot.
+                    if _bg_session_still_running(f.name):
+                        n += 1
+                    else:
+                        f.unlink(missing_ok=True)
+                elif age <= SESS_TTL_FG:
+                    n += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return n
 
 API_URL = "https://api.anthropic.com/v1/messages"
+# Read-only usage endpoint (what Claude Code's /usage renders). Preferred
+# source: unlike the /v1/messages probe it consumes no usage at all.
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
     "anthropic-beta": "oauth-2025-04-20",
@@ -122,18 +402,7 @@ def read_config_dirs() -> list[Path]:
     Defaults to [~/.claude] so existing single-plan setups are unchanged. ~ is
     expanded. Mirrors the Linux bash daemon's read_config_dirs.
     """
-    raw = ""
-    try:
-        if CONFIG_FILE.exists():
-            for line in CONFIG_FILE.read_text().splitlines():
-                line = line.split("#", 1)[0].strip()
-                if "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                if key.strip().lower() == "config_dirs":
-                    raw = val.strip()
-    except OSError:
-        pass
+    raw = read_config().get("config_dirs", "")
     if not raw:
         return [DEFAULT_CONFIG_DIR]
     dirs = [Path(p.strip()).expanduser() for p in raw.split(",") if p.strip()]
@@ -290,20 +559,8 @@ def read_chime_setting() -> str:
     Defaults to "off" (the device stays silent) so existing setups are
     unaffected until the user opts in.
     """
-    try:
-        if CONFIG_FILE.exists():
-            for line in CONFIG_FILE.read_text().splitlines():
-                line = line.split("#", 1)[0].strip()
-                if "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                if key.strip().lower() == "chime":
-                    val = val.strip().lower()
-                    if val in ("off", "on"):
-                        return val
-    except OSError:
-        pass
-    return "off"
+    val = read_config().get("chime", "").lower()
+    return val if val in ("off", "on") else "off"
 
 
 def read_clock_setting() -> str:
@@ -312,20 +569,8 @@ def read_clock_setting() -> str:
     Defaults to "off" (no clock; the device keeps showing "Usage") so existing
     setups are unaffected until the user opts in.
     """
-    try:
-        if CONFIG_FILE.exists():
-            for line in CONFIG_FILE.read_text().splitlines():
-                line = line.split("#", 1)[0].strip()
-                if "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                if key.strip().lower() == "clock":
-                    val = val.strip().lower()
-                    if val in ("off", "auto", "12", "24"):
-                        return val
-    except OSError:
-        pass
-    return "off"
+    val = read_config().get("clock", "").lower()
+    return val if val in ("off", "auto", "12", "24") else "off"
 
 
 def add_chime_field(payload: dict) -> None:
@@ -333,6 +578,14 @@ def add_chime_field(payload: dict) -> None:
     sound the session-reset chime. Omitted entirely when chime is off."""
     if read_chime_setting() == "on":
         payload["c"] = 1
+
+
+def add_lang_field(payload: dict) -> None:
+    """Add "lang":"ru|en" from the `lang` config option. Omitted when unset —
+    the firmware then keeps its persisted (or default English) UI language."""
+    val = read_config().get("lang", "").lower()
+    if val in ("ru", "en"):
+        payload["lang"] = val
 
 
 def detect_hour_format() -> int:
@@ -373,18 +626,150 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
-async def poll_api(token: str) -> dict | None:
+# Poll error codes surfaced to the device as the "err" payload field so it
+# can say WHY the data went stale: "auth" (401/403 — token expired; Claude
+# Code will refresh it next time the user opens it, we deliberately never
+# touch the refresh token ourselves — rotation could log the CLI out),
+# "rate" (429), "net", "http".
+def _err_from_status(status: int) -> str:
+    if status in (401, 403):
+        return "auth"
+    if status == 429:
+        return "rate"
+    return "http"
+
+
+_HTTP: httpx.AsyncClient | None = None
+
+
+def _http() -> httpx.AsyncClient:
+    """Shared keep-alive client — both pollers hit the same host every
+    minute; a fresh TLS handshake per poll would be pure waste."""
+    global _HTTP
+    if _HTTP is None:
+        _HTTP = httpx.AsyncClient(timeout=20.0)
+    return _HTTP
+
+
+async def poll_api(token: str) -> dict | str:
+    """Fetch usage: the free read-only endpoint first, the /v1/messages probe
+    as a fallback (it costs a 1-token Haiku call but knows every account shape
+    the headers describe, e.g. Enterprise overage). Returns the payload, or an
+    error code string when both sources failed."""
+    result = await _poll_usage_endpoint(token)
+    if isinstance(result, str):
+        result = await _poll_probe(token)   # the probe's verdict is fresher
+    if isinstance(result, str):
+        return result
+    add_chime_field(result)   # adds "c":1 iff the config opts in
+    add_clock_fields(result)  # adds "t" + "tf" iff the config opts in
+    add_lang_field(result)    # adds "lang" iff the config sets it
+    return result
+
+
+async def _poll_usage_endpoint(token: str) -> dict | str:
+    """GET /api/oauth/usage → payload, or an error code on any surprise
+    (HTTP error, unfamiliar response shape, Enterprise-style account) so the
+    caller can fall back to the probe."""
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": API_HEADERS_TEMPLATE["anthropic-beta"],
+        "User-Agent": API_HEADERS_TEMPLATE["User-Agent"],
+    }
+    try:
+        resp = await _http().get(USAGE_URL, headers=headers)
+    except httpx.HTTPError as e:
+        log(f"Usage endpoint failed: {e}")
+        return "net"
+    if resp.status_code != 200:
+        log(f"Usage endpoint HTTP {resp.status_code}: {resp.text[:200]}")
+        return _err_from_status(resp.status_code)
+
+    def mins_until(iso: str | None) -> int:
+        if not iso:
+            return 0
+        try:
+            dt = datetime.datetime.fromisoformat(iso)
+        except ValueError:
+            return 0
+        mins = (dt - datetime.datetime.now(datetime.timezone.utc)).total_seconds() / 60.0
+        return int(round(mins)) if mins > 0 else 0
+
+    def local_reset_at(iso: str | None) -> str:
+        if not iso:
+            return ""
+        try:
+            return _fmt_reset_at(datetime.datetime.fromisoformat(iso))
+        except ValueError:
+            return ""
+
+    try:
+        data = resp.json()
+        five, seven = data.get("five_hour"), data.get("seven_day")
+        if not isinstance(five, dict) or not isinstance(seven, dict):
+            return "http"   # not the Pro/Max shape — let the probe classify it
+        status = "allowed"
+        scoped = None   # model-scoped weekly limit (e.g. Fable) — third gauge
+        for lim in data.get("limits") or []:
+            if not isinstance(lim, dict):
+                continue
+            if lim.get("kind") == "session":
+                sev = lim.get("severity")
+                status = "allowed" if sev == "normal" else str(sev or "unknown")
+            elif (lim.get("kind") == "weekly_scoped"
+                  and (scoped is None
+                       or (lim.get("percent") or 0) > (scoped.get("percent") or 0))):
+                scoped = lim   # several scoped limits → show the hottest one
+        payload = {
+            "s": int(round(float(five.get("utilization") or 0))),
+            "sr": mins_until(five.get("resets_at")),
+            "srt": local_reset_at(five.get("resets_at")),
+            "w": int(round(float(seven.get("utilization") or 0))),
+            "wr": mins_until(seven.get("resets_at")),
+            "wrt": local_reset_at(seven.get("resets_at")),
+            "st": status,
+            "acct": "pro",
+            "ok": True,
+        }
+        if scoped is not None:
+            payload["f"] = int(round(float(scoped.get("percent") or 0)))
+            model = (scoped.get("scope") or {}).get("model") or {}
+            if model.get("display_name"):
+                payload["fn"] = str(model["display_name"])[:12]
+        return payload
+    except (ValueError, TypeError) as e:
+        log(f"Usage endpoint parse error: {e}")
+        return "http"
+
+
+_WEEKDAYS = {
+    "ru": ("пн", "вт", "ср", "чт", "пт", "сб", "вс"),
+    "en": ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"),
+}
+
+
+def _fmt_reset_at(dt: datetime.datetime) -> str:
+    """Wall-clock reset time for the display: "21:00" today, "ср 19:00" /
+    "Wed 19:00" on another day — weekday follows the `lang` config option."""
+    dt = dt.astimezone()
+    hm = dt.strftime("%H:%M")
+    if dt.date() == datetime.datetime.now().astimezone().date():
+        return hm
+    days = _WEEKDAYS.get(read_config().get("lang", ""), _WEEKDAYS["en"])
+    return f"{days[dt.weekday()]} {hm}"
+
+
+async def _poll_probe(token: str) -> dict | str:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
     try:
-        async with httpx.AsyncClient(timeout=20.0) as http:
-            resp = await http.post(API_URL, headers=headers, json=API_BODY)
+        resp = await _http().post(API_URL, headers=headers, json=API_BODY)
     except httpx.HTTPError as e:
         log(f"API call failed: {e}")
-        return None
+        return "net"
     if resp.status_code >= 400:
         log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
-        return None
+        return _err_from_status(resp.status_code)
 
     def hdr(name: str, default: str = "0") -> str:
         return resp.headers.get(name, default)
@@ -405,14 +790,25 @@ async def poll_api(token: str) -> dict | None:
         except ValueError:
             return 0
 
+    def reset_at(reset_ts: str) -> str:
+        try:
+            r = float(reset_ts)
+        except ValueError:
+            return ""
+        if r <= now:
+            return ""
+        return _fmt_reset_at(datetime.datetime.fromtimestamp(r))
+
     # Pro/Max accounts expose 5h/7d windows; Enterprise/overage use a single
     # spending-limit model reported via overage-utilization.
     if resp.headers.get("anthropic-ratelimit-unified-5h-utilization"):
         payload = {
             "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
             "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
+            "srt": reset_at(hdr("anthropic-ratelimit-unified-5h-reset")),
             "w": pct(hdr("anthropic-ratelimit-unified-7d-utilization")),
             "wr": reset_minutes(hdr("anthropic-ratelimit-unified-7d-reset")),
+            "wrt": reset_at(hdr("anthropic-ratelimit-unified-7d-reset")),
             "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
             "acct": "pro",
             "ok": True,
@@ -429,8 +825,6 @@ async def poll_api(token: str) -> dict | None:
             **_billing_period_info(now, reset_ts),
             "ok": True,
         }
-    add_chime_field(payload)   # adds "c":1 iff the config opts in
-    add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
     return payload
 
 
@@ -504,26 +898,34 @@ class PlanSelector:
 _SELECTOR = PlanSelector()
 
 
-async def poll_active_payload(selector: PlanSelector = _SELECTOR) -> dict | None:
+
+async def poll_active_payload(selector: PlanSelector = _SELECTOR) -> dict:
     """Poll every configured config dir and return the active plan's payload.
 
-    Returns None when no dir yields a usable payload this cycle. A single
-    configured dir (the default) collapses to exactly the old single-poll path.
+    Returns an {"ok": False, "err": ...} error beat when no dir yields a
+    usable payload this cycle. A single configured dir (the default) collapses
+    to exactly the old single-poll path.
     """
     dirs = read_config_dirs()
     payloads: dict[Path, dict] = {}
     sessions: dict[Path, int] = {}
+    last_err: str | None = None
     for d in dirs:
         token = read_token_for(d)
         if not token:
             log(f"No token in {d}; skipping")
             continue
-        payload = await poll_api(token)
-        if payload is not None:
-            payloads[d] = payload
-            sessions[d] = int(payload.get("s", 0) or 0)
+        result = await poll_api(token)
+        if isinstance(result, str):
+            last_err = result
+            continue
+        payloads[d] = result
+        sessions[d] = int(result.get("s", 0) or 0)
     if not payloads:
-        return None
+        # Error beat: tells the firmware to flip to the idle view and show WHY
+        # instead of rendering hours-old numbers as live ("token" = no config
+        # dir had a readable token this cycle).
+        return {"ok": False, "err": last_err or "token"}
     active = selector.choose(sessions)
     if len(dirs) > 1:
         log(f"Active plan: {active} (s={sessions[active]})")
@@ -558,7 +960,10 @@ class Session:
             log("Refresh subscription timed out; polling without it")
 
     async def write_payload(self, payload: dict) -> bool:
-        data = json.dumps(payload, separators=(",", ":")).encode()
+        # ensure_ascii=False: meeting titles are Cyrillic — raw UTF-8 is 2
+        # bytes/char over the wire vs 6 for \uXXXX escapes (BLE_BUF_SIZE=512).
+        data = json.dumps(payload, separators=(",", ":"),
+                          ensure_ascii=False).encode()
         log(f"Sending: {data.decode()}")
         try:
             await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
@@ -693,17 +1098,59 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     last_poll = 0.0
     used_successfully = False
     try:
+        last_payload: dict | None = None
+        poll_interval = POLL_INTERVAL   # grows exponentially while polls fail
         while client.is_connected and not stop_event.is_set():
             now = time.time()
             elapsed = now - last_poll
-            if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
+            attn, attn_project = read_attention_flag()
+            cal_url, cal_thresholds = read_cal_config()
+            cal = None
+            if not attn and cal_url:
+                # Hook events outrank the calendar; an unsent reminder just
+                # waits for the next TICK (nothing is marked sent yet).
+                refresh_cal_events(cal_url)
+                cal = check_cal_reminder(cal_thresholds)
+            if attn == "clear":
+                # Dismiss-only: reuse the last payload, skip the API poll.
+                if last_payload is not None:
+                    log("Attention clear — dismissing the attention view")
+                    a = await asyncio.to_thread(count_active_sessions)
+                    await session.write_payload({**last_payload, "n": "clear",
+                                                 "a": a})
+            elif (session.refresh_requested.is_set() or elapsed >= poll_interval
+                  or attn or cal):
                 session.refresh_requested.clear()
                 payload = await poll_active_payload()
-                if payload is None:
-                    log("No usable config dir this cycle")
-                elif await session.write_payload(payload):
+                if payload.get("ok"):
+                    last_payload = dict(payload)
+                    poll_interval = POLL_INTERVAL
+                else:
+                    # Exponential backoff: a dead token means every retry is a
+                    # guaranteed 401, and repeated auth failures escalate to
+                    # 429s — don't hammer the API while there's nothing to win.
+                    poll_interval = min(poll_interval * 2, 600)
+                    log(f"Poll failed ({payload.get('err')}); next attempt in {poll_interval}s")
+                # lsof inside can take a while — keep the BLE loop responsive.
+                payload["a"] = await asyncio.to_thread(count_active_sessions)
+                if attn:
+                    # Attention events ride on error beats too — a permission
+                    # chime matters even while the usage data is unavailable.
+                    payload["n"] = attn
+                    if attn_project:
+                        payload["np"] = attn_project
+                    log(f"Attention flag ({attn}, {attn_project or '?'}) — forwarding to device")
+                elif cal:
+                    payload["n"] = "calstart" if cal[2] == 0 else "cal"
+                    payload["np"] = cal[0]
+                    log(f"Calendar reminder — {cal[0]} "
+                        f"({'началась' if cal[2] == 0 else f'{cal[2]}′'})")
+                if await session.write_payload(payload):
                     last_poll = time.time()
-                    used_successfully = True
+                    if cal:
+                        _cal_sent.add((cal[1], cal[2]))
+                    if payload.get("ok"):
+                        used_successfully = True
 
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
