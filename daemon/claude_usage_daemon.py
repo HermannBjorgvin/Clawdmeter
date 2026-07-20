@@ -610,6 +610,7 @@ class PlanSelector:
 _SELECTOR = PlanSelector()
 
 
+
 async def poll_active_payload(selector: PlanSelector = _SELECTOR) -> dict:
     """Poll every configured config dir and return the active plan's payload.
 

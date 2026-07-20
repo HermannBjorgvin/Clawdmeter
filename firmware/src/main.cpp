@@ -415,6 +415,23 @@ void loop() {
                         g_before, g_after, usage.session_pct);
                     if (splash_is_active()) splash_pick_for_current_rate();
                 }
+                // Session-limit thresholds: warn once when crossing 80%, and
+                // again at 95%. A jump over both in one payload alerts once.
+                // Re-armed by the session reset above (history restarts).
+                {
+                    static int prev_s_pct = -1;
+                    int s_now = (int)(usage.session_pct + 0.5f);
+                    if (session_reset) prev_s_pct = -1;
+                    if (prev_s_pct >= 0 &&
+                        ((prev_s_pct < 95 && s_now >= 95) ||
+                         (prev_s_pct < 80 && s_now >= 80 && s_now < 95))) {
+                        Serial.printf("session limit warning: %d%% -> %d%%\n",
+                                      prev_s_pct, s_now);
+                        sound_hal_play_alert(4);
+                        ui_show_attention(4, "");
+                    }
+                    prev_s_pct = s_now;
+                }
                 ui_update(&usage);
             }
             ble_send_ack();

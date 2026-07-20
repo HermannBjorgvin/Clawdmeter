@@ -72,6 +72,7 @@ struct ToneNote { uint16_t freq; uint16_t ms; };   // freq 0 = rest
 static const ToneNote MELODY_INPUT[] = { {659, 220}, {0, 120}, {659, 220} };            // E5 E5 — «ждёт ответа»
 static const ToneNote MELODY_PERM[]  = { {880, 110}, {0, 60}, {880, 110}, {0, 60}, {880, 160} };  // A5×3 — «нужно разрешение»
 static const ToneNote MELODY_DONE[]  = { {523, 140}, {659, 140}, {784, 220} };          // C5 E5 G5 — «готово»
+static const ToneNote MELODY_LIMIT[] = { {988, 130}, {880, 130}, {784, 240} };          // B5 A5 G5 вниз — «лимит близко»
 
 static const ToneNote* alert_notes = nullptr;
 static int             alert_count = 0;
@@ -118,6 +119,7 @@ void chime_play_alert(uint8_t kind) {
     case 1: alert_notes = MELODY_INPUT; alert_count = sizeof(MELODY_INPUT) / sizeof(ToneNote); break;
     case 2: alert_notes = MELODY_PERM;  alert_count = sizeof(MELODY_PERM)  / sizeof(ToneNote); break;
     case 3: alert_notes = MELODY_DONE;  alert_count = sizeof(MELODY_DONE)  / sizeof(ToneNote); break;
+    case 4: alert_notes = MELODY_LIMIT; alert_count = sizeof(MELODY_LIMIT) / sizeof(ToneNote); break;
     default: return;
     }
     playing = true;

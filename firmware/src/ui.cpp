@@ -142,17 +142,18 @@ static lv_obj_t* attention_group;       // the "Claude is waiting for you" view
 static lv_obj_t* lbl_attention;         // its caption (text/color vary by type)
 static lv_obj_t* mini_creature;         // the single shared mini creature canvas
 static bool      attention_active = false;
-static uint8_t   attention_type   = 1;  // 1 input / 2 permission / 3 done
+static uint8_t   attention_type   = 1;  // 1 input / 2 permission / 3 done / 4 limit warning
 static char      attention_project[17] = "";   // shown in the header while active
 static uint32_t  attention_since  = 0;
-// "Done" is informational — dismiss it quickly; the waiting states nag longer.
+// The waiting states nag for 2 min; "done" and the limit warning are
+// informational — dismiss them quickly.
 static const uint32_t ATTENTION_TIMEOUT_MS      = 120000;
 static const uint32_t ATTENTION_DONE_TIMEOUT_MS = 30000;
 
 // Caption, color and creature animation per attention type (index = type - 1).
-static const char* const ATTN_CAPTIONS[3] = { "Клод ждёт ответа", "Нужно разрешение", "Готово!" };
-static const char* const ATTN_ANIMS[3]    = { "idle look around", "expression surprise", "dance bounce" };
-static const char* const ATTN_STATUS[3]   = { "Ждёт ответа", "Ждёт разрешения", "Готово" };
+static const char* const ATTN_CAPTIONS[4] = { "Клод ждёт ответа", "Нужно разрешение", "Готово!", "Лимит близко!" };
+static const char* const ATTN_ANIMS[4]    = { "idle look around", "expression surprise", "dance bounce", "expression surprise" };
+static const char* const ATTN_STATUS[4]   = { "Ждёт ответа", "Ждёт разрешения", "Готово", "Лимит близко" };
 static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage update landed
 static bool      data_received = false; // any valid update since boot
 static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage / 3 attention
@@ -676,7 +677,7 @@ static void update_view_state(void) {
 void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
     if (attention_active &&
-        lv_tick_get() - attention_since >= (attention_type == 3 ? ATTENTION_DONE_TIMEOUT_MS
+        lv_tick_get() - attention_since >= (attention_type >= 3 ? ATTENTION_DONE_TIMEOUT_MS
                                                                 : ATTENTION_TIMEOUT_MS)) {
         attention_active = false;   // nobody came — stop nagging
     }
@@ -763,7 +764,7 @@ static void global_click_cb(lv_event_t* e) {
 }
 
 void ui_show_attention(uint8_t type, const char* project) {
-    if (type < 1 || type > 3) return;
+    if (type < 1 || type > 4) return;
     idle_note_activity();               // wake the panel if it faded out
     // Re-style the view even if it's already up (a new event may differ).
     bool was_active = attention_active;
@@ -773,7 +774,8 @@ void ui_show_attention(uint8_t type, const char* project) {
     if (lbl_attention) {
         lv_label_set_text(lbl_attention, ATTN_CAPTIONS[type - 1]);
         lv_obj_set_style_text_color(lbl_attention,
-                                    type == 3 ? COL_GREEN : COL_AMBER, 0);
+                                    type == 3 ? COL_GREEN :
+                                    type == 4 ? COL_RED   : COL_AMBER, 0);
     }
     if (was_active) {
         if (mini_creature) splash_mini_set_anim(ATTN_ANIMS[type - 1]);
