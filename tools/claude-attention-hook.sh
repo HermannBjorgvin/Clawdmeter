@@ -10,9 +10,10 @@
 set -u
 DIR="$HOME/.config/claude-usage-monitor"
 FLAG="$DIR/attention"
+SESS="$DIR/sessions"   # per-session liveness: mtime = last heartbeat, content = fg|bg
 MIN_TURN_S=45          # "done" only for turns longer than this — short Q&A means you're right there
 IN=$(cat)
-mkdir -p "$DIR"
+mkdir -p "$DIR" "$SESS"
 
 jqr() { printf '%s' "$IN" | jq -r "$1 // \"\"" 2>/dev/null; }
 
@@ -27,6 +28,11 @@ write_flag() {
 }
 
 case "${1:-}" in
+heartbeat)
+    # PostToolUse — Claude is actively using tools right now.
+    sid=$(jqr '.session_id')
+    [[ -n "$sid" ]] && echo fg > "$SESS/$sid"
+    ;;
 notification)
     # Claude is waiting: a permission prompt or an idle "waiting for your input".
     msg=$(jqr '.message' | tr '[:upper:]' '[:lower:]')
@@ -47,9 +53,11 @@ stop)
         for tasks in /private/tmp/claude-$(id -u)/*/"$sid"/tasks; do
             # NB: lsof's exit code is useless here (1 even with matches) — test stdout.
             if [[ -d "$tasks" ]] && lsof -w +d "$tasks" 2>/dev/null | grep -q .; then
+                echo bg > "$SESS/$sid"   # still working, just in the background
                 exit 0
             fi
         done
+        rm -f "$SESS/$sid"               # turn really finished — session is idle
     fi
     # Skip short interactive turns — the user is at the keyboard anyway.
     if [[ -n "$sid" && -f "$DIR/turn-start-$sid" ]]; then
@@ -59,16 +67,19 @@ stop)
     write_flag done
     ;;
 prompt)
+    # Any prompt — real or harness-generated — means the session is working.
+    sid=$(jqr '.session_id')
+    [[ -n "$sid" ]] && echo fg > "$SESS/$sid"
     # Harness-generated turns (background-task notifications, scheduled
     # wakeups) also fire UserPromptSubmit — they are NOT the user coming back,
     # so they must neither dismiss an alert nor restart the turn clock.
     p=$(jqr '.prompt')
     case "$p" in *"[SYSTEM NOTIFICATION"*|*"<task-notification>"*|*"<system-reminder>"*) exit 0;; esac
     # The user is typing: stamp the turn start and dismiss any pending alert.
-    sid=$(jqr '.session_id')
     [[ -n "$sid" ]] && date +%s > "$DIR/turn-start-$sid"
     echo clear > "$FLAG"
     find "$DIR" -name 'turn-start-*' -mtime +1 -delete 2>/dev/null
+    find "$SESS" -type f -mtime +1 -delete 2>/dev/null
     ;;
 esac
 exit 0

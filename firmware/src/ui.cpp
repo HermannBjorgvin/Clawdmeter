@@ -127,6 +127,7 @@ static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
 static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
 static lv_obj_t* lbl_spending_status = nullptr;   // "Under pace" / "On pace" / "Over pace"
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
+static lv_obj_t* lbl_sessions;  // bottom-left "·N" active-session counter
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
@@ -477,6 +478,15 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+
+    // Active-session counter — pinned to the bottom-left corner, independent
+    // of the centered status text. Shown only on the live usage view.
+    lbl_sessions = lv_label_create(usage_container);
+    lv_label_set_text(lbl_sessions, "");
+    lv_obj_set_style_text_font(lbl_sessions, &font_mono_32, 0);
+    lv_obj_set_style_text_color(lbl_sessions, COL_DIM, 0);
+    lv_obj_align(lbl_sessions, LV_ALIGN_BOTTOM_LEFT, L.margin, -15);
+    lv_obj_add_flag(lbl_sessions, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ======== Public API ========
@@ -509,6 +519,18 @@ void ui_init(void) {
 }
 
 static char data_err[8] = "";   // daemon error beat code; "" = data flows fine
+static int  active_sessions = -1;   // working Claude sessions; -1 = not reported
+
+// Bottom-left session counter: "·N" for N >= 1 on the live usage view only.
+static void apply_sessions_label(void) {
+    if (!lbl_sessions) return;
+    if (view_state == 2 && active_sessions >= 1) {
+        lv_label_set_text_fmt(lbl_sessions, "\xC2\xB7%d", active_sessions);
+        lv_obj_clear_flag(lbl_sessions, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(lbl_sessions, LV_OBJ_FLAG_HIDDEN);
+    }
+}
 
 void ui_set_data_error(const char* code) {
     strlcpy(data_err, code ? code : "", sizeof(data_err));
@@ -521,6 +543,8 @@ void ui_set_data_error(const char* code) {
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
     data_err[0] = '\0';             // a good payload clears any error beat
+    active_sessions = data->active_sessions;
+    apply_sessions_label();
     last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
     data_received = true;
 
@@ -672,6 +696,7 @@ static void update_view_state(void) {
     lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group :
                       v == 3 ? attention_group : usage_group,
                       LV_OBJ_FLAG_HIDDEN);
+    apply_sessions_label();
 }
 
 void ui_tick_anim(void) {
@@ -713,11 +738,21 @@ void ui_tick_anim(void) {
         anim_msg_start = now;
     }
 
-    if (now - anim_last_ms < spinner_ms[anim_spinner_idx]) return;
-    anim_last_ms = now;
-    anim_phase = (anim_phase + 1) % SPINNER_PHASES;
-    anim_spinner_idx = (anim_phase < SPINNER_COUNT) ? anim_phase
-                                                    : (SPINNER_PHASES - anim_phase);
+    // While every session is resting the spinner freezes on its calm base
+    // glyph — a pulsing star reads as "working", which would be a lie.
+    bool resting = (view_state == 2 && active_sessions == 0);
+    if (resting) {
+        anim_phase = 0;
+        anim_spinner_idx = 0;
+        if (now - anim_last_ms < 1000) return;   // still refresh the text ~1/s
+        anim_last_ms = now;
+    } else {
+        if (now - anim_last_ms < spinner_ms[anim_spinner_idx]) return;
+        anim_last_ms = now;
+        anim_phase = (anim_phase + 1) % SPINNER_PHASES;
+        anim_spinner_idx = (anim_phase < SPINNER_COUNT) ? anim_phase
+                                                        : (SPINNER_PHASES - anim_phase);
+    }
 
     // Status text by priority. Whimsical messages only when connected & settled.
     const char* text;
@@ -734,12 +769,15 @@ void ui_tick_anim(void) {
         text = (anim_msg_idx & 1) ? "Нет данных" : "Слушает";
     } else if (now - connected_at_ms < 5000) {
         text = "Подключено";
+    } else if (active_sessions == 0) {
+        text = "Отдыхает";             // no Claude session is doing anything
     } else {
         text = anim_messages[anim_msg_idx];
     }
 
-    // All states share the whimsical style: "<glyph> <Title-case word>…"
-    static char buf[80];
+    // All states share the whimsical style: "<glyph> <Title-case word>…".
+    // The active-session count lives in its own bottom-left label.
+    static char buf[96];
     snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6",
              spinner_frames[anim_spinner_idx], text);
     lv_label_set_text(lbl_anim, buf);

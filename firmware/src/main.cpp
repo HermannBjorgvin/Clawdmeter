@@ -119,6 +119,7 @@ static bool parse_json(const char* json, UsageData* out) {
     out->notify_type = !strcmp(n, "input") ? 1 : !strcmp(n, "perm") ? 2 :
                        !strcmp(n, "done")  ? 3 : !strcmp(n, "clear") ? 4 : 0;
     strlcpy(out->notify_project, doc["np"] | "", sizeof(out->notify_project));
+    out->active_sessions = doc["a"] | -1;
     const char* acct = doc["acct"] | "pro";
     out->enterprise = (strcmp(acct, "ent") == 0);
     out->time_pct = doc["tp"] | 0;
@@ -433,6 +434,7 @@ void loop() {
                     prev_s_pct = s_now;
                 }
                 ui_update(&usage);
+                splash_set_activity(usage.active_sessions);
             }
             ble_send_ack();
         } else {

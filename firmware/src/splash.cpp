@@ -240,12 +240,21 @@ void splash_init(lv_obj_t *parent) {
     lv_obj_add_flag(splash_container, LV_OBJ_FLAG_HIDDEN);
 }
 
+// Live activity state from the host daemon: -1 unknown (old daemon — keep the
+// usage-rate picks), 0 no Claude session is working, 1+ at least one is. When
+// known, it owns the splash rotation: Work animations while working, Idle
+// while resting. pick_for_activity is defined near splash_pick_for_current_rate.
+static int activity_state = -1;
+static void pick_for_activity(void);
+
 void splash_tick(void) {
     if (!active || SPLASH_ANIM_COUNT == 0) return;
 
-    // Auto-rotate to the next animation in the current group.
+    // Auto-rotate: within the activity category when the daemon reports a
+    // live working/idle state, else within the usage-rate group as before.
     if (millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
-        splash_pick_for_current_rate();
+        if (activity_state >= 0) pick_for_activity();
+        else                     splash_pick_for_current_rate();
     }
 
     const splash_anim_def_t *a = &splash_anims[cur_anim];
@@ -268,6 +277,31 @@ void splash_next(void) {
     const splash_anim_def_t *a = &splash_anims[cur_anim];
     render_frame(a->frames[0], a->palette);
     Serial.printf("splash: -> %s\n", a->name);
+}
+
+static void pick_for_activity(void) {
+    const char* cat = (activity_state >= 1) ? "Work" : "Idle";
+    uint8_t list[SPLASH_ANIM_COUNT];
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < SPLASH_ANIM_COUNT; i++)
+        if (strcmp(splash_anims[i].category, cat) == 0) list[n++] = i;
+    if (n == 0) { splash_pick_for_current_rate(); return; }
+    static uint8_t rot = 0;
+    uint8_t pick = list[rot++ % n];
+    if (pick == cur_anim && n > 1) pick = list[rot++ % n];   // avoid an immediate repeat
+    cur_anim = pick;
+    cur_frame = 0;
+    frame_started_ms = millis();
+    last_pick_ms = frame_started_ms;
+    const splash_anim_def_t *a = &splash_anims[cur_anim];
+    render_frame(a->frames[0], a->palette);
+}
+
+void splash_set_activity(int working_sessions) {
+    int st = (working_sessions < 0) ? -1 : (working_sessions > 0 ? 1 : 0);
+    if (st == activity_state) return;
+    activity_state = st;
+    if (st >= 0 && active) pick_for_activity();
 }
 
 void splash_pick_for_current_rate(void) {

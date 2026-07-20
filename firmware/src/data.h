@@ -10,6 +10,7 @@ struct UsageData {
     bool chime;              // play the session-reset chime; false unless daemon opts in
     uint8_t notify_type;     // hook-driven event: 0 none / 1 input / 2 permission / 3 done / 4 clear
     char notify_project[17]; // project the event belongs to (git root basename); "" if unknown
+    int active_sessions;     // Claude Code sessions working right now; -1 = daemon doesn't report
     bool enterprise;         // true = Enterprise spending-limit account
     int time_pct;            // 0-100: fraction of billing period elapsed (Enterprise)
     int period_days;         // total billing period length in days (Enterprise)

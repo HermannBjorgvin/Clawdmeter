@@ -50,6 +50,32 @@ ATTN_FILE = Path.home() / ".config" / "claude-usage-monitor" / "attention"
 ATTN_MAX_AGE = 60
 ATTN_TYPES = ("input", "perm", "done", "clear")
 
+# Per-session liveness files written by the Claude Code hooks: mtime = last
+# heartbeat (PostToolUse / prompt), content "fg" (in a turn) or "bg" (turn
+# yielded to a long background task — builds, monitors — heartbeats pause, so
+# it earns a much longer TTL). Count → "a" field → the device's working/idle
+# creature and the "·N" session counter.
+SESS_DIR = Path.home() / ".config" / "claude-usage-monitor" / "sessions"
+SESS_TTL_FG = 4 * 60
+SESS_TTL_BG = 45 * 60
+
+
+def count_active_sessions() -> int:
+    now = time.time()
+    n = 0
+    try:
+        for f in SESS_DIR.iterdir():
+            try:
+                age = now - f.stat().st_mtime
+                mode = f.read_text().strip()
+                if age <= (SESS_TTL_BG if mode == "bg" else SESS_TTL_FG):
+                    n += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return n
+
 API_URL = "https://api.anthropic.com/v1/messages"
 # Read-only usage endpoint (what Claude Code's /usage renders). Preferred
 # source: unlike the /v1/messages probe it consumes no usage at all.
@@ -827,7 +853,8 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                 # Dismiss-only: reuse the last payload, skip the API poll.
                 if last_payload is not None:
                     log("Attention clear — dismissing the attention view")
-                    await session.write_payload({**last_payload, "n": "clear"})
+                    await session.write_payload({**last_payload, "n": "clear",
+                                                 "a": count_active_sessions()})
             elif session.refresh_requested.is_set() or elapsed >= poll_interval or attn:
                 session.refresh_requested.clear()
                 payload = await poll_active_payload()
@@ -840,6 +867,7 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                     # 429s — don't hammer the API while there's nothing to win.
                     poll_interval = min(poll_interval * 2, 600)
                     log(f"Poll failed ({payload.get('err')}); next attempt in {poll_interval}s")
+                payload["a"] = count_active_sessions()
                 if attn:
                     # Attention events ride on error beats too — a permission
                     # chime matters even while the usage data is unavailable.
