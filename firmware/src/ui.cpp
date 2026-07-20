@@ -122,6 +122,10 @@ static lv_obj_t* bar_weekly;
 static lv_obj_t* lbl_weekly_pct;
 static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
+// Model-scoped weekly limit (Fable) — a second pill inside panel_weekly next
+// to the "Неделя" one; the scoped reset matches the weekly one, so it needs
+// no reset line of its own.
+static lv_obj_t* pill_fable = nullptr;
 static lv_obj_t* panel_session = nullptr;
 static lv_obj_t* panel_weekly = nullptr;
 // Enterprise-only widgets inside panel_session
@@ -498,6 +502,17 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
 
+    // Fable pill — hidden until the daemon reports a model-scoped limit.
+    // Slimmer than the "Неделя" pill so it doesn't crowd the big percent.
+    pill_fable = make_pill(panel_weekly, "");
+    lv_obj_set_style_text_font(pill_fable, &font_styrene_20, 0);
+    lv_obj_set_style_pad_left(pill_fable, 12, 0);
+    lv_obj_set_style_pad_right(pill_fable, 12, 0);
+    lv_obj_set_style_pad_top(pill_fable, 4, 0);
+    lv_obj_set_style_pad_bottom(pill_fable, 4, 0);
+    lv_label_set_recolor(pill_fable, true);
+    lv_obj_add_flag(pill_fable, LV_OBJ_FLAG_HIDDEN);
+
     build_pair_group(usage_container);
     build_idle_group(usage_container);
     build_attention_group(usage_container);
@@ -657,6 +672,21 @@ void ui_update(const UsageData* data) {
         lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
         format_reset_time(data->weekly_reset_mins, data->weekly_reset_at, buf, sizeof(buf));
         lv_label_set_text(lbl_weekly_reset, buf);
+    }
+
+    if (pill_fable) {
+        if (!data->enterprise && data->fable_pct >= 0) {
+            // Name dim, percent in the threshold color (mirrors pct_color).
+            const char* hex = data->fable_pct >= 80 ? "c0392b" :
+                              data->fable_pct >= 50 ? "d97757" : "788c5d";
+            lv_label_set_text_fmt(pill_fable, "#b0aea5 %s# #%s %d%%#",
+                                  data->fable_name, hex, data->fable_pct);
+            lv_obj_align_to(pill_fable, lbl_weekly_label,
+                            LV_ALIGN_OUT_LEFT_MID, -10, 0);
+            lv_obj_clear_flag(pill_fable, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(pill_fable, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 

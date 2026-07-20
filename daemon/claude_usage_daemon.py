@@ -705,12 +705,16 @@ async def _poll_usage_endpoint(token: str) -> dict | str:
         if not isinstance(five, dict) or not isinstance(seven, dict):
             return "http"   # not the Pro/Max shape — let the probe classify it
         status = "allowed"
+        scoped = None   # model-scoped weekly limit (e.g. Fable) — third gauge
         for lim in data.get("limits") or []:
-            if isinstance(lim, dict) and lim.get("kind") == "session":
+            if not isinstance(lim, dict):
+                continue
+            if lim.get("kind") == "session":
                 sev = lim.get("severity")
                 status = "allowed" if sev == "normal" else str(sev or "unknown")
-                break
-        return {
+            elif lim.get("kind") == "weekly_scoped" and scoped is None:
+                scoped = lim
+        payload = {
             "s": int(round(float(five.get("utilization") or 0))),
             "sr": mins_until(five.get("resets_at")),
             "srt": local_reset_at(five.get("resets_at")),
@@ -721,6 +725,12 @@ async def _poll_usage_endpoint(token: str) -> dict | str:
             "acct": "pro",
             "ok": True,
         }
+        if scoped is not None:
+            payload["f"] = int(round(float(scoped.get("percent") or 0)))
+            model = (scoped.get("scope") or {}).get("model") or {}
+            if model.get("display_name"):
+                payload["fn"] = str(model["display_name"])[:12]
+        return payload
     except (ValueError, TypeError) as e:
         log(f"Usage endpoint parse error: {e}")
         return "http"

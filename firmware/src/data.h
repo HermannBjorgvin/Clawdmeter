@@ -24,6 +24,8 @@ struct UsageData {
     float weekly_pct;        // 7-day utilization (Pro/Max only; 0 for Enterprise)
     int weekly_reset_mins;   // minutes until weekly reset (Pro/Max only)
     char weekly_reset_at[12];  // wall-clock weekly reset; "" unknown
+    int fable_pct;           // model-scoped weekly limit (Fable); -1 = not reported
+    char fable_name[13];     // the scoped model's display name ("Fable")
     char status[16];         // "allowed", "limited", etc.
     bool chime;              // play the session-reset chime; false unless daemon opts in
     uint8_t notify_type;     // hook-driven event: one of the ATTN_* values above

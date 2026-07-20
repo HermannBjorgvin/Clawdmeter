@@ -112,6 +112,8 @@ static bool parse_json(const char* json, UsageData* out) {
     out->weekly_pct = doc["w"] | 0.0f;
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->weekly_reset_at, doc["wrt"] | "", sizeof(out->weekly_reset_at));
+    out->fable_pct = doc["f"] | -1;
+    strlcpy(out->fable_name, doc["fn"] | "Fable", sizeof(out->fable_name));
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     // NB: the daemon sends "c" as an integer, and ArduinoJson's `| false`
     // fallback rejects non-bool types — as<bool>() coerces both int and bool,
@@ -206,6 +208,10 @@ static void check_serial_cmd() {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
             else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
+            // QA helpers: jump between screens without touching the buttons
+            // (a fresh flash boots into the splash — see CLAUDE.md).
+            else if (strcmp(cmd_buf, "usage") == 0)  ui_show_screen(SCREEN_USAGE);
+            else if (strcmp(cmd_buf, "splash") == 0) ui_show_screen(SCREEN_SPLASH);
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
