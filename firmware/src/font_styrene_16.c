@@ -1828,6 +1828,8 @@ static const lv_font_fmt_txt_dsc_t font_dsc = {
  *  PUBLIC FONT
  *----------------*/
 
+LV_FONT_DECLARE(font_golos_16_cyr);
+
 /*Initialize a public general font descriptor*/
 const lv_font_t font_styrene_16 = {
     .get_glyph_dsc = lv_font_get_glyph_dsc_fmt_txt,
@@ -1841,7 +1843,7 @@ const lv_font_t font_styrene_16 = {
     .underline_position = -1,
     .underline_thickness = 1,
     .dsc = &font_dsc,
-    .fallback = NULL,
+    .fallback = &font_golos_16_cyr,
     .user_data = NULL,
 };
 
