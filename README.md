@@ -12,6 +12,45 @@ Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
 
 The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaanbuilds](https://x.com/amaanbuilds)'s library of pixel-art Clawd sprites, check it out, it's lovely.
 
+## What this fork adds
+
+This fork ([upstream](https://github.com/HermannBjorgvin/Clawdmeter)) turns the
+device from a passive usage meter into a desk-side Claude Code **pager** —
+full details in [CHANGELOG-FORK.md](CHANGELOG-FORK.md) (Russian, with an
+English summary):
+
+- **Typed alerts driven by Claude Code hooks** — the device plays a distinct
+  melody and shows a distinct screen when Claude is *waiting for your reply*,
+  *needs a permission*, or *finished a long turn*, with the project name on
+  screen. Background tasks and parallel agents are filtered out so autonomous
+  sessions never cry wolf.
+- **Meeting reminders** — 15 and 5 minutes before a meeting, plus a separate
+  "meeting started" alert. Sources: any ICS feed (published Outlook/Google
+  calendar) or the macOS system calendar via a tiny signed EventKit helper.
+- **Live activity indicator** — an active-session counter, a "Resting" state,
+  and splash animations that escalate with the number of working sessions
+  (3 sessions → DJ Clawd, 5+ → full disco at double tempo).
+- **Better limit data** — usage comes from the read-only `/api/oauth/usage`
+  endpoint (consumes nothing), a third gauge shows the model-scoped weekly
+  limit (e.g. Fable), thresholds chime at 80/95%, and the reset countdown
+  shows the wall-clock time too.
+- **RU/EN interface** — every string (including all ~90 whimsical status
+  verbs) switches at runtime via a `lang = ru|en` daemon config option;
+  defaults to English.
+- Battery percent next to the icon (charging included), screen-off after 5
+  minutes of Claude inactivity, error states spelled out honestly instead of
+  stale numbers.
+
+|                 Usage                  |                 Waiting for you                  |                Turn finished                 |
+| :------------------------------------: | :----------------------------------------------: | :------------------------------------------: |
+| ![Usage](screenshots/fork/usage.png)   | ![Waiting](screenshots/fork/waiting.png)         | ![Done](screenshots/fork/done.png)           |
+|  Session + weekly + model-scoped limit |  Melody + project name when Claude blocks on you |  Only after turns long enough to walk away   |
+
+|                 Meeting soon                  |                  Meeting started                   |
+| :-------------------------------------------: | :------------------------------------------------: |
+| ![Meeting soon](screenshots/fork/meeting.png) | ![Meeting started](screenshots/fork/meeting-started.png) |
+|     15' and 5' before, with time and title    |      A separate chime the moment it begins         |
+
 ## Screens
 
 The device boots into the splash. Tap the screen anywhere to switch to the Usage view; tap again to flip back to the splash.

@@ -742,17 +742,21 @@ async def _poll_usage_endpoint(token: str) -> dict | str:
         return "http"
 
 
-_WEEKDAYS_RU = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+_WEEKDAYS = {
+    "ru": ("пн", "вт", "ср", "чт", "пт", "сб", "вс"),
+    "en": ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"),
+}
 
 
 def _fmt_reset_at(dt: datetime.datetime) -> str:
-    """Wall-clock reset time for the display: "21:00" today, "ср 19:00" on
-    another day."""
+    """Wall-clock reset time for the display: "21:00" today, "ср 19:00" /
+    "Wed 19:00" on another day — weekday follows the `lang` config option."""
     dt = dt.astimezone()
     hm = dt.strftime("%H:%M")
     if dt.date() == datetime.datetime.now().astimezone().date():
         return hm
-    return f"{_WEEKDAYS_RU[dt.weekday()]} {hm}"
+    days = _WEEKDAYS.get(read_config().get("lang", ""), _WEEKDAYS["en"])
+    return f"{days[dt.weekday()]} {hm}"
 
 
 async def _poll_probe(token: str) -> dict | str:
