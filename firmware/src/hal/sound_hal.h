@@ -9,6 +9,11 @@
 // returns immediately; sound_hal_tick() (called every loop) advances the notes
 // so the LVGL render loop never stalls.
 
+#include <stdint.h>
+
 void sound_hal_init(void);
 void sound_hal_tick(void);
 void sound_hal_play_reset(void);
+// Synthesized alert melody: 1 = waiting for input, 2 = permission needed,
+// 3 = work done. No-op on boards without a speaker.
+void sound_hal_play_alert(uint8_t kind);

@@ -34,3 +34,6 @@ lv_obj_t* splash_get_root(void);
 // splash_mini_tick(). One mini creature at a time.
 lv_obj_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px);
 void splash_mini_tick(void);
+// Switch the existing mini creature to another animation (same canvas/buffer).
+// Returns false if the name isn't found or no mini was created yet.
+bool splash_mini_set_anim(const char *anim_name);

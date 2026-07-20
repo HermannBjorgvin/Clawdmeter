@@ -29,5 +29,10 @@ bool chime_init(const ChimeConfig& cfg);
 // or already playing.
 void chime_play(void);
 
+// Short synthesized alert melodies (sine tones through the same I2S/codec
+// path — no extra PCM clips in flash). Kinds match the daemon's "n" field:
+// 1 = waiting for input, 2 = permission needed, 3 = work done.
+void chime_play_alert(uint8_t kind);
+
 // Currently a no-op (playback runs in its own task); kept for HAL symmetry.
 void chime_tick(void);

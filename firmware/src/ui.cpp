@@ -1,5 +1,6 @@
 #include "ui.h"
 #include "splash.h"
+#include "idle.h"
 #include <lvgl.h>
 #include <time.h>
 #include "logo.h"
@@ -137,9 +138,24 @@ static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 // connected but no usage update landed within DATA_FRESH_MS, the pairing hint
 // when BLE is down. Re-evaluated every loop in ui_tick_anim().
 static lv_obj_t* idle_group;            // the "Zzz" idle screen
+static lv_obj_t* attention_group;       // the "Claude is waiting for you" view
+static lv_obj_t* lbl_attention;         // its caption (text/color vary by type)
+static lv_obj_t* mini_creature;         // the single shared mini creature canvas
+static bool      attention_active = false;
+static uint8_t   attention_type   = 1;  // 1 input / 2 permission / 3 done
+static char      attention_project[17] = "";   // shown in the header while active
+static uint32_t  attention_since  = 0;
+// "Done" is informational — dismiss it quickly; the waiting states nag longer.
+static const uint32_t ATTENTION_TIMEOUT_MS      = 120000;
+static const uint32_t ATTENTION_DONE_TIMEOUT_MS = 30000;
+
+// Caption, color and creature animation per attention type (index = type - 1).
+static const char* const ATTN_CAPTIONS[3] = { "Клод ждёт ответа", "Нужно разрешение", "Готово!" };
+static const char* const ATTN_ANIMS[3]    = { "idle look around", "expression surprise", "dance bounce" };
+static const char* const ATTN_STATUS[3]   = { "Ждёт ответа", "Ждёт разрешения", "Готово" };
 static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage update landed
 static bool      data_received = false; // any valid update since boot
-static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage
+static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage / 3 attention
 static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within this window (daemon sends ~60s)
 
 // ---- Shared ----
@@ -168,37 +184,37 @@ static const uint16_t spinner_ms[SPINNER_COUNT] = {
 };
 
 static const char* const anim_messages[] = {
-    "Accomplishing", "Elucidating", "Perusing",
-    "Actioning", "Enchanting", "Philosophising",
-    "Actualizing", "Envisioning", "Pondering",
-    "Baking", "Finagling", "Pontificating",
-    "Booping", "Flibbertigibbeting", "Processing",
-    "Brewing", "Forging", "Puttering",
-    "Calculating", "Forming", "Puzzling",
-    "Cerebrating", "Frolicking", "Reticulating",
-    "Channelling", "Generating", "Ruminating",
-    "Churning", "Germinating", "Scheming",
-    "Clauding", "Hatching", "Schlepping",
-    "Coalescing", "Herding", "Shimmying",
-    "Cogitating", "Honking", "Shucking",
-    "Combobulating", "Hustling", "Simmering",
-    "Computing", "Ideating", "Smooshing",
-    "Concocting", "Imagining", "Spelunking",
-    "Conjuring", "Incubating", "Spinning",
-    "Considering", "Inferring", "Stewing",
-    "Contemplating", "Jiving", "Sussing",
-    "Cooking", "Manifesting", "Synthesizing",
-    "Crafting", "Marinating", "Thinking",
-    "Creating", "Meandering", "Tinkering",
-    "Crunching", "Moseying", "Transmuting",
-    "Deciphering", "Mulling", "Unfurling",
-    "Deliberating", "Mustering", "Unravelling",
-    "Determining", "Musing", "Vibing",
-    "Discombobulating", "Noodling", "Wandering",
-    "Divining", "Percolating", "Whirring",
-    "Doing", "Wibbling",
-    "Effecting", "Wizarding",
-    "Working", "Wrangling",
+    "Вершит", "Проясняет", "Штудирует",
+    "Действует", "Чарует", "Философствует",
+    "Воплощает", "Прозревает", "Раздумывает",
+    "Печёт", "Хитрит", "Вещает",
+    "Бупает", "Балаболит", "Обрабатывает",
+    "Варит", "Куёт", "Возится",
+    "Считает", "Формирует", "Ломает голову",
+    "Мозгует", "Резвится", "Ретикулирует",
+    "Транслирует", "Генерирует", "Пережёвывает",
+    "Взбивает", "Проращивает", "Замышляет",
+    "Клодит", "Высиживает", "Тащит",
+    "Сплавляет", "Пасёт", "Пританцовывает",
+    "Кумекает", "Бибикает", "Лущит",
+    "Комбобулирует", "Шустрит", "Томит",
+    "Вычисляет", "Придумывает", "Мнёт",
+    "Стряпает", "Воображает", "Копает вглубь",
+    "Колдует", "Инкубирует", "Крутит",
+    "Взвешивает", "Умозаключает", "Тушит",
+    "Созерцает", "Джайвит", "Просекает",
+    "Готовит", "Манифестирует", "Синтезирует",
+    "Мастерит", "Маринует", "Думает",
+    "Творит", "Петляет", "Ковыряется",
+    "Хрустит", "Бредёт", "Трансмутирует",
+    "Расшифровывает", "Обмозговывает", "Разворачивает",
+    "Совещается", "Собирается", "Распутывает",
+    "Определяет", "Грезит", "Вайбит",
+    "Дискомбобулирует", "Наигрывает", "Блуждает",
+    "Гадает", "Процеживает", "Жужжит",
+    "Делает", "Колышется",
+    "Осуществляет", "Волшебничает",
+    "Работает", "Укрощает",
 };
 #define ANIM_MSG_COUNT (sizeof(anim_messages) / sizeof(anim_messages[0]))
 
@@ -212,11 +228,11 @@ static void format_reset_time(int mins, char* buf, size_t len) {
     if (mins < 0) {
         snprintf(buf, len, "---");
     } else if (mins < 60) {
-        snprintf(buf, len, "Resets in %dm", mins);
+        snprintf(buf, len, "Сброс через %dм", mins);
     } else if (mins < 1440) {
-        snprintf(buf, len, "Resets in %dh %dm", mins / 60, mins % 60);
+        snprintf(buf, len, "Сброс через %dч %dм", mins / 60, mins % 60);
     } else {
-        snprintf(buf, len, "Resets in %dd %dh", mins / 1440, (mins % 1440) / 60);
+        snprintf(buf, len, "Сброс через %dд %dч", mins / 1440, (mins % 1440) / 60);
     }
 }
 
@@ -327,19 +343,19 @@ static void build_pair_group(lv_obj_t* parent) {
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     lv_obj_t* l1 = lv_label_create(pair_group);
-    lv_label_set_text(l1, "To pair");
+    lv_label_set_text(l1, "Сопряжение");
     lv_obj_set_style_text_font(l1, L.bt_status_font, 0);
     lv_obj_set_style_text_color(l1, COL_TEXT, 0);
     lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, 40);
 
     lv_obj_t* l2 = lv_label_create(pair_group);
-    lv_label_set_text(l2, "hold the power button");
+    lv_label_set_text(l2, "зажмите кнопку питания");
     lv_obj_set_style_text_font(l2, L.bt_device_font, 0);
     lv_obj_set_style_text_color(l2, COL_DIM, 0);
     lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, 120);
 
     lv_obj_t* l3 = lv_label_create(pair_group);
-    lv_label_set_text(l3, "for 3 seconds, then release");
+    lv_label_set_text(l3, "на 3 секунды и отпустите");
     lv_obj_set_style_text_font(l3, L.bt_device_font, 0);
     lv_obj_set_style_text_color(l3, COL_DIM, 0);
     lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, 160);
@@ -363,10 +379,33 @@ static void build_idle_group(lv_obj_t* parent) {
     // A shrunk-down sleeping creature (reused claudepix "expression sleep" art)
     // sits between the header and the status line; the animated "Listening…"
     // status line carries the words, so no extra text is needed here.
-    lv_obj_t* creature = splash_mini_create(idle_group, "expression sleep", 160);
-    if (creature) lv_obj_align(creature, LV_ALIGN_CENTER, 0, -20);
+    mini_creature = splash_mini_create(idle_group, "expression sleep", 160);
+    if (mini_creature) lv_obj_align(mini_creature, LV_ALIGN_CENTER, 0, -20);
 
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
+}
+
+// "Claude is waiting for you" view — shown when the host daemon forwards an
+// attention request (Claude Code hook: permission prompt / waiting for input).
+// The shared mini creature is re-parented here and switched to a surprised
+// animation while the view is up; a caption spells out why the device chimed.
+static void build_attention_group(lv_obj_t* parent) {
+    attention_group = lv_obj_create(parent);
+    lv_obj_set_size(attention_group, L.scr_w, L.scr_h - L.content_y);
+    lv_obj_set_pos(attention_group, 0, L.content_y);
+    lv_obj_set_style_bg_opa(attention_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(attention_group, 0, 0);
+    lv_obj_set_style_pad_all(attention_group, 0, 0);
+    lv_obj_clear_flag(attention_group, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(attention_group, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    lbl_attention = lv_label_create(attention_group);
+    lv_label_set_text(lbl_attention, ATTN_CAPTIONS[0]);
+    lv_obj_set_style_text_font(lbl_attention, L.bt_status_font, 0);
+    lv_obj_set_style_text_color(lbl_attention, COL_AMBER, 0);
+    lv_obj_align(lbl_attention, LV_ALIGN_CENTER, 0, 90);
+
+    lv_obj_add_flag(attention_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
 }
 
 static void init_usage_screen(lv_obj_t* scr) {
@@ -380,7 +419,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
 
     lbl_title = lv_label_create(usage_container);
-    lv_label_set_text(lbl_title, "Usage");
+    lv_label_set_text(lbl_title, "Лимиты");
     lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
     lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
@@ -396,7 +435,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    panel_session = make_usage_panel(usage_group, L.content_y, "Current",
+    panel_session = make_usage_panel(usage_group, L.content_y, "Сессия",
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
 
@@ -408,7 +447,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
 
     lbl_spending_desc = lv_label_create(panel_session);
-    lv_label_set_text(lbl_spending_desc, "of your monthly budget");
+    lv_label_set_text(lbl_spending_desc, "месячного бюджета");
     lv_obj_set_style_text_font(lbl_spending_desc, &font_styrene_28, 0);
     lv_obj_set_style_text_color(lbl_spending_desc, COL_DIM, 0);
     lv_obj_set_pos(lbl_spending_desc, 0, L.usage_reset_y);
@@ -421,7 +460,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
 
     panel_weekly = make_usage_panel(usage_group,
-                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
+                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Неделя",
                      &lbl_weekly_pct, &lbl_weekly_label,
                      &bar_weekly, &lbl_weekly_reset);
     // Recolor enabled so enterprise period box can color pace and reset separately
@@ -429,6 +468,7 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     build_pair_group(usage_container);
     build_idle_group(usage_container);
+    build_attention_group(usage_container);
 
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
@@ -467,8 +507,19 @@ void ui_init(void) {
 
 }
 
+static char data_err[8] = "";   // daemon error beat code; "" = data flows fine
+
+void ui_set_data_error(const char* code) {
+    strlcpy(data_err, code ? code : "", sizeof(data_err));
+    if (!data_err[0]) return;
+    // Expire the freshness window right away so update_view_state flips to
+    // the idle view on the next tick instead of after DATA_FRESH_MS.
+    if (data_received) last_data_ms = lv_tick_get() - DATA_FRESH_MS;
+}
+
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
+    data_err[0] = '\0';             // a good payload clears any error beat
     last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
     data_received = true;
 
@@ -479,7 +530,7 @@ void ui_update(const UsageData* data) {
     } else if (clock_base_epoch != 0) {   // clock turned off daemon-side → revert title to "Usage"
         clock_base_epoch = 0;
         clock_last_min = -1;
-        lv_label_set_text(lbl_title, "Usage");
+        lv_label_set_text(lbl_title, "Лимиты");
     }
 
     int s_pct = (int)(data->session_pct + 0.5f);
@@ -487,7 +538,7 @@ void ui_update(const UsageData* data) {
     if (data->enterprise) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
         lv_obj_set_style_text_font(lbl_session_pct, &font_tiempos_56, 0);
-        lv_label_set_text(lbl_session_label, "Spending");
+        lv_label_set_text(lbl_session_label, "Расходы");
         lv_obj_add_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
@@ -495,7 +546,7 @@ void ui_update(const UsageData* data) {
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_set_style_text_font(lbl_session_pct, &font_styrene_48, 0);
-        lv_label_set_text(lbl_session_label, "Current");
+        lv_label_set_text(lbl_session_label, "Сессия");
         lv_obj_clear_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
@@ -503,16 +554,16 @@ void ui_update(const UsageData* data) {
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     }
 
-    char buf[48];
+    char buf[96];   // UTF-8 Cyrillic is 2 bytes/char — keep headroom for the recolor markup
 
     // Pace vars used in both enterprise blocks below
-    const char* pace_text = "Under pace";
+    const char* pace_text = "Ниже темпа";
     lv_color_t  pace_color = COL_GREEN;
     const char* pace_hex   = "788c5d";   // matches THEME_GREEN
     if (data->session_pct > (float)data->time_pct + 15.0f) {
-        pace_text = "Over pace";  pace_color = COL_RED;   pace_hex = "c0392b";
+        pace_text = "Выше темпа"; pace_color = COL_RED;   pace_hex = "c0392b";
     } else if (data->session_pct > (float)data->time_pct - 15.0f) {
-        pace_text = "On pace";    pace_color = COL_AMBER; pace_hex = "d97757";
+        pace_text = "В темпе";    pace_color = COL_AMBER; pace_hex = "d97757";
     }
 
     if (data->enterprise) {
@@ -530,14 +581,14 @@ void ui_update(const UsageData* data) {
 
     if (data->enterprise) {
         // Period box: time % + dynamic pace color + "Resets <date>" label
-        lv_label_set_text(lbl_weekly_label, "Period");
+        lv_label_set_text(lbl_weekly_label, "Период");
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", data->time_pct);
         lv_bar_set_value(bar_weekly, data->time_pct, LV_ANIM_ON);
         lv_color_t bar_pace = (data->session_pct <= (float)data->time_pct) ? COL_GREEN :
                               (data->session_pct <= (float)data->time_pct + 15.0f) ? COL_AMBER :
                               COL_RED;
         lv_obj_set_style_bg_color(bar_weekly, bar_pace, LV_PART_INDICATOR);
-        snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Resets %s#",
+        snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Сброс %s#",
                  pace_hex, pace_text, data->reset_date);
         lv_label_set_text(lbl_weekly_reset, buf);
     } else {
@@ -554,35 +605,90 @@ void ui_update(const UsageData* data) {
 // (connected but data has gone stale), or the live usage panels. Only re-lays-out
 // on an actual change. The animated status line stays visible everywhere — it
 // reads "Listening…" on the idle screen, keeping it alive rather than frozen.
+// Header while the attention view is up: the project name in a smaller, dim
+// face (Tiempos 56 collides with the corner logo and battery icon), or hidden
+// when the project is unknown.
+static void attention_style_title(void) {
+    if (!lbl_title) return;
+    if (attention_project[0]) {
+        lv_label_set_text(lbl_title, attention_project);
+        lv_obj_set_style_text_font(lbl_title, &font_styrene_28, 0);
+        lv_obj_set_style_text_color(lbl_title, COL_DIM, 0);
+        lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y + 14);
+        lv_obj_clear_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 static void update_view_state(void) {
-    if (!usage_group || !pair_group || !idle_group) return;
+    if (!usage_group || !pair_group || !idle_group || !attention_group) return;
     int v;
     if (!s_ble_connected) {
         v = 0;  // pairing hint
+        attention_active = false;   // stale without a live host
+    } else if (attention_active) {
+        v = 3;  // "Claude is waiting for you"
     } else if (data_received && (lv_tick_get() - last_data_ms) < DATA_FRESH_MS) {
         v = 2;  // live usage
     } else {
         v = 1;  // idle / Zzz
     }
     if (v == view_state) return;
+    // The mini creature is a singleton — hand it to whichever view needs it.
+    // The "Лимиты" header title is irrelevant while the attention view is up
+    // (its caption carries the message), so hide it for the duration.
+    if (mini_creature) {
+        if (v == 3) {
+            lv_obj_set_parent(mini_creature, attention_group);
+            splash_mini_set_anim(ATTN_ANIMS[attention_type - 1]);
+            lv_obj_align(mini_creature, LV_ALIGN_CENTER, 0, -40);
+        } else if (view_state == 3) {
+            lv_obj_set_parent(mini_creature, idle_group);
+            splash_mini_set_anim("expression sleep");
+            lv_obj_align(mini_creature, LV_ALIGN_CENTER, 0, -20);
+        }
+    }
+    // While the attention view is up, the header shows the PROJECT the event
+    // belongs to (or nothing if unknown) instead of the usual "Лимиты" title.
+    if (lbl_title) {
+        if (v == 3) {
+            attention_style_title();
+        } else if (view_state == 3) {
+            lv_label_set_text(lbl_title, "Лимиты");
+            lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
+            lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
+            lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+            clock_last_min = -1;   // let an active title clock repaint itself
+            lv_obj_clear_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
     view_state = v;
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group : usage_group,
+    lv_obj_add_flag(attention_group, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group :
+                      v == 3 ? attention_group : usage_group,
                       LV_OBJ_FLAG_HIDDEN);
 }
 
 void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
+    if (attention_active &&
+        lv_tick_get() - attention_since >= (attention_type == 3 ? ATTENTION_DONE_TIMEOUT_MS
+                                                                : ATTENTION_TIMEOUT_MS)) {
+        attention_active = false;   // nobody came — stop nagging
+    }
     update_view_state();
-    if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
+    if (view_state == 1 || view_state == 3) splash_mini_tick();  // animate the mini creature
 
     uint32_t now = lv_tick_get();
 
     // Title clock: once the daemon has sent wall-clock time, replace "Usage" with
     // the live time, advanced locally so it ticks every minute between payloads.
-    if (clock_base_epoch > 0) {
+    // Skipped while the attention view owns the header (it shows the project).
+    if (clock_base_epoch > 0 && view_state != 3) {
         time_t cur = (time_t)(clock_base_epoch + (now - clock_base_ms) / 1000);
         struct tm tmv;
         gmtime_r(&cur, &tmv);   // epoch is already local wall-clock → gmtime keeps it as-is
@@ -615,11 +721,18 @@ void ui_tick_anim(void) {
     // Status text by priority. Whimsical messages only when connected & settled.
     const char* text;
     if (!s_ble_connected) {
-        text = "Waiting";              // advertising / waiting for a host connection
+        text = "Ожидание";             // advertising / waiting for a host connection
+    } else if (view_state == 3) {      // attention — spell out why the device chimed
+        text = ATTN_STATUS[attention_type - 1];
+    } else if (view_state == 1 && data_err[0]) {  // idle with a known cause — name it
+        text = !strcmp(data_err, "auth")  ? "Обновите токен" :
+               !strcmp(data_err, "token") ? "Нет токена" :
+               !strcmp(data_err, "rate")  ? "Лимит запросов" :
+               !strcmp(data_err, "net")   ? "Нет сети" : "Ошибка API";
     } else if (view_state == 1) {      // idle — alternate so it reads as alive AND data-less
-        text = (anim_msg_idx & 1) ? "No data" : "Listening";
+        text = (anim_msg_idx & 1) ? "Нет данных" : "Слушает";
     } else if (now - connected_at_ms < 5000) {
-        text = "Connected";
+        text = "Подключено";
     } else {
         text = anim_messages[anim_msg_idx];
     }
@@ -640,8 +753,41 @@ static void apply_battery_visibility(void) {
 
 static void global_click_cb(lv_event_t* e) {
     (void)e;
+    if (attention_active) {   // first tap acknowledges the attention view
+        attention_active = false;
+        update_view_state();
+        return;
+    }
     if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
     else                                  ui_show_screen(SCREEN_SPLASH);
+}
+
+void ui_show_attention(uint8_t type, const char* project) {
+    if (type < 1 || type > 3) return;
+    idle_note_activity();               // wake the panel if it faded out
+    // Re-style the view even if it's already up (a new event may differ).
+    bool was_active = attention_active;
+    attention_active = true;
+    attention_type   = type;
+    strlcpy(attention_project, project ? project : "", sizeof(attention_project));
+    if (lbl_attention) {
+        lv_label_set_text(lbl_attention, ATTN_CAPTIONS[type - 1]);
+        lv_obj_set_style_text_color(lbl_attention,
+                                    type == 3 ? COL_GREEN : COL_AMBER, 0);
+    }
+    if (was_active) {
+        if (mini_creature) splash_mini_set_anim(ATTN_ANIMS[type - 1]);
+        attention_style_title();   // header project may differ between events too
+    }
+    attention_since = lv_tick_get();
+    if (current_screen != SCREEN_USAGE) ui_show_screen(SCREEN_USAGE);
+    update_view_state();
+}
+
+void ui_hide_attention(void) {
+    if (!attention_active) return;
+    attention_active = false;
+    update_view_state();
 }
 
 void ui_show_screen(screen_t screen) {

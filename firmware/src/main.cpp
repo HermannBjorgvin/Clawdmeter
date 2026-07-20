@@ -111,7 +111,14 @@ static bool parse_json(const char* json, UsageData* out) {
     out->weekly_pct = doc["w"] | 0.0f;
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
-    out->chime = doc["c"] | false;   // absent (old daemon / chime off) → stay silent
+    // NB: the daemon sends "c" as an integer, and ArduinoJson's `| false`
+    // fallback rejects non-bool types — as<bool>() coerces both int and bool,
+    // and yields false for absent/null.
+    out->chime = doc["c"].as<bool>();   // session-reset chime opt-in
+    const char* n = doc["n"] | "";      // hook-driven attention event
+    out->notify_type = !strcmp(n, "input") ? 1 : !strcmp(n, "perm") ? 2 :
+                       !strcmp(n, "done")  ? 3 : !strcmp(n, "clear") ? 4 : 0;
+    strlcpy(out->notify_project, doc["np"] | "", sizeof(out->notify_project));
     const char* acct = doc["acct"] | "pro";
     out->enterprise = (strcmp(acct, "ent") == 0);
     out->time_pct = doc["tp"] | 0;
@@ -120,6 +127,7 @@ static bool parse_json(const char* json, UsageData* out) {
     out->clock_epoch = doc["t"] | 0L;
     out->clock_fmt = doc["tf"] | 24;
     out->ok = doc["ok"] | false;
+    strlcpy(out->err, doc["err"] | "", sizeof(out->err));
     out->valid = true;
     return true;
 }
@@ -371,22 +379,44 @@ void loop() {
 
     if (ble_has_data()) {
         if (parse_json(ble_get_data(), &usage)) {
-            int g_before = usage_rate_group();
-            bool session_reset = usage_rate_sample(usage.session_pct);
-            int g_after = usage_rate_group();
-            // 5-hour session limit refilled → chime so the user knows they can
-            // use Claude again (no-op on boards without a buzzer). Gated on the
-            // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
-            if (session_reset && usage.chime) {
-                Serial.println("session reset detected — chime");
-                sound_hal_play_reset();
+            // Hook-driven attention event. The daemon sets "n" on exactly one
+            // payload per hook event, so no edge detection is needed here.
+            // Handled before the ok-check: a permission chime matters even
+            // while the usage data itself is unavailable.
+            if (usage.notify_type >= 1 && usage.notify_type <= 3) {
+                Serial.printf("attention request type %d (%s) — melody + view\n",
+                              usage.notify_type, usage.notify_project);
+                sound_hal_play_alert(usage.notify_type);
+                ui_show_attention(usage.notify_type, usage.notify_project);
+            } else if (usage.notify_type == 4) {
+                Serial.println("attention clear — user is back at the keyboard");
+                ui_hide_attention();
             }
-            if (g_after != g_before) {
-                Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
-                if (splash_is_active()) splash_pick_for_current_rate();
+            if (!usage.ok) {
+                // Error beat: the daemon can't fetch usage (expired token,
+                // network, 429…). Flip to the idle view showing WHY instead
+                // of rendering the old numbers as if they were live.
+                Serial.printf("error beat: %s\n", usage.err);
+                ui_set_data_error(usage.err);
+            } else {
+                int g_before = usage_rate_group();
+                bool session_reset = usage_rate_sample(usage.session_pct);
+                int g_after = usage_rate_group();
+                // 5-hour session limit refilled → chime so the user knows they
+                // can use Claude again (no-op on boards without a buzzer).
+                // Gated on the daemon's opt-in `chime` config; the `buzz`
+                // serial cmd ignores it.
+                if (session_reset && usage.chime) {
+                    Serial.println("session reset detected — chime");
+                    sound_hal_play_reset();
+                }
+                if (g_after != g_before) {
+                    Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
+                        g_before, g_after, usage.session_pct);
+                    if (splash_is_active()) splash_pick_for_current_rate();
+                }
+                ui_update(&usage);
             }
-            ui_update(&usage);
             ble_send_ack();
         } else {
             ble_send_nack();

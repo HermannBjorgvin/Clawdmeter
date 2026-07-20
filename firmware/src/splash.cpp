@@ -141,6 +141,21 @@ lv_obj_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px) {
     return mini_canvas;
 }
 
+bool splash_mini_set_anim(const char *anim_name) {
+    if (!mini_buf) return false;
+    for (int i = 0; i < SPLASH_ANIM_COUNT; i++) {
+        if (strcmp(splash_anims[i].name, anim_name) == 0) {
+            if (mini_anim == &splash_anims[i]) return true;
+            mini_anim = &splash_anims[i];
+            mini_frame = 0;
+            mini_started = millis();
+            mini_render();
+            return true;
+        }
+    }
+    return false;
+}
+
 void splash_mini_tick(void) {
     if (!mini_buf || !mini_anim || mini_anim->frame_count == 0) return;
     if (millis() - mini_started < mini_anim->holds[mini_frame]) return;
