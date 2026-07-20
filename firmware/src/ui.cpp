@@ -166,7 +166,7 @@ struct AttnStyle {
     lv_color_t  color;     // caption color
     uint32_t    timeout_ms;
 };
-static const AttnStyle ATTN_STYLES[7] = {
+static const AttnStyle ATTN_STYLES[ATTN_STYLED_COUNT] = {
     { "idle look around",    COL_AMBER,  120000 },  // ATTN_INPUT
     { "expression surprise", COL_AMBER,  120000 },  // ATTN_PERM
     { "dance bounce",        COL_GREEN,  30000  },  // ATTN_DONE
@@ -211,6 +211,13 @@ static lv_color_t pct_color(float pct) {
     if (pct >= 80.0f) return COL_RED;
     if (pct >= 50.0f) return COL_AMBER;
     return COL_GREEN;
+}
+
+// Same thresholds as pct_color, as a recolor-markup hex string.
+static const char* pct_hex(float pct) {
+    if (pct >= 80.0f) return THEME_RED_HEX;
+    if (pct >= 50.0f) return THEME_AMBER_HEX;
+    return THEME_GREEN_HEX;
 }
 
 // "Сброс через 2ч 49м (21:00)" — the countdown plus, when the daemon supplied
@@ -335,23 +342,23 @@ static void build_pair_group(lv_obj_t* parent) {
     lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    lv_obj_t* l1 = lbl_pair1 = lv_label_create(pair_group);
-    lv_label_set_text(l1, S->pair1);
-    lv_obj_set_style_text_font(l1, L.bt_status_font, 0);
-    lv_obj_set_style_text_color(l1, COL_TEXT, 0);
-    lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, 40);
+    lbl_pair1 = lv_label_create(pair_group);
+    lv_label_set_text(lbl_pair1, S->pair1);
+    lv_obj_set_style_text_font(lbl_pair1, L.bt_status_font, 0);
+    lv_obj_set_style_text_color(lbl_pair1, COL_TEXT, 0);
+    lv_obj_align(lbl_pair1, LV_ALIGN_TOP_MID, 0, 40);
 
-    lv_obj_t* l2 = lbl_pair2 = lv_label_create(pair_group);
-    lv_label_set_text(l2, S->pair2);
-    lv_obj_set_style_text_font(l2, L.bt_device_font, 0);
-    lv_obj_set_style_text_color(l2, COL_DIM, 0);
-    lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, 120);
+    lbl_pair2 = lv_label_create(pair_group);
+    lv_label_set_text(lbl_pair2, S->pair2);
+    lv_obj_set_style_text_font(lbl_pair2, L.bt_device_font, 0);
+    lv_obj_set_style_text_color(lbl_pair2, COL_DIM, 0);
+    lv_obj_align(lbl_pair2, LV_ALIGN_TOP_MID, 0, 120);
 
-    lv_obj_t* l3 = lbl_pair3 = lv_label_create(pair_group);
-    lv_label_set_text(l3, S->pair3);
-    lv_obj_set_style_text_font(l3, L.bt_device_font, 0);
-    lv_obj_set_style_text_color(l3, COL_DIM, 0);
-    lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, 160);
+    lbl_pair3 = lv_label_create(pair_group);
+    lv_label_set_text(lbl_pair3, S->pair3);
+    lv_obj_set_style_text_font(lbl_pair3, L.bt_device_font, 0);
+    lv_obj_set_style_text_color(lbl_pair3, COL_DIM, 0);
+    lv_obj_align(lbl_pair3, LV_ALIGN_TOP_MID, 0, 160);
 
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);  // ui_update_ble_status decides
 }
@@ -572,7 +579,7 @@ void ui_update(const UsageData* data) {
     } else if (clock_base_epoch != 0) {   // clock turned off daemon-side → revert title to "Usage"
         clock_base_epoch = 0;
         clock_last_min = -1;
-        lv_label_set_text(lbl_title, "Лимиты");
+        lv_label_set_text(lbl_title, S->title);
     }
 
     int s_pct = (int)(data->session_pct + 0.5f);
@@ -601,11 +608,11 @@ void ui_update(const UsageData* data) {
     // Pace vars used in both enterprise blocks below
     const char* pace_text = S->pace_under;
     lv_color_t  pace_color = COL_GREEN;
-    const char* pace_hex   = "788c5d";   // matches THEME_GREEN
+    const char* pace_hex   = THEME_GREEN_HEX;
     if (data->session_pct > (float)data->time_pct + 15.0f) {
-        pace_text = S->pace_over;  pace_color = COL_RED;   pace_hex = "c0392b";
+        pace_text = S->pace_over;  pace_color = COL_RED;   pace_hex = THEME_RED_HEX;
     } else if (data->session_pct > (float)data->time_pct - 15.0f) {
-        pace_text = S->pace_on; pace_color = COL_AMBER; pace_hex = "d97757";
+        pace_text = S->pace_on;    pace_color = COL_AMBER; pace_hex = THEME_AMBER_HEX;
     }
 
     if (data->enterprise) {
@@ -631,7 +638,7 @@ void ui_update(const UsageData* data) {
                               COL_RED;
         lv_obj_set_style_bg_color(bar_weekly, bar_pace, LV_PART_INDICATOR);
         snprintf(buf, sizeof(buf), S->ent_reset_fmt,
-                 pace_hex, pace_text, data->reset_date);
+                 pace_hex, pace_text, THEME_TEXT_HEX, data->reset_date);
         lv_label_set_text(lbl_weekly_reset, buf);
     } else {
         int w_pct = (int)(data->weekly_pct + 0.5f);
@@ -644,13 +651,20 @@ void ui_update(const UsageData* data) {
 
     if (pill_fable) {
         if (!data->enterprise && data->fable_pct >= 0) {
-            // Name dim, percent in the threshold color (mirrors pct_color).
-            const char* hex = data->fable_pct >= 80 ? "c0392b" :
-                              data->fable_pct >= 50 ? "d97757" : "788c5d";
-            lv_label_set_text_fmt(pill_fable, "#b0aea5 %s# #%s %d%%#",
-                                  data->fable_name, hex, data->fable_pct);
-            lv_obj_align_to(pill_fable, lbl_weekly_label,
-                            LV_ALIGN_OUT_LEFT_MID, -10, 0);
+            // The weekly-scoped percent changes maybe hourly; skip the LVGL
+            // set/align (each one invalidates + reflushes over QSPI) unless
+            // the composed text actually changed.
+            char txt[64];
+            snprintf(txt, sizeof(txt), "#%s %s# #%s %d%%#", THEME_DIM_HEX,
+                     data->fable_name, pct_hex((float)data->fable_pct),
+                     data->fable_pct);
+            static char last_txt[64];
+            if (strcmp(txt, last_txt) != 0) {
+                strcpy(last_txt, txt);
+                lv_label_set_text(pill_fable, txt);
+                lv_obj_align_to(pill_fable, lbl_weekly_label,
+                                LV_ALIGN_OUT_LEFT_MID, -10, 0);
+            }
             lv_obj_clear_flag(pill_fable, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(pill_fable, LV_OBJ_FLAG_HIDDEN);
@@ -712,10 +726,9 @@ static void update_view_state(void) {
         if (v == 3) {
             attention_style_title();
         } else if (view_state == 3) {
-            lv_label_set_text(lbl_title, "Лимиты");
-            lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
-            lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-            lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+            // attention only hid the title — bring it back (font/color/align
+            // were never touched).
+            lv_label_set_text(lbl_title, S->title);
             clock_last_min = -1;   // let an active title clock repaint itself
             lv_obj_clear_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
         }
@@ -823,14 +836,9 @@ void ui_tick_anim(void) {
 
 static screen_t prev_non_splash_screen = SCREEN_USAGE;
 static void apply_battery_visibility(void) {
-    if (!battery_img) return;
-    if (current_screen == SCREEN_SPLASH) {
-        lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-        if (battery_lbl) lv_obj_add_flag(battery_lbl, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-        if (battery_lbl) lv_obj_clear_flag(battery_lbl, LV_OBJ_FLAG_HIDDEN);
-    }
+    bool hide = current_screen == SCREEN_SPLASH;
+    if (battery_img) lv_obj_set_flag(battery_img, LV_OBJ_FLAG_HIDDEN, hide);
+    if (battery_lbl) lv_obj_set_flag(battery_lbl, LV_OBJ_FLAG_HIDDEN, hide);
 }
 
 static void global_click_cb(lv_event_t* e) {
@@ -921,8 +929,13 @@ void ui_set_lang(const char* lang) {
     }
     // The weekly pill is only rewritten by Enterprise updates ("Период") —
     // in the Pro/Max flow it keeps its creation-time text, so restamp it
-    // here (a following Enterprise update overwrites it anyway).
+    // here (a following Enterprise update overwrites it anyway). Same for
+    // the Enterprise-only budget caption and an attention caption that is
+    // on screen right now.
     if (lbl_weekly_label) lv_label_set_text(lbl_weekly_label, S->pill_weekly);
+    if (lbl_spending_desc) lv_label_set_text(lbl_spending_desc, S->of_monthly_budget);
+    if (attention_active && lbl_attention)
+        lv_label_set_text(lbl_attention, S->attn_caption[attention_type - 1]);
     // Header: skip while the attention view owns it or the clock ticks in it.
     if (lbl_title && view_state != 3 && clock_base_epoch == 0)
         lv_label_set_text(lbl_title, S->title);

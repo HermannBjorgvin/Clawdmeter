@@ -86,7 +86,7 @@ static const Strings STR_EN = {
     /* reset_m          */ "Resets in %dm%s",
     /* reset_hm         */ "Resets in %dh %dm%s",
     /* reset_dh         */ "Resets in %dd %dh%s",
-    /* ent_reset_fmt    */ "#%s %s# - #faf9f5 Resets %s#",
+    /* ent_reset_fmt    */ "#%s %s# - #%s Resets %s#",
     /* pair1/2/3        */ "To pair", "hold the power button", "for 3 seconds, then release",
     /* st_waiting       */ "Waiting",
     /* st_no_data       */ "No data",
@@ -122,7 +122,7 @@ static const Strings STR_RU = {
     /* reset_m          */ "Сброс через %dм%s",
     /* reset_hm         */ "Сброс через %dч %dм%s",
     /* reset_dh         */ "Сброс через %dд %dч%s",
-    /* ent_reset_fmt    */ "#%s %s# - #faf9f5 Сброс %s#",
+    /* ent_reset_fmt    */ "#%s %s# - #%s Сброс %s#",
     /* pair1/2/3        */ "Сопряжение", "зажмите кнопку питания", "на 3 секунды и отпустите",
     /* st_waiting       */ "Ожидание",
     /* st_no_data       */ "Нет данных",
@@ -149,23 +149,39 @@ static const Strings STR_RU = {
 
 // ---- Selection + persistence ----------------------------------------------
 
+// One lookup used by both init and set — adding a language is one row here
+// plus its STR_XX table.
+static const struct { const char* code; const Strings* table; } LANGS[] = {
+    { "en", &STR_EN },
+    { "ru", &STR_RU },
+};
+
+static const Strings* lang_lookup(const char* code) {
+    for (auto& l : LANGS)
+        if (!strcmp(code, l.code)) return l.table;
+    return nullptr;
+}
+
 const Strings* S = &STR_EN;
 
-static Preferences prefs;
-
 void strings_init(void) {
-    prefs.begin("clawdmeter", false);
+    // Same open/get/close idiom as brightness.cpp — no held-open handle.
+    Preferences prefs;
+    prefs.begin("clawdmeter", true);
     String lang = prefs.getString("lang", "");
-    if (lang == "ru") S = &STR_RU;
+    prefs.end();
+    const Strings* t = lang_lookup(lang.c_str());
+    if (t) S = t;
 }
 
 bool strings_set_lang(const char* lang) {
-    const Strings* want;
-    if      (!strcmp(lang, "ru")) want = &STR_RU;
-    else if (!strcmp(lang, "en")) want = &STR_EN;
-    else return false;               // absent/unknown — keep the current table
+    const Strings* want = lang_lookup(lang);
+    if (!want) return false;         // absent/unknown — keep the current table
     if (want == S) return false;
     S = want;
+    Preferences prefs;
+    prefs.begin("clawdmeter", false);
     prefs.putString("lang", lang);
+    prefs.end();
     return true;
 }

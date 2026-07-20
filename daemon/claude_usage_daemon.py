@@ -50,6 +50,41 @@ CONFIG_FILE = STATE_DIR / "config"
 ATTN_FILE = STATE_DIR / "attention"
 ATTN_MAX_AGE = 60
 ATTN_TYPES = ("input", "perm", "done", "clear")
+# Firmware context-line budget ("np" field): two wrapped lines, 48 chars.
+NP_MAX_CHARS = 48
+
+
+_config_cache: dict[str, str] = {}
+_config_mtime: float | None = None
+
+
+def read_config() -> dict[str, str]:
+    """CONFIG_FILE parsed into {key: value}, re-read only when mtime changes.
+
+    The single config reader for every option (chime/clock/lang/cal/...).
+    Keys lowercased, inline #-comments stripped, duplicate keys keep the last
+    occurrence. Missing/unreadable file → {} (or the previous cache).
+    """
+    global _config_cache, _config_mtime
+    try:
+        mtime = CONFIG_FILE.stat().st_mtime
+    except OSError:
+        _config_cache, _config_mtime = {}, None
+        return _config_cache
+    if mtime == _config_mtime:
+        return _config_cache
+    opts: dict[str, str] = {}
+    try:
+        for line in CONFIG_FILE.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            opts[key.strip().lower()] = val.strip()
+    except OSError:
+        return _config_cache
+    _config_cache, _config_mtime = opts, mtime
+    return opts
 
 
 def read_attention_flag() -> tuple[str | None, str]:
@@ -67,7 +102,7 @@ def read_attention_flag() -> tuple[str | None, str]:
         if fresh and lines:
             kind = lines[0].strip().lower()
             kind = kind if kind in ATTN_TYPES else "input"
-            project = lines[1].strip()[:48] if len(lines) > 1 else ""
+            project = lines[1].strip()[:NP_MAX_CHARS] if len(lines) > 1 else ""
             return kind, project
     except OSError:
         pass
@@ -105,44 +140,43 @@ _cal_err_logged = 0.0
 
 def read_cal_config() -> tuple[str, tuple[int, ...]]:
     """(ics_url, reminder thresholds in minutes); url "" = feature off."""
-    url = ""
-    thresholds = CAL_THRESHOLDS_MIN
-    try:
-        if CONFIG_FILE.exists():
-            for line in CONFIG_FILE.read_text().splitlines():
-                line = line.split("#", 1)[0].strip()
-                if "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                key, val = key.strip().lower(), val.strip()
-                if key == "cal_ics_url":
-                    url = val
-                elif key == "cal_remind":
-                    mins = sorted({int(m) for m in re.split(r"[,\s]+", val)
-                                   if m.isdigit() and int(m) > 0}, reverse=True)
-                    if mins:
-                        thresholds = tuple(mins)
-    except OSError:
-        pass
-    return url, thresholds
+    opts = read_config()
+    mins = {int(m) for m in re.split(r"[,\s]+", opts.get("cal_remind", ""))
+            if m.isdigit() and int(m) > 0}
+    return opts.get("cal_ics_url", ""), tuple(sorted(mins)) or CAL_THRESHOLDS_MIN
 
 
-async def refresh_cal_events(url: str) -> None:
-    """Refetch the ICS feed into _cal_events if CAL_FETCH_S elapsed.
+_cal_task: asyncio.Task | None = None
 
-    Failures only log (rate-limited): the calendar is an optional extra and
-    must never take down or delay the usage loop beyond this one await.
+
+def refresh_cal_events(url: str) -> None:
+    """Kick off a background refetch of _cal_events if CAL_FETCH_S elapsed.
+
+    Fire-and-forget: the first eventkit run can block ~2 min on the TCC
+    dialog and an ICS fetch up to 20 s — neither may stall the BLE loop, so
+    the fetch runs as its own task while check_cal_reminder keeps reading
+    whatever _cal_events currently holds.
     """
-    global _cal_events, _cal_fetched, _cal_sent, _cal_err_logged
+    global _cal_task, _cal_fetched
     if time.time() - _cal_fetched < CAL_FETCH_S:
         return
+    if _cal_task is not None and not _cal_task.done():
+        return
     _cal_fetched = time.time()   # even on failure — don't hammer every TICK
+    _cal_task = asyncio.create_task(_fetch_cal_events(url))
+
+
+async def _fetch_cal_events(url: str) -> None:
+    """The actual refetch; failures only log (rate-limited) — the calendar
+    is an optional extra and must never take down the usage loop."""
+    global _cal_events, _cal_sent, _cal_err_logged
     try:
         if url == "eventkit":
             events = await asyncio.to_thread(_events_from_eventkit)
         else:
             events = await _events_from_ics(url)
-        _cal_events = sorted(events)
+        _cal_events = sorted((s, " ".join(t.split()) or "Встреча")
+                             for s, t in events)
         _cal_sent = {(s, m) for (s, m) in _cal_sent if s > time.time() - 3600}
     except Exception as e:  # noqa: BLE001 — any parse/net/tz problem: log & keep going
         if time.time() - _cal_err_logged > 600:
@@ -160,7 +194,7 @@ def _events_from_eventkit() -> set[tuple[float, str]]:
     if proc.returncode != 0:
         err = proc.stderr.decode(errors="replace").strip()
         raise RuntimeError(err or f"calnext rc={proc.returncode}")
-    return {(float(ev["start"]), " ".join(str(ev["title"]).split()) or "Встреча")
+    return {(float(ev["start"]), str(ev["title"]))
             for ev in json.loads(proc.stdout)}
 
 
@@ -185,8 +219,7 @@ async def _events_from_ics(url: str) -> set[tuple[float, str]]:
             continue
         if str(ev.get("STATUS", "")).upper() == "CANCELLED":
             continue
-        title = " ".join(str(ev.get("SUMMARY", "")).split()) or "Встреча"
-        events.add((start.dt.timestamp(), title))
+        events.add((start.dt.timestamp(), str(ev.get("SUMMARY", ""))))
     return events
 
 
@@ -194,32 +227,29 @@ def check_cal_reminder(thresholds: tuple[int, ...]) -> tuple[str, float, int] | 
     """First unsent reminder due now → ("HH:MM title", start, threshold_min).
 
     threshold_min 0 = the meeting just started (grace window); positive =
-    that many minutes before the start. Doesn't mark anything sent — call
-    cal_mark_sent() after the payload is actually delivered. Concurrent
-    meetings resolve one per TICK.
+    that many minutes before the start. Doesn't mark anything sent — the
+    caller adds (start, threshold) to _cal_sent once the payload is actually
+    delivered. Concurrent meetings resolve one per TICK.
     """
     now = time.time()
-    for start, title in _cal_events:
-        text = f"{datetime.datetime.fromtimestamp(start):%H:%M} {title}"
-        # 48 chars = the firmware's context-line budget (two wrapped lines)
+    for start, title in _cal_events:      # sorted by start
+        if start - max(thresholds) * 60 > now:
+            break                          # everything further is future-only
         if start <= now:
-            if now < start + CAL_STARTED_GRACE_S and (start, 0) not in _cal_sent:
-                return text[:48], start, 0
-            continue
-        active = [m for m in thresholds if start - m * 60 <= now]
-        if not active:
-            continue
-        m = min(active)   # closest threshold wins; larger ones are stale
-        if (start, m) in _cal_sent:
-            continue
-        return text[:48], start, m
+            if now >= start + CAL_STARTED_GRACE_S or (start, 0) in _cal_sent:
+                continue
+            m = 0
+        else:
+            active = [t for t in thresholds if start - t * 60 <= now]
+            if not active:
+                continue
+            m = min(active)   # closest threshold wins; larger ones are stale
+            if (start, m) in _cal_sent:
+                continue
+        when = _fmt_reset_at(datetime.datetime.fromtimestamp(
+            start, tz=datetime.timezone.utc))
+        return f"{when} {title}"[:NP_MAX_CHARS], start, m
     return None
-
-
-def cal_mark_sent(start: float, threshold: int, thresholds: tuple[int, ...]) -> None:
-    """Mark this reminder slot and every larger (already-stale) one sent."""
-    _cal_sent.add((start, threshold))
-    _cal_sent.update((start, m) for m in thresholds if m >= threshold)
 
 
 # Per-session liveness files written by the Claude Code hooks: mtime = last
@@ -372,18 +402,7 @@ def read_config_dirs() -> list[Path]:
     Defaults to [~/.claude] so existing single-plan setups are unchanged. ~ is
     expanded. Mirrors the Linux bash daemon's read_config_dirs.
     """
-    raw = ""
-    try:
-        if CONFIG_FILE.exists():
-            for line in CONFIG_FILE.read_text().splitlines():
-                line = line.split("#", 1)[0].strip()
-                if "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                if key.strip().lower() == "config_dirs":
-                    raw = val.strip()
-    except OSError:
-        pass
+    raw = read_config().get("config_dirs", "")
     if not raw:
         return [DEFAULT_CONFIG_DIR]
     dirs = [Path(p.strip()).expanduser() for p in raw.split(",") if p.strip()]
@@ -540,20 +559,8 @@ def read_chime_setting() -> str:
     Defaults to "off" (the device stays silent) so existing setups are
     unaffected until the user opts in.
     """
-    try:
-        if CONFIG_FILE.exists():
-            for line in CONFIG_FILE.read_text().splitlines():
-                line = line.split("#", 1)[0].strip()
-                if "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                if key.strip().lower() == "chime":
-                    val = val.strip().lower()
-                    if val in ("off", "on"):
-                        return val
-    except OSError:
-        pass
-    return "off"
+    val = read_config().get("chime", "").lower()
+    return val if val in ("off", "on") else "off"
 
 
 def read_clock_setting() -> str:
@@ -562,20 +569,8 @@ def read_clock_setting() -> str:
     Defaults to "off" (no clock; the device keeps showing "Usage") so existing
     setups are unaffected until the user opts in.
     """
-    try:
-        if CONFIG_FILE.exists():
-            for line in CONFIG_FILE.read_text().splitlines():
-                line = line.split("#", 1)[0].strip()
-                if "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                if key.strip().lower() == "clock":
-                    val = val.strip().lower()
-                    if val in ("off", "auto", "12", "24"):
-                        return val
-    except OSError:
-        pass
-    return "off"
+    val = read_config().get("clock", "").lower()
+    return val if val in ("off", "auto", "12", "24") else "off"
 
 
 def add_chime_field(payload: dict) -> None:
@@ -588,20 +583,9 @@ def add_chime_field(payload: dict) -> None:
 def add_lang_field(payload: dict) -> None:
     """Add "lang":"ru|en" from the `lang` config option. Omitted when unset —
     the firmware then keeps its persisted (or default English) UI language."""
-    try:
-        if CONFIG_FILE.exists():
-            for line in CONFIG_FILE.read_text().splitlines():
-                line = line.split("#", 1)[0].strip()
-                if "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                if key.strip().lower() == "lang":
-                    val = val.strip().lower()
-                    if val in ("ru", "en"):
-                        payload["lang"] = val
-                    return
-    except OSError:
-        pass
+    val = read_config().get("lang", "").lower()
+    if val in ("ru", "en"):
+        payload["lang"] = val
 
 
 def detect_hour_format() -> int:
@@ -732,8 +716,10 @@ async def _poll_usage_endpoint(token: str) -> dict | str:
             if lim.get("kind") == "session":
                 sev = lim.get("severity")
                 status = "allowed" if sev == "normal" else str(sev or "unknown")
-            elif lim.get("kind") == "weekly_scoped" and scoped is None:
-                scoped = lim
+            elif (lim.get("kind") == "weekly_scoped"
+                  and (scoped is None
+                       or (lim.get("percent") or 0) > (scoped.get("percent") or 0))):
+                scoped = lim   # several scoped limits → show the hottest one
         payload = {
             "s": int(round(float(five.get("utilization") or 0))),
             "sr": mins_until(five.get("resets_at")),
@@ -1119,7 +1105,7 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
             if not attn and cal_url:
                 # Hook events outrank the calendar; an unsent reminder just
                 # waits for the next TICK (nothing is marked sent yet).
-                await refresh_cal_events(cal_url)
+                refresh_cal_events(cal_url)
                 cal = check_cal_reminder(cal_thresholds)
             if attn == "clear":
                 # Dismiss-only: reuse the last payload, skip the API poll.
@@ -1157,8 +1143,8 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                         f"({'началась' if cal[2] == 0 else f'{cal[2]}′'})")
                 if await session.write_payload(payload):
                     last_poll = time.time()
-                    if cal and not attn:
-                        cal_mark_sent(cal[1], cal[2], cal_thresholds)
+                    if cal:
+                        _cal_sent.add((cal[1], cal[2]))
                     if payload.get("ok"):
                         used_successfully = True
 

@@ -16,6 +16,9 @@ enum : uint8_t {
     ATTN_RESET     = 7,   // session window reset (firmware-local)
     ATTN_CLEAR     = 8,   // dismiss the attention view, no sound
 };
+// Types INPUT..RESET have a style/caption/status entry (index = ATTN_* - 1);
+// sizes every parallel table in ui.cpp and lang.h.
+#define ATTN_STYLED_COUNT (ATTN_CLEAR - 1)
 
 struct UsageData {
     float session_pct;       // utilization 0-100 (5h window Pro/Max; spending % Enterprise)

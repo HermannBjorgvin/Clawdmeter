@@ -15,3 +15,11 @@
 #define THEME_YELLOW   lv_color_hex(0xd9b84f)   // meeting started — go now
 
 #define THEME_BAR_BG   lv_color_hex(0x2a2a28)   // unfilled bar track
+
+// The same colors as hex strings for LVGL recolor markup ("#RRGGBB text#").
+// Keep each pair in sync with its lv_color_hex twin above.
+#define THEME_TEXT_HEX  "faf9f5"
+#define THEME_DIM_HEX   "b0aea5"
+#define THEME_GREEN_HEX "788c5d"
+#define THEME_AMBER_HEX "d97757"
+#define THEME_RED_HEX   "c0392b"

@@ -1,4 +1,5 @@
 #pragma once
+#include "data.h"   // ATTN_STYLED_COUNT
 
 // UI string table — every user-visible phrase in one place, switched at
 // runtime by the daemon's "lang" payload field (host config: `lang = ru|en`).
@@ -16,12 +17,12 @@ struct Strings {
     const char* pace_under, *pace_on, *pace_over;
     // printf formats: countdown + "%s" tail for the optional " (21:00)" part
     const char* reset_m, *reset_hm, *reset_dh;
-    const char* ent_reset_fmt;            // recolor fmt: pace hex, pace text, reset date
+    const char* ent_reset_fmt;            // recolor fmt: pace hex, pace text, text hex, reset date
     const char* pair1, *pair2, *pair3;    // pairing hint lines
     const char* st_waiting, *st_no_data, *st_listening, *st_connected, *st_resting;
     const char* err_auth, *err_token, *err_rate, *err_net, *err_api;
-    const char* attn_caption[7];          // indexed by ATTN_* - 1
-    const char* attn_status[7];
+    const char* attn_caption[ATTN_STYLED_COUNT];   // indexed by ATTN_* - 1
+    const char* attn_status[ATTN_STYLED_COUNT];
     const char* const* words;             // animated status-line verbs
     int word_count;
 };
