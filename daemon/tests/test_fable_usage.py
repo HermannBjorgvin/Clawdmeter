@@ -36,16 +36,23 @@ def test_extract_fable_usage_preserves_measured_zero() -> None:
     ) == {"f": 0, "fr": 120}
 
 
-def test_extract_fable_usage_rejects_inactive_wrong_or_malformed_limits() -> None:
+def test_extract_fable_usage_reads_inactive_limit_with_valid_measurement() -> None:
     inactive = fable_limit()
     inactive["is_active"] = False
+
+    assert fable_usage.extract_fable_usage(
+        {"limits": [inactive]}, now=NOW
+    ) == {"f": 61, "fr": 120}
+
+
+def test_extract_fable_usage_rejects_wrong_or_malformed_limits() -> None:
     wrong = fable_limit()
     wrong["scope"]["model"]["display_name"] = "Opus"
     malformed = fable_limit()
     malformed["percent"] = "61"
 
     assert fable_usage.extract_fable_usage(
-        {"limits": [inactive, wrong, malformed]}, now=NOW
+        {"limits": [wrong, malformed]}, now=NOW
     ) == {}
 
 

@@ -37,7 +37,6 @@ def extract_fable_usage(
         percent = limit.get("percent")
         if (
             limit.get("kind") != "weekly_scoped"
-            or limit.get("is_active") is not True
             or not isinstance(model, dict)
             or model.get("display_name") != "Fable"
             or isinstance(percent, bool)
