@@ -12,5 +12,6 @@
 #define THEME_AMBER    lv_color_hex(0xd97757)
 #define THEME_RED      lv_color_hex(0xc0392b)
 #define THEME_BLUE     lv_color_hex(0x7b9ec7)   // calendar events — not-Claude
+#define THEME_YELLOW   lv_color_hex(0xd9b84f)   // meeting started — go now
 
 #define THEME_BAR_BG   lv_color_hex(0x2a2a28)   // unfilled bar track

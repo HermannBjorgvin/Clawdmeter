@@ -85,7 +85,8 @@ void chime_play(void) {
 static const ToneNote MELODY_INPUT[] = { {659, 220}, {0, 120}, {659, 220} };            // E5 E5 — «ждёт ответа»
 static const ToneNote MELODY_PERM[]  = { {880, 110}, {0, 60}, {880, 110}, {0, 60}, {880, 160} };  // A5×3 — «нужно разрешение»
 static const ToneNote MELODY_DONE[]  = { {523, 140}, {659, 140}, {784, 220} };          // C5 E5 G5 — «готово»
-static const ToneNote MELODY_CAL[]   = { {1319, 150}, {0, 80}, {1047, 260} };           // E6..C6 «динь-дон» — «скоро встреча»
+static const ToneNote MELODY_CAL[]   = { {784, 170}, {0, 40}, {1047, 170}, {0, 40}, {1319, 340} };  // G5 C6 E6 вверх, мягкое арпеджио — «скоро встреча»
+static const ToneNote MELODY_CAL_GO[] = { {1047, 150}, {0, 50}, {1047, 150}, {0, 50}, {784, 320} }; // C6 C6 G5 «динь-динь-дон» — «встреча началась»
 static const ToneNote MELODY_LIMIT[] = { {988, 130}, {880, 130}, {784, 240} };          // B5 A5 G5 вниз — «лимит близко»
 
 #define NOTES(m) { m, (int)(sizeof(m) / sizeof(ToneNote)) }
@@ -94,6 +95,7 @@ static const struct { const ToneNote* notes; int count; } MELODIES[] = {
     NOTES(MELODY_PERM),    // ATTN_PERM
     NOTES(MELODY_DONE),    // ATTN_DONE
     NOTES(MELODY_CAL),     // ATTN_CAL
+    NOTES(MELODY_CAL_GO),  // ATTN_CAL_START
     NOTES(MELODY_LIMIT),   // ATTN_LIMIT
 };
 #undef NOTES

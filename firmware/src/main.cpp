@@ -118,11 +118,12 @@ static bool parse_json(const char* json, UsageData* out) {
     // and yields false for absent/null.
     out->chime = doc["c"].as<bool>();   // session-reset chime opt-in
     const char* n = doc["n"] | "";      // hook-driven attention event
-    out->notify_type = !strcmp(n, "input") ? ATTN_INPUT :
-                       !strcmp(n, "perm")  ? ATTN_PERM  :
-                       !strcmp(n, "done")  ? ATTN_DONE  :
-                       !strcmp(n, "cal")   ? ATTN_CAL   :
-                       !strcmp(n, "clear") ? ATTN_CLEAR : ATTN_NONE;
+    out->notify_type = !strcmp(n, "input")    ? ATTN_INPUT     :
+                       !strcmp(n, "perm")     ? ATTN_PERM      :
+                       !strcmp(n, "done")     ? ATTN_DONE      :
+                       !strcmp(n, "cal")      ? ATTN_CAL       :
+                       !strcmp(n, "calstart") ? ATTN_CAL_START :
+                       !strcmp(n, "clear")    ? ATTN_CLEAR     : ATTN_NONE;
     strlcpy(out->notify_project, doc["np"] | "", sizeof(out->notify_project));
     out->active_sessions = doc["a"] | -1;
     const char* acct = doc["acct"] | "pro";
@@ -409,7 +410,7 @@ void loop() {
             // payload per hook event, so no edge detection is needed here.
             // Handled before the ok-check: a permission chime matters even
             // while the usage data itself is unavailable.
-            if (usage.notify_type >= ATTN_INPUT && usage.notify_type <= ATTN_CAL) {
+            if (usage.notify_type >= ATTN_INPUT && usage.notify_type <= ATTN_CAL_START) {
                 Serial.printf("attention request type %d (%s) — melody + view\n",
                               usage.notify_type, usage.notify_project);
                 sound_hal_play_alert(usage.notify_type);

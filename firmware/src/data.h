@@ -6,14 +6,15 @@
 // from the daemon (as strings — renumbering is wire-safe); LIMIT and RESET
 // are raised by the firmware itself.
 enum : uint8_t {
-    ATTN_NONE  = 0,
-    ATTN_INPUT = 1,   // Claude is waiting for an answer
-    ATTN_PERM  = 2,   // permission prompt
-    ATTN_DONE  = 3,   // turn finished
-    ATTN_CAL   = 4,   // upcoming meeting (daemon-side calendar reminder)
-    ATTN_LIMIT = 5,   // session limit almost exhausted (firmware-local)
-    ATTN_RESET = 6,   // session window reset (firmware-local)
-    ATTN_CLEAR = 7,   // dismiss the attention view, no sound
+    ATTN_NONE      = 0,
+    ATTN_INPUT     = 1,   // Claude is waiting for an answer
+    ATTN_PERM      = 2,   // permission prompt
+    ATTN_DONE      = 3,   // turn finished
+    ATTN_CAL       = 4,   // upcoming meeting (daemon-side calendar reminder)
+    ATTN_CAL_START = 5,   // the meeting just started
+    ATTN_LIMIT     = 6,   // session limit almost exhausted (firmware-local)
+    ATTN_RESET     = 7,   // session window reset (firmware-local)
+    ATTN_CLEAR     = 8,   // dismiss the attention view, no sound
 };
 
 struct UsageData {

@@ -91,6 +91,10 @@ def read_attention_flag() -> tuple[str | None, str]:
 CAL_FETCH_S = 300
 CAL_HORIZON_S = 26 * 3600   # keep in sync with the horizon in calnext.swift
 CAL_THRESHOLDS_MIN = (15, 5)
+# "Meeting started" beat: sent within this window after the start ("n":
+# "calstart", threshold slot 0). A daemon that was down through the whole
+# window stays silent — a started-alert 10 minutes late is just noise.
+CAL_STARTED_GRACE_S = 120
 CALNEXT_BIN = Path(__file__).resolve().parent / "calnext"
 
 _cal_events: list[tuple[float, str]] = []   # (start_epoch, title), sorted
@@ -189,12 +193,18 @@ async def _events_from_ics(url: str) -> set[tuple[float, str]]:
 def check_cal_reminder(thresholds: tuple[int, ...]) -> tuple[str, float, int] | None:
     """First unsent reminder due now → ("HH:MM title", start, threshold_min).
 
-    Doesn't mark anything sent — call cal_mark_sent() after the payload is
-    actually delivered. Concurrent meetings resolve one per TICK.
+    threshold_min 0 = the meeting just started (grace window); positive =
+    that many minutes before the start. Doesn't mark anything sent — call
+    cal_mark_sent() after the payload is actually delivered. Concurrent
+    meetings resolve one per TICK.
     """
     now = time.time()
     for start, title in _cal_events:
+        text = f"{datetime.datetime.fromtimestamp(start):%H:%M} {title}"
+        # 48 chars = the firmware's context-line budget (two wrapped lines)
         if start <= now:
+            if now < start + CAL_STARTED_GRACE_S and (start, 0) not in _cal_sent:
+                return text[:48], start, 0
             continue
         active = [m for m in thresholds if start - m * 60 <= now]
         if not active:
@@ -202,14 +212,13 @@ def check_cal_reminder(thresholds: tuple[int, ...]) -> tuple[str, float, int] | 
         m = min(active)   # closest threshold wins; larger ones are stale
         if (start, m) in _cal_sent:
             continue
-        text = f"{datetime.datetime.fromtimestamp(start):%H:%M} {title}"
-        # 48 chars = the firmware's context-line budget (two wrapped lines)
         return text[:48], start, m
     return None
 
 
 def cal_mark_sent(start: float, threshold: int, thresholds: tuple[int, ...]) -> None:
     """Mark this reminder slot and every larger (already-stale) one sent."""
+    _cal_sent.add((start, threshold))
     _cal_sent.update((start, m) for m in thresholds if m >= threshold)
 
 
@@ -1112,9 +1121,10 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                         payload["np"] = attn_project
                     log(f"Attention flag ({attn}, {attn_project or '?'}) — forwarding to device")
                 elif cal:
-                    payload["n"] = "cal"
+                    payload["n"] = "calstart" if cal[2] == 0 else "cal"
                     payload["np"] = cal[0]
-                    log(f"Calendar reminder — {cal[0]} ({cal[2]}')")
+                    log(f"Calendar reminder — {cal[0]} "
+                        f"({'началась' if cal[2] == 0 else f'{cal[2]}′'})")
                 if await session.write_payload(payload):
                     last_poll = time.time()
                     if cal and not attn:

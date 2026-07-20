@@ -100,6 +100,7 @@ static void compute_layout(const BoardCaps& c) {
 #define COL_AMBER     THEME_AMBER
 #define COL_RED       THEME_RED
 #define COL_BLUE      THEME_BLUE
+#define COL_YELLOW    THEME_YELLOW
 #define COL_BAR_BG    THEME_BAR_BG
 
 // ---- Usage screen widgets (single non-splash view) ----
@@ -159,11 +160,12 @@ struct AttnStyle {
     lv_color_t  color;     // caption color
     uint32_t    timeout_ms;
 };
-static const AttnStyle ATTN_STYLES[6] = {
+static const AttnStyle ATTN_STYLES[7] = {
     { "Клод ждёт ответа",   "idle look around",    "Ждёт ответа",       COL_AMBER, 120000 },  // ATTN_INPUT
     { "Нужно разрешение",   "expression surprise", "Ждёт разрешения",   COL_AMBER, 120000 },  // ATTN_PERM
     { "Готово!",            "dance bounce",        "Готово",            COL_GREEN, 30000  },  // ATTN_DONE
     { "Скоро встреча!",     "dance sway",          "Скоро встреча",     COL_BLUE,  120000 },  // ATTN_CAL
+    { "Встреча началась!",  "expression surprise", "Встреча идёт",      COL_YELLOW, 120000 },  // ATTN_CAL_START
     { "Лимит близко!",      "expression surprise", "Лимит близко",      COL_RED,   30000  },  // ATTN_LIMIT
     { "Лимиты обновились!", "expression wink",     "Лимиты обновились", COL_GREEN, 30000  },  // ATTN_RESET
 };
