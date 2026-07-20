@@ -585,6 +585,25 @@ def add_chime_field(payload: dict) -> None:
         payload["c"] = 1
 
 
+def add_lang_field(payload: dict) -> None:
+    """Add "lang":"ru|en" from the `lang` config option. Omitted when unset —
+    the firmware then keeps its persisted (or default English) UI language."""
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "lang":
+                    val = val.strip().lower()
+                    if val in ("ru", "en"):
+                        payload["lang"] = val
+                    return
+    except OSError:
+        pass
+
+
 def detect_hour_format() -> int:
     """Best-effort 12h/24h detection for the host. Returns 12 or 24 (default 24)."""
     # macOS: the explicit System Settings toggle lives in NSGlobalDomain.
@@ -660,6 +679,7 @@ async def poll_api(token: str) -> dict | str:
         return result
     add_chime_field(result)   # adds "c":1 iff the config opts in
     add_clock_fields(result)  # adds "t" + "tf" iff the config opts in
+    add_lang_field(result)    # adds "lang" iff the config sets it
     return result
 
 

@@ -27,4 +27,7 @@ void ui_hide_attention(void);
 // numbers as live) and show the reason in the status line. Codes: auth /
 // token / rate / net / http. Cleared automatically by the next good payload.
 void ui_set_data_error(const char* code);
+// Switch the UI language ("ru"/"en", persisted; "" = keep current) and
+// restamp the labels that aren't rewritten on every update.
+void ui_set_lang(const char* lang);
 void ui_update_battery(int percent, bool charging);

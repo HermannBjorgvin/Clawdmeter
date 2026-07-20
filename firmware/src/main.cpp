@@ -6,6 +6,7 @@
 
 #include "data.h"
 #include "ui.h"
+#include "lang.h"
 #include "ble.h"
 #include "splash.h"
 #include "usage_rate.h"
@@ -133,6 +134,7 @@ static bool parse_json(const char* json, UsageData* out) {
     out->time_pct = doc["tp"] | 0;
     out->period_days = doc["pd"] | 30;
     strlcpy(out->reset_date, doc["rd"] | "", sizeof(out->reset_date));
+    strlcpy(out->lang, doc["lang"] | "", sizeof(out->lang));
     out->clock_epoch = doc["t"] | 0L;
     out->clock_fmt = doc["tf"] | 24;
     out->ok = doc["ok"] | false;
@@ -266,6 +268,7 @@ void setup() {
     ble_init();
     input_hal_init();
 
+    strings_init();   // load the persisted UI language before any label exists
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
@@ -412,6 +415,9 @@ void loop() {
 
     if (ble_has_data()) {
         if (parse_json(ble_get_data(), &usage)) {
+            // Language first: an attention event in the same payload must
+            // already render its caption in the requested language.
+            ui_set_lang(usage.lang);   // "" = keep current
             // Hook-driven attention event. The daemon sets "n" on exactly one
             // payload per hook event, so no edge detection is needed here.
             // Handled before the ok-check: a permission chime matters even

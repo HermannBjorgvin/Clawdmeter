@@ -91,6 +91,8 @@ static void compute_layout(const BoardCaps& c) {
 
 // Anthropic brand palette — design tokens live in theme.h
 #include "theme.h"
+// All user-visible phrases live in strings.h (RU/EN, runtime-switched)
+#include "lang.h"
 #define COL_BG        THEME_BG
 #define COL_PANEL     THEME_PANEL
 #define COL_TEXT      THEME_TEXT
@@ -114,6 +116,7 @@ static int      clock_fmt = 24;   // 12 or 24, set from the daemon payload
 static int      clock_last_min = -1;   // last rendered minute; avoids redrawing the title every tick
 static lv_obj_t* usage_group;   // the two usage panels — shown when connected
 static lv_obj_t* pair_group;    // pairing hint — shown when disconnected
+static lv_obj_t* lbl_pair1, *lbl_pair2, *lbl_pair3;   // its lines (restamped on language change)
 static lv_obj_t* bar_session;
 static lv_obj_t* lbl_session_pct;
 static lv_obj_t* lbl_session_label;
@@ -157,21 +160,20 @@ static uint32_t  attention_since  = 0;
 
 // Everything type-specific in one row (index = ATTN_* - 1): the waiting
 // states nag for 2 min, informational ones dismiss themselves quickly.
+// The caption/status texts live in strings.h so they follow the language.
 struct AttnStyle {
-    const char* caption;   // big line on the attention view
     const char* anim;      // mini-creature animation
-    const char* status;    // bottom status-line text
     lv_color_t  color;     // caption color
     uint32_t    timeout_ms;
 };
 static const AttnStyle ATTN_STYLES[7] = {
-    { "Клод ждёт ответа",   "idle look around",    "Ждёт ответа",       COL_AMBER, 120000 },  // ATTN_INPUT
-    { "Нужно разрешение",   "expression surprise", "Ждёт разрешения",   COL_AMBER, 120000 },  // ATTN_PERM
-    { "Готово!",            "dance bounce",        "Готово",            COL_GREEN, 30000  },  // ATTN_DONE
-    { "Скоро встреча!",     "dance sway",          "Скоро встреча",     COL_BLUE,  120000 },  // ATTN_CAL
-    { "Встреча началась!",  "expression surprise", "Встреча идёт",      COL_YELLOW, 120000 },  // ATTN_CAL_START
-    { "Лимит близко!",      "expression surprise", "Лимит близко",      COL_RED,   30000  },  // ATTN_LIMIT
-    { "Лимиты обновились!", "expression wink",     "Лимиты обновились", COL_GREEN, 30000  },  // ATTN_RESET
+    { "idle look around",    COL_AMBER,  120000 },  // ATTN_INPUT
+    { "expression surprise", COL_AMBER,  120000 },  // ATTN_PERM
+    { "dance bounce",        COL_GREEN,  30000  },  // ATTN_DONE
+    { "dance sway",          COL_BLUE,   120000 },  // ATTN_CAL
+    { "expression surprise", COL_YELLOW, 120000 },  // ATTN_CAL_START
+    { "expression surprise", COL_RED,    30000  },  // ATTN_LIMIT
+    { "expression wink",     COL_GREEN,  30000  },  // ATTN_RESET
 };
 static inline const AttnStyle& attn_style(void) { return ATTN_STYLES[attention_type - 1]; }
 static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage update landed
@@ -204,40 +206,6 @@ static const uint16_t spinner_ms[SPINNER_COUNT] = {
     260, 130, 130, 130, 130, 260,
 };
 
-static const char* const anim_messages[] = {
-    "Вершит", "Проясняет", "Штудирует",
-    "Действует", "Чарует", "Философствует",
-    "Воплощает", "Прозревает", "Раздумывает",
-    "Печёт", "Хитрит", "Вещает",
-    "Бупает", "Балаболит", "Обрабатывает",
-    "Варит", "Куёт", "Возится",
-    "Считает", "Формирует", "Ломает голову",
-    "Мозгует", "Резвится", "Ретикулирует",
-    "Транслирует", "Генерирует", "Пережёвывает",
-    "Взбивает", "Проращивает", "Замышляет",
-    "Клодит", "Высиживает", "Тащит",
-    "Сплавляет", "Пасёт", "Пританцовывает",
-    "Кумекает", "Бибикает", "Лущит",
-    "Комбобулирует", "Шустрит", "Томит",
-    "Вычисляет", "Придумывает", "Мнёт",
-    "Стряпает", "Воображает", "Копает вглубь",
-    "Колдует", "Инкубирует", "Крутит",
-    "Взвешивает", "Умозаключает", "Тушит",
-    "Созерцает", "Джайвит", "Просекает",
-    "Готовит", "Манифестирует", "Синтезирует",
-    "Мастерит", "Маринует", "Думает",
-    "Творит", "Петляет", "Ковыряется",
-    "Хрустит", "Бредёт", "Трансмутирует",
-    "Расшифровывает", "Обмозговывает", "Разворачивает",
-    "Совещается", "Собирается", "Распутывает",
-    "Определяет", "Грезит", "Вайбит",
-    "Дискомбобулирует", "Наигрывает", "Блуждает",
-    "Гадает", "Процеживает", "Жужжит",
-    "Делает", "Колышется",
-    "Осуществляет", "Волшебничает",
-    "Работает", "Укрощает",
-};
-#define ANIM_MSG_COUNT (sizeof(anim_messages) / sizeof(anim_messages[0]))
 
 static lv_color_t pct_color(float pct) {
     if (pct >= 80.0f) return COL_RED;
@@ -253,11 +221,11 @@ static void format_reset_time(int mins, const char* at, char* buf, size_t len) {
     if (mins < 0) {
         snprintf(buf, len, "---");
     } else if (mins < 60) {
-        snprintf(buf, len, "Сброс через %dм%s", mins, when);
+        snprintf(buf, len, S->reset_m, mins, when);
     } else if (mins < 1440) {
-        snprintf(buf, len, "Сброс через %dч %dм%s", mins / 60, mins % 60, when);
+        snprintf(buf, len, S->reset_hm, mins / 60, mins % 60, when);
     } else {
-        snprintf(buf, len, "Сброс через %dд %dч%s", mins / 1440, (mins % 1440) / 60, when);
+        snprintf(buf, len, S->reset_dh, mins / 1440, (mins % 1440) / 60, when);
     }
 }
 
@@ -367,20 +335,20 @@ static void build_pair_group(lv_obj_t* parent) {
     lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    lv_obj_t* l1 = lv_label_create(pair_group);
-    lv_label_set_text(l1, "Сопряжение");
+    lv_obj_t* l1 = lbl_pair1 = lv_label_create(pair_group);
+    lv_label_set_text(l1, S->pair1);
     lv_obj_set_style_text_font(l1, L.bt_status_font, 0);
     lv_obj_set_style_text_color(l1, COL_TEXT, 0);
     lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, 40);
 
-    lv_obj_t* l2 = lv_label_create(pair_group);
-    lv_label_set_text(l2, "зажмите кнопку питания");
+    lv_obj_t* l2 = lbl_pair2 = lv_label_create(pair_group);
+    lv_label_set_text(l2, S->pair2);
     lv_obj_set_style_text_font(l2, L.bt_device_font, 0);
     lv_obj_set_style_text_color(l2, COL_DIM, 0);
     lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, 120);
 
-    lv_obj_t* l3 = lv_label_create(pair_group);
-    lv_label_set_text(l3, "на 3 секунды и отпустите");
+    lv_obj_t* l3 = lbl_pair3 = lv_label_create(pair_group);
+    lv_label_set_text(l3, S->pair3);
     lv_obj_set_style_text_font(l3, L.bt_device_font, 0);
     lv_obj_set_style_text_color(l3, COL_DIM, 0);
     lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, 160);
@@ -425,7 +393,7 @@ static void build_attention_group(lv_obj_t* parent) {
     lv_obj_add_flag(attention_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     lbl_attention = lv_label_create(attention_group);
-    lv_label_set_text(lbl_attention, ATTN_STYLES[0].caption);
+    lv_label_set_text(lbl_attention, S->attn_caption[0]);
     lv_obj_set_style_text_font(lbl_attention, L.bt_status_font, 0);
     lv_obj_set_style_text_color(lbl_attention, COL_AMBER, 0);
     lv_obj_align(lbl_attention, LV_ALIGN_CENTER, 0, 90);
@@ -455,7 +423,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
 
     lbl_title = lv_label_create(usage_container);
-    lv_label_set_text(lbl_title, "Лимиты");
+    lv_label_set_text(lbl_title, S->title);
     lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
     lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
@@ -471,7 +439,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    panel_session = make_usage_panel(usage_group, L.content_y, "Сессия",
+    panel_session = make_usage_panel(usage_group, L.content_y, S->pill_session,
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
 
@@ -483,7 +451,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
 
     lbl_spending_desc = lv_label_create(panel_session);
-    lv_label_set_text(lbl_spending_desc, "месячного бюджета");
+    lv_label_set_text(lbl_spending_desc, S->of_monthly_budget);
     lv_obj_set_style_text_font(lbl_spending_desc, &font_styrene_28, 0);
     lv_obj_set_style_text_color(lbl_spending_desc, COL_DIM, 0);
     lv_obj_set_pos(lbl_spending_desc, 0, L.usage_reset_y);
@@ -496,7 +464,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
 
     panel_weekly = make_usage_panel(usage_group,
-                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Неделя",
+                     L.content_y + L.usage_panel_h + L.usage_panel_gap, S->pill_weekly,
                      &lbl_weekly_pct, &lbl_weekly_label,
                      &bar_weekly, &lbl_weekly_reset);
     // Recolor enabled so enterprise period box can color pace and reset separately
@@ -612,7 +580,7 @@ void ui_update(const UsageData* data) {
     if (data->enterprise) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
         lv_obj_set_style_text_font(lbl_session_pct, &font_tiempos_56, 0);
-        lv_label_set_text(lbl_session_label, "Расходы");
+        lv_label_set_text(lbl_session_label, S->spending);
         lv_obj_add_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
@@ -620,7 +588,7 @@ void ui_update(const UsageData* data) {
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_set_style_text_font(lbl_session_pct, &font_styrene_48, 0);
-        lv_label_set_text(lbl_session_label, "Сессия");
+        lv_label_set_text(lbl_session_label, S->pill_session);
         lv_obj_clear_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
@@ -631,13 +599,13 @@ void ui_update(const UsageData* data) {
     char buf[96];   // UTF-8 Cyrillic is 2 bytes/char — keep headroom for the recolor markup
 
     // Pace vars used in both enterprise blocks below
-    const char* pace_text = "Ниже темпа";
+    const char* pace_text = S->pace_under;
     lv_color_t  pace_color = COL_GREEN;
     const char* pace_hex   = "788c5d";   // matches THEME_GREEN
     if (data->session_pct > (float)data->time_pct + 15.0f) {
-        pace_text = "Выше темпа"; pace_color = COL_RED;   pace_hex = "c0392b";
+        pace_text = S->pace_over;  pace_color = COL_RED;   pace_hex = "c0392b";
     } else if (data->session_pct > (float)data->time_pct - 15.0f) {
-        pace_text = "В темпе";    pace_color = COL_AMBER; pace_hex = "d97757";
+        pace_text = S->pace_on; pace_color = COL_AMBER; pace_hex = "d97757";
     }
 
     if (data->enterprise) {
@@ -655,14 +623,14 @@ void ui_update(const UsageData* data) {
 
     if (data->enterprise) {
         // Period box: time % + dynamic pace color + "Resets <date>" label
-        lv_label_set_text(lbl_weekly_label, "Период");
+        lv_label_set_text(lbl_weekly_label, S->pill_period);
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", data->time_pct);
         lv_bar_set_value(bar_weekly, data->time_pct, LV_ANIM_ON);
         lv_color_t bar_pace = (data->session_pct <= (float)data->time_pct) ? COL_GREEN :
                               (data->session_pct <= (float)data->time_pct + 15.0f) ? COL_AMBER :
                               COL_RED;
         lv_obj_set_style_bg_color(bar_weekly, bar_pace, LV_PART_INDICATOR);
-        snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Сброс %s#",
+        snprintf(buf, sizeof(buf), S->ent_reset_fmt,
                  pace_hex, pace_text, data->reset_date);
         lv_label_set_text(lbl_weekly_reset, buf);
     } else {
@@ -797,7 +765,7 @@ void ui_tick_anim(void) {
     }
 
     if (now - anim_msg_start >= ANIM_MSG_MS) {
-        anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
+        anim_msg_idx = (anim_msg_idx + 1) % S->word_count;
         anim_msg_start = now;
     }
 
@@ -820,22 +788,22 @@ void ui_tick_anim(void) {
     // Status text by priority. Whimsical messages only when connected & settled.
     const char* text;
     if (!s_ble_connected) {
-        text = "Ожидание";             // advertising / waiting for a host connection
+        text = S->st_waiting;          // advertising / waiting for a host connection
     } else if (view_state == 3) {      // attention — spell out why the device chimed
-        text = attn_style().status;
+        text = S->attn_status[attention_type - 1];
     } else if (view_state == 1 && data_err[0]) {  // idle with a known cause — name it
-        text = !strcmp(data_err, "auth")  ? "Обновите токен" :
-               !strcmp(data_err, "token") ? "Нет токена" :
-               !strcmp(data_err, "rate")  ? "Лимит запросов" :
-               !strcmp(data_err, "net")   ? "Нет сети" : "Ошибка API";
+        text = !strcmp(data_err, "auth")  ? S->err_auth :
+               !strcmp(data_err, "token") ? S->err_token :
+               !strcmp(data_err, "rate")  ? S->err_rate :
+               !strcmp(data_err, "net")   ? S->err_net : S->err_api;
     } else if (view_state == 1) {      // idle — alternate so it reads as alive AND data-less
-        text = (anim_msg_idx & 1) ? "Нет данных" : "Слушает";
+        text = (anim_msg_idx & 1) ? S->st_no_data : S->st_listening;
     } else if (now - connected_at_ms < 5000) {
-        text = "Подключено";
+        text = S->st_connected;
     } else if (active_sessions == 0) {
-        text = "Отдыхает";             // no Claude session is doing anything
+        text = S->st_resting;          // no Claude session is doing anything
     } else {
-        text = anim_messages[anim_msg_idx];
+        text = S->words[anim_msg_idx % S->word_count];
     }
 
     // All states share the whimsical style: "<glyph> <Title-case word>…".
@@ -885,7 +853,7 @@ void ui_show_attention(uint8_t type, const char* project) {
     attention_type   = type;
     strlcpy(attention_project, project ? project : "", sizeof(attention_project));
     if (lbl_attention) {
-        lv_label_set_text(lbl_attention, attn_style().caption);
+        lv_label_set_text(lbl_attention, S->attn_caption[attention_type - 1]);
         lv_obj_set_style_text_color(lbl_attention, attn_style().color, 0);
     }
     if (was_active) {   // already on the view — update_view_state won't re-enter
@@ -940,6 +908,24 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
     if (s_ble_connected && !was_connected) connected_at_ms = lv_tick_get();
     // pair / idle / usage — picked from connection + data freshness.
     update_view_state();
+}
+
+void ui_set_lang(const char* lang) {
+    if (!strings_set_lang(lang)) return;
+    // Most labels are rewritten by the next ui_update()/status tick; restamp
+    // only the ones that aren't.
+    if (lbl_pair1) {
+        lv_label_set_text(lbl_pair1, S->pair1);
+        lv_label_set_text(lbl_pair2, S->pair2);
+        lv_label_set_text(lbl_pair3, S->pair3);
+    }
+    // The weekly pill is only rewritten by Enterprise updates ("Период") —
+    // in the Pro/Max flow it keeps its creation-time text, so restamp it
+    // here (a following Enterprise update overwrites it anyway).
+    if (lbl_weekly_label) lv_label_set_text(lbl_weekly_label, S->pill_weekly);
+    // Header: skip while the attention view owns it or the clock ticks in it.
+    if (lbl_title && view_state != 3 && clock_base_epoch == 0)
+        lv_label_set_text(lbl_title, S->title);
 }
 
 void ui_update_battery(int percent, bool charging) {
