@@ -1,5 +1,6 @@
 #include "ui.h"
 #include "splash.h"
+#include "idle.h"
 #include <lvgl.h>
 #include <time.h>
 #include "logo.h"
@@ -179,6 +180,8 @@ static void compute_layout(const BoardCaps& c) {
 
 // Anthropic brand palette — design tokens live in theme.h
 #include "theme.h"
+// All user-visible phrases live in strings.h (RU/EN, runtime-switched)
+#include "lang.h"
 #define COL_BG        THEME_BG
 #define COL_PANEL     THEME_PANEL
 #define COL_TEXT      THEME_TEXT
@@ -187,6 +190,8 @@ static void compute_layout(const BoardCaps& c) {
 #define COL_GREEN     THEME_GREEN
 #define COL_AMBER     THEME_AMBER
 #define COL_RED       THEME_RED
+#define COL_BLUE      THEME_BLUE
+#define COL_YELLOW    THEME_YELLOW
 #define COL_BAR_BG    THEME_BAR_BG
 
 // ---- Usage screen widgets (single non-splash view) ----
@@ -200,6 +205,7 @@ static int      clock_fmt = 24;   // 12 or 24, set from the daemon payload
 static int      clock_last_min = -1;   // last rendered minute; avoids redrawing the title every tick
 static lv_obj_t* usage_group;   // the two usage panels — shown when connected
 static lv_obj_t* pair_group;    // pairing hint — shown when disconnected
+static lv_obj_t* lbl_pair1, *lbl_pair2, *lbl_pair3;   // its lines (restamped on language change)
 static lv_obj_t* bar_session;
 static lv_obj_t* lbl_session_pct;
 static lv_obj_t* lbl_session_label;
@@ -208,6 +214,10 @@ static lv_obj_t* bar_weekly;
 static lv_obj_t* lbl_weekly_pct;
 static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
+// Model-scoped weekly limit (Fable) — a second pill inside panel_weekly next
+// to the "Неделя" one; the scoped reset matches the weekly one, so it needs
+// no reset line of its own.
+static lv_obj_t* pill_fable = nullptr;
 static lv_obj_t* panel_session = nullptr;
 static lv_obj_t* panel_weekly = nullptr;
 // Enterprise-only widgets inside panel_session
@@ -215,9 +225,11 @@ static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
 static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
 static lv_obj_t* lbl_spending_status = nullptr;   // "Under pace" / "On pace" / "Over pace"
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
+static lv_obj_t* lbl_sessions;  // bottom-left "·N" active-session counter
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
+static lv_obj_t* battery_lbl;   // numeric percent left of the icon
 static lv_obj_t* logo_img;
 static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 
@@ -226,9 +238,36 @@ static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 // connected but no usage update landed within DATA_FRESH_MS, the pairing hint
 // when BLE is down. Re-evaluated every loop in ui_tick_anim().
 static lv_obj_t* idle_group;            // the "Zzz" idle screen
+static lv_obj_t* attention_group;       // the "Claude is waiting for you" view
+static lv_obj_t* lbl_attention;         // its caption (text/color vary by type)
+static lv_obj_t* lbl_attn_ctx;          // event context line under the header
+static lv_obj_t* mini_creature;         // the single shared mini creature canvas
+static bool      attention_active = false;
+static uint8_t   attention_type   = ATTN_INPUT;
+static char      attention_project[97] = "";   // context line while active (mirrors UsageData::notify_project)
+static uint32_t  attention_since  = 0;
+
+// Everything type-specific in one row (index = ATTN_* - 1): the waiting
+// states nag for 2 min, informational ones dismiss themselves quickly.
+// The caption/status texts live in strings.h so they follow the language.
+struct AttnStyle {
+    const char* anim;      // mini-creature animation
+    lv_color_t  color;     // caption color
+    uint32_t    timeout_ms;
+};
+static const AttnStyle ATTN_STYLES[ATTN_STYLED_COUNT] = {
+    { "idle look around",    COL_AMBER,  120000 },  // ATTN_INPUT
+    { "expression surprise", COL_AMBER,  120000 },  // ATTN_PERM
+    { "dance bounce",        COL_GREEN,  30000  },  // ATTN_DONE
+    { "dance sway",          COL_BLUE,   120000 },  // ATTN_CAL
+    { "expression surprise", COL_YELLOW, 120000 },  // ATTN_CAL_START
+    { "expression surprise", COL_RED,    30000  },  // ATTN_LIMIT
+    { "expression wink",     COL_GREEN,  30000  },  // ATTN_RESET
+};
+static inline const AttnStyle& attn_style(void) { return ATTN_STYLES[attention_type - 1]; }
 static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage update landed
 static bool      data_received = false; // any valid update since boot
-static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage
+static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage / 3 attention
 static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within this window (daemon sends ~60s)
 
 // ---- Shared ----
@@ -256,40 +295,6 @@ static const uint16_t spinner_ms[SPINNER_COUNT] = {
     260, 130, 130, 130, 130, 260,
 };
 
-static const char* const anim_messages[] = {
-    "Accomplishing", "Elucidating", "Perusing",
-    "Actioning", "Enchanting", "Philosophising",
-    "Actualizing", "Envisioning", "Pondering",
-    "Baking", "Finagling", "Pontificating",
-    "Booping", "Flibbertigibbeting", "Processing",
-    "Brewing", "Forging", "Puttering",
-    "Calculating", "Forming", "Puzzling",
-    "Cerebrating", "Frolicking", "Reticulating",
-    "Channelling", "Generating", "Ruminating",
-    "Churning", "Germinating", "Scheming",
-    "Clauding", "Hatching", "Schlepping",
-    "Coalescing", "Herding", "Shimmying",
-    "Cogitating", "Honking", "Shucking",
-    "Combobulating", "Hustling", "Simmering",
-    "Computing", "Ideating", "Smooshing",
-    "Concocting", "Imagining", "Spelunking",
-    "Conjuring", "Incubating", "Spinning",
-    "Considering", "Inferring", "Stewing",
-    "Contemplating", "Jiving", "Sussing",
-    "Cooking", "Manifesting", "Synthesizing",
-    "Crafting", "Marinating", "Thinking",
-    "Creating", "Meandering", "Tinkering",
-    "Crunching", "Moseying", "Transmuting",
-    "Deciphering", "Mulling", "Unfurling",
-    "Deliberating", "Mustering", "Unravelling",
-    "Determining", "Musing", "Vibing",
-    "Discombobulating", "Noodling", "Wandering",
-    "Divining", "Percolating", "Whirring",
-    "Doing", "Wibbling",
-    "Effecting", "Wizarding",
-    "Working", "Wrangling",
-};
-#define ANIM_MSG_COUNT (sizeof(anim_messages) / sizeof(anim_messages[0]))
 
 static lv_color_t pct_color(float pct) {
     if (pct >= 80.0f) return COL_RED;
@@ -297,15 +302,26 @@ static lv_color_t pct_color(float pct) {
     return COL_GREEN;
 }
 
-static void format_reset_time(int mins, char* buf, size_t len) {
+// Same thresholds as pct_color, as a recolor-markup hex string.
+static const char* pct_hex(float pct) {
+    if (pct >= 80.0f) return THEME_RED_HEX;
+    if (pct >= 50.0f) return THEME_AMBER_HEX;
+    return THEME_GREEN_HEX;
+}
+
+// "Сброс через 2ч 49м (21:00)" — the countdown plus, when the daemon supplied
+// it, the wall-clock moment in parentheses so nobody has to do the math.
+static void format_reset_time(int mins, const char* at, char* buf, size_t len) {
+    char when[24] = "";
+    if (at && at[0]) snprintf(when, sizeof(when), " (%s)", at);
     if (mins < 0) {
         snprintf(buf, len, "---");
     } else if (mins < 60) {
-        snprintf(buf, len, "Resets in %dm", mins);
+        snprintf(buf, len, S->reset_m, mins, when);
     } else if (mins < 1440) {
-        snprintf(buf, len, "Resets in %dh %dm", mins / 60, mins % 60);
+        snprintf(buf, len, S->reset_hm, mins / 60, mins % 60, when);
     } else {
-        snprintf(buf, len, "Resets in %dd %dh", mins / 1440, (mins % 1440) / 60);
+        snprintf(buf, len, S->reset_dh, mins / 1440, (mins % 1440) / 60, when);
     }
 }
 
@@ -424,23 +440,23 @@ static void build_pair_group(lv_obj_t* parent) {
     lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    lv_obj_t* l1 = lv_label_create(pair_group);
-    lv_label_set_text(l1, "To pair");
-    lv_obj_set_style_text_font(l1, L.bt_status_font, 0);
-    lv_obj_set_style_text_color(l1, COL_TEXT, 0);
-    lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, L.pair_y1);
+lbl_pair1 = lv_label_create(pair_group);
+    lv_label_set_text(lbl_pair1, S->pair1);
+    lv_obj_set_style_text_font(lbl_pair1, L.bt_status_font, 0);
+    lv_obj_set_style_text_color(lbl_pair1, COL_TEXT, 0);
+    lv_obj_align(lbl_pair1, LV_ALIGN_TOP_MID, 0, L.pair_y1);
 
-    lv_obj_t* l2 = lv_label_create(pair_group);
-    lv_label_set_text(l2, "hold the power button");
-    lv_obj_set_style_text_font(l2, L.bt_device_font, 0);
-    lv_obj_set_style_text_color(l2, COL_DIM, 0);
-    lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, L.pair_y2);
+    lbl_pair2 = lv_label_create(pair_group);
+    lv_label_set_text(lbl_pair2, S->pair2);
+    lv_obj_set_style_text_font(lbl_pair2, L.bt_device_font, 0);
+    lv_obj_set_style_text_color(lbl_pair2, COL_DIM, 0);
+    lv_obj_align(lbl_pair2, LV_ALIGN_TOP_MID, 0, L.pair_y2);
 
-    lv_obj_t* l3 = lv_label_create(pair_group);
-    lv_label_set_text(l3, "for 3 seconds, then release");
-    lv_obj_set_style_text_font(l3, L.bt_device_font, 0);
-    lv_obj_set_style_text_color(l3, COL_DIM, 0);
-    lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, L.pair_y3);
+    lbl_pair3 = lv_label_create(pair_group);
+    lv_label_set_text(lbl_pair3, S->pair3);
+    lv_obj_set_style_text_font(lbl_pair3, L.bt_device_font, 0);
+    lv_obj_set_style_text_color(lbl_pair3, COL_DIM, 0);
+    lv_obj_align(lbl_pair3, LV_ALIGN_TOP_MID, 0, L.pair_y3);
 
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);  // ui_update_ble_status decides
 }
@@ -461,10 +477,44 @@ static void build_idle_group(lv_obj_t* parent) {
     // A shrunk-down sleeping creature (reused claudepix "expression sleep" art)
     // sits between the header and the status line; the animated "Listening…"
     // status line carries the words, so no extra text is needed here.
-    lv_obj_t* creature = splash_mini_create(idle_group, "expression sleep", L.idle_px);
-    if (creature) lv_obj_align(creature, LV_ALIGN_CENTER, 0, -20);
+mini_creature = splash_mini_create(idle_group, "expression sleep", L.idle_px);
+    if (mini_creature) lv_obj_align(mini_creature, LV_ALIGN_CENTER, 0, -20);
 
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
+}
+
+// "Claude is waiting for you" view — shown when the host daemon forwards an
+// attention request (Claude Code hook: permission prompt / waiting for input).
+// The shared mini creature is re-parented here and switched to a surprised
+// animation while the view is up; a caption spells out why the device chimed.
+static void build_attention_group(lv_obj_t* parent) {
+    attention_group = lv_obj_create(parent);
+    lv_obj_set_size(attention_group, L.scr_w, L.scr_h - L.content_y);
+    lv_obj_set_pos(attention_group, 0, L.content_y);
+    lv_obj_set_style_bg_opa(attention_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(attention_group, 0, 0);
+    lv_obj_set_style_pad_all(attention_group, 0, 0);
+    lv_obj_clear_flag(attention_group, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(attention_group, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    lbl_attention = lv_label_create(attention_group);
+    lv_label_set_text(lbl_attention, S->attn_caption[0]);
+    lv_obj_set_style_text_font(lbl_attention, L.bt_status_font, 0);
+    lv_obj_set_style_text_color(lbl_attention, COL_AMBER, 0);
+    lv_obj_align(lbl_attention, LV_ALIGN_CENTER, 0, 90);
+
+    // Event context (project name / "HH:MM meeting title") on its own line
+    // right below the header, full width — up to two wrapped lines, "…" when
+    // even that overflows. The header title itself stays hidden meanwhile.
+    lbl_attn_ctx = lv_label_create(attention_group);
+    lv_obj_set_style_text_font(lbl_attn_ctx, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_attn_ctx, COL_DIM, 0);
+    lv_obj_set_style_text_align(lbl_attn_ctx, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(lbl_attn_ctx, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(lbl_attn_ctx, L.scr_w - 2 * L.margin, 80);
+    lv_obj_align(lbl_attn_ctx, LV_ALIGN_TOP_MID, 0, 0);
+
+    lv_obj_add_flag(attention_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
 }
 
 static void init_usage_screen(lv_obj_t* scr) {
@@ -478,7 +528,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
 
     lbl_title = lv_label_create(usage_container);
-    lv_label_set_text(lbl_title, "Usage");
+lv_label_set_text(lbl_title, S->title);
     lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
     // The nudge balances the corner logo on the left; smaller on small
@@ -496,7 +546,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    panel_session = make_usage_panel(usage_group, L.content_y, "Current",
+    panel_session = make_usage_panel(usage_group, L.content_y, S->pill_session,
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
 
@@ -508,7 +558,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
 
     lbl_spending_desc = lv_label_create(panel_session);
-    lv_label_set_text(lbl_spending_desc, "of your monthly budget");
+lv_label_set_text(lbl_spending_desc, S->of_monthly_budget);
     lv_obj_set_style_text_font(lbl_spending_desc, L.reset_font, 0);
     lv_obj_set_style_text_color(lbl_spending_desc, COL_DIM, 0);
     lv_obj_set_pos(lbl_spending_desc, 0, L.usage_reset_y);
@@ -521,21 +571,42 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
 
     panel_weekly = make_usage_panel(usage_group,
-                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
+                     L.content_y + L.usage_panel_h + L.usage_panel_gap, S->pill_weekly,
                      &lbl_weekly_pct, &lbl_weekly_label,
                      &bar_weekly, &lbl_weekly_reset);
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
 
+    // Fable pill — hidden until the daemon reports a model-scoped limit.
+    // Slimmer than the "Неделя" pill so it doesn't crowd the big percent.
+    pill_fable = make_pill(panel_weekly, "");
+    lv_obj_set_style_text_font(pill_fable, &font_styrene_20, 0);
+    lv_obj_set_style_pad_left(pill_fable, 12, 0);
+    lv_obj_set_style_pad_right(pill_fable, 12, 0);
+    lv_obj_set_style_pad_top(pill_fable, 4, 0);
+    lv_obj_set_style_pad_bottom(pill_fable, 4, 0);
+    lv_label_set_recolor(pill_fable, true);
+    lv_obj_add_flag(pill_fable, LV_OBJ_FLAG_HIDDEN);
+
     build_pair_group(usage_container);
     build_idle_group(usage_container);
+    build_attention_group(usage_container);
 
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
     lv_obj_set_style_text_font(lbl_anim, L.anim_font, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
-    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
+lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
+
+    // Active-session counter — pinned to the bottom-left corner, independent
+    // of the centered status text. Shown only on the live usage view.
+    lbl_sessions = lv_label_create(usage_container);
+    lv_label_set_text(lbl_sessions, "");
+    lv_obj_set_style_text_font(lbl_sessions, L.anim_font, 0);
+    lv_obj_set_style_text_color(lbl_sessions, COL_DIM, 0);
+    lv_obj_align(lbl_sessions, LV_ALIGN_BOTTOM_LEFT, L.margin, L.anim_y);
+    lv_obj_add_flag(lbl_sessions, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ======== Public API ========
@@ -564,17 +635,47 @@ void ui_init(void) {
 
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
-    lv_obj_set_pos(battery_img, L.scr_w - L.batt_w - L.margin, L.batt_y);
+lv_obj_set_pos(battery_img, L.scr_w - L.batt_w - L.margin, L.batt_y);
     // Boards without battery telemetry never show the indicator (per the HAL
     // contract; previously every board drew the empty-battery glyph).
     if (!board_caps().has_battery) {
         lv_obj_del(battery_img);
         battery_img = nullptr;
+    } else {
+        battery_lbl = lv_label_create(scr);
+        lv_obj_set_style_text_font(battery_lbl, &font_styrene_16, 0);
+        lv_obj_set_style_text_color(battery_lbl, COL_DIM, 0);
+        lv_label_set_text(battery_lbl, "");
     }
+}
+
+static char data_err[8] = "";   // daemon error beat code; "" = data flows fine
+static int  active_sessions = -1;   // working Claude sessions; -1 = not reported
+
+// Bottom-left session counter: "\xC2\xB7N" for N >= 1 on the live usage view only.
+static void apply_sessions_label(void) {
+    if (!lbl_sessions) return;
+    if (view_state == 2 && active_sessions >= 1) {
+        lv_label_set_text_fmt(lbl_sessions, "\xC2\xB7%d", active_sessions);
+        lv_obj_clear_flag(lbl_sessions, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(lbl_sessions, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void ui_set_data_error(const char* code) {
+    strlcpy(data_err, code ? code : "", sizeof(data_err));
+    if (!data_err[0]) return;
+    // Expire the freshness window right away so update_view_state flips to
+    // the idle view on the next tick instead of after DATA_FRESH_MS.
+    if (data_received) last_data_ms = lv_tick_get() - DATA_FRESH_MS;
 }
 
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
+    data_err[0] = '\0';             // a good payload clears any error beat
+    active_sessions = data->active_sessions;
+    apply_sessions_label();
     last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
     data_received = true;
 
@@ -585,23 +686,23 @@ void ui_update(const UsageData* data) {
     } else if (clock_base_epoch != 0) {   // clock turned off daemon-side → revert title to "Usage"
         clock_base_epoch = 0;
         clock_last_min = -1;
-        lv_label_set_text(lbl_title, "Usage");
+        lv_label_set_text(lbl_title, S->title);
     }
 
     int s_pct = (int)(data->session_pct + 0.5f);
 
     if (data->enterprise) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
-        lv_obj_set_style_text_font(lbl_session_pct, L.ent_pct_font, 0);
-        lv_label_set_text(lbl_session_label, "Spending");
+lv_obj_set_style_text_font(lbl_session_pct, L.ent_pct_font, 0);
+        lv_label_set_text(lbl_session_label, S->spending);
         lv_obj_add_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_status,   LV_OBJ_FLAG_HIDDEN);
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_set_style_text_font(lbl_session_pct, L.pct_font, 0);
-        lv_label_set_text(lbl_session_label, "Current");
+lv_obj_set_style_text_font(lbl_session_pct, L.pct_font, 0);
+        lv_label_set_text(lbl_session_label, S->pill_session);
         lv_obj_clear_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
@@ -609,16 +710,16 @@ void ui_update(const UsageData* data) {
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     }
 
-    char buf[48];
+    char buf[96];   // UTF-8 Cyrillic is 2 bytes/char — keep headroom for the recolor markup
 
     // Pace vars used in both enterprise blocks below
-    const char* pace_text = "Under pace";
+    const char* pace_text = S->pace_under;
     lv_color_t  pace_color = COL_GREEN;
-    const char* pace_hex   = "788c5d";   // matches THEME_GREEN
+    const char* pace_hex   = THEME_GREEN_HEX;
     if (data->session_pct > (float)data->time_pct + 15.0f) {
-        pace_text = "Over pace";  pace_color = COL_RED;   pace_hex = "c0392b";
+        pace_text = S->pace_over;  pace_color = COL_RED;   pace_hex = THEME_RED_HEX;
     } else if (data->session_pct > (float)data->time_pct - 15.0f) {
-        pace_text = "On pace";    pace_color = COL_AMBER; pace_hex = "d97757";
+        pace_text = S->pace_on;    pace_color = COL_AMBER; pace_hex = THEME_AMBER_HEX;
     }
 
     if (data->enterprise) {
@@ -627,7 +728,7 @@ void ui_update(const UsageData* data) {
                         LV_ALIGN_OUT_RIGHT_TOP, 4, 12);
     } else {
         lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
-        format_reset_time(data->session_reset_mins, buf, sizeof(buf));
+        format_reset_time(data->session_reset_mins, data->session_reset_at, buf, sizeof(buf));
         lv_label_set_text(lbl_session_reset, buf);
     }
 
@@ -636,23 +737,45 @@ void ui_update(const UsageData* data) {
 
     if (data->enterprise) {
         // Period box: time % + dynamic pace color + "Resets <date>" label
-        lv_label_set_text(lbl_weekly_label, "Period");
+        lv_label_set_text(lbl_weekly_label, S->pill_period);
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", data->time_pct);
         lv_bar_set_value(bar_weekly, data->time_pct, LV_ANIM_ON);
         lv_color_t bar_pace = (data->session_pct <= (float)data->time_pct) ? COL_GREEN :
                               (data->session_pct <= (float)data->time_pct + 15.0f) ? COL_AMBER :
                               COL_RED;
         lv_obj_set_style_bg_color(bar_weekly, bar_pace, LV_PART_INDICATOR);
-        snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Resets %s#",
-                 pace_hex, pace_text, data->reset_date);
+        snprintf(buf, sizeof(buf), S->ent_reset_fmt,
+                 pace_hex, pace_text, THEME_TEXT_HEX, data->reset_date);
         lv_label_set_text(lbl_weekly_reset, buf);
     } else {
         int w_pct = (int)(data->weekly_pct + 0.5f);
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
         lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
         lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
-        format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
+        format_reset_time(data->weekly_reset_mins, data->weekly_reset_at, buf, sizeof(buf));
         lv_label_set_text(lbl_weekly_reset, buf);
+    }
+
+    if (pill_fable) {
+        if (!data->enterprise && data->fable_pct >= 0) {
+            // The weekly-scoped percent changes maybe hourly; skip the LVGL
+            // set/align (each one invalidates + reflushes over QSPI) unless
+            // the composed text actually changed.
+            char txt[64];
+            snprintf(txt, sizeof(txt), "#%s %s# #%s %d%%#", THEME_DIM_HEX,
+                     data->fable_name, pct_hex((float)data->fable_pct),
+                     data->fable_pct);
+            static char last_txt[64];
+            if (strcmp(txt, last_txt) != 0) {
+                strcpy(last_txt, txt);
+                lv_label_set_text(pill_fable, txt);
+                lv_obj_align_to(pill_fable, lbl_weekly_label,
+                                LV_ALIGN_OUT_LEFT_MID, -10, 0);
+            }
+            lv_obj_clear_flag(pill_fable, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(pill_fable, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 
@@ -660,35 +783,89 @@ void ui_update(const UsageData* data) {
 // (connected but data has gone stale), or the live usage panels. Only re-lays-out
 // on an actual change. The animated status line stays visible everywhere — it
 // reads "Listening…" on the idle screen, keeping it alive rather than frozen.
+// While the attention view is up the header title is hidden (logo + battery
+// stay); the event context renders full-width on lbl_attn_ctx instead — the
+// header slot is too narrow between the two corner icons.
+static void attention_style_title(void) {
+    if (lbl_title) lv_obj_add_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
+    if (!lbl_attn_ctx) return;
+    if (attention_project[0]) {
+        lv_label_set_text(lbl_attn_ctx, attention_project);
+        lv_obj_clear_flag(lbl_attn_ctx, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(lbl_attn_ctx, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 static void update_view_state(void) {
-    if (!usage_group || !pair_group || !idle_group) return;
+    if (!usage_group || !pair_group || !idle_group || !attention_group) return;
     int v;
     if (!s_ble_connected) {
         v = 0;  // pairing hint
+        attention_active = false;   // stale without a live host
+    } else if (attention_active) {
+        v = 3;  // "Claude is waiting for you"
     } else if (data_received && (lv_tick_get() - last_data_ms) < DATA_FRESH_MS) {
         v = 2;  // live usage
     } else {
         v = 1;  // idle / Zzz
     }
     if (v == view_state) return;
+    // The mini creature is a singleton — hand it to whichever view needs it.
+    // The "Лимиты" header title is irrelevant while the attention view is up
+    // (its caption carries the message), so hide it for the duration.
+    if (mini_creature) {
+        if (v == 3) {
+            lv_obj_set_parent(mini_creature, attention_group);
+            splash_mini_set_anim(attn_style().anim);
+            // -16 (not the idle view's -20): leaves room for two wrapped
+            // context lines above without touching the caption below.
+            lv_obj_align(mini_creature, LV_ALIGN_CENTER, 0, -16);
+        } else if (view_state == 3) {
+            lv_obj_set_parent(mini_creature, idle_group);
+            splash_mini_set_anim("expression sleep");
+            lv_obj_align(mini_creature, LV_ALIGN_CENTER, 0, -20);
+        }
+    }
+    // While the attention view is up, the header shows the PROJECT the event
+    // belongs to (or nothing if unknown) instead of the usual "Лимиты" title.
+    if (lbl_title) {
+        if (v == 3) {
+            attention_style_title();
+        } else if (view_state == 3) {
+            // attention only hid the title — bring it back (font/color/align
+            // were never touched).
+            lv_label_set_text(lbl_title, S->title);
+            clock_last_min = -1;   // let an active title clock repaint itself
+            lv_obj_clear_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
     view_state = v;
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group : usage_group,
+    lv_obj_add_flag(attention_group, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group :
+                      v == 3 ? attention_group : usage_group,
                       LV_OBJ_FLAG_HIDDEN);
+    apply_sessions_label();
 }
 
 void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
+    if (attention_active &&
+        lv_tick_get() - attention_since >= attn_style().timeout_ms) {
+        attention_active = false;   // nobody came — stop nagging
+    }
     update_view_state();
-    if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
+    if (view_state == 1 || view_state == 3) splash_mini_tick();  // animate the mini creature
 
     uint32_t now = lv_tick_get();
 
     // Title clock: once the daemon has sent wall-clock time, replace "Usage" with
     // the live time, advanced locally so it ticks every minute between payloads.
-    if (clock_base_epoch > 0) {
+    // Skipped while the attention view owns the header (it shows the project).
+    if (clock_base_epoch > 0 && view_state != 3) {
         time_t cur = (time_t)(clock_base_epoch + (now - clock_base_ms) / 1000);
         struct tm tmv;
         gmtime_r(&cur, &tmv);   // epoch is already local wall-clock → gmtime keeps it as-is
@@ -708,46 +885,105 @@ void ui_tick_anim(void) {
     }
 
     if (now - anim_msg_start >= ANIM_MSG_MS) {
-        anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
+        anim_msg_idx = (anim_msg_idx + 1) % S->word_count;
         anim_msg_start = now;
     }
 
-    if (now - anim_last_ms < spinner_ms[anim_spinner_idx]) return;
-    anim_last_ms = now;
-    anim_phase = (anim_phase + 1) % SPINNER_PHASES;
-    anim_spinner_idx = (anim_phase < SPINNER_COUNT) ? anim_phase
-                                                    : (SPINNER_PHASES - anim_phase);
+    // While every session is resting the spinner freezes on its calm base
+    // glyph — a pulsing star reads as "working", which would be a lie.
+    bool resting = (view_state == 2 && active_sessions == 0);
+    if (resting) {
+        anim_phase = 0;
+        anim_spinner_idx = 0;
+        if (now - anim_last_ms < 1000) return;   // still refresh the text ~1/s
+        anim_last_ms = now;
+    } else {
+        if (now - anim_last_ms < spinner_ms[anim_spinner_idx]) return;
+        anim_last_ms = now;
+        anim_phase = (anim_phase + 1) % SPINNER_PHASES;
+        anim_spinner_idx = (anim_phase < SPINNER_COUNT) ? anim_phase
+                                                        : (SPINNER_PHASES - anim_phase);
+    }
 
     // Status text by priority. Whimsical messages only when connected & settled.
     const char* text;
     if (!s_ble_connected) {
-        text = "Waiting";              // advertising / waiting for a host connection
+        text = S->st_waiting;          // advertising / waiting for a host connection
+    } else if (view_state == 3) {      // attention — spell out why the device chimed
+        text = S->attn_status[attention_type - 1];
+    } else if (view_state == 1 && data_err[0]) {  // idle with a known cause — name it
+        text = !strcmp(data_err, "auth")  ? S->err_auth :
+               !strcmp(data_err, "token") ? S->err_token :
+               !strcmp(data_err, "rate")  ? S->err_rate :
+               !strcmp(data_err, "net")   ? S->err_net : S->err_api;
     } else if (view_state == 1) {      // idle — alternate so it reads as alive AND data-less
-        text = (anim_msg_idx & 1) ? "No data" : "Listening";
+        text = (anim_msg_idx & 1) ? S->st_no_data : S->st_listening;
     } else if (now - connected_at_ms < 5000) {
-        text = "Connected";
+        text = S->st_connected;
+    } else if (active_sessions == 0) {
+        text = S->st_resting;          // no Claude session is doing anything
     } else {
-        text = anim_messages[anim_msg_idx];
+        text = S->words[anim_msg_idx % S->word_count];
     }
 
-    // All states share the whimsical style: "<glyph> <Title-case word>…"
-    static char buf[80];
+    // All states share the whimsical style: "<glyph> <Title-case word>…".
+    // The active-session count lives in its own bottom-left label. Skip the
+    // set_text when nothing changed — LVGL invalidates (and re-flushes over
+    // QSPI) the label area on every set, which matters while resting, where
+    // the composed text is identical second after second.
+    static char buf[96];
+    static char last_buf[96] = "";
     snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6",
              spinner_frames[anim_spinner_idx], text);
-    lv_label_set_text(lbl_anim, buf);
+    if (strcmp(buf, last_buf) != 0) {
+        strcpy(last_buf, buf);
+        lv_label_set_text(lbl_anim, buf);
+    }
 }
 
 static screen_t prev_non_splash_screen = SCREEN_USAGE;
 static void apply_battery_visibility(void) {
-    if (!battery_img) return;
-    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-    else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    bool hide = current_screen == SCREEN_SPLASH;
+    if (battery_img) lv_obj_set_flag(battery_img, LV_OBJ_FLAG_HIDDEN, hide);
+    if (battery_lbl) lv_obj_set_flag(battery_lbl, LV_OBJ_FLAG_HIDDEN, hide);
 }
 
 static void global_click_cb(lv_event_t* e) {
     (void)e;
+    if (attention_active) {   // first tap acknowledges the attention view
+        attention_active = false;
+        update_view_state();
+        return;
+    }
     if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
     else                                  ui_show_screen(SCREEN_SPLASH);
+}
+
+void ui_show_attention(uint8_t type, const char* project) {
+    if (type < ATTN_INPUT || type > ATTN_RESET) return;
+    idle_note_activity();               // wake the panel if it faded out
+    // Re-style the view even if it's already up (a new event may differ).
+    bool was_active = attention_active;
+    attention_active = true;
+    attention_type   = type;
+    strlcpy(attention_project, project ? project : "", sizeof(attention_project));
+    if (lbl_attention) {
+        lv_label_set_text(lbl_attention, S->attn_caption[attention_type - 1]);
+        lv_obj_set_style_text_color(lbl_attention, attn_style().color, 0);
+    }
+    if (was_active) {   // already on the view — update_view_state won't re-enter
+        if (mini_creature) splash_mini_set_anim(attn_style().anim);
+        attention_style_title();   // header project may differ between events too
+    }
+    attention_since = lv_tick_get();
+    if (current_screen != SCREEN_USAGE) ui_show_screen(SCREEN_USAGE);
+    update_view_state();
+}
+
+void ui_hide_attention(void) {
+    if (!attention_active) return;
+    attention_active = false;
+    update_view_state();
 }
 
 void ui_show_screen(screen_t screen) {
@@ -789,6 +1025,29 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
     update_view_state();
 }
 
+void ui_set_lang(const char* lang) {
+    if (!strings_set_lang(lang)) return;
+    // Most labels are rewritten by the next ui_update()/status tick; restamp
+    // only the ones that aren't.
+    if (lbl_pair1) {
+        lv_label_set_text(lbl_pair1, S->pair1);
+        lv_label_set_text(lbl_pair2, S->pair2);
+        lv_label_set_text(lbl_pair3, S->pair3);
+    }
+    // The weekly pill is only rewritten by Enterprise updates ("Период") —
+    // in the Pro/Max flow it keeps its creation-time text, so restamp it
+    // here (a following Enterprise update overwrites it anyway). Same for
+    // the Enterprise-only budget caption and an attention caption that is
+    // on screen right now.
+    if (lbl_weekly_label) lv_label_set_text(lbl_weekly_label, S->pill_weekly);
+    if (lbl_spending_desc) lv_label_set_text(lbl_spending_desc, S->of_monthly_budget);
+    if (attention_active && lbl_attention)
+        lv_label_set_text(lbl_attention, S->attn_caption[attention_type - 1]);
+    // Header: skip while the attention view owns it or the clock ticks in it.
+    if (lbl_title && view_state != 3 && clock_base_epoch == 0)
+        lv_label_set_text(lbl_title, S->title);
+}
+
 void ui_update_battery(int percent, bool charging) {
     if (!battery_img) return;
     int idx;
@@ -806,5 +1065,13 @@ void ui_update_battery(int percent, bool charging) {
         idx = 3;
     }
     lv_image_set_src(battery_img, &battery_dscs[idx]);
+    if (battery_lbl) {
+        // Numeric percent, charging included; hidden only when the PMU
+        // doesn't report a level. Re-align after the text: the label grows
+        // leftwards from the icon.
+        if (percent >= 0) lv_label_set_text_fmt(battery_lbl, "%d%%", percent);
+        else              lv_label_set_text(battery_lbl, "");
+        lv_obj_align_to(battery_lbl, battery_img, LV_ALIGN_OUT_LEFT_MID, -6, 0);
+    }
     apply_battery_visibility();
 }

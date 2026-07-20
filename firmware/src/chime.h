@@ -29,5 +29,10 @@ bool chime_init(const ChimeConfig& cfg);
 // or already playing.
 void chime_play(void);
 
+// Short synthesized alert melodies (sine tones through the same I2S/codec
+// path — no extra PCM clips in flash). `kind` is an ATTN_* value from
+// data.h: ATTN_INPUT through ATTN_LIMIT (every type with a melody).
+void chime_play_alert(uint8_t kind);
+
 // Currently a no-op (playback runs in its own task); kept for HAL symmetry.
 void chime_tick(void);

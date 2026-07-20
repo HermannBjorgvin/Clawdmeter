@@ -6,6 +6,7 @@
 
 #include "data.h"
 #include "ui.h"
+#include "lang.h"
 #include "ble.h"
 #include "splash.h"
 #include "usage_rate.h"
@@ -108,20 +109,55 @@ static bool parse_json(const char* json, UsageData* out) {
 
     out->session_pct = doc["s"] | 0.0f;
     out->session_reset_mins = doc["sr"] | -1;
+    strlcpy(out->session_reset_at, doc["srt"] | "", sizeof(out->session_reset_at));
     out->weekly_pct = doc["w"] | 0.0f;
     out->weekly_reset_mins = doc["wr"] | -1;
+    strlcpy(out->weekly_reset_at, doc["wrt"] | "", sizeof(out->weekly_reset_at));
+    out->fable_pct = doc["f"] | -1;
+    strlcpy(out->fable_name, doc["fn"] | "Fable", sizeof(out->fable_name));
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
-    out->chime = doc["c"] | false;   // absent (old daemon / chime off) → stay silent
+    // NB: the daemon sends "c" as an integer, and ArduinoJson's `| false`
+    // fallback rejects non-bool types — as<bool>() coerces both int and bool,
+    // and yields false for absent/null.
+    out->chime = doc["c"].as<bool>();   // session-reset chime opt-in
+    const char* n = doc["n"] | "";      // hook-driven attention event
+    out->notify_type = !strcmp(n, "input")    ? ATTN_INPUT     :
+                       !strcmp(n, "perm")     ? ATTN_PERM      :
+                       !strcmp(n, "done")     ? ATTN_DONE      :
+                       !strcmp(n, "cal")      ? ATTN_CAL       :
+                       !strcmp(n, "calstart") ? ATTN_CAL_START :
+                       !strcmp(n, "clear")    ? ATTN_CLEAR     : ATTN_NONE;
+    strlcpy(out->notify_project, doc["np"] | "", sizeof(out->notify_project));
+    out->active_sessions = doc["a"] | -1;
     const char* acct = doc["acct"] | "pro";
     out->enterprise = (strcmp(acct, "ent") == 0);
     out->time_pct = doc["tp"] | 0;
     out->period_days = doc["pd"] | 30;
     strlcpy(out->reset_date, doc["rd"] | "", sizeof(out->reset_date));
+    strlcpy(out->lang, doc["lang"] | "", sizeof(out->lang));
     out->clock_epoch = doc["t"] | 0L;
     out->clock_fmt = doc["tf"] | 24;
     out->ok = doc["ok"] | false;
+    strlcpy(out->err, doc["err"] | "", sizeof(out->err));
     out->valid = true;
     return true;
+}
+
+// Session-limit thresholds: warn once when crossing 80%, and again at 95%
+// (a jump over both in one payload alerts once, at the higher tier).
+// Re-armed by a session-window reset. Only the previous payload's value is
+// tracked here — the full sample history lives in usage_rate.cpp.
+static void check_limit_thresholds(bool session_reset, float pct) {
+    static int prev = -1;
+    int s_now = (int)(pct + 0.5f);
+    if (session_reset) prev = -1;
+    if (prev >= 0 && ((prev < 95 && s_now >= 95) ||
+                      (prev < 80 && s_now >= 80 && s_now < 95))) {
+        Serial.printf("session limit warning: %d%% -> %d%%\n", prev, s_now);
+        sound_hal_play_alert(ATTN_LIMIT);
+        ui_show_attention(ATTN_LIMIT, "");
+    }
+    prev = s_now;
 }
 
 // ---- Serial command buffer ----
@@ -174,6 +210,10 @@ static void check_serial_cmd() {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
             else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
+            // QA helpers: jump between screens without touching the buttons
+            // (a fresh flash boots into the splash — see CLAUDE.md).
+            else if (strcmp(cmd_buf, "usage") == 0)  ui_show_screen(SCREEN_USAGE);
+            else if (strcmp(cmd_buf, "splash") == 0) ui_show_screen(SCREEN_SPLASH);
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -228,6 +268,7 @@ void setup() {
     ble_init();
     input_hal_init();
 
+    strings_init();   // load the persisted UI language before any label exists
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
@@ -355,6 +396,9 @@ void loop() {
     if (bs != last_ble_state) {
         last_ble_state = bs;
         ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());
+        // Without a live daemon the activity state is unknowable — fall back
+        // to the classic power rules (and stay lit for the pairing hint).
+        if (bs != BLE_STATE_CONNECTED) idle_set_claude_active(-1);
     }
 
     static int  last_pct      = -2;
@@ -371,22 +415,51 @@ void loop() {
 
     if (ble_has_data()) {
         if (parse_json(ble_get_data(), &usage)) {
-            int g_before = usage_rate_group();
-            bool session_reset = usage_rate_sample(usage.session_pct);
-            int g_after = usage_rate_group();
-            // 5-hour session limit refilled → chime so the user knows they can
-            // use Claude again (no-op on boards without a buzzer). Gated on the
-            // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
-            if (session_reset && usage.chime) {
-                Serial.println("session reset detected — chime");
-                sound_hal_play_reset();
+            // Language first: an attention event in the same payload must
+            // already render its caption in the requested language.
+            ui_set_lang(usage.lang);   // "" = keep current
+            // Hook-driven attention event. The daemon sets "n" on exactly one
+            // payload per hook event, so no edge detection is needed here.
+            // Handled before the ok-check: a permission chime matters even
+            // while the usage data itself is unavailable.
+            if (usage.notify_type >= ATTN_INPUT && usage.notify_type <= ATTN_CAL_START) {
+                Serial.printf("attention request type %d (%s) — melody + view\n",
+                              usage.notify_type, usage.notify_project);
+                sound_hal_play_alert(usage.notify_type);
+                ui_show_attention(usage.notify_type, usage.notify_project);
+            } else if (usage.notify_type == ATTN_CLEAR) {
+                Serial.println("attention clear — user is back at the keyboard");
+                ui_hide_attention();
             }
-            if (g_after != g_before) {
-                Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
-                if (splash_is_active()) splash_pick_for_current_rate();
+            if (!usage.ok) {
+                // Error beat: the daemon can't fetch usage (expired token,
+                // network, 429…). Flip to the idle view showing WHY instead
+                // of rendering the old numbers as if they were live.
+                Serial.printf("error beat: %s\n", usage.err);
+                ui_set_data_error(usage.err);
+            } else {
+                int g_before = usage_rate_group();
+                bool session_reset = usage_rate_sample(usage.session_pct);
+                int g_after = usage_rate_group();
+                // 5-hour session limit refilled → chime so the user knows they
+                // can use Claude again (no-op on boards without a buzzer).
+                // Gated on the daemon's opt-in `chime` config; the `buzz`
+                // serial cmd ignores it.
+                if (session_reset) {
+                    Serial.println("session reset detected — wink");
+                    ui_show_attention(ATTN_RESET, "");
+                    if (usage.chime) sound_hal_play_reset();  // sound stays opt-in
+                }
+                if (g_after != g_before) {
+                    Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
+                        g_before, g_after, usage.session_pct);
+                    if (splash_is_active()) splash_pick_for_current_rate();
+                }
+                check_limit_thresholds(session_reset, usage.session_pct);
+                ui_update(&usage);
+                splash_set_activity(usage.active_sessions);
+                idle_set_claude_active(usage.active_sessions);
             }
-            ui_update(&usage);
             ble_send_ack();
         } else {
             ble_send_nack();

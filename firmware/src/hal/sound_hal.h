@@ -9,6 +9,12 @@
 // returns immediately; sound_hal_tick() (called every loop) advances the notes
 // so the LVGL render loop never stalls.
 
+#include <stdint.h>
+
 void sound_hal_init(void);
 void sound_hal_tick(void);
 void sound_hal_play_reset(void);
+// Synthesized alert melody; `kind` is an ATTN_* value from data.h
+// (ATTN_INPUT through ATTN_LIMIT — every type with a melody). No-op on
+// boards without a speaker.
+void sound_hal_play_alert(uint8_t kind);
