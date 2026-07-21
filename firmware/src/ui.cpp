@@ -16,6 +16,7 @@ LV_FONT_DECLARE(font_styrene_20);
 LV_FONT_DECLARE(font_styrene_16);
 LV_FONT_DECLARE(font_styrene_14);
 LV_FONT_DECLARE(font_mono_32);
+LV_FONT_DECLARE(font_mono_18);
 
 // Layout values computed from the active board's geometry. Populated once
 // in ui_init() and treated as const for the rest of the program. Adding a
@@ -42,6 +43,17 @@ struct Layout {
     const lv_font_t* bt_device_font;
     const lv_font_t* bt_credit_1_font;
     const lv_font_t* bt_credit_2_font;
+
+    // Round-display usage gauges (semicircle arcs instead of rectangular bars)
+    bool     is_round;
+    int16_t  round_cx, round_cy;   // arc center — screen center
+    int16_t  round_r_out;          // arc outer radius
+    int16_t  round_r_in;           // arc inner radius (round_r_out - round_arc_w) — divider length
+    int16_t  round_arc_w;          // arc track thickness
+    const lv_font_t* round_title_font;
+    const lv_font_t* round_pct_font;
+    const lv_font_t* round_pill_font;
+    const lv_font_t* round_sub_font;
 };
 static Layout L = {};
 
@@ -54,6 +66,37 @@ static void compute_layout(const BoardCaps& c) {
     L.scr_h = c.height;
     L.margin = 20;
     L.title_y = 30;
+    L.is_round = c.is_round;
+
+    if (c.is_round) {
+        // Round panel — usage is two semicircle gauges (top = current, bottom =
+        // weekly) sharing one ring, not rectangular bar panels. Geometry below
+        // is tuned for 360x360 (Waveshare LCD-1.85B); new round ports may need
+        // a fresh pass but inherit sane defaults via the same formulas.
+        int16_t half = (L.scr_w < L.scr_h ? L.scr_w : L.scr_h) / 2;
+        L.round_cx = L.scr_w / 2;
+        L.round_cy = L.scr_h / 2;
+        // Smaller than the ring would ideally be, but a header band tall enough
+        // for a battery icon (not just a title's-worth of text) needs the room.
+        L.round_r_out = half - 64;
+        L.round_arc_w = 26;
+        L.round_r_in  = L.round_r_out - L.round_arc_w;
+        L.round_title_font  = &font_styrene_24;
+        L.round_pct_font    = &font_styrene_48;
+        L.round_pill_font   = &font_styrene_16;
+        L.round_sub_font    = &font_styrene_14;
+
+        // Fields below aren't used by the round usage builder but the shared
+        // pairing-hint screen (build_pair_group) still reads the bt_* fonts.
+        L.content_y = 0;
+        L.bt_title_font    = &font_tiempos_34;
+        L.bt_status_font   = &font_styrene_28;
+        L.bt_device_font   = &font_styrene_20;
+        L.bt_credit_1_font = &font_styrene_16;
+        L.bt_credit_2_font = &font_styrene_14;
+        L.content_w = L.scr_w - 2 * L.margin;
+        return;
+    }
 
     if (c.height >= 460) {
         // Large layout — tuned for 480x480 (AMOLED-2.16).
@@ -202,6 +245,19 @@ static const char* const anim_messages[] = {
 };
 #define ANIM_MSG_COUNT (sizeof(anim_messages) / sizeof(anim_messages[0]))
 
+// Sets fill + color on either a rectangular bar or a round-display arc gauge —
+// the two share the same lv_obj_t* pointer slot (bar_session/bar_weekly), so
+// callers don't need to know which one the active board built.
+static void set_gauge(lv_obj_t* gauge, int pct, lv_color_t color) {
+    if (L.is_round) {
+        lv_arc_set_value(gauge, pct);
+        lv_obj_set_style_arc_color(gauge, color, LV_PART_INDICATOR);
+    } else {
+        lv_bar_set_value(gauge, pct, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(gauge, color, LV_PART_INDICATOR);
+    }
+}
+
 static lv_color_t pct_color(float pct) {
     if (pct >= 80.0f) return COL_RED;
     if (pct >= 50.0f) return COL_AMBER;
@@ -255,6 +311,62 @@ static lv_obj_t* make_bar(lv_obj_t* parent, int x, int y, int w, int h) {
     return bar;
 }
 
+// Round-display progress gauge: a semicircle arc (0..100 value range mapped
+// onto [start_angle, end_angle]) instead of a rectangular bar. Two of these,
+// covering the top and bottom halves respectively, form one ring split into
+// independent current/weekly fills. Non-interactive — knob removed, not
+// clickable — so it behaves like the bar it replaces (tap passes through to
+// usage_container's splash-toggle handler).
+static lv_obj_t* make_gauge_arc(lv_obj_t* parent, int32_t start_angle, int32_t end_angle) {
+    lv_obj_t* arc = lv_arc_create(parent);
+    lv_obj_set_size(arc, 2 * L.round_r_out, 2 * L.round_r_out);
+    lv_obj_set_pos(arc, L.round_cx - L.round_r_out, L.round_cy - L.round_r_out);
+    lv_arc_set_bg_angles(arc, start_angle, end_angle);
+    lv_arc_set_range(arc, 0, 100);
+    lv_arc_set_value(arc, 0);
+    lv_obj_set_style_arc_width(arc, L.round_arc_w, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(arc, L.round_arc_w, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(arc, COL_BAR_BG, LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(arc, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(arc, COL_GREEN, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(arc, false, LV_PART_MAIN);
+    lv_obj_set_style_arc_rounded(arc, false, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, 0);
+    lv_obj_remove_style(arc, NULL, LV_PART_KNOB);
+    lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
+    return arc;
+}
+
+// One gauge half: the arc plus its centered pct/label/reset text stack. Text
+// is parented directly to `parent` (not the arc) and placed via LV_ALIGN_CENTER
+// offsets so it sits in the safe inner disk the arc never draws into.
+static lv_obj_t* make_usage_gauge_round(lv_obj_t* parent, int32_t angle_start, int32_t angle_end,
+                                         int16_t y_off_caption, int16_t y_off_pct, int16_t y_off_reset,
+                                         const char* pill_text,
+                                         lv_obj_t** out_pct, lv_obj_t** out_pill, lv_obj_t** out_reset) {
+    lv_obj_t* arc = make_gauge_arc(parent, angle_start, angle_end);
+
+    *out_pct = lv_label_create(parent);
+    lv_label_set_text(*out_pct, "---%");
+    lv_obj_set_style_text_font(*out_pct, L.round_pct_font, 0);
+    lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
+    lv_obj_align(*out_pct, LV_ALIGN_CENTER, 0, y_off_pct);
+
+    *out_pill = lv_label_create(parent);
+    lv_label_set_text(*out_pill, pill_text);
+    lv_obj_set_style_text_font(*out_pill, L.round_pill_font, 0);
+    lv_obj_set_style_text_color(*out_pill, COL_DIM, 0);
+    lv_obj_align(*out_pill, LV_ALIGN_CENTER, 0, y_off_caption);
+
+    *out_reset = lv_label_create(parent);
+    lv_label_set_text(*out_reset, "---");
+    lv_obj_set_style_text_font(*out_reset, L.round_sub_font, 0);
+    lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
+    lv_obj_align(*out_reset, LV_ALIGN_CENTER, 0, y_off_reset);
+
+    return arc;
+}
+
 static void init_icon_dsc_rgb565a8(lv_image_dsc_t* dsc, int w, int h, const uint8_t* data) {
     dsc->header.w = w;
     dsc->header.h = h;
@@ -264,10 +376,10 @@ static void init_icon_dsc_rgb565a8(lv_image_dsc_t* dsc, int w, int h, const uint
     dsc->data_size = w * h * 3;
 }
 
-static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
+static lv_obj_t* make_pill(lv_obj_t* parent, const char* text, const lv_font_t* font) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_font(lbl, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl, font, 0);
     lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
     lv_obj_set_style_bg_color(lbl, COL_BAR_BG, 0);
     lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
@@ -300,7 +412,7 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
     lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
     lv_obj_set_pos(*out_pct, 0, 0);
 
-    *out_pill = make_pill(panel, pill_text);
+    *out_pill = make_pill(panel, pill_text, &font_styrene_28);
     lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
 
     *out_bar = make_bar(panel, 0, L.usage_bar_y, L.content_w - 32, 24);
@@ -326,23 +438,30 @@ static void build_pair_group(lv_obj_t* parent) {
     lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
+    // Round panels are widest near the vertical center and narrow toward the
+    // top edge, so the three lines sit lower (and closer together) than on a
+    // rectangular panel to stay clear of the circular bezel.
+    int16_t y1 = L.is_round ? 90  : 40;
+    int16_t y2 = L.is_round ? 160 : 120;
+    int16_t y3 = L.is_round ? 200 : 160;
+
     lv_obj_t* l1 = lv_label_create(pair_group);
     lv_label_set_text(l1, "To pair");
     lv_obj_set_style_text_font(l1, L.bt_status_font, 0);
     lv_obj_set_style_text_color(l1, COL_TEXT, 0);
-    lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, y1);
 
     lv_obj_t* l2 = lv_label_create(pair_group);
     lv_label_set_text(l2, "hold the power button");
     lv_obj_set_style_text_font(l2, L.bt_device_font, 0);
     lv_obj_set_style_text_color(l2, COL_DIM, 0);
-    lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, 120);
+    lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, y2);
 
     lv_obj_t* l3 = lv_label_create(pair_group);
     lv_label_set_text(l3, "for 3 seconds, then release");
     lv_obj_set_style_text_font(l3, L.bt_device_font, 0);
     lv_obj_set_style_text_color(l3, COL_DIM, 0);
-    lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, 160);
+    lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, y3);
 
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);  // ui_update_ble_status decides
 }
@@ -381,9 +500,18 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
-    lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+    if (L.is_round) {
+        // Round header has room for the battery meter or a title, not both —
+        // the meter wins. Kept alive (not destroyed) so the clock-text code in
+        // ui_tick_anim() still has a valid target; it just never renders.
+        lv_obj_set_style_text_font(lbl_title, L.round_title_font, 0);
+        lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, 10);
+        lv_obj_add_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
+        lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+    }
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
@@ -396,34 +524,83 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    panel_session = make_usage_panel(usage_group, L.content_y, "Current",
-                     &lbl_session_pct, &lbl_session_label,
-                     &bar_session, &lbl_session_reset);
+    if (L.is_round) {
+        // Top semicircle (9 o'clock -> 12 o'clock -> 3 o'clock) = current.
+        panel_session = make_usage_gauge_round(usage_group, 180, 360,
+                         /*caption*/ -78, /*pct*/ -50, /*reset*/ -12, "Current",
+                         &lbl_session_pct, &lbl_session_label, &lbl_session_reset);
+        bar_session = panel_session;
 
-    // Enterprise-only overlays inside panel_session — hidden until enterprise data arrives
-    lbl_session_pct_sym = lv_label_create(panel_session);
-    lv_label_set_text(lbl_session_pct_sym, "%");
-    lv_obj_set_style_text_font(lbl_session_pct_sym, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_session_pct_sym, COL_TEXT, 0);
-    lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
+        // Enterprise-only overlays — hidden until enterprise data arrives. Parented
+        // to usage_group (not the arc) and pinned to the same slot as the reset/
+        // caption labels they stand in for.
+        lbl_session_pct_sym = lv_label_create(usage_group);
+        lv_label_set_text(lbl_session_pct_sym, "%");
+        lv_obj_set_style_text_font(lbl_session_pct_sym, &font_styrene_16, 0);
+        lv_obj_set_style_text_color(lbl_session_pct_sym, COL_TEXT, 0);
+        lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
 
-    lbl_spending_desc = lv_label_create(panel_session);
-    lv_label_set_text(lbl_spending_desc, "of your monthly budget");
-    lv_obj_set_style_text_font(lbl_spending_desc, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_spending_desc, COL_DIM, 0);
-    lv_obj_set_pos(lbl_spending_desc, 0, L.usage_reset_y);
-    lv_obj_add_flag(lbl_spending_desc, LV_OBJ_FLAG_HIDDEN);
+        lbl_spending_desc = lv_label_create(usage_group);
+        lv_label_set_text(lbl_spending_desc, "of your monthly budget");
+        lv_obj_set_style_text_font(lbl_spending_desc, L.round_sub_font, 0);
+        lv_obj_set_style_text_color(lbl_spending_desc, COL_DIM, 0);
+        lv_obj_align(lbl_spending_desc, LV_ALIGN_CENTER, 0, -14);
+        lv_obj_add_flag(lbl_spending_desc, LV_OBJ_FLAG_HIDDEN);
 
-    lbl_spending_status = lv_label_create(panel_session);
-    lv_label_set_text(lbl_spending_status, "");
-    lv_obj_set_style_text_font(lbl_spending_status, &font_styrene_16, 0);
-    lv_obj_set_pos(lbl_spending_status, 0, L.usage_reset_y + 20);
-    lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
+        lbl_spending_status = lv_label_create(usage_group);
+        lv_label_set_text(lbl_spending_status, "");
+        lv_obj_set_style_text_font(lbl_spending_status, L.round_sub_font, 0);
+        lv_obj_align(lbl_spending_status, LV_ALIGN_CENTER, 0, 4);
+        lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
 
-    panel_weekly = make_usage_panel(usage_group,
-                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
-                     &lbl_weekly_pct, &lbl_weekly_label,
-                     &bar_weekly, &lbl_weekly_reset);
+        // Bottom semicircle (3 o'clock -> 6 o'clock -> 9 o'clock) = weekly.
+        panel_weekly = make_usage_gauge_round(usage_group, 0, 180,
+                         /*caption*/ 90, /*pct*/ 58, /*reset*/ 14, "Weekly",
+                         &lbl_weekly_pct, &lbl_weekly_label, &lbl_weekly_reset);
+        bar_weekly = panel_weekly;
+
+        // Divider between the two gauges, created last so it draws on top of
+        // both arcs — reads as a clean cut across the ring, not a blob split.
+        lv_obj_t* divider = lv_obj_create(usage_group);
+        lv_obj_set_size(divider, 2 * L.round_r_out, 3);
+        lv_obj_set_pos(divider, L.round_cx - L.round_r_out, L.round_cy - 1);
+        lv_obj_set_style_bg_color(divider, COL_DIM, 0);
+        lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(divider, 0, 0);
+        lv_obj_set_style_radius(divider, 0, 0);
+        lv_obj_clear_flag(divider, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(divider, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(divider, LV_OBJ_FLAG_EVENT_BUBBLE);
+    } else {
+        panel_session = make_usage_panel(usage_group, L.content_y, "Current",
+                         &lbl_session_pct, &lbl_session_label,
+                         &bar_session, &lbl_session_reset);
+
+        // Enterprise-only overlays inside panel_session — hidden until enterprise data arrives
+        lbl_session_pct_sym = lv_label_create(panel_session);
+        lv_label_set_text(lbl_session_pct_sym, "%");
+        lv_obj_set_style_text_font(lbl_session_pct_sym, &font_styrene_28, 0);
+        lv_obj_set_style_text_color(lbl_session_pct_sym, COL_TEXT, 0);
+        lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
+
+        lbl_spending_desc = lv_label_create(panel_session);
+        lv_label_set_text(lbl_spending_desc, "of your monthly budget");
+        lv_obj_set_style_text_font(lbl_spending_desc, &font_styrene_28, 0);
+        lv_obj_set_style_text_color(lbl_spending_desc, COL_DIM, 0);
+        lv_obj_set_pos(lbl_spending_desc, 0, L.usage_reset_y);
+        lv_obj_add_flag(lbl_spending_desc, LV_OBJ_FLAG_HIDDEN);
+
+        lbl_spending_status = lv_label_create(panel_session);
+        lv_label_set_text(lbl_spending_status, "");
+        lv_obj_set_style_text_font(lbl_spending_status, &font_styrene_16, 0);
+        lv_obj_set_pos(lbl_spending_status, 0, L.usage_reset_y + 20);
+        lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
+
+        panel_weekly = make_usage_panel(usage_group,
+                         L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
+                         &lbl_weekly_pct, &lbl_weekly_label,
+                         &bar_weekly, &lbl_weekly_reset);
+    }
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
 
@@ -433,9 +610,17 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
-    lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
-    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+    if (L.is_round) {
+        // Small mono font (has the spinner glyphs; styrene doesn't) and pulled
+        // in from the edge — the default mono-32 status line is far wider than
+        // the ~140px clear at the bottom bezel.
+        lv_obj_set_style_text_font(lbl_anim, &font_mono_18, 0);
+        lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -22);
+    } else {
+        lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
+        lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+    }
 }
 
 // ======== Public API ========
@@ -459,12 +644,27 @@ void ui_init(void) {
 
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
-    lv_obj_set_pos(logo_img, L.margin, L.title_y - 10);
+    if (L.is_round) {
+        // No room for an 80px decorative logo in the round header — the
+        // battery meter lives there instead (replacing the title text too).
+        lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_set_pos(logo_img, L.margin, L.title_y - 10);
+    }
 
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
-    lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
-
+    if (L.is_round) {
+        // Dead-center top, where the title used to be. Scaled down to ~2/3 size
+        // (LVGL zooms around the image's own center, so the logical 48x48 box
+        // stays centered on round_cx even though the visible pixels shrink) —
+        // the round header band is only ~50px tall, not enough for a full-size
+        // 48px icon without it poking into the ring or the bezel above it.
+        lv_image_set_scale(battery_img, 171);
+        lv_obj_set_pos(battery_img, L.round_cx - 24, 22);
+    } else {
+        lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
+    }
 }
 
 void ui_update(const UsageData* data) {
@@ -486,7 +686,7 @@ void ui_update(const UsageData* data) {
 
     if (data->enterprise) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
-        lv_obj_set_style_text_font(lbl_session_pct, &font_tiempos_56, 0);
+        lv_obj_set_style_text_font(lbl_session_pct, L.is_round ? L.round_pct_font : &font_tiempos_56, 0);
         lv_label_set_text(lbl_session_label, "Spending");
         lv_obj_add_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
@@ -494,7 +694,7 @@ void ui_update(const UsageData* data) {
         lv_obj_add_flag(lbl_spending_status,   LV_OBJ_FLAG_HIDDEN);
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_set_style_text_font(lbl_session_pct, &font_styrene_48, 0);
+        lv_obj_set_style_text_font(lbl_session_pct, L.is_round ? L.round_pct_font : &font_styrene_48, 0);
         lv_label_set_text(lbl_session_label, "Current");
         lv_obj_clear_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
@@ -525,26 +725,23 @@ void ui_update(const UsageData* data) {
         lv_label_set_text(lbl_session_reset, buf);
     }
 
-    lv_bar_set_value(bar_session, s_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
+    set_gauge(bar_session, s_pct, pct_color(data->session_pct));
 
     if (data->enterprise) {
         // Period box: time % + dynamic pace color + "Resets <date>" label
         lv_label_set_text(lbl_weekly_label, "Period");
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", data->time_pct);
-        lv_bar_set_value(bar_weekly, data->time_pct, LV_ANIM_ON);
         lv_color_t bar_pace = (data->session_pct <= (float)data->time_pct) ? COL_GREEN :
                               (data->session_pct <= (float)data->time_pct + 15.0f) ? COL_AMBER :
                               COL_RED;
-        lv_obj_set_style_bg_color(bar_weekly, bar_pace, LV_PART_INDICATOR);
+        set_gauge(bar_weekly, data->time_pct, bar_pace);
         snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Resets %s#",
                  pace_hex, pace_text, data->reset_date);
         lv_label_set_text(lbl_weekly_reset, buf);
     } else {
         int w_pct = (int)(data->weekly_pct + 0.5f);
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
-        lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
-        lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
+        set_gauge(bar_weekly, w_pct, pct_color(data->weekly_pct));
         format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
         lv_label_set_text(lbl_weekly_reset, buf);
     }
@@ -654,7 +851,9 @@ void ui_show_screen(screen_t screen) {
     default: break;
     }
 
-    if (logo_img) {
+    // Round boards never show the logo (no room for it in the header) —
+    // ui_init() hides it permanently, so leave it alone here.
+    if (logo_img && !L.is_round) {
         if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
         else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
     }
