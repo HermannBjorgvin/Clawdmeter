@@ -139,6 +139,7 @@ static void compute_layout(const BoardCaps& c) {
 #define COL_DIM       THEME_DIM
 #define COL_ACCENT    THEME_ACCENT
 #define COL_GREEN     THEME_GREEN
+#define COL_TEAL      THEME_TEAL
 #define COL_AMBER     THEME_AMBER
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
@@ -261,7 +262,7 @@ static void set_gauge(lv_obj_t* gauge, int pct, lv_color_t color) {
 static lv_color_t pct_color(float pct) {
     if (pct >= 80.0f) return COL_RED;
     if (pct >= 50.0f) return COL_AMBER;
-    return COL_GREEN;
+    return L.is_round ? COL_TEAL : COL_GREEN;
 }
 
 static void format_reset_time(int mins, char* buf, size_t len) {
@@ -328,7 +329,7 @@ static lv_obj_t* make_gauge_arc(lv_obj_t* parent, int32_t start_angle, int32_t e
     lv_obj_set_style_arc_width(arc, L.round_arc_w, LV_PART_INDICATOR);
     lv_obj_set_style_arc_color(arc, COL_BAR_BG, LV_PART_MAIN);
     lv_obj_set_style_arc_opa(arc, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(arc, COL_GREEN, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(arc, COL_TEAL, LV_PART_INDICATOR);  // round-only helper
     lv_obj_set_style_arc_rounded(arc, false, LV_PART_MAIN);
     lv_obj_set_style_arc_rounded(arc, false, LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, 0);
@@ -731,7 +732,7 @@ void ui_update(const UsageData* data) {
         // Period box: time % + dynamic pace color + "Resets <date>" label
         lv_label_set_text(lbl_weekly_label, "Period");
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", data->time_pct);
-        lv_color_t bar_pace = (data->session_pct <= (float)data->time_pct) ? COL_GREEN :
+        lv_color_t bar_pace = (data->session_pct <= (float)data->time_pct) ? (L.is_round ? COL_TEAL : COL_GREEN) :
                               (data->session_pct <= (float)data->time_pct + 15.0f) ? COL_AMBER :
                               COL_RED;
         set_gauge(bar_weekly, data->time_pct, bar_pace);
