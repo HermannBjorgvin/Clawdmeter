@@ -77,12 +77,13 @@ static void compute_layout(const BoardCaps& c) {
         L.round_cx = L.scr_w / 2;
         L.round_cy = L.scr_h / 2;
         // Battery meter is hidden for now (see ui_init), so the ring doesn't need
-        // to leave header room for it — sized to run almost edge-to-edge instead.
-        L.round_r_out = half - 41;   // ~20% bigger than the previous header-safe 116
-        L.round_arc_w = 31;          // ~20% thicker fill
+        // to leave header room for it — runs almost edge-to-edge (3px margin,
+        // just enough to keep the outer stroke from anti-aliasing off-panel).
+        L.round_r_out = half - 3;
+        L.round_arc_w = 40;          // thick fill — was 31
         L.round_r_in  = L.round_r_out - L.round_arc_w;
         L.round_title_font  = &font_styrene_24;
-        L.round_pct_font    = &font_styrene_48;
+        L.round_pct_font    = &font_styrene_28;   // smaller now the ring dominates — was 48
         L.round_pill_font   = &font_styrene_16;
         L.round_sub_font    = &font_styrene_14;
 
@@ -528,7 +529,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     if (L.is_round) {
         // Top semicircle (9 o'clock -> 12 o'clock -> 3 o'clock) = current.
         panel_session = make_usage_gauge_round(usage_group, 180, 360,
-                         /*caption*/ -94, /*pct*/ -60, /*reset*/ -14, "Current",
+                         /*caption*/ -119, /*pct*/ -76, /*reset*/ -18, "Current",
                          &lbl_session_pct, &lbl_session_label, &lbl_session_reset);
         bar_session = panel_session;
 
@@ -556,7 +557,7 @@ static void init_usage_screen(lv_obj_t* scr) {
 
         // Bottom semicircle (3 o'clock -> 6 o'clock -> 9 o'clock) = weekly.
         panel_weekly = make_usage_gauge_round(usage_group, 0, 180,
-                         /*caption*/ 94, /*pct*/ 60, /*reset*/ 14, "Weekly",
+                         /*caption*/ 119, /*pct*/ 76, /*reset*/ 18, "Weekly",
                          &lbl_weekly_pct, &lbl_weekly_label, &lbl_weekly_reset);
         bar_weekly = panel_weekly;
 
