@@ -80,7 +80,7 @@ static void compute_layout(const BoardCaps& c) {
         // to leave header room for it — runs almost edge-to-edge (3px margin,
         // just enough to keep the outer stroke from anti-aliasing off-panel).
         L.round_r_out = half - 3;
-        L.round_arc_w = 40;          // thick fill — was 31
+        L.round_arc_w = 80;          // 100% wider — was 40
         L.round_r_in  = L.round_r_out - L.round_arc_w;
         L.round_title_font  = &font_styrene_24;
         L.round_pct_font    = &font_styrene_28;   // smaller now the ring dominates — was 48
@@ -529,7 +529,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     if (L.is_round) {
         // Top semicircle (9 o'clock -> 12 o'clock -> 3 o'clock) = current.
         panel_session = make_usage_gauge_round(usage_group, 180, 360,
-                         /*caption*/ -119, /*pct*/ -76, /*reset*/ -18, "Current",
+                         /*caption*/ -86, /*pct*/ -58, /*reset*/ -34, "Current",
                          &lbl_session_pct, &lbl_session_label, &lbl_session_reset);
         bar_session = panel_session;
 
@@ -557,22 +557,26 @@ static void init_usage_screen(lv_obj_t* scr) {
 
         // Bottom semicircle (3 o'clock -> 6 o'clock -> 9 o'clock) = weekly.
         panel_weekly = make_usage_gauge_round(usage_group, 0, 180,
-                         /*caption*/ 119, /*pct*/ 76, /*reset*/ 18, "Weekly",
+                         /*caption*/ 86, /*pct*/ 58, /*reset*/ 34, "Weekly",
                          &lbl_weekly_pct, &lbl_weekly_label, &lbl_weekly_reset);
         bar_weekly = panel_weekly;
 
-        // Divider between the two gauges, created last so it draws on top of
-        // both arcs — reads as a clean cut across the ring, not a blob split.
-        lv_obj_t* divider = lv_obj_create(usage_group);
-        lv_obj_set_size(divider, 2 * L.round_r_out, 3);
-        lv_obj_set_pos(divider, L.round_cx - L.round_r_out, L.round_cy - 1);
-        lv_obj_set_style_bg_color(divider, COL_DIM, 0);
-        lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(divider, 0, 0);
-        lv_obj_set_style_radius(divider, 0, 0);
-        lv_obj_clear_flag(divider, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_clear_flag(divider, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_flag(divider, LV_OBJ_FLAG_EVENT_BUBBLE);
+        // Two dividers (not one) flanking the center gap, created last so they
+        // draw on top of both arcs. The gap between them houses the animated
+        // status line (see below) instead of the two gauges reading as one blob.
+        const int16_t rule_ys[2] = {-18, 18};
+        for (int16_t rule_y : rule_ys) {
+            lv_obj_t* divider = lv_obj_create(usage_group);
+            lv_obj_set_size(divider, 2 * L.round_r_out, 3);
+            lv_obj_set_pos(divider, L.round_cx - L.round_r_out, L.round_cy + rule_y - 1);
+            lv_obj_set_style_bg_color(divider, COL_DIM, 0);
+            lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(divider, 0, 0);
+            lv_obj_set_style_radius(divider, 0, 0);
+            lv_obj_clear_flag(divider, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_clear_flag(divider, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_flag(divider, LV_OBJ_FLAG_EVENT_BUBBLE);
+        }
     } else {
         panel_session = make_usage_panel(usage_group, L.content_y, "Current",
                          &lbl_session_pct, &lbl_session_label,
@@ -614,11 +618,11 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_anim, "");
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     if (L.is_round) {
-        // Small mono font (has the spinner glyphs; styrene doesn't) and pulled
-        // in from the edge — the default mono-32 status line is far wider than
-        // the ~140px clear at the bottom bezel.
+        // Small mono font (has the spinner glyphs; styrene doesn't). Dead center,
+        // in the gap between the two divider rules — not at the bottom edge,
+        // which the much-thicker ring/fill leaves almost no clearance against.
         lv_obj_set_style_text_font(lbl_anim, &font_mono_18, 0);
-        lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -22);
+        lv_obj_align(lbl_anim, LV_ALIGN_CENTER, 0, 0);
     } else {
         lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
         lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
