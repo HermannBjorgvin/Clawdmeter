@@ -18,8 +18,9 @@ daemon/.venv/
 # Windows daemon venv (install-windows.ps1 creates .venv at the repo root)
 .venv/
 
-# Generated art preview (regenerate with tools/gen_costumes.py)
+# Generated art references (regenerate with tools/gen_costumes.py)
 tools/costumes_preview.png
+tools/costumes_guide.png
 
 # Python bytecode cache
 __pycache__/
