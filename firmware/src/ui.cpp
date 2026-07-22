@@ -32,7 +32,9 @@ struct Layout {
 
     // Usage screen
     int16_t usage_panel_h;
-    int16_t usage_panel_gap;
+    int16_t usage_panel_w;      // width of one usage panel
+    bool    usage_panels_row;   // true = panels side by side (landscape strips)
+    int16_t usage_panel_gap;    // between the two panels, on whichever axis
     int16_t usage_bar_y;
     int16_t usage_reset_y;
     int16_t bar_h;
@@ -101,8 +103,50 @@ static void compute_layout(const BoardCaps& c) {
     L.pair_y2 = 120;
     L.pair_y3 = 160;
     L.idle_px = 160;
+    L.usage_panels_row = false;   // stacked; the landscape branch flips this
 
-    if (c.height >= 460) {
+    if (c.width > c.height && c.height < 200) {
+        // Landscape strip — tuned for 320x172 (LCD-1.47). Too short to stack
+        // the two usage panels, so they sit side by side; everything else
+        // follows the small layout's scale.
+        L.margin = 10;
+        L.title_y = 4;
+        L.content_y = 46;
+        L.usage_panels_row = true;
+        L.usage_panel_h = 100;
+        L.usage_panel_gap = 10;
+        L.usage_bar_y = 40;
+        L.usage_reset_y = 54;
+        L.bar_h = 12;
+        L.panel_pad_x = 10;
+        L.panel_pad_y = 6;
+        L.pill_pad_x = 8;
+        L.pill_pad_y = 2;
+        L.title_font   = &font_tiempos_34;
+        L.pct_font     = &font_styrene_24;
+        L.ent_pct_font = &font_tiempos_34;
+        L.pill_font    = &font_styrene_12;
+        L.reset_font   = &font_styrene_12;
+        L.pace_font    = &font_styrene_12;
+        L.anim_font    = &font_mono_18;
+        L.anim_y = -4;
+        L.small_icons = true;
+        L.title_nudge = 8;
+        L.logo_y = 2;
+        L.batt_y = 10;
+        L.batt_w = ICON_BATTERY_SMALL_W;
+        L.pair_y1 = 6;
+        L.pair_y2 = 46;
+        L.pair_y3 = 70;
+        L.idle_px = 80;
+        L.bt_info_panel_h = 80;
+        L.bt_reset_zone_h = 50;
+        L.bt_title_font    = &font_tiempos_34;
+        L.bt_status_font   = &font_styrene_20;
+        L.bt_device_font   = &font_styrene_14;
+        L.bt_credit_1_font = &font_styrene_12;
+        L.bt_credit_2_font = &font_styrene_12;
+    } else if (c.height >= 460) {
         // Large layout — tuned for 480x480 (AMOLED-2.16).
         L.content_y = 100;
         L.usage_panel_h = 150;
@@ -175,6 +219,11 @@ static void compute_layout(const BoardCaps& c) {
     }
 
     L.content_w = L.scr_w - 2 * L.margin;
+    // Side-by-side panels split the content width; stacked ones each take all
+    // of it. Derived here so every branch above only has to set the flag.
+    L.usage_panel_w = L.usage_panels_row
+                        ? (int16_t)((L.content_w - L.usage_panel_gap) / 2)
+                        : L.content_w;
 }
 
 // Anthropic brand palette — design tokens live in theme.h
@@ -387,10 +436,11 @@ static void init_battery_icons(void) {
 
 // ======== Usage Screen ========
 
-static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
+static lv_obj_t* make_usage_panel(lv_obj_t* parent, int x, int y, int w,
+                                  const char* pill_text,
                                   lv_obj_t** out_pct, lv_obj_t** out_pill,
                                   lv_obj_t** out_bar, lv_obj_t** out_reset) {
-    lv_obj_t* panel = make_panel(parent, L.margin, y, L.content_w, L.usage_panel_h);
+    lv_obj_t* panel = make_panel(parent, x, y, w, L.usage_panel_h);
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "---%");
@@ -402,7 +452,7 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
     lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
 
     *out_bar = make_bar(panel, 0, L.usage_bar_y,
-                        L.content_w - 2 * L.panel_pad_x, L.bar_h);
+                        w - 2 * L.panel_pad_x, L.bar_h);
 
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
@@ -497,7 +547,8 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    panel_session = make_usage_panel(usage_group, L.content_y, "Current",
+    panel_session = make_usage_panel(usage_group, L.margin, L.content_y,
+                     L.usage_panel_w, "Current",
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
 
@@ -521,8 +572,16 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_pos(lbl_spending_status, 0, L.usage_reset_y + 20);
     lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
 
-    panel_weekly = make_usage_panel(usage_group,
-                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
+    // Second panel goes to the right of the first on landscape strips that are
+    // too short to stack them, below it everywhere else.
+    const int weekly_x = L.usage_panels_row
+                           ? L.margin + L.usage_panel_w + L.usage_panel_gap
+                           : L.margin;
+    const int weekly_y = L.usage_panels_row
+                           ? L.content_y
+                           : L.content_y + L.usage_panel_h + L.usage_panel_gap;
+    panel_weekly = make_usage_panel(usage_group, weekly_x, weekly_y,
+                     L.usage_panel_w, "Weekly",
                      &lbl_weekly_pct, &lbl_weekly_label,
                      &bar_weekly, &lbl_weekly_reset);
     // Recolor enabled so enterprise period box can color pace and reset separately
