@@ -76,10 +76,10 @@ static void compute_layout(const BoardCaps& c) {
         int16_t half = (L.scr_w < L.scr_h ? L.scr_w : L.scr_h) / 2;
         L.round_cx = L.scr_w / 2;
         L.round_cy = L.scr_h / 2;
-        // Smaller than the ring would ideally be, but a header band tall enough
-        // for a battery icon (not just a title's-worth of text) needs the room.
-        L.round_r_out = half - 64;
-        L.round_arc_w = 26;
+        // Battery meter is hidden for now (see ui_init), so the ring doesn't need
+        // to leave header room for it — sized to run almost edge-to-edge instead.
+        L.round_r_out = half - 41;   // ~20% bigger than the previous header-safe 116
+        L.round_arc_w = 31;          // ~20% thicker fill
         L.round_r_in  = L.round_r_out - L.round_arc_w;
         L.round_title_font  = &font_styrene_24;
         L.round_pct_font    = &font_styrene_48;
@@ -528,7 +528,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     if (L.is_round) {
         // Top semicircle (9 o'clock -> 12 o'clock -> 3 o'clock) = current.
         panel_session = make_usage_gauge_round(usage_group, 180, 360,
-                         /*caption*/ -78, /*pct*/ -50, /*reset*/ -12, "Current",
+                         /*caption*/ -94, /*pct*/ -60, /*reset*/ -14, "Current",
                          &lbl_session_pct, &lbl_session_label, &lbl_session_reset);
         bar_session = panel_session;
 
@@ -556,7 +556,7 @@ static void init_usage_screen(lv_obj_t* scr) {
 
         // Bottom semicircle (3 o'clock -> 6 o'clock -> 9 o'clock) = weekly.
         panel_weekly = make_usage_gauge_round(usage_group, 0, 180,
-                         /*caption*/ 90, /*pct*/ 58, /*reset*/ 14, "Weekly",
+                         /*caption*/ 94, /*pct*/ 60, /*reset*/ 14, "Weekly",
                          &lbl_weekly_pct, &lbl_weekly_label, &lbl_weekly_reset);
         bar_weekly = panel_weekly;
 
@@ -658,11 +658,12 @@ void ui_init(void) {
     if (L.is_round) {
         // Dead-center top, where the title used to be. Scaled down to ~2/3 size
         // (LVGL zooms around the image's own center, so the logical 48x48 box
-        // stays centered on round_cx even though the visible pixels shrink) —
-        // the round header band is only ~50px tall, not enough for a full-size
-        // 48px icon without it poking into the ring or the bezel above it.
+        // stays centered on round_cx even though the visible pixels shrink).
+        // Hidden for now — the ring runs edge-to-edge and there's no header
+        // band left for it — but positioned so it's ready to re-enable.
         lv_image_set_scale(battery_img, 171);
         lv_obj_set_pos(battery_img, L.round_cx - 24, 22);
+        lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
     }
@@ -832,6 +833,8 @@ void ui_tick_anim(void) {
 static screen_t prev_non_splash_screen = SCREEN_USAGE;
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
+    // Round boards keep it hidden regardless of screen — see ui_init().
+    if (L.is_round) return;
     if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
     else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
