@@ -16,6 +16,20 @@ Claude Code e as animações pixel-art do Clawd. Este fork acrescenta:
 
 O projeto não é oficial nem endossado pela Anthropic ou pela OpenAI.
 
+## Fotos do hardware
+
+As fotos abaixo mostram a placa capacitiva ESP32-2432S024C de 2,4 polegadas
+funcionando em landscape com a USB à esquerda, montada em uma caixa impressa em
+filamento.
+
+| Claude + Fable | Codex | Atividade combinada |
+| :---: | :---: | :---: |
+| ![Uso do Claude e Fable na ESP32-2432S024C](images/esp32-2432s024c/claude-fable-dashboard.jpg) | ![Uso do Codex na ESP32-2432S024C](images/esp32-2432s024c/codex-dashboard.jpg) | ![Atividade do Claude Code e Codex na ESP32-2432S024C](images/esp32-2432s024c/activity-dashboard.jpg) |
+
+[Veja a galeria completa, incluindo versões anteriores da interface.](images/esp32-2432s024c/README.md)
+
+O splash animado original do Clawdmeter também foi preservado:
+
 ![Animação splash do Clawd](../assets/demo.gif)
 
 ## O que aparece na tela

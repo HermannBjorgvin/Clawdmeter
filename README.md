@@ -14,9 +14,21 @@ OpenAI.
 
 ## Gallery
 
+### ESP32-2432S024C hardware validation
+
+These photos show the tested 2.4-inch capacitive board running the fork in
+USB-left landscape orientation, mounted in a filament-printed enclosure.
+
+| Claude + Fable | Codex | Combined activity |
+| :---: | :---: | :---: |
+| ![Claude and Fable usage on the ESP32-2432S024C](docs/images/esp32-2432s024c/claude-fable-dashboard.jpg) | ![Codex usage on the ESP32-2432S024C](docs/images/esp32-2432s024c/codex-dashboard.jpg) | ![Claude Code and Codex activity on the ESP32-2432S024C](docs/images/esp32-2432s024c/activity-dashboard.jpg) |
+
+[See the complete hardware gallery and captions.](docs/images/esp32-2432s024c/README.md)
+
+### Original Clawdmeter assets
+
 The Clawd animations react to Claude usage and rotate while the splash is
-visible. The assets below come from the original Clawdmeter experience; they are
-not photographs of the ESP32-2432S024C port.
+visible. The assets below come from the original Clawdmeter experience.
 
 | Usage interface | Animated Clawd splash |
 | :---: | :---: |
