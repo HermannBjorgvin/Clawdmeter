@@ -432,6 +432,12 @@ void ble_send_nack(void) {
     }
 }
 
+void ble_set_battery_level(int pct) {
+    if (!hid_dev || pct < 0) return;
+    if (pct > 100) pct = 100;
+    hid_dev->setBatteryLevel((uint8_t)pct, state == BLE_STATE_CONNECTED);
+}
+
 void ble_request_refresh(void) {
     if (state == BLE_STATE_CONNECTED && req_char) {
         uint8_t v = 0x01;

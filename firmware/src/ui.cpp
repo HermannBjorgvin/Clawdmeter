@@ -403,6 +403,15 @@ static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
 }
 
 static void init_battery_icons(void) {
+    if (L.scr_w <= 240 && L.scr_h <= 240) {
+        init_icon_dsc_rgb565a8(&battery_dscs[0], ICON_BATTERY_SMALL_W, ICON_BATTERY_SMALL_H, icon_battery_small_data);
+        init_icon_dsc_rgb565a8(&battery_dscs[1], ICON_BATTERY_LOW_SMALL_W, ICON_BATTERY_LOW_SMALL_H, icon_battery_low_small_data);
+        init_icon_dsc_rgb565a8(&battery_dscs[2], ICON_BATTERY_MEDIUM_SMALL_W, ICON_BATTERY_MEDIUM_SMALL_H, icon_battery_medium_small_data);
+        init_icon_dsc_rgb565a8(&battery_dscs[3], ICON_BATTERY_FULL_SMALL_W, ICON_BATTERY_FULL_SMALL_H, icon_battery_full_small_data);
+        init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_SMALL_W, ICON_BATTERY_CHARGING_SMALL_H, icon_battery_charging_small_data);
+        return;
+    }
+
     init_icon_dsc_rgb565a8(&battery_dscs[0], ICON_BATTERY_W, ICON_BATTERY_H, icon_battery_data);
     init_icon_dsc_rgb565a8(&battery_dscs[1], ICON_BATTERY_LOW_W, ICON_BATTERY_LOW_H, icon_battery_low_data);
     init_icon_dsc_rgb565a8(&battery_dscs[2], ICON_BATTERY_MEDIUM_W, ICON_BATTERY_MEDIUM_H, icon_battery_medium_data);
@@ -884,7 +893,9 @@ void ui_init(void) {
         init_battery_icons();
         battery_img = lv_image_create(scr);
         lv_image_set_src(battery_img, &battery_dscs[0]);
-        lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
+        const int16_t battery_width =
+            (L.scr_w <= 240 && L.scr_h <= 240) ? ICON_BATTERY_SMALL_W : ICON_BATTERY_W;
+        lv_obj_set_pos(battery_img, L.scr_w - battery_width - L.margin, L.title_y);
     }
 
     navigation_layer = lv_obj_create(scr);
