@@ -1,0 +1,10 @@
+[package]
+name = "daemon_rs_spike"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+btleplug = { git = "https://github.com/challiwill/btleplug", branch = "cjh/rebuild-features" }
+tokio = { version = "1", features = ["full"] }
+uuid = "1"
+futures = "0.3"

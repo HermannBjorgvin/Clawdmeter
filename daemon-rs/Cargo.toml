@@ -1,0 +1,21 @@
+[package]
+name = "clawdmeter-daemon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json"] }
+uuid = "1"
+dirs = "5"
+chrono = "0.4"
+futures = "0.3"
+# Patched for macOS's missing `connected_peripherals` (retrieveConnectedPeripheralsWithServices)
+# support — see openspec/changes/multi-provider-rust-daemon/design.md Decision 2.
+# Used unconditionally (not just cfg(macos)) because Cargo requires one
+# canonical source per dependency name across all build targets; the patch
+# doesn't remove anything from the released crate's Linux/Windows backends.
+btleplug = { git = "https://github.com/challiwill/btleplug", branch = "cjh/rebuild-features" }
