@@ -37,8 +37,10 @@ struct Layout {
     int16_t usage_reset_y;
     // Split-weekly mode: when the daemon reports a per-model scoped weekly
     // bucket ("m"/"mn"), the weekly panel adds a slim model row between the
-    // main bar and the reset line. Everything fits inside usage_panel_h by
-    // tightening the internal spacing — no panel or screen layout shifts.
+    // main bar and the reset line. The panel grows to split_panel_h so the
+    // main bar keeps the same y as the session panel's — the two bars stay
+    // on one visual grid; every breakpoint has clearance below for the growth.
+    int16_t split_panel_h;           // weekly panel height in split mode
     int16_t split_bar_y;             // main weekly bar y in split mode
     int16_t model_row_y;             // model name/pct labels y
     int16_t model_bar_y;             // slim model bar y
@@ -121,13 +123,14 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 16;
         L.usage_bar_y = 56;
         L.usage_reset_y = 94;
-        L.split_bar_y = 44;
-        L.model_row_y = 76;
-        L.model_bar_y = 82;
-        L.model_bar_h = 14;
+        L.split_panel_h = 162;
+        L.split_bar_y = 56;
+        L.model_row_y = 88;
+        L.model_bar_y = 94;
+        L.model_bar_h = 12;
         L.model_name_w = 96;
         L.model_pct_w = 60;
-        L.split_reset_y = 110;
+        L.split_reset_y = 118;
         L.model_font = &font_styrene_24;
         L.bt_info_panel_h = 160;
         L.bt_reset_zone_h = 110;
@@ -143,13 +146,14 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 12;
         L.usage_bar_y = 48;
         L.usage_reset_y = 78;
-        L.split_bar_y = 42;
-        L.model_row_y = 70;
-        L.model_bar_y = 75;
+        L.split_panel_h = 146;
+        L.split_bar_y = 48;
+        L.model_row_y = 80;
+        L.model_bar_y = 85;
         L.model_bar_h = 10;
         L.model_name_w = 86;
         L.model_pct_w = 54;
-        L.split_reset_y = 96;
+        L.split_reset_y = 106;
         L.model_font = &font_styrene_20;
         L.bt_info_panel_h = 140;
         L.bt_reset_zone_h = 90;
@@ -169,13 +173,14 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 6;
         L.usage_bar_y = 30;
         L.usage_reset_y = 46;
-        L.split_bar_y = 24;
-        L.model_row_y = 40;
-        L.model_bar_y = 43;
+        L.split_panel_h = 82;
+        L.split_bar_y = 30;
+        L.model_row_y = 46;
+        L.model_bar_y = 49;
         L.model_bar_h = 8;
         L.model_name_w = 52;
         L.model_pct_w = 38;
-        L.split_reset_y = 56;
+        L.split_reset_y = 62;
         L.model_font = &font_styrene_12;
         L.bar_h = 12;
         L.panel_pad_x = 10;
@@ -724,6 +729,7 @@ void ui_update(const UsageData* data) {
     // the main bar + reset line into their split-mode positions; single-bar
     // layout is restored whenever the daemon stops reporting a scoped bucket.
     bool split = data->has_model && !data->enterprise;
+    lv_obj_set_height(panel_weekly, split ? L.split_panel_h : L.usage_panel_h);
     lv_obj_set_y(bar_weekly, split ? L.split_bar_y : L.usage_bar_y);
     lv_obj_set_y(lbl_weekly_reset, split ? L.split_reset_y : L.usage_reset_y);
     if (split) {
