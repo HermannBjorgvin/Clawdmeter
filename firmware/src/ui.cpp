@@ -989,7 +989,7 @@ void ui_update(const UsageData* data) {
     }
 
     // ---- Feed history + refresh the extra pages (Trend / Burn / Session / Weekly) ----
-    usage_history_add(data->session_pct, data->weekly_pct);
+    usage_history_add(data->session_pct, data->weekly_pct, data->clock_epoch);
     s_cur_session = data->session_pct;
     s_cur_weekly  = data->weekly_pct;
 

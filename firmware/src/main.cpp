@@ -6,6 +6,7 @@
 
 #include "data.h"
 #include "ui.h"
+#include "usage_history.h"
 #include "ble.h"
 #include "splash.h"
 #include "usage_rate.h"
@@ -279,6 +280,7 @@ void setup() {
     ble_init();
     input_hal_init();
 
+    usage_history_load();   // restore saved Trend history (validated on the first live update)
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
