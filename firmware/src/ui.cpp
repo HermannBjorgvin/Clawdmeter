@@ -2,9 +2,14 @@
 #include "splash.h"
 #include <lvgl.h>
 #include <time.h>
+#include <math.h>
 #include "logo.h"
 #include "icons.h"
 #include "hal/board_caps.h"
+#include "usage_history.h"
+#include "flame_icon.h"
+#include "costumes.h"
+#include <Preferences.h>
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
@@ -216,10 +221,16 @@ static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
 static lv_obj_t* lbl_spending_status = nullptr;   // "Under pace" / "On pace" / "Over pace"
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
 
-// ---- Battery indicator (shared, on top) ----
-static lv_obj_t* battery_img;
-static lv_obj_t* logo_img;
+// ---- Corner indicators (top-right): burn-rate flame + battery when present ----
+static lv_obj_t* flame_img;             // burn-rate indicator, always shown
+static lv_image_dsc_t flame_dsc;        // single flame bitmap; scaled/faded by burn rate
+static uint16_t  flame_max_scale = 256; // 256 = 48px; halved on small-icon boards
+static lv_obj_t* battery_img = nullptr; // just left of the flame; only when a cell is attached
 static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
+static lv_obj_t* prop_img = nullptr;               // costume overlay on the corner Claude
+static lv_image_dsc_t costume_dscs[COSTUME_COUNT]; // [0] unused (none)
+static int current_costume = 0;
+static lv_obj_t* logo_img;
 
 // ---- Live-data freshness → which usage sub-view to show ----
 // usage panels when data is flowing, an idle "Zzz" screen when the host is
@@ -368,6 +379,10 @@ static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
     return lbl;
 }
 
+static void init_flame_icon(void) {
+    init_icon_dsc_rgb565a8(&flame_dsc, ICON_FLAME_W, ICON_FLAME_H, icon_flame_data);
+}
+
 static void init_battery_icons(void) {
     if (L.small_icons) {
         init_icon_dsc_rgb565a8(&battery_dscs[0], ICON_BATTERY_SMALL_W, ICON_BATTERY_SMALL_H, icon_battery_small_data);
@@ -382,6 +397,38 @@ static void init_battery_icons(void) {
     init_icon_dsc_rgb565a8(&battery_dscs[2], ICON_BATTERY_MEDIUM_W, ICON_BATTERY_MEDIUM_H, icon_battery_medium_data);
     init_icon_dsc_rgb565a8(&battery_dscs[3], ICON_BATTERY_FULL_W, ICON_BATTERY_FULL_H, icon_battery_full_data);
     init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_W, ICON_BATTERY_CHARGING_H, icon_battery_charging_data);
+}
+
+static void init_costumes(void) {
+    for (int i = 1; i < COSTUME_COUNT; i++)
+        init_icon_dsc_rgb565a8(&costume_dscs[i], costumes[i].w, costumes[i].h, costumes[i].data);
+    Preferences p; p.begin("clawdmeter", true);
+    current_costume = p.getInt("costume", 0);
+    p.end();
+    if (current_costume < 0 || current_costume >= COSTUME_COUNT) current_costume = 0;
+}
+
+// Show the current costume overlay on the corner Claude (hidden when "none" or
+// on the splash, where the corner logo itself is hidden).
+static void apply_costume(void) {
+    if (!prop_img) return;
+    if (current_costume == 0 || current_screen == SCREEN_SPLASH) {
+        lv_obj_add_flag(prop_img, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_image_set_src(prop_img, &costume_dscs[current_costume]);
+        lv_obj_set_pos(prop_img, L.margin + costumes[current_costume].ox,
+                                 L.logo_y + costumes[current_costume].oy);
+        lv_obj_clear_flag(prop_img, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// Swipe up (+1) / down (-1) cycles Claude's costume; persisted across reboots.
+void ui_cycle_costume(int dir) {
+    current_costume = (current_costume + dir + COSTUME_COUNT) % COSTUME_COUNT;
+    Preferences p; p.begin("clawdmeter", false);
+    p.putInt("costume", current_costume);
+    p.end();
+    apply_costume();
 }
 
 // ======== Usage Screen ========
@@ -538,6 +585,264 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
 }
 
+// ======== Extra pages: Trend / Burn / Session / Weekly ========
+// Each is a full-screen transparent container parented to the base screen
+// (created BEFORE logo_img/battery_img so those corner icons stay on top and
+// visible on every page). Hidden by default; ui_show_screen() toggles them.
+// The corner logo, battery icon and page cycling via PWR are shared chrome.
+
+static float s_cur_session = 0.0f, s_cur_weekly = 0.0f;
+
+static lv_obj_t* trend_container = nullptr;
+static lv_obj_t* trend_line_session = nullptr;
+static lv_obj_t* trend_line_weekly = nullptr;
+static lv_point_precise_t trend_pts_session[USAGE_HIST_SIZE];
+static lv_point_precise_t trend_pts_weekly[USAGE_HIST_SIZE];
+static lv_obj_t* trend_lbl_session = nullptr;
+static lv_obj_t* trend_lbl_weekly = nullptr;
+static lv_obj_t* trend_lbl_span = nullptr;
+static int trend_chart_w = 0, trend_chart_h = 0;
+
+static lv_obj_t* burn_container = nullptr;
+static lv_obj_t* burn_lbl_session_rate = nullptr;
+static lv_obj_t* burn_lbl_session_eta = nullptr;
+static lv_obj_t* burn_lbl_weekly_rate = nullptr;
+static lv_obj_t* burn_lbl_weekly_eta = nullptr;
+
+static lv_obj_t* session_container = nullptr;
+static lv_obj_t* session_pct_lbl = nullptr;
+static lv_obj_t* session_bar = nullptr;
+static lv_obj_t* session_reset_lbl = nullptr;
+static lv_obj_t* session_status_lbl = nullptr;
+
+static lv_obj_t* weekly_container = nullptr;
+static lv_obj_t* weekly_pct_lbl = nullptr;
+static lv_obj_t* weekly_bar = nullptr;
+static lv_obj_t* weekly_reset_lbl = nullptr;
+static lv_obj_t* weekly_status_lbl = nullptr;
+
+static lv_obj_t* make_page_container(lv_obj_t* scr) {
+    lv_obj_t* c = lv_obj_create(scr);
+    lv_obj_set_size(c, L.scr_w, L.scr_h);
+    lv_obj_set_pos(c, 0, 0);
+    lv_obj_set_style_bg_opa(c, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(c, 0, 0);
+    lv_obj_set_style_pad_all(c, 0, 0);
+    lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+    // Tap anywhere still toggles the splash, same as the usage view.
+    lv_obj_add_event_cb(c, global_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
+    return c;
+}
+
+static void make_page_title(lv_obj_t* parent, const char* txt) {
+    lv_obj_t* t = lv_label_create(parent);
+    lv_label_set_text(t, txt);
+    lv_obj_set_style_text_font(t, L.title_font, 0);
+    lv_obj_set_style_text_color(t, COL_TEXT, 0);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, L.title_nudge, L.title_y);
+}
+
+static void build_trend_screen(lv_obj_t* scr) {
+    trend_container = make_page_container(scr);
+    make_page_title(trend_container, "Trend");
+
+    int panel_h = L.scr_h - L.content_y - 90;
+    lv_obj_t* panel = make_panel(trend_container, L.margin, L.content_y, L.content_w, panel_h);
+    trend_chart_w = L.content_w - 2 * L.panel_pad_x;
+    trend_chart_h = panel_h - 2 * L.panel_pad_y;
+
+    // Weekly drawn first (under), session on top.
+    trend_line_weekly = lv_line_create(panel);
+    lv_obj_set_style_line_width(trend_line_weekly, 3, 0);
+    lv_obj_set_style_line_color(trend_line_weekly, COL_GREEN, 0);
+    lv_obj_set_style_line_rounded(trend_line_weekly, true, 0);
+    lv_obj_add_flag(trend_line_weekly, LV_OBJ_FLAG_HIDDEN);
+
+    trend_line_session = lv_line_create(panel);
+    lv_obj_set_style_line_width(trend_line_session, 3, 0);
+    lv_obj_set_style_line_color(trend_line_session, COL_ACCENT, 0);
+    lv_obj_set_style_line_rounded(trend_line_session, true, 0);
+    lv_obj_add_flag(trend_line_session, LV_OBJ_FLAG_HIDDEN);
+
+    int ly = L.content_y + panel_h + 8;
+    trend_lbl_session = lv_label_create(trend_container);
+    lv_obj_set_style_text_font(trend_lbl_session, L.reset_font, 0);
+    lv_obj_set_style_text_color(trend_lbl_session, COL_ACCENT, 0);
+    lv_obj_set_pos(trend_lbl_session, L.margin, ly);
+    lv_label_set_text(trend_lbl_session, "Session --%");
+
+    trend_lbl_weekly = lv_label_create(trend_container);
+    lv_obj_set_style_text_font(trend_lbl_weekly, L.reset_font, 0);
+    lv_obj_set_style_text_color(trend_lbl_weekly, COL_GREEN, 0);
+    lv_obj_align(trend_lbl_weekly, LV_ALIGN_TOP_RIGHT, -L.margin, ly);
+    lv_label_set_text(trend_lbl_weekly, "Weekly --%");
+
+    trend_lbl_span = lv_label_create(trend_container);
+    lv_obj_set_style_text_font(trend_lbl_span, L.pace_font, 0);
+    lv_obj_set_style_text_color(trend_lbl_span, COL_DIM, 0);
+    lv_obj_align(trend_lbl_span, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_label_set_text(trend_lbl_span, "Gathering data...");
+}
+
+static lv_obj_t* make_burn_panel(lv_obj_t* parent, int y, int h, const char* name,
+                                 lv_color_t accent, lv_obj_t** out_rate, lv_obj_t** out_eta) {
+    lv_obj_t* panel = make_panel(parent, L.margin, y, L.content_w, h);
+
+    lv_obj_t* pill = make_pill(panel, name);
+    lv_obj_set_style_bg_color(pill, accent, 0);
+    lv_obj_align(pill, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    *out_rate = lv_label_create(panel);
+    lv_obj_set_style_text_font(*out_rate, L.pct_font, 0);
+    lv_obj_set_style_text_color(*out_rate, COL_TEXT, 0);
+    lv_obj_set_pos(*out_rate, 0, 48);
+    lv_label_set_text(*out_rate, "--");
+
+    *out_eta = lv_label_create(panel);
+    lv_obj_set_style_text_font(*out_eta, L.reset_font, 0);
+    lv_obj_set_style_text_color(*out_eta, COL_DIM, 0);
+    lv_obj_set_pos(*out_eta, 0, 110);
+    lv_label_set_text(*out_eta, "Gathering data...");
+    return panel;
+}
+
+static void build_burn_screen(lv_obj_t* scr) {
+    burn_container = make_page_container(scr);
+    make_page_title(burn_container, "Burn");
+
+    int ph = (L.scr_h - L.content_y - L.margin - L.usage_panel_gap) / 2;
+    make_burn_panel(burn_container, L.content_y, ph, "Session", COL_ACCENT,
+                    &burn_lbl_session_rate, &burn_lbl_session_eta);
+    make_burn_panel(burn_container, L.content_y + ph + L.usage_panel_gap, ph, "Weekly", COL_GREEN,
+                    &burn_lbl_weekly_rate, &burn_lbl_weekly_eta);
+}
+
+static void build_detail_screen(lv_obj_t* scr, lv_obj_t** cont, const char* title,
+                                lv_obj_t** pct, lv_obj_t** bar,
+                                lv_obj_t** reset, lv_obj_t** status) {
+    *cont = make_page_container(scr);
+    make_page_title(*cont, title);
+
+    int panel_h = L.scr_h - L.content_y - L.margin;
+    lv_obj_t* panel = make_panel(*cont, L.margin, L.content_y, L.content_w, panel_h);
+
+    *pct = lv_label_create(panel);
+    lv_obj_set_style_text_font(*pct, L.ent_pct_font, 0);
+    lv_obj_set_style_text_color(*pct, COL_TEXT, 0);
+    lv_obj_set_pos(*pct, 0, 6);
+    lv_label_set_text(*pct, "--%");
+
+    *bar = make_bar(panel, 0, 108, L.content_w - 2 * L.panel_pad_x, L.bar_h);
+
+    *reset = lv_label_create(panel);
+    lv_obj_set_style_text_font(*reset, L.reset_font, 0);
+    lv_obj_set_style_text_color(*reset, COL_DIM, 0);
+    lv_obj_set_pos(*reset, 0, 150);
+    lv_label_set_text(*reset, "---");
+
+    *status = lv_label_create(panel);
+    lv_obj_set_style_text_font(*status, L.reset_font, 0);
+    lv_obj_set_style_text_color(*status, COL_DIM, 0);
+    lv_obj_set_pos(*status, 0, 196);
+    lv_label_set_text(*status, "");
+}
+
+static void trend_update(void) {
+    if (!trend_line_session) return;
+    int n = usage_history_count();
+    if (n >= 1) {
+        const UsageHistPoint* last = usage_history_at(n - 1);
+        lv_label_set_text_fmt(trend_lbl_session, "Session %d%%", (int)(last->session + 0.5f));
+        lv_label_set_text_fmt(trend_lbl_weekly, "Weekly %d%%", (int)(last->weekly + 0.5f));
+    }
+    if (n < 2 || trend_chart_w < 2 || trend_chart_h < 2) {
+        lv_obj_add_flag(trend_line_session, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(trend_line_weekly, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(trend_lbl_span, "Gathering data...");
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        const UsageHistPoint* p = usage_history_at(i);
+        int32_t x = (int32_t)((int64_t)i * (trend_chart_w - 1) / (n - 1));
+        int32_t ys = (trend_chart_h - 1) - (int32_t)(p->session * (trend_chart_h - 1) / 100.0f);
+        int32_t yw = (trend_chart_h - 1) - (int32_t)(p->weekly * (trend_chart_h - 1) / 100.0f);
+        trend_pts_session[i].x = x; trend_pts_session[i].y = ys;
+        trend_pts_weekly[i].x = x;  trend_pts_weekly[i].y = yw;
+    }
+    lv_line_set_points(trend_line_session, trend_pts_session, n);
+    lv_line_set_points(trend_line_weekly, trend_pts_weekly, n);
+    lv_obj_clear_flag(trend_line_session, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(trend_line_weekly, LV_OBJ_FLAG_HIDDEN);
+
+    const UsageHistPoint* first = usage_history_at(0);
+    const UsageHistPoint* last = usage_history_at(n - 1);
+    int span_min = (int)((last->ms - first->ms) / 60000UL);
+    lv_label_set_text_fmt(trend_lbl_span, "last %dm", span_min);
+}
+
+static void fmt_burn_eta(float pct_now, float rate, char* buf, size_t len) {
+    if (rate <= 0.05f) { snprintf(buf, len, "holding steady"); return; }
+    float rem = 100.0f - pct_now;
+    if (rem <= 0.0f) { snprintf(buf, len, "at the limit"); return; }
+    int mins = (int)(rem / rate * 60.0f + 0.5f);
+    if (mins < 60)        snprintf(buf, len, "~%dm to full", mins);
+    else if (mins < 1440) snprintf(buf, len, "~%dh %dm to full", mins / 60, mins % 60);
+    else                  snprintf(buf, len, "~%dd %dh to full", mins / 1440, (mins % 1440) / 60);
+}
+
+// LVGL's lv_label_set_text_fmt (lv_snprintf) has NO %f support, so format the
+// one-decimal rate from integer parts instead — this was the "f %/hr" bug.
+static void set_rate_label(lv_obj_t* lbl, float r) {
+    if (r < 0.0f) r = 0.0f;
+    int whole = (int)r;
+    int frac  = (int)((r - (float)whole) * 10.0f + 0.5f);
+    if (frac >= 10) { whole++; frac = 0; }
+    lv_label_set_text_fmt(lbl, "%d.%d %%/hr", whole, frac);
+}
+
+static void burn_update(void) {
+    if (!burn_lbl_session_rate) return;
+    char b[48];
+    float r;
+    if (usage_history_session_rate(&r)) {
+        set_rate_label(burn_lbl_session_rate, r);
+        fmt_burn_eta(s_cur_session, r, b, sizeof(b));
+        lv_label_set_text(burn_lbl_session_eta, b);
+    } else {
+        lv_label_set_text(burn_lbl_session_rate, "--");
+        lv_label_set_text(burn_lbl_session_eta, "Gathering data...");
+    }
+    if (usage_history_weekly_rate(&r)) {
+        set_rate_label(burn_lbl_weekly_rate, r);
+        fmt_burn_eta(s_cur_weekly, r, b, sizeof(b));
+        lv_label_set_text(burn_lbl_weekly_eta, b);
+    } else {
+        lv_label_set_text(burn_lbl_weekly_rate, "--");
+        lv_label_set_text(burn_lbl_weekly_eta, "Gathering data...");
+    }
+}
+
+// Hide every cyclable page container; ui_show_screen then reveals one.
+static void hide_all_pages(void) {
+    lv_obj_t* pages[] = { usage_container, trend_container, burn_container,
+                          session_container, weekly_container };
+    for (unsigned i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
+        if (pages[i]) lv_obj_add_flag(pages[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static lv_obj_t* page_container(screen_t s) {
+    switch (s) {
+    case SCREEN_USAGE:   return usage_container;
+    case SCREEN_TREND:   return trend_container;
+    case SCREEN_BURN:    return burn_container;
+    case SCREEN_SESSION: return session_container;
+    case SCREEN_WEEKLY:  return weekly_container;
+    default:             return nullptr;
+    }
+}
+
 // ======== Public API ========
 
 void ui_init(void) {
@@ -549,9 +854,17 @@ void ui_init(void) {
 
     if (L.small_icons) init_icon_dsc_rgb565a8(&logo_dsc, LOGO_SMALL_WIDTH, LOGO_SMALL_HEIGHT, logo_small_data);
     else               init_icon_dsc_rgb565a8(&logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data);
-    init_battery_icons();
+    init_flame_icon();
+    init_costumes();
 
     init_usage_screen(scr);
+    // Extra pages — created before logo/battery so the corner chrome stays on top.
+    build_trend_screen(scr);
+    build_burn_screen(scr);
+    build_detail_screen(scr, &session_container, "Session",
+                        &session_pct_lbl, &session_bar, &session_reset_lbl, &session_status_lbl);
+    build_detail_screen(scr, &weekly_container, "Weekly",
+                        &weekly_pct_lbl, &weekly_bar, &weekly_reset_lbl, &weekly_status_lbl);
     splash_init(scr);
 
     if (splash_get_root()) {
@@ -562,14 +875,34 @@ void ui_init(void) {
     lv_image_set_src(logo_img, &logo_dsc);
     lv_obj_set_pos(logo_img, L.margin, L.logo_y);
 
-    battery_img = lv_image_create(scr);
-    lv_image_set_src(battery_img, &battery_dscs[0]);
-    lv_obj_set_pos(battery_img, L.scr_w - L.batt_w - L.margin, L.batt_y);
-    // Boards without battery telemetry never show the indicator (per the HAL
-    // contract; previously every board drew the empty-battery glyph).
-    if (!board_caps().has_battery) {
-        lv_obj_del(battery_img);
-        battery_img = nullptr;
+    // Costume overlay, on top of the corner Claude. Props are drawn to align
+    // with the 80px logo, so only enable them on full-size (non-small) boards.
+    if (!L.small_icons) {
+        prop_img = lv_image_create(scr);
+        lv_obj_set_pos(prop_img, L.margin, L.logo_y);
+        lv_obj_add_flag(prop_img, LV_OBJ_FLAG_HIDDEN);
+        apply_costume();
+    }
+
+    // Corner indicators (top-right): the burn-rate flame at the far right, and
+    // the battery just to its left when a cell is actually attached. On small-
+    // icon boards the flame is scaled down to match the smaller battery glyph.
+    flame_max_scale = L.small_icons ? 128 : 256;
+    flame_img = lv_image_create(scr);
+    lv_image_set_src(flame_img, &flame_dsc);
+    lv_obj_set_pos(flame_img, L.scr_w - ICON_FLAME_W - L.margin, L.batt_y);
+    lv_image_set_pivot(flame_img, ICON_FLAME_W / 2, ICON_FLAME_H / 2);
+    lv_image_set_scale(flame_img, (uint16_t)(flame_max_scale * 0.66f));  // small idle candle
+    lv_obj_set_style_image_opa(flame_img, 150, 0);
+
+    // Battery only on boards with battery hardware; ui_update_battery() reveals
+    // it (left of the flame) only while a cell is really attached (pct >= 0).
+    if (board_caps().has_battery) {
+        init_battery_icons();
+        battery_img = lv_image_create(scr);
+        lv_image_set_src(battery_img, &battery_dscs[0]);
+        lv_obj_set_pos(battery_img, L.scr_w - ICON_FLAME_W - L.margin - 6 - L.batt_w, L.batt_y);
+        lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -654,6 +987,34 @@ void ui_update(const UsageData* data) {
         format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
         lv_label_set_text(lbl_weekly_reset, buf);
     }
+
+    // ---- Feed history + refresh the extra pages (Trend / Burn / Session / Weekly) ----
+    usage_history_add(data->session_pct, data->weekly_pct, data->clock_epoch);
+    s_cur_session = data->session_pct;
+    s_cur_weekly  = data->weekly_pct;
+
+    {
+        int sp = (int)(data->session_pct + 0.5f);
+        lv_label_set_text_fmt(session_pct_lbl, "%d%%", sp);
+        lv_bar_set_value(session_bar, sp, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(session_bar, pct_color(data->session_pct), LV_PART_INDICATOR);
+        char rb[48];
+        format_reset_time(data->session_reset_mins, rb, sizeof(rb));
+        lv_label_set_text(session_reset_lbl, rb);
+        lv_label_set_text_fmt(session_status_lbl, "Status: %s", data->status);
+    }
+    {
+        int wp = (int)(data->weekly_pct + 0.5f);
+        lv_label_set_text_fmt(weekly_pct_lbl, "%d%%", wp);
+        lv_bar_set_value(weekly_bar, wp, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(weekly_bar, pct_color(data->weekly_pct), LV_PART_INDICATOR);
+        char rb[48];
+        format_reset_time(data->weekly_reset_mins, rb, sizeof(rb));
+        lv_label_set_text(weekly_reset_lbl, rb);
+        lv_label_set_text_fmt(weekly_status_lbl, "Status: %s", data->status);
+    }
+    trend_update();
+    burn_update();
 }
 
 // Pick the usage-view sub-screen: pairing hint (BLE down), the idle "Zzz" screen
@@ -738,26 +1099,61 @@ void ui_tick_anim(void) {
 }
 
 static screen_t prev_non_splash_screen = SCREEN_USAGE;
+static void apply_flame_visibility(void) {
+    if (!flame_img) return;
+    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(flame_img, LV_OBJ_FLAG_HIDDEN);
+    else                                  lv_obj_clear_flag(flame_img, LV_OBJ_FLAG_HIDDEN);
+}
+
+static bool battery_present = false;   // a cell is actually attached (pct >= 0 or charging)
+
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
-    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-    else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    if (battery_present && current_screen != SCREEN_SPLASH)
+        lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    else
+        lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
+
+// Battery indicator (left of the flame) — shown only while a cell is present.
+// power_hal reports pct == -1 when none, so a battery-capable board with an
+// empty connector hides it instead of drawing a misleading empty glyph.
+void ui_update_battery(int percent, bool charging) {
+    if (!battery_img) return;
+    battery_present = (percent >= 0) || charging;
+    if (battery_present) {
+        int idx = charging      ? 4 :
+                  percent <= 10 ? 0 :
+                  percent <= 35 ? 1 :
+                  percent <= 75 ? 2 : 3;
+        lv_image_set_src(battery_img, &battery_dscs[idx]);
+    }
+    apply_battery_visibility();
+}
+
+// Set (via ui_note_swipe) the instant a swipe is recognised, so the tap handler
+// below stands down: with scrolling disabled on our containers, LVGL still emits
+// CLICKED after a swipe, which would otherwise toggle the splash mid-swipe.
+static uint32_t last_swipe_tick = 0;
+void ui_note_swipe(void) { last_swipe_tick = lv_tick_get(); }
 
 static void global_click_cb(lv_event_t* e) {
     (void)e;
+    if (lv_tick_get() - last_swipe_tick < 500) return;  // this "click" was really a swipe
     if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
     else                                  ui_show_screen(SCREEN_SPLASH);
 }
 
 void ui_show_screen(screen_t screen) {
-    lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+    hide_all_pages();
     splash_hide();
 
-    switch (screen) {
-    case SCREEN_SPLASH:  splash_show(); break;
-    case SCREEN_USAGE:   lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
-    default: break;
+    if (screen == SCREEN_SPLASH) {
+        splash_show();
+    } else {
+        lv_obj_t* c = page_container(screen);
+        if (c) lv_obj_clear_flag(c, LV_OBJ_FLAG_HIDDEN);
+        else { screen = SCREEN_USAGE; lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); }
     }
 
     if (logo_img) {
@@ -767,8 +1163,28 @@ void ui_show_screen(screen_t screen) {
 
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
     current_screen = screen;
+    apply_flame_visibility();
     apply_battery_visibility();
+    apply_costume();
 }
+
+#define PAGE_COUNT (SCREEN_PAGE_LAST - SCREEN_PAGE_FIRST + 1)
+
+// Step `delta` pages from the current one, wrapping with modulo. From the splash
+// (out of the page range) we enter at the first/last page depending on direction.
+static void ui_step_page(int delta) {
+    screen_t s = current_screen;
+    if (s < SCREEN_PAGE_FIRST || s > SCREEN_PAGE_LAST) {
+        ui_show_screen(delta >= 0 ? SCREEN_PAGE_FIRST : SCREEN_PAGE_LAST);
+        return;
+    }
+    int idx = (s - SCREEN_PAGE_FIRST + delta) % PAGE_COUNT;
+    if (idx < 0) idx += PAGE_COUNT;                    // C's % can go negative
+    ui_show_screen((screen_t)(SCREEN_PAGE_FIRST + idx));
+}
+
+void ui_next_page(void) { ui_step_page(+1); }
+void ui_prev_page(void) { ui_step_page(-1); }
 
 void ui_toggle_splash(void) {
     if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
@@ -789,22 +1205,37 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
     update_view_state();
 }
 
-void ui_update_battery(int percent, bool charging) {
-    if (!battery_img) return;
-    int idx;
-    if (charging) {
-        idx = 4;
-    } else if (percent < 0) {
-        idx = 0;
-    } else if (percent <= 10) {
-        idx = 0;
-    } else if (percent <= 35) {
-        idx = 1;
-    } else if (percent <= 75) {
-        idx = 2;
-    } else {
-        idx = 3;
-    }
-    lv_image_set_src(battery_img, &battery_dscs[idx]);
-    apply_battery_visibility();
+// Burn-rate corner indicator: an animated fire emoji. Called every loop; it
+// (1) smoothly tracks the live session burn rate as a base intensity, and
+// (2) adds a per-frame organic flicker whose amplitude grows with intensity —
+// a gently breathing candle when idle, a wild roaring flame when you're
+// hammering Claude. Replaces the old 4-step tier + the battery glyph.
+#define BURN_RATE_FULL 20.0f   // %/hr that maps to a full-size flame (~fills 5h session)
+
+static float flame_base = 0.0f;   // smoothed 0..1 base intensity
+
+void ui_flame_tick(void) {
+    if (!flame_img || current_screen == SCREEN_SPLASH) return;
+    static uint32_t last = 0;
+    uint32_t now = millis();
+    if (now - last < 45) return;   // ~22 fps is plenty for a flicker
+    last = now;
+
+    // Target intensity from the live session rate (0 until ~4 min of history).
+    float rate = 0.0f;
+    float target = usage_history_session_rate(&rate) ? (rate / BURN_RATE_FULL) : 0.0f;
+    if (target < 0.0f) target = 0.0f;
+    if (target > 1.0f) target = 1.0f;
+    flame_base += (target - flame_base) * 0.05f;   // ease toward target (~1s)
+
+    // Idle floor so it's always a visible little candle, then organic flicker.
+    float inten = 0.22f + 0.78f * flame_base;
+    float t = now / 1000.0f;
+    float wave = sinf(t * 11.0f) * 0.5f + sinf(t * 17.3f) * 0.3f + sinf(t * 27.1f) * 0.2f;
+    inten += (0.06f + 0.16f * flame_base) * wave;   // flicker grows with heat
+    if (inten < 0.15f) inten = 0.15f;
+    if (inten > 1.0f)  inten = 1.0f;
+
+    lv_image_set_scale(flame_img, (uint16_t)(flame_max_scale * (0.586f + 0.414f * inten)));
+    lv_obj_set_style_image_opa(flame_img, (uint8_t)(140 + inten * (255 - 140)), 0);
 }

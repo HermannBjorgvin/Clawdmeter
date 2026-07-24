@@ -6,6 +6,7 @@
 
 #include "data.h"
 #include "ui.h"
+#include "usage_history.h"
 #include "ble.h"
 #include "splash.h"
 #include "usage_rate.h"
@@ -58,6 +59,12 @@ static void rounder_cb(lv_event_t* e) {
 //   false → touch never counts as activity and is fully swallowed while the
 //           panel is dark, so pets/sleeves can't wake it overnight and LVGL
 //           can't quietly toggle splash<->usage on a black panel.
+// Set by my_touch_cb on a horizontal flick; applied in loop() (deferred so we
+// never re-enter LVGL object show/hide from inside the indev read callback).
+// +1 = next page (swipe left), -1 = previous page (swipe right).
+static volatile int g_pending_page_dir = 0;
+static volatile int g_pending_costume_dir = 0;   // +1 next / -1 prev costume (swipe up/down)
+
 static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     uint16_t x, y;
     bool pressed;
@@ -94,6 +101,49 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
         data->state = LV_INDEV_STATE_PRESSED;
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
+    }
+
+    // Horizontal flick → page navigation. LVGL still gets the raw points above,
+    // so a short tap stays a normal click (toggles splash) while a longer fast
+    // swipe crosses LVGL's click-vs-move threshold and only navigates here.
+    {
+        static bool     sw_was = false;
+        static int16_t  sw_x0 = 0, sw_y0 = 0;
+        static uint32_t sw_t0 = 0;
+        if (pressed && !sw_was) {
+            sw_x0 = (int16_t)x; sw_y0 = (int16_t)y; sw_t0 = millis();
+        } else if (!pressed && sw_was) {
+            int rdx = (int)x - sw_x0;   // raw delta in native-panel coords
+            int rdy = (int)y - sw_y0;
+            // Map the raw touch delta into the upright ("screen up") frame the
+            // user sees. The panel auto-rotates the display by quadrant r
+            // (display.cpp rotate_strip) while touch stays in native coords, so
+            // we invert that rotation here — otherwise a vertical swipe reads as
+            // horizontal (and vice-versa) whenever the device is rotated.
+            // Map the raw touch delta into the upright ("screen up") frame the
+            // user sees. Calibrated from measured swipes: at r=3 the touch frame
+            // already equals the visual frame (dx=rdx), and the other quadrants
+            // follow by 90° steps. dx = visual-horizontal, dy = visual-vertical.
+            int dx, dy;
+            switch (imu_hal_rotation_quadrant()) {
+                case 0:  dx = -rdy; dy =  rdx; break;
+                case 1:  dx = -rdx; dy = -rdy; break;
+                case 2:  dx =  rdy; dy = -rdx; break;
+                default: dx =  rdx; dy =  rdy; break;   // r=3, the resting orientation
+            }
+            // A ~40px mostly-horizontal flick within 800ms is a page swipe.
+            // ui_note_swipe() then suppresses the tap→splash toggle LVGL would
+            // otherwise fire on the same release.
+            uint32_t sdt = millis() - sw_t0;
+            if (sdt < 800 && abs(dx) >= 40 && abs(dx) > abs(dy)) {
+                g_pending_page_dir = (dx < 0) ? -1 : 1;      // horizontal → page
+                ui_note_swipe();
+            } else if (sdt < 800 && abs(dy) >= 40 && abs(dy) > abs(dx)) {
+                g_pending_costume_dir = (dy < 0) ? 1 : -1;   // up → next costume, down → prev
+                ui_note_swipe();
+            }
+        }
+        sw_was = pressed;
     }
 }
 
@@ -174,6 +224,8 @@ static void check_serial_cmd() {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
             else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
+            else if (strcmp(cmd_buf, "page") == 0)  ui_next_page();       // dev: cycle pages
+            else if (strcmp(cmd_buf, "costume") == 0) ui_cycle_costume(1); // dev: cycle costumes
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -228,6 +280,7 @@ void setup() {
     ble_init();
     input_hal_init();
 
+    usage_history_load();   // restore saved Trend history (validated on the first live update)
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
@@ -341,8 +394,7 @@ void loop() {
 
         if (power_hal_pwr_pressed()) {
             if (!idle_consume_wake_press()) {
-                // On splash: cycle animations. On the usage view: cycle
-                // screen brightness (single non-splash view, no more screens).
+                // On splash: cycle animations. On any usage page: cycle brightness.
                 if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
                 else                                          brightness_cycle();
             }
@@ -357,18 +409,32 @@ void loop() {
         ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());
     }
 
-    static int  last_pct      = -2;
+    // Corner indicators: battery glyph (only when a cell is attached) + flame.
+    static int  last_pct = -2;
     static bool last_charging = false;
-    int  pct      = power_hal_battery_pct();
+    int  pct = power_hal_battery_pct();
     bool charging = power_hal_is_charging();
     if (pct != last_pct || charging != last_charging) {
-        if (pct != last_pct) ble_set_battery_level(pct);
+        if (pct != last_pct) ble_set_battery_level(pct);   // upstream: BLE battery level (PR #117)
         last_pct = pct;
         last_charging = charging;
         ui_update_battery(pct, charging);
     }
+    ui_flame_tick();   // animate the burn-rate flame (flicker + rate tracking)
 
     check_serial_cmd();
+
+    if (g_pending_page_dir) {
+        int d = g_pending_page_dir;
+        g_pending_page_dir = 0;
+        if (d > 0) ui_next_page();
+        else       ui_prev_page();
+    }
+    if (g_pending_costume_dir) {
+        int d = g_pending_costume_dir;
+        g_pending_costume_dir = 0;
+        ui_cycle_costume(d);
+    }
 
     if (ble_has_data()) {
         if (parse_json(ble_get_data(), &usage)) {
