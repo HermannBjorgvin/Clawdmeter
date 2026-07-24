@@ -1,0 +1,2 @@
+-r requirements-windows.txt
+pyserial
