@@ -47,6 +47,7 @@ RECONNECT_BACKOFF_CAP = 8  # D-05: fast-reconnect cap (seconds); keeps stacked r
 CONFIG_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "config"
 
 API_URL = "https://api.anthropic.com/v1/messages"
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
     "anthropic-beta": "oauth-2025-04-20",
@@ -181,6 +182,87 @@ def add_clock_fields(payload: dict) -> None:
     tf = 24 if clock == "24" else 12 if clock == "12" else detect_hour_format()
     payload["t"] = int(time.time()) + time.localtime().tm_gmtoff
     payload["tf"] = tf
+
+
+async def poll_usage_endpoint(token: str) -> dict | None:
+    """Poll the OAuth usage endpoint (token-free) and build the BLE payload.
+
+    GET /api/oauth/usage returns the same buckets the rate-limit headers carry
+    (5h session + 7d weekly) plus per-model scoped weekly limits ("m"/"mn"
+    below) — and unlike poll_api() it doesn't spend a 1-token message call per
+    poll. Returns None on any failure or unexpected shape so the caller can
+    fall back to poll_api() (e.g. Enterprise accounts, where the spending
+    limit only surfaces in the overage headers). Raises AuthError on a real
+    401/403 so the tray toast behavior is preserved.
+    """
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": API_HEADERS_TEMPLATE["anthropic-beta"],
+        "User-Agent": API_HEADERS_TEMPLATE["User-Agent"],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.get(USAGE_URL, headers=headers)
+    except httpx.HTTPError as e:
+        log(f"Usage endpoint failed: {e}")
+        return None
+    if resp.status_code in (401, 403):
+        log(f"Usage endpoint HTTP {resp.status_code}: {resp.text[:200]}")
+        raise AuthError(resp.status_code)
+    if resp.status_code != 200:
+        log(f"Usage endpoint HTTP {resp.status_code}: {resp.text[:200]}")
+        return None
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    five = data.get("five_hour") or {}
+    seven = data.get("seven_day") or {}
+    if five.get("utilization") is None:
+        return None   # shape we don't understand (Enterprise?) — use the fallback
+
+    now = time.time()
+
+    def reset_minutes_iso(iso: str | None) -> int:
+        if not iso:
+            return 0
+        try:
+            ts = datetime.datetime.fromisoformat(iso).timestamp()
+        except (ValueError, OSError):
+            return 0
+        mins = (ts - now) / 60.0
+        return int(round(mins)) if mins > 0 else 0
+
+    def pct_of(v) -> int:
+        try:
+            return max(0, min(100, int(round(float(v)))))
+        except (TypeError, ValueError):
+            return 0
+
+    payload = {
+        "s": pct_of(five.get("utilization")),
+        "sr": reset_minutes_iso(five.get("resets_at")),
+        "w": pct_of(seven.get("utilization")),
+        "wr": reset_minutes_iso(seven.get("resets_at")),
+        "st": "allowed" if pct_of(five.get("utilization")) < 100 else "rejected",
+        "acct": "pro",
+        "ok": True,
+    }
+    # Per-model scoped weekly limit (e.g. "Fable" / "Opus"): the limits array
+    # carries kind == "weekly_scoped" entries with the model's display name.
+    for lim in data.get("limits") or []:
+        if lim.get("kind") != "weekly_scoped":
+            continue
+        scope = lim.get("scope") or {}
+        model = (scope.get("model") or {}).get("display_name")
+        if not model:
+            continue
+        payload["m"] = pct_of(lim.get("percent"))
+        payload["mn"] = str(model)[:15]
+        break   # firmware shows one scoped bucket; first entry wins
+    add_chime_field(payload)
+    add_clock_fields(payload)
+    return payload
 
 
 async def poll_api(token: str) -> dict | None:
@@ -602,7 +684,12 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                         tray_state.set_error("token expired — run claude login")
                 else:
                     try:
-                        payload = await poll_api(token)
+                        # Prefer the token-free usage endpoint; fall back to
+                        # the 1-token message call (whose overage headers
+                        # still cover Enterprise accounts).
+                        payload = await poll_usage_endpoint(token)
+                        if payload is None:
+                            payload = await poll_api(token)
                     except AuthError:
                         # Real 401/403 — token genuinely needs a refresh.
                         if tray_state:

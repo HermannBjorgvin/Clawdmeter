@@ -189,8 +189,7 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
 ## How it works
 
 1. The daemon reads your Claude Code OAuth token — from the macOS Keychain (service `Claude Code-credentials`) on macOS, or from `~/.claude/.credentials.json` on Linux (`%USERPROFILE%\.claude\.credentials.json` on Windows).
-2. It makes a minimal API call to `api.anthropic.com/v1/messages` — one token of Haiku, basically free.
-3. The usage numbers come straight out of the response headers (`anthropic-ratelimit-unified-5h-utilization` and friends).
+2. It polls `api.anthropic.com/api/oauth/usage` (macOS/Windows daemons) — the same endpoint the Claude Code client's `/usage` view reads. It costs zero tokens and also carries per-model weekly limits (the "Fable"/"Opus" row on the display). Heads-up: this endpoint isn't publicly documented, so it could change; if the call fails for any reason the daemon automatically falls back to the original method — a minimal call to `api.anthropic.com/v1/messages` (one token of Haiku, basically free) whose response headers (`anthropic-ratelimit-unified-5h-utilization` and friends) carry the same session/weekly numbers, minus the per-model bucket. The Linux bash daemon still uses the header method.
 4. The daemon connects to the ESP32 over BLE and writes a JSON payload to the GATT RX characteristic.
 5. The firmware parses it and updates the LVGL dashboard.
 6. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.
