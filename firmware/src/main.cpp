@@ -9,6 +9,9 @@
 #include "ble.h"
 #include "splash.h"
 #include "usage_rate.h"
+#include "usage_history.h"
+#include "touch_rotate.h"
+#include "clawd_speech.h"
 #include "idle.h"
 #include "idle_cfg.h"
 #include "brightness.h"
@@ -58,27 +61,42 @@ static void rounder_cb(lv_event_t* e) {
 //   false → touch never counts as activity and is fully swallowed while the
 //           panel is dark, so pets/sleeves can't wake it overnight and LVGL
 //           can't quietly toggle splash<->usage on a black panel.
+static lv_display_t* g_disp = nullptr;   // for lv_display_set_rotation on IMU quadrant change
+
+// Map the board's IMU rotation quadrant to the LVGL rotation that makes touch
+// input line up with the CPU-rotated display (derived from rotate_strip's D_r
+// vs lv_display_rotate_point; see touch_rotate.cpp).
+static lv_display_rotation_t quadrant_to_rotation(uint8_t q) {
+    switch (q) {
+        case 1:  return LV_DISPLAY_ROTATION_270;
+        case 2:  return LV_DISPLAY_ROTATION_180;
+        case 3:  return LV_DISPLAY_ROTATION_90;
+        default: return LV_DISPLAY_ROTATION_0;
+    }
+}
+
 static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
-    uint16_t x, y;
+    uint16_t rx, ry;
     bool pressed;
-    touch_hal_read(&x, &y, &pressed);
+    touch_hal_read(&rx, &ry, &pressed);
     const bool raw_pressed = pressed;
+    ui_note_touch(raw_pressed);   // any touch (button, background, swipe) interrupts the kiosk
+
+    // Fixed touch->panel alignment; LVGL applies the per-orientation rotation
+    // (lv_display_set_rotation in loop()). Swipes are recognised by a background
+    // gesture handler in ui.cpp, so there is no gesture logic here.
+    uint16_t px, py;
+    touch_to_panel(rx, ry, &px, &py);
 
     if (IDLE_WAKE_ON_TOUCH) {
         static bool touch_was = false;
         static bool touch_wake_swallowed = false;
         if (raw_pressed && !touch_was) {
             // Press edge — consume as wake if asleep.
-            if (idle_consume_wake_press()) {
-                touch_wake_swallowed = true;
-                pressed = false;
-            }
+            if (idle_consume_wake_press()) { touch_wake_swallowed = true; pressed = false; }
         } else if (!raw_pressed && touch_was) {
             // Release edge.
-            if (touch_wake_swallowed) {
-                touch_wake_swallowed = false;
-                pressed = false;
-            }
+            if (touch_wake_swallowed) { touch_wake_swallowed = false; pressed = false; }
         } else if (raw_pressed && touch_wake_swallowed) {
             // Held finger through wake — keep hiding until release.
             pressed = false;
@@ -89,8 +107,8 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 
     if (pressed) {
-        data->point.x = x;
-        data->point.y = y;
+        data->point.x = px;   // panel point; LVGL rotates it for hit-testing
+        data->point.y = py;
         data->state = LV_INDEV_STATE_PRESSED;
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
@@ -174,6 +192,28 @@ static void check_serial_cmd() {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
             else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
+            else if (strcmp(cmd_buf, "page") == 0)  ui_next_page();       // dev: cycle pages
+            else if (strcmp(cmd_buf, "costume") == 0) ui_cycle_costume(1); // dev: cycle costumes
+            else if (strcmp(cmd_buf, "sim") == 0) {   // dev/demo: load synthetic 24h history onto the Trend page
+                usage_history_fill_sim();             // also freezes live history intake so the demo persists
+                ui_show_screen(SCREEN_TREND);
+                ui_trend_refresh();
+                Serial.println("sim: 24h synthetic history loaded (history frozen; 'simoff' to resume live)");
+            }
+            else if (strcmp(cmd_buf, "simoff") == 0) {
+                usage_history_set_frozen(false);
+                usage_history_reset();   // discard demo data so it isn't persisted / read as a reset
+                ui_trend_refresh();
+                Serial.println("sim off: demo cleared, live history resumed");
+            }
+            else if (strcmp(cmd_buf, "histclear") == 0) {   // dev: wipe Trend history (RAM + flash)
+                usage_history_clear_saved();
+                ui_trend_refresh();
+                Serial.println("history cleared (RAM + flash)");
+            }
+            else if (strcmp(cmd_buf, "zoom") == 0) ui_trend_zoom_step(1);  // dev: step the Trend zoom window
+            else if (strcmp(cmd_buf, "quip") == 0) ui_debug_quip();        // dev: pop the mascot quip bubble
+            else if (strcmp(cmd_buf, "chatty") == 0) ui_debug_cycle_chatty(); // dev: cycle chatter mode
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -215,6 +255,7 @@ void setup() {
     buf2 = (uint16_t*)heap_caps_malloc(W * BUF_LINES * 2, LV_BUF_CAPS);
 
     lv_display_t* disp = lv_display_create(W, H);
+    g_disp = disp;
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
     lv_display_set_flush_cb(disp, my_flush_cb);
     lv_display_set_buffers(disp, buf1, buf2, W * BUF_LINES * 2,
@@ -228,6 +269,7 @@ void setup() {
     ble_init();
     input_hal_init();
 
+    usage_history_load();   // restore the saved Trend history (validated on the first live update)
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
@@ -289,9 +331,19 @@ void loop() {
     idle_tick();
     lv_timer_handler();
     ui_tick_anim();
+    ui_system_tick();   // refresh System-page stats (~1/s) while it's visible
+    ui_kiosk_tick();    // kiosk auto-cycle (skips System; a manual swipe restarts its dwell)
+    clawd_speech_tick(); // auto-fade the mascot speech bubble
     ble_tick();
     power_hal_tick();
     imu_hal_tick();
+    // Mirror the display auto-rotation into LVGL so it rotates touch input to
+    // match — no per-quadrant touch table. Set before display_hal_tick invalidates.
+    {
+        static uint8_t last_q = 255;
+        uint8_t q = imu_hal_rotation_quadrant();
+        if (q != last_q) { lv_display_set_rotation(g_disp, quadrant_to_rotation(q)); last_q = q; }
+    }
     sound_hal_tick();
     splash_tick();
     // Rotation transition (blank + ramp) would fight the idle fade — skip
@@ -341,8 +393,7 @@ void loop() {
 
         if (power_hal_pwr_pressed()) {
             if (!idle_consume_wake_press()) {
-                // On splash: cycle animations. On the usage view: cycle
-                // screen brightness (single non-splash view, no more screens).
+                // On splash: cycle animations. On any usage page: cycle brightness.
                 if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
                 else                                          brightness_cycle();
             }
@@ -357,18 +408,24 @@ void loop() {
         ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());
     }
 
-    static int  last_pct      = -2;
+    // Corner indicators: battery glyph (only when a cell is attached) + flame.
+    static int  last_pct = -2;
     static bool last_charging = false;
-    int  pct      = power_hal_battery_pct();
+    int  pct = power_hal_battery_pct();
     bool charging = power_hal_is_charging();
     if (pct != last_pct || charging != last_charging) {
-        if (pct != last_pct) ble_set_battery_level(pct);
+        if (pct != last_pct) ble_set_battery_level(pct);   // upstream: BLE battery level (PR #117)
         last_pct = pct;
         last_charging = charging;
         ui_update_battery(pct, charging);
     }
+    ui_flame_tick();   // animate the burn-rate flame (flicker + rate tracking)
 
     check_serial_cmd();
+
+    // Apply any swipe recognised by ui.cpp's background gesture handler (a press
+    // on a button never reaches it, so buttons need no special handling).
+    ui_apply_pending_gestures();
 
     if (ble_has_data()) {
         if (parse_json(ble_get_data(), &usage)) {
@@ -378,9 +435,15 @@ void loop() {
             // 5-hour session limit refilled → chime so the user knows they can
             // use Claude again (no-op on boards without a buzzer). Gated on the
             // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
-            if (session_reset && usage.chime) {
-                Serial.println("session reset detected — chime");
-                sound_hal_play_reset();
+            if (session_reset) {
+                // Feedback vector: let Clawd announce the refill (works whether or
+                // not the buzzer chimes). ui_update below runs right after, so the
+                // bubble sits over fresh data.
+                clawd_speak("Session refilled! Back in business.");
+                if (usage.chime) {
+                    Serial.println("session reset detected — chime");
+                    sound_hal_play_reset();
+                }
             }
             if (g_after != g_before) {
                 Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
