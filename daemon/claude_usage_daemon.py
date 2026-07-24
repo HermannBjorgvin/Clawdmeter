@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Claude Usage Tracker Daemon (BLE) — macOS port of claude-usage-daemon.sh.
 
-Polls Claude API rate-limit headers and writes a JSON payload to the
-ESP32 "Clawdmeter" peripheral over a custom GATT service. Uses
-bleak (CoreBluetooth backend on macOS).
+Polls the OAuth usage endpoint (token-free; also carries per-model weekly
+limits), falling back to the Claude API rate-limit headers, and writes a
+JSON payload to the ESP32 "Clawdmeter" peripheral over a custom GATT
+service. Uses bleak (CoreBluetooth backend on macOS).
 """
 
 import asyncio
@@ -374,6 +375,16 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
+# After a 429 from the usage endpoint, skip it for this long and let the
+# message-call fallback carry polling. The endpoint was tried once before
+# (PR #29) and reverted (PR #37) after a rate-limit report — the cooldown
+# ensures a rate-limited endpoint is never hammered on every cycle, and the
+# fixed 60s poll cadence (vs the old 5s retry loop implicated in #29) bounds
+# request volume in the first place.
+USAGE_ENDPOINT_COOLDOWN_S = 900
+_usage_endpoint_cooldown_until = 0.0
+
+
 async def poll_usage_endpoint(token: str) -> dict | None:
     """Poll the OAuth usage endpoint (token-free) and build the BLE payload.
 
@@ -381,9 +392,16 @@ async def poll_usage_endpoint(token: str) -> dict | None:
     (5h session + 7d weekly) plus per-model scoped weekly limits ("m"/"mn"
     below) — and unlike poll_api() it doesn't spend a 1-token message call per
     poll. Returns None on any failure or unexpected shape so the caller can
-    fall back to poll_api() (e.g. Enterprise accounts, where the spending
-    limit only surfaces in the overage headers).
+    fall back to poll_api(); auth errors are also just a None here — poll_api
+    remains the sole authority on token validity. The Pro/Max shape check
+    requires BOTH the 5h and 7d buckets: Enterprise spending-limit accounts
+    have no weekly concept, so a missing bucket routes them (and any future
+    unknown shape) to the fallback rather than misclassifying them as "pro".
     """
+    global _usage_endpoint_cooldown_until
+    now = time.time()
+    if now < _usage_endpoint_cooldown_until:
+        return None   # rate-limit cooldown active — fallback carries this cycle
     headers = {
         "Authorization": f"Bearer {token}",
         "anthropic-beta": API_HEADERS_TEMPLATE["anthropic-beta"],
@@ -395,6 +413,11 @@ async def poll_usage_endpoint(token: str) -> dict | None:
     except httpx.HTTPError as e:
         log(f"Usage endpoint failed: {e}")
         return None
+    if resp.status_code == 429:
+        _usage_endpoint_cooldown_until = now + USAGE_ENDPOINT_COOLDOWN_S
+        log(f"Usage endpoint rate-limited (429) — cooling down for "
+            f"{USAGE_ENDPOINT_COOLDOWN_S // 60} min, using API fallback")
+        return None
     if resp.status_code != 200:
         log(f"Usage endpoint HTTP {resp.status_code}: {resp.text[:200]}")
         return None
@@ -404,17 +427,19 @@ async def poll_usage_endpoint(token: str) -> dict | None:
         return None
     five = data.get("five_hour") or {}
     seven = data.get("seven_day") or {}
-    if five.get("utilization") is None:
-        return None   # shape we don't understand (Enterprise?) — use the fallback
-
-    now = time.time()
+    if five.get("utilization") is None or seven.get("utilization") is None:
+        return None   # not the full Pro/Max shape (Enterprise?) — use the fallback
 
     def reset_minutes_iso(iso: str | None) -> int:
         if not iso:
             return 0
         try:
-            ts = datetime.datetime.fromisoformat(iso).timestamp()
-        except ValueError:
+            # Python < 3.11 can't parse a literal "Z" suffix; normalize first.
+            ts = datetime.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+        except (ValueError, OSError, OverflowError):
+            # Same guard set as _billing_period_info(): out-of-range values
+            # raise OSError/OverflowError on Windows-family platforms, and
+            # garbage must never take down the poll loop.
             return 0
         mins = (ts - now) / 60.0
         return int(round(mins)) if mins > 0 else 0
