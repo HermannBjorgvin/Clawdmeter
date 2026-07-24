@@ -663,12 +663,12 @@ void ui_update(const UsageData* data) {
 static void update_view_state(void) {
     if (!usage_group || !pair_group || !idle_group) return;
     int v;
-    if (!s_ble_connected) {
-        v = 0;  // pairing hint
-    } else if (data_received && (lv_tick_get() - last_data_ms) < DATA_FRESH_MS) {
-        v = 2;  // live usage
+    if (data_received && (lv_tick_get() - last_data_ms) < DATA_FRESH_MS) {
+        v = 2;
+    } else if (!s_ble_connected) {
+        v = 0;
     } else {
-        v = 1;  // idle / Zzz
+        v = 1;
     }
     if (v == view_state) return;
     view_state = v;
@@ -720,7 +720,11 @@ void ui_tick_anim(void) {
 
     // Status text by priority. Whimsical messages only when connected & settled.
     const char* text;
-    if (!s_ble_connected) {
+    if (view_state == 2 && !s_ble_connected) {
+        text = (now - last_data_ms < 5000)
+            ? "Updated"
+            : anim_messages[anim_msg_idx];
+    } else if (!s_ble_connected) {
         text = "Waiting";              // advertising / waiting for a host connection
     } else if (view_state == 1) {      // idle — alternate so it reads as alive AND data-less
         text = (anim_msg_idx & 1) ? "No data" : "Listening";

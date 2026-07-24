@@ -164,6 +164,21 @@ pip install -r daemon\requirements-windows.txt
 python daemon\claude_usage_daemon_windows.py        # runs in the foreground; Ctrl+C to stop
 ```
 
+### Optional USB/UART transport
+
+Boards with a USB-to-UART bridge such as CH340 can receive the same usage payload
+over their physical COM port without Bluetooth pairing. This is an opt-in transport;
+the installer and tray application continue to use BLE by default.
+
+```powershell
+pip install -r daemon\requirements-windows-serial.txt
+python daemon\claude_usage_daemon_serial_windows.py
+```
+
+The daemon ignores Bluetooth COM ports, probes physical USB serial ports with the
+`identify` command, and reconnects if the cable is unplugged. Set
+`CLAWDMETER_SERIAL_PORT=COM3` to select a port explicitly.
+
 ### Tray icon and menu
 
 The icon's corner bubble shows state — **green** Connected, **amber** Scanning, **red** Error — and hovering shows the status (`Connected · last update HH:MM`). A notification fires once when it enters Error (e.g. an expired token). Right-click for the menu:
