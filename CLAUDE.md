@@ -170,6 +170,8 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 
 Bash daemon (`daemon/claude-usage-daemon.sh`) reads OAuth token, polls Anthropic API, sends JSON over BLE GATT. Run with `systemctl --user start claude-usage-daemon`. The unit file's `ExecStart` is the absolute path to the script — repoint it when switching between the worktree and the main checkout.
 
+**Polling paths (macOS/Windows Python daemons):** `poll_usage_endpoint()` first — GET `/api/oauth/usage` (token-free; same buckets as the headers plus per-model `weekly_scoped` limits, sent as payload `"m"`/`"mn"`). Undocumented endpoint, so any failure or non-Pro/Max shape falls back to `poll_api()` (1-token `/v1/messages`, rate-limit headers) — which also remains the sole path that detects Enterprise accounts and (on Windows) the sole raiser of `AuthError` for the token-expired toast. A 429 from the usage endpoint benches it for 15 min (`USAGE_ENDPOINT_COOLDOWN_S`) — it was reverted once before over rate limiting (PRs #29/#37); don't remove the cooldown. The bash daemon still uses only the header method (no `m`/`mn`).
+
 **Discovery & resilience:**
 
 - Connects by name (`"Clawdmeter"`) on first run, caches resolved MAC at `~/.config/claude-usage-monitor/ble-address`. ESP32 BLE addresses are factory-burned per-chip, so swapping any board invalidates the cache.

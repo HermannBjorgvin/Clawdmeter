@@ -35,6 +35,20 @@ struct Layout {
     int16_t usage_panel_gap;
     int16_t usage_bar_y;
     int16_t usage_reset_y;
+    // Split-weekly mode: when the daemon reports a per-model scoped weekly
+    // bucket ("m"/"mn"), the weekly panel adds a slim model row between the
+    // main bar and the reset line. The panel grows to split_panel_h so the
+    // main bar keeps the same y as the session panel's — the two bars stay
+    // on one visual grid; every breakpoint has clearance below for the growth.
+    int16_t split_panel_h;           // weekly panel height in split mode
+    int16_t split_bar_y;             // main weekly bar y in split mode
+    int16_t model_row_y;             // model name/pct labels y
+    int16_t model_bar_y;             // slim model bar y
+    int16_t model_bar_h;             // slim model bar height
+    int16_t model_name_w;            // reserved width for the model name column
+    int16_t model_pct_w;             // reserved width for the model pct column
+    int16_t split_reset_y;           // reset line y in split mode
+    const lv_font_t* model_font;     // model row name + pct font
     int16_t bar_h;
     int16_t panel_pad_x, panel_pad_y;
     int16_t pill_pad_x, pill_pad_y;
@@ -109,6 +123,15 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 16;
         L.usage_bar_y = 56;
         L.usage_reset_y = 94;
+        L.split_panel_h = 162;
+        L.split_bar_y = 56;
+        L.model_row_y = 88;
+        L.model_bar_y = 94;
+        L.model_bar_h = 12;
+        L.model_name_w = 96;
+        L.model_pct_w = 60;
+        L.split_reset_y = 118;
+        L.model_font = &font_styrene_24;
         L.bt_info_panel_h = 160;
         L.bt_reset_zone_h = 110;
         L.bt_title_font    = &font_tiempos_56;
@@ -123,6 +146,15 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 12;
         L.usage_bar_y = 48;
         L.usage_reset_y = 78;
+        L.split_panel_h = 146;
+        L.split_bar_y = 48;
+        L.model_row_y = 80;
+        L.model_bar_y = 85;
+        L.model_bar_h = 10;
+        L.model_name_w = 86;
+        L.model_pct_w = 54;
+        L.split_reset_y = 106;
+        L.model_font = &font_styrene_20;
         L.bt_info_panel_h = 140;
         L.bt_reset_zone_h = 90;
         L.bt_title_font    = &font_tiempos_34;
@@ -141,6 +173,15 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 6;
         L.usage_bar_y = 30;
         L.usage_reset_y = 46;
+        L.split_panel_h = 82;
+        L.split_bar_y = 30;
+        L.model_row_y = 46;
+        L.model_bar_y = 49;
+        L.model_bar_h = 8;
+        L.model_name_w = 52;
+        L.model_pct_w = 38;
+        L.split_reset_y = 62;
+        L.model_font = &font_styrene_12;
         L.bar_h = 12;
         L.panel_pad_x = 10;
         L.panel_pad_y = 6;
@@ -208,6 +249,10 @@ static lv_obj_t* bar_weekly;
 static lv_obj_t* lbl_weekly_pct;
 static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
+// Per-model scoped weekly row (split-weekly mode); hidden until data arrives.
+static lv_obj_t* lbl_model_name = nullptr;
+static lv_obj_t* bar_model = nullptr;
+static lv_obj_t* lbl_model_pct = nullptr;
 static lv_obj_t* panel_session = nullptr;
 static lv_obj_t* panel_weekly = nullptr;
 // Enterprise-only widgets inside panel_session
@@ -527,6 +572,31 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
 
+    // Per-model scoped weekly row (e.g. "Fable"): name + slim bar + pct, sitting
+    // between the main weekly bar and the reset line. Hidden until the daemon
+    // reports a scoped bucket; ui_update() shifts bar/reset into split positions.
+    int model_bar_w = (L.content_w - 2 * L.panel_pad_x)
+                      - L.model_name_w - L.model_pct_w;
+    lbl_model_name = lv_label_create(panel_weekly);
+    lv_label_set_text(lbl_model_name, "");
+    lv_obj_set_style_text_font(lbl_model_name, L.model_font, 0);
+    lv_obj_set_style_text_color(lbl_model_name, COL_DIM, 0);
+    lv_obj_set_width(lbl_model_name, L.model_name_w - 6);
+    lv_label_set_long_mode(lbl_model_name, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(lbl_model_name, 0, L.model_row_y);
+    lv_obj_add_flag(lbl_model_name, LV_OBJ_FLAG_HIDDEN);
+
+    bar_model = make_bar(panel_weekly, L.model_name_w, L.model_bar_y,
+                         model_bar_w, L.model_bar_h);
+    lv_obj_add_flag(bar_model, LV_OBJ_FLAG_HIDDEN);
+
+    lbl_model_pct = lv_label_create(panel_weekly);
+    lv_label_set_text(lbl_model_pct, "---%");
+    lv_obj_set_style_text_font(lbl_model_pct, L.model_font, 0);
+    lv_obj_set_style_text_color(lbl_model_pct, COL_TEXT, 0);
+    lv_obj_align(lbl_model_pct, LV_ALIGN_TOP_RIGHT, 0, L.model_row_y);
+    lv_obj_add_flag(lbl_model_pct, LV_OBJ_FLAG_HIDDEN);
+
     build_pair_group(usage_container);
     build_idle_group(usage_container);
 
@@ -653,6 +723,29 @@ void ui_update(const UsageData* data) {
         lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
         format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
         lv_label_set_text(lbl_weekly_reset, buf);
+    }
+
+    // Split-weekly mode: show the per-model scoped row (e.g. Fable) and shift
+    // the main bar + reset line into their split-mode positions; single-bar
+    // layout is restored whenever the daemon stops reporting a scoped bucket.
+    bool split = data->has_model && !data->enterprise;
+    lv_obj_set_height(panel_weekly, split ? L.split_panel_h : L.usage_panel_h);
+    lv_obj_set_y(bar_weekly, split ? L.split_bar_y : L.usage_bar_y);
+    lv_obj_set_y(lbl_weekly_reset, split ? L.split_reset_y : L.usage_reset_y);
+    if (split) {
+        int m_pct = (int)(data->model_pct + 0.5f);
+        lv_label_set_text(lbl_model_name,
+                          data->model_name[0] ? data->model_name : "Model");
+        lv_label_set_text_fmt(lbl_model_pct, "%d%%", m_pct);
+        lv_bar_set_value(bar_model, m_pct, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_model, pct_color(data->model_pct), LV_PART_INDICATOR);
+        lv_obj_clear_flag(lbl_model_name, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(bar_model, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(lbl_model_pct, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(lbl_model_name, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(bar_model, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_model_pct, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
