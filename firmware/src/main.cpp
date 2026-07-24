@@ -11,6 +11,7 @@
 #include "usage_rate.h"
 #include "usage_history.h"
 #include "touch_rotate.h"
+#include "clawd_speech.h"
 #include "idle.h"
 #include "idle_cfg.h"
 #include "brightness.h"
@@ -211,6 +212,8 @@ static void check_serial_cmd() {
                 Serial.println("history cleared (RAM + flash)");
             }
             else if (strcmp(cmd_buf, "zoom") == 0) ui_trend_zoom_step(1);  // dev: step the Trend zoom window
+            else if (strcmp(cmd_buf, "quip") == 0) ui_debug_quip();        // dev: pop the mascot quip bubble
+            else if (strcmp(cmd_buf, "chatty") == 0) ui_debug_cycle_chatty(); // dev: cycle chatter mode
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -330,6 +333,7 @@ void loop() {
     ui_tick_anim();
     ui_system_tick();   // refresh System-page stats (~1/s) while it's visible
     ui_kiosk_tick();    // kiosk auto-cycle (skips System; a manual swipe restarts its dwell)
+    clawd_speech_tick(); // auto-fade the mascot speech bubble
     ble_tick();
     power_hal_tick();
     imu_hal_tick();
@@ -431,9 +435,15 @@ void loop() {
             // 5-hour session limit refilled → chime so the user knows they can
             // use Claude again (no-op on boards without a buzzer). Gated on the
             // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
-            if (session_reset && usage.chime) {
-                Serial.println("session reset detected — chime");
-                sound_hal_play_reset();
+            if (session_reset) {
+                // Feedback vector: let Clawd announce the refill (works whether or
+                // not the buzzer chimes). ui_update below runs right after, so the
+                // bubble sits over fresh data.
+                clawd_speak("Session refilled! Back in business.");
+                if (usage.chime) {
+                    Serial.println("session reset detected — chime");
+                    sound_hal_play_reset();
+                }
             }
             if (g_after != g_before) {
                 Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",

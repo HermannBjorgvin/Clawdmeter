@@ -35,3 +35,5 @@ void ui_trend_refresh(void);      // re-render the Trend page (e.g. after sim da
 void ui_trend_zoom_step(int dir); // dev: step the Trend zoom window (+1 wider / -1 narrower)
 void ui_kiosk_tick(void);         // kiosk auto-cycle timer (call each loop); skips System, resets on manual swipe
 void ui_system_tick(void);        // refresh System-page stats (~1/s) while it's visible
+void ui_debug_quip(void);         // dev: pop a context-aware mascot quip (for QA / the `quip` cmd)
+void ui_debug_cycle_chatty(void); // dev: cycle Clawd's chatter mode (the `chatty` cmd)

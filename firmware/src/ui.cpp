@@ -2,6 +2,7 @@
 #include "splash.h"
 #include <lvgl.h>
 #include <Arduino.h>
+#include "clawd_speech.h"
 #include <time.h>
 #include <math.h>
 #include "logo.h"
@@ -233,8 +234,10 @@ static lv_image_dsc_t costume_dscs[COSTUME_COUNT]; // [0] unused (none)
 static int current_costume = 0;
 static lv_obj_t* logo_img;
 
-// Latest session/weekly %, cached for the Burn page's ETA math (set in ui_update).
+// Latest live stats, cached so the mascot speech module can react to them
+// (snapshotted into a ClawdContext in clawd_fill_context; updated in ui_update).
 static float s_cur_session = 0.0f, s_cur_weekly = 0.0f;
+static int   s_cur_session_reset = -1;   // mins to the 5h reset (-1 = unknown), for quips
 
 // ---- Live-data freshness → which usage sub-view to show ----
 // usage panels when data is flowing, an idle "Zzz" screen when the host is
@@ -486,6 +489,45 @@ void ui_cycle_costume(int dir) {
     apply_costume();
 }
 
+static void sys_chat_refresh(void);   // fwd (defined with the System page)
+
+// Snapshot the live stats into a ClawdContext for the speech module (which owns
+// the bubble + the quip repository — see clawd_speech.{h,cpp}).
+static void clawd_fill_context(ClawdContext* c) {
+    c->session_pct = s_cur_session;
+    c->weekly_pct  = s_cur_weekly;
+    float rate = 0; c->burn_known = usage_history_session_rate(&rate);
+    c->burn_rate = rate;
+    c->session_reset_min = s_cur_session_reset;
+    c->costume = current_costume ? costume_names[current_costume] : nullptr;
+    c->hour = -1;
+    if (clock_base_epoch != 0) {   // local hour, if the daemon supplied a wall-clock
+        long ep = clock_base_epoch + (long)((lv_tick_get() - clock_base_ms) / 1000);
+        c->hour = (int)(((ep / 3600) % 24 + 24) % 24);
+    }
+    c->connected = s_ble_connected;
+}
+
+// Poke the corner Claude → a context-aware quip. A swipe that starts on the logo
+// still navigates (the gesture handler is also attached), so only a genuine tap
+// fires this. clawd_speak() no-ops while the mascot is hidden (splash).
+static void clawd_tapped_cb(lv_event_t* e) {
+    (void)e;
+    ClawdContext c; clawd_fill_context(&c);
+    clawd_quip(&c);
+    ui_note_swipe();   // a tap on the mascot must not also toggle the splash
+}
+
+// Dev: pop a freshly-composed context-aware quip (via the `quip` serial command).
+void ui_debug_quip(void) { ClawdContext c; clawd_fill_context(&c); clawd_quip(&c); }
+
+// Dev: cycle Clawd's chatter mode Quiet->Balanced->Chatty (via the `chatty` cmd).
+void ui_debug_cycle_chatty(void) {
+    int m = ((int)clawd_speech_get_chattiness() + 1) % 3;
+    clawd_speech_set_chattiness((ClawdChattiness)m);
+    Preferences p; p.begin("clawdmeter", false); p.putInt("chatty", m); p.end();
+    sys_chat_refresh();
+}
 
 // ======== Usage Screen ========
 
@@ -676,6 +718,7 @@ static lv_obj_t* system_container = nullptr;
 static lv_obj_t* sys_stats_lbl = nullptr;    // multi-line mono stats block
 static lv_obj_t* sys_cycle_btn = nullptr;    // kiosk-cycle toggle
 static lv_obj_t* sys_cycle_lbl = nullptr;
+static lv_obj_t* sys_chat_btn[3] = { nullptr, nullptr, nullptr };  // Quiet / Balanced / Chatty
 static bool      s_cycle_mode  = false;      // auto-advance pages (persisted NVS "cycle")
 
 #define RHYTHM_BARS 14
@@ -892,8 +935,33 @@ static void sys_cycle_toggle_cb(lv_event_t* e) {
     // begins auto-advancing as soon as you swipe to any page.
 }
 
+// Highlight the active Clawd-chatter mode (Quiet / Balanced / Chatty).
+static void sys_chat_refresh(void) {
+    int m = (int)clawd_speech_get_chattiness();
+    for (int i = 0; i < 3; i++)
+        if (sys_chat_btn[i])
+            lv_obj_set_style_bg_color(sys_chat_btn[i], (i == m) ? COL_ACCENT : COL_BAR_BG, 0);
+}
+
+static void sys_chat_cb(lv_event_t* e) {
+    ui_note_swipe();   // a tap on a settings button must not toggle the splash
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    clawd_speech_set_chattiness((ClawdChattiness)i);
+    Preferences p; p.begin("clawdmeter", false); p.putInt("chatty", i); p.end();
+    sys_chat_refresh();
+}
 
 // ---- System-page settings widgets (shared so every control looks/behaves the same) ----
+
+// Dim section caption above a setting (e.g. "Clawd chatter").
+static lv_obj_t* make_setting_label(lv_obj_t* parent, int x, int y, const char* text) {
+    lv_obj_t* t = lv_label_create(parent);
+    lv_obj_set_style_text_font(t, L.small_icons ? &font_styrene_12 : &font_styrene_16, 0);
+    lv_obj_set_style_text_color(t, COL_DIM, 0);
+    lv_obj_set_pos(t, x, y);
+    lv_label_set_text(t, text);
+    return t;
+}
 
 // A rounded, clickable settings pill with a centered label. Used for both the
 // chatter segmented control and the kiosk toggle. Position with lv_obj_set_pos
@@ -940,6 +1008,21 @@ static void build_system_page(lv_obj_t* scr) {
     lv_label_set_text(sys_stats_lbl, "...");
 
     int y = L.content_y + stats_h + (sm ? 8 : 14);   // running cursor down the page
+
+    // --- Setting: Clawd chatter — Quiet / Balanced / Chatty segmented control ---
+    make_setting_label(system_container, L.margin, y, "Clawd chatter");
+    y += sm ? 18 : 26;
+    static const char* const chat_names[3] = { "Quiet", "Balanced", "Chatty" };
+    const int seg_gap = 8, seg_h = sm ? 38 : 46;
+    const int seg_w = (L.content_w - 2 * seg_gap) / 3;
+    const lv_font_t* seg_font = sm ? &font_styrene_14 : &font_styrene_20;
+    for (int i = 0; i < 3; i++) {
+        sys_chat_btn[i] = make_setting_btn(system_container, seg_w, seg_h, chat_names[i],
+                                           seg_font, sys_chat_cb, (void*)(intptr_t)i, nullptr);
+        lv_obj_set_pos(sys_chat_btn[i], L.margin + i * (seg_w + seg_gap), y);
+    }
+    sys_chat_refresh();
+    y += seg_h + (sm ? 10 : 14);
 
     // --- Setting: kiosk auto-cycle toggle (accent-outlined full-width pill) ---
     sys_cycle_btn = make_setting_btn(system_container, L.content_w, sm ? 44 : 58, "",
@@ -1321,10 +1404,16 @@ static lv_obj_t* page_container(screen_t s) {
 
 void ui_init(void) {
     compute_layout(board_caps());
+    int loaded_chat = CLAWD_BALANCED;
     { Preferences p; if (p.begin("clawdmeter", true)) {
         s_cycle_mode = p.getBool("cycle", false);
+        loaded_chat  = p.getInt("chatty", CLAWD_BALANCED);
         p.end();
     } }
+    if (loaded_chat < CLAWD_QUIET || loaded_chat > CLAWD_CHATTY) loaded_chat = CLAWD_BALANCED;
+    // Apply the saved chatter mode BEFORE the pages build, so the System page's
+    // segmented highlight (sys_chat_refresh) reflects it from the first frame.
+    clawd_speech_set_chattiness((ClawdChattiness)loaded_chat);
 
     lv_obj_t* scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
@@ -1348,7 +1437,19 @@ void ui_init(void) {
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
     lv_obj_set_pos(logo_img, L.margin, L.logo_y);
-    attach_swipe(logo_img);   // keep swipes that start on the corner logo working
+    // Poke-the-mascot: a tap pops a quip bubble; attach_swipe keeps swipes that
+    // start on Clawd working (gesture + click coexist — drag = swipe, tap = quip).
+    lv_obj_set_ext_click_area(logo_img, 8);
+    lv_obj_add_event_cb(logo_img, clawd_tapped_cb, LV_EVENT_CLICKED, NULL);
+    attach_swipe(logo_img);
+
+    // Mascot speech bubble, anchored below Clawd (styling passed so the module
+    // stays theme-agnostic). Tapping him or calling clawd_speak() drives it.
+    ClawdSpeechStyle bubble_style = {
+        L.pill_font, COL_TEXT, COL_BG, (int32_t)(L.scr_w - 2 * L.margin - 24)
+    };
+    clawd_speech_init(scr, logo_img, &bubble_style);
+    clawd_speech_set_context_provider(clawd_fill_context);        // for autonomous chatter
 
     // Costume overlay, on top of the corner Claude. Props are drawn to align
     // with the 80px logo, so only enable them on full-size (non-small) boards.
@@ -1401,6 +1502,7 @@ void ui_update(const UsageData* data) {
     usage_history_add(data->session_pct, data->weekly_pct, data->clock_epoch);
     s_cur_session = data->session_pct;
     s_cur_weekly  = data->weekly_pct;
+    s_cur_session_reset = data->session_reset_mins;
     for (int i = 0; i < PAGE_N; i++)
         if (PAGES[i].update) PAGES[i].update(data);
 }
@@ -1573,6 +1675,10 @@ static void global_click_cb(lv_event_t* e) {
 void ui_show_screen(screen_t screen) {
     hide_all_pages();
     splash_hide();
+    // Let a quip finish its dwell across page changes (kiosk or swipe) — the bubble
+    // is anchored to the always-present corner mascot, not to any page. Only hide it
+    // when entering the splash, where the mascot itself disappears.
+    if (screen == SCREEN_SPLASH) clawd_speech_hide();
 
     if (screen == SCREEN_SPLASH) {
         splash_show();
