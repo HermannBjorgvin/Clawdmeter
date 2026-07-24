@@ -20,6 +20,7 @@ daemon/.venv/
 
 # Generated art preview (regenerate with tools/gen_costumes.py)
 tools/costumes_preview.png
+tools/costumes_guide.png
 
 # Python bytecode cache
 __pycache__/
