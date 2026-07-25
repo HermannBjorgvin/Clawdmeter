@@ -80,7 +80,7 @@ firmware/src/
     waveshare_amoled_206/   — CO5300 + FT3168 + AXP PKEY, no IO expander, 32 MB, no rotation
     template/               — copy this to bootstrap a new port
   main.cpp                  — setup() + loop(): HAL calls only, zero #ifdef BOARD_*
-  ui.{h,cpp}                — 3-screen UI (splash, usage, bluetooth). compute_layout() picks fonts/positions from board_caps() (responsive — current breakpoint: H >= 460 → large, else compact)
+  ui.{h,cpp}                — screens: splash, usage, context (per-chat context-window gauge; swipe left/right hops usage ⟷ context pages, tap toggles splash). compute_layout() picks fonts/positions from board_caps() (responsive breakpoints: H >= 460 large, H >= 300 compact, else small)
   splash.{h,cpp}            — 20×20 pixel-art engine. CELL = min(W,H)/20, centered.
   ble.{h,cpp}               — NimBLE peripheral: custom data service + HID keyboard
   data.h                    — UsageData struct
@@ -178,6 +178,13 @@ Bash daemon (`daemon/claude-usage-daemon.sh`) reads OAuth token, polls Anthropic
 
 **GATT characteristics on service `4c41555a-...0001`:**
 
-- `...0002` RX — daemon writes JSON usage payload here.
+- `...0002` RX — daemon writes JSON usage payload here. Besides the API usage
+  fields, the payload carries `"cc":[{n,p,k,l}, …]` — context-window fill of
+  up to 4 recently-active local Claude Code chats (name, percent, tokens-used
+  in thousands, window size in thousands), scanned from
+  `<config_dir>/projects/*/*.jsonl` transcript tails every TICK and pushed
+  between polls whenever it changes. Firmware negotiates ATT MTU 517
+  (`NimBLEDevice::setMTU`); the daemon trims trailing `cc` entries to fit
+  MTU−3 on firmware that predates that (255 MTU).
 - `...0003` TX — firmware notifies ack/nack (daemon doesn't subscribe).
 - `...0004` REQ — firmware fires `0x01` notify in `onSubscribe` if `has_received_data` is false. Daemon subscribes via `setsid bash -c "stdbuf -oL dbus-monitor … | awk …"`; awk drops a flag file the inner loop picks up. See the `feedback_dbus_monitor_pipe` memory for the three subtle gotchas (pipe buffering, busctl-exits race, `wait` blocking on pipeline jobs).

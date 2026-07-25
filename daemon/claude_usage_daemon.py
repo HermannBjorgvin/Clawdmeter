@@ -33,6 +33,26 @@ POLL_INTERVAL = 60
 TICK = 5
 CONNECT_TIMEOUT = 20.0
 
+# Context-window reporting: transcripts touched within this window count as
+# "active" chats; at most CONTEXT_MAX_CHATS are sent (firmware page limit).
+# Even when nothing is "active", the single most-recently-modified transcript
+# is still reported as the "current" chat — see scan_chat_contexts().
+CONTEXT_ACTIVE_SECS = 15 * 60
+# How far back scan_chat_contexts() bothers stat()'ing transcripts at all.
+# Just a cheap upper bound for the always-keep-newest fallback (finding the
+# most recent usable chat even outside CONTEXT_ACTIVE_SECS) — not itself an
+# "active" threshold — so it can be generous without walking the whole
+# projects/ tree every tick.
+CONTEXT_STAT_SCAN_SECS = 48 * 60 * 60
+CONTEXT_MAX_CHATS = 4
+CONTEXT_TAIL_BYTES = 256 * 1024
+CONTEXT_NAME_MAX = 18
+# Transcripts carry no reliable record of a chat's context-window size (no
+# "[1m]"-style marker survives consistently across models/transcripts), so it
+# can't be detected from the file. The user's plan runs 1M-token windows on
+# every chat — if that ever changes, this is the single knob to touch.
+CONTEXT_WINDOW_TOKENS = 1_000_000
+
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
 KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -81,12 +101,17 @@ def _extract_access_token(blob: str) -> str | None:
         for v in data.values():
             if isinstance(v, dict) and isinstance(v.get("accessToken"), str):
                 return v["accessToken"]
-    m = re.search(r'"accessToken"\s*:\s*"([^"]+)"', blob)
-    if m:
-        return m.group(1)
-    # Raw token (no JSON wrapper) — must look plausible (sk-ant-... etc.)
-    if re.fullmatch(r"[A-Za-z0-9_\-.~+/=]{20,}", blob):
-        return blob
+    if data is None:
+        # Only regex-mine blobs that aren't valid JSON. Valid JSON without a
+        # Claude OAuth token (e.g. a .credentials.json holding only mcpOAuth
+        # entries) must NOT be mined — the regex would grab an unrelated MCP
+        # server's accessToken and the API would reject it.
+        m = re.search(r'"accessToken"\s*:\s*"([^"]+)"', blob)
+        if m:
+            return m.group(1)
+        # Raw token (no JSON wrapper) — must look plausible (sk-ant-... etc.)
+        if re.fullmatch(r"[A-Za-z0-9_\-.~+/=]{20,}", blob):
+            return blob
     return None
 
 
@@ -144,8 +169,9 @@ def read_token_for(config_dir: Path) -> str | None:
     """Read the OAuth token for one config dir.
 
     Linux: each dir keeps its own ``<dir>/.credentials.json``. macOS: the default
-    install stores the token in Keychain with no file, so for the default dir we
-    fall back to Keychain when no file is present — preserving existing
+    install stores the token in Keychain, so for the default dir we fall back
+    to Keychain when the file is absent or holds no usable token (it may hold
+    only mcpOAuth entries) — preserving existing
     single-plan macOS behavior. Additional macOS dirs are read from their files;
     a work plan whose token lives only in the single Keychain entry can't be told
     apart there (documented follow-up).
@@ -153,7 +179,9 @@ def read_token_for(config_dir: Path) -> str | None:
     cred = config_dir / ".credentials.json"
     try:
         if cred.exists():
-            return _extract_access_token(cred.read_text())
+            token = _extract_access_token(cred.read_text())
+            if token:
+                return token
     except OSError as e:
         log(f"Error reading credentials in {config_dir}: {e}")
     if sys.platform == "darwin" and config_dir == DEFAULT_CONFIG_DIR:
@@ -504,6 +532,163 @@ class PlanSelector:
 _SELECTOR = PlanSelector()
 
 
+# --- Context-window fill of local Claude Code chats -------------------------
+#
+# Claude Code writes every session transcript to
+# <config_dir>/projects/<slug>/<session-id>.jsonl. The last main-chain
+# assistant message's usage block gives the current context occupancy:
+# input_tokens + cache_read_input_tokens + cache_creation_input_tokens.
+# Compaction shrinks that sum automatically, so no special-casing is needed.
+
+_ctx_cache: dict[Path, tuple[float, dict | None]] = {}
+
+
+def _last_assistant_context(path: Path) -> dict | None:
+    """Return {"n","p","k","l"} for a transcript's newest assistant turn.
+
+    n = project name, p = context fill %, k = tokens used (thousands),
+    l = window size (thousands). None if no usable assistant turn is found
+    in the file's tail (e.g. a chat with no response yet).
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - CONTEXT_TAIL_BYTES))
+            tail = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+
+    # Project name comes from the session's FIRST recorded cwd — the directory
+    # the session was started in. Later messages' cwd drifts with in-session
+    # `cd`s, which would mislabel the chat. Early lines can be huge (file
+    # snapshots), so read line-by-line with a per-line cap instead of a fixed
+    # head chunk; an over-cap line just fails to parse and is skipped.
+    project = ""
+    try:
+        with open(path, "r", errors="replace") as f:
+            for _ in range(25):
+                line = f.readline(1_048_576)
+                if not line:
+                    break
+                try:
+                    first = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if first.get("cwd"):
+                    project = Path(first["cwd"]).name
+                    break
+    except OSError:
+        pass
+    for line in reversed(tail.splitlines()):
+        # Cheap pre-filter: most lines (user turns, tool results) have no usage.
+        if '"usage"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # includes the partial first line of a mid-file seek
+        if d.get("type") != "assistant" or d.get("isSidechain"):
+            continue
+        u = (d.get("message") or {}).get("usage") or {}
+        used = (
+            (u.get("input_tokens") or 0)
+            + (u.get("cache_read_input_tokens") or 0)
+            + (u.get("cache_creation_input_tokens") or 0)
+        )
+        if used <= 0:
+            continue
+        limit = CONTEXT_WINDOW_TOKENS
+        if used > limit:
+            # Safety snap-up: round to the next 1M multiple so the gauge
+            # never wrongly pegs at >100% if usage ever exceeds the window.
+            limit = ((used // CONTEXT_WINDOW_TOKENS) + 1) * CONTEXT_WINDOW_TOKENS
+        cwd = d.get("cwd") or ""
+        name = (project or (Path(cwd).name if cwd else path.parent.name))[
+            :CONTEXT_NAME_MAX
+        ]
+        return {
+            "n": name or "?",
+            "p": max(0, min(100, round(used / limit * 100))),
+            "k": round(used / 1000),
+            "l": limit // 1000,
+        }
+    return None
+
+
+def scan_chat_contexts() -> list[dict]:
+    """Context fill of recently-active local chats, most recent first.
+
+    Chats touched within CONTEXT_ACTIVE_SECS are "active" and all get
+    reported (up to CONTEXT_MAX_CHATS). If NONE are active this cycle, the
+    single most-recently-modified transcript with usable data is reported
+    anyway — it's the "current" chat and should stay on the device until
+    something else becomes active, rather than the cc list going empty
+    the moment a user pauses for more than CONTEXT_ACTIVE_SECS.
+
+    Rescanned every TICK, so results are cached per file by mtime — only
+    transcripts that actually changed get their tail re-read. The cached
+    entry deliberately excludes "a" (age in minutes): age changes every
+    tick even when mtime doesn't, so it's computed fresh below instead of
+    baked into the mtime-keyed cache.
+    """
+    now = time.time()
+    candidates: list[tuple[float, Path]] = []
+    for cfg in read_config_dirs():
+        projects = cfg / "projects"
+        if not projects.is_dir():
+            continue
+        for f in projects.glob("*/*.jsonl"):
+            try:
+                mt = f.stat().st_mtime
+            except OSError:
+                continue
+            # Bounded scan, not the active-window filter — see
+            # CONTEXT_STAT_SCAN_SECS.
+            if now - mt <= CONTEXT_STAT_SCAN_SECS:
+                candidates.append((mt, f))
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    def entry_for(mt: float, f: Path) -> dict | None:
+        cached = _ctx_cache.get(f)
+        if cached and cached[0] == mt:
+            return cached[1]
+        entry = _last_assistant_context(f)
+        _ctx_cache[f] = (mt, entry)
+        return entry
+
+    def with_age(entry: dict, mt: float) -> dict:
+        age_min = max(0, int((now - mt) // 60))
+        return {**entry, "a": age_min}
+
+    out: list[dict] = []
+    for mt, f in candidates:
+        # candidates is sorted newest-first, so the first one outside the
+        # active window means every remaining one is too — stop here.
+        if now - mt > CONTEXT_ACTIVE_SECS:
+            break
+        entry = entry_for(mt, f)
+        if entry:
+            out.append(with_age(entry, mt))
+            if len(out) >= CONTEXT_MAX_CHATS:
+                break
+
+    if not out:
+        # Nothing active — fall back to the newest transcript that actually
+        # has a usable assistant turn (older/emptier ones are skipped).
+        for mt, f in candidates:
+            entry = entry_for(mt, f)
+            if entry:
+                out.append(with_age(entry, mt))
+                break
+
+    if len(_ctx_cache) > 64:  # drop cache entries for long-inactive sessions
+        live = {f for _, f in candidates}
+        for k in [k for k in _ctx_cache if k not in live]:
+            del _ctx_cache[k]
+    return out
+
+
 async def poll_active_payload(selector: PlanSelector = _SELECTOR) -> dict | None:
     """Poll every configured config dir and return the active plan's payload.
 
@@ -557,9 +742,22 @@ class Session:
         except asyncio.TimeoutError:
             log("Refresh subscription timed out; polling without it")
 
-    async def write_payload(self, payload: dict) -> bool:
+    async def write_payload(self, payload: dict, note: str | None = None) -> bool:
         data = json.dumps(payload, separators=(",", ":")).encode()
-        log(f"Sending: {data.decode()}")
+        # Write-without-response carries at most MTU-3 bytes (255-byte MTU on
+        # firmware predating the 517 negotiation). Drop trailing cc entries
+        # (the least-recently-active chats) until the payload fits, rather
+        # than letting the whole write fail.
+        try:
+            max_len = (self.client.mtu_size or 23) - 3
+        except Exception:  # backend without mtu_size — assume firmware buffer
+            max_len = 511
+        while len(data) > max_len and payload.get("cc"):
+            payload["cc"] = payload["cc"][:-1]
+            data = json.dumps(payload, separators=(",", ":")).encode()
+        if len(data) > max_len:
+            log(f"Payload {len(data)}B exceeds MTU budget {max_len}B; sending anyway")
+        log(note if note else f"Sending: {data.decode()}")
         try:
             await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
             return True
@@ -687,23 +885,44 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
         return False
 
     log("Connected")
+    try:
+        log(f"Negotiated MTU: {client.mtu_size}")
+    except Exception:
+        pass
     session = Session(client)
     await session.setup_refresh_subscription()
 
     last_poll = 0.0
     used_successfully = False
+    last_payload: dict | None = None
+    last_cc: list | None = None
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
             elapsed = now - last_poll
+            cc = scan_chat_contexts()
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
                 payload = await poll_active_payload()
                 if payload is None:
                     log("No usable config dir this cycle")
-                elif await session.write_payload(payload):
-                    last_poll = time.time()
-                    used_successfully = True
+                else:
+                    payload["cc"] = cc
+                    if await session.write_payload(payload):
+                        last_poll = time.time()
+                        last_payload = payload
+                        last_cc = cc
+                        used_successfully = True
+            elif last_payload is not None and cc != last_cc:
+                # Context fill moves much faster than the 60s API cadence, so
+                # push a cc-only refresh of the last payload as soon as any
+                # chat's context changes (checked every TICK).
+                last_payload["cc"] = cc
+                if await session.write_payload(
+                    last_payload,
+                    note=f"Sending context update ({len(cc)} chats)",
+                ):
+                    last_cc = cc
 
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
