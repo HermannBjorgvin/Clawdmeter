@@ -47,11 +47,21 @@ CONTEXT_STAT_SCAN_SECS = 48 * 60 * 60
 CONTEXT_MAX_CHATS = 4
 CONTEXT_TAIL_BYTES = 256 * 1024
 CONTEXT_NAME_MAX = 18
-# Transcripts carry no reliable record of a chat's context-window size (no
-# "[1m]"-style marker survives consistently across models/transcripts), so it
-# can't be detected from the file. The user's plan runs 1M-token windows on
-# every chat — if that ever changes, this is the single knob to touch.
-CONTEXT_WINDOW_TOKENS = 1_000_000
+# Transcripts carry no reliable, universal record of a chat's context-window
+# size, so absent an explicit override (see read_context_window_k() below)
+# it's a heuristic: HEURISTIC_LONG_CONTEXT_TOKENS if the assistant message's
+# "model" string contains a "[1m]" marker (a long-context variant), else
+# HEURISTIC_STANDARD_CONTEXT_TOKENS. If usage ever exceeds the assumed
+# window, _last_assistant_context() snaps the assumed limit up to 1M (and
+# further, to the next 1M multiple) so the gauge keeps tracking progress
+# instead of pegging at 100% on a wrong guess.
+#
+# `context_window_k` (config file, thousands of tokens) overrides the
+# heuristic entirely for plans where every chat shares one known window —
+# e.g. `context_window_k = 1000` for an all-1M-context plan. See
+# read_context_window_k().
+HEURISTIC_STANDARD_CONTEXT_TOKENS = 200_000
+HEURISTIC_LONG_CONTEXT_TOKENS = 1_000_000
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
@@ -141,24 +151,36 @@ def _read_token_keychain() -> str | None:
     return _extract_access_token(out.stdout)
 
 
-def read_config_dirs() -> list[Path]:
-    """Claude config dirs to poll, from the `config_dirs` option (comma list).
+def read_config_value(key: str) -> str | None:
+    """Read one `key = value` entry from CONFIG_FILE (# comments allowed).
 
-    Defaults to [~/.claude] so existing single-plan setups are unchanged. ~ is
-    expanded. Mirrors the Linux bash daemon's read_config_dirs.
+    Case-insensitive key match; if `key` appears more than once, the LAST
+    matching line wins (mirrors the historical behavior of the individual
+    option readers this replaces). Returns None if the file is missing,
+    unreadable, or the key isn't set — never raises.
     """
-    raw = ""
+    result: str | None = None
     try:
         if CONFIG_FILE.exists():
             for line in CONFIG_FILE.read_text().splitlines():
                 line = line.split("#", 1)[0].strip()
                 if "=" not in line:
                     continue
-                key, val = line.split("=", 1)
-                if key.strip().lower() == "config_dirs":
-                    raw = val.strip()
+                k, val = line.split("=", 1)
+                if k.strip().lower() == key.lower():
+                    result = val.strip()
     except OSError:
         pass
+    return result
+
+
+def read_config_dirs() -> list[Path]:
+    """Claude config dirs to poll, from the `config_dirs` option (comma list).
+
+    Defaults to [~/.claude] so existing single-plan setups are unchanged. ~ is
+    expanded. Mirrors the Linux bash daemon's read_config_dirs.
+    """
+    raw = read_config_value("config_dirs") or ""
     if not raw:
         return [DEFAULT_CONFIG_DIR]
     dirs = [Path(p.strip()).expanduser() for p in raw.split(",") if p.strip()]
@@ -318,20 +340,8 @@ def read_chime_setting() -> str:
     Defaults to "off" (the device stays silent) so existing setups are
     unaffected until the user opts in.
     """
-    try:
-        if CONFIG_FILE.exists():
-            for line in CONFIG_FILE.read_text().splitlines():
-                line = line.split("#", 1)[0].strip()
-                if "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                if key.strip().lower() == "chime":
-                    val = val.strip().lower()
-                    if val in ("off", "on"):
-                        return val
-    except OSError:
-        pass
-    return "off"
+    val = (read_config_value("chime") or "").lower()
+    return val if val in ("off", "on") else "off"
 
 
 def read_clock_setting() -> str:
@@ -340,20 +350,28 @@ def read_clock_setting() -> str:
     Defaults to "off" (no clock; the device keeps showing "Usage") so existing
     setups are unaffected until the user opts in.
     """
+    val = (read_config_value("clock") or "").lower()
+    return val if val in ("off", "auto", "12", "24") else "off"
+
+
+def read_context_window_k() -> int | None:
+    """Read the `context_window_k` option (thousands of tokens) from config.
+
+    This is the override for plans where every chat shares one known context
+    window — e.g. `context_window_k = 1000` for an all-1M-context plan.
+    Returns a positive int if set to one, else None (meaning: fall back to
+    the per-chat heuristic in _last_assistant_context — see its docstring).
+    Re-read once per scan_chat_contexts() call, so changing it takes effect
+    on the next scan without a daemon restart.
+    """
+    raw = read_config_value("context_window_k")
+    if not raw:
+        return None
     try:
-        if CONFIG_FILE.exists():
-            for line in CONFIG_FILE.read_text().splitlines():
-                line = line.split("#", 1)[0].strip()
-                if "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                if key.strip().lower() == "clock":
-                    val = val.strip().lower()
-                    if val in ("off", "auto", "12", "24"):
-                        return val
-    except OSError:
-        pass
-    return "off"
+        val = int(raw)
+    except ValueError:
+        return None
+    return val if val > 0 else None
 
 
 def add_chime_field(payload: dict) -> None:
@@ -540,15 +558,27 @@ _SELECTOR = PlanSelector()
 # input_tokens + cache_read_input_tokens + cache_creation_input_tokens.
 # Compaction shrinks that sum automatically, so no special-casing is needed.
 
-_ctx_cache: dict[Path, tuple[float, dict | None]] = {}
+_ctx_cache: dict[Path, tuple[float, int | None, dict | None]] = {}
 
 
-def _last_assistant_context(path: Path) -> dict | None:
+def _last_assistant_context(path: Path, context_window_k: int | None) -> dict | None:
     """Return {"n","p","k","l"} for a transcript's newest assistant turn.
 
     n = project name, p = context fill %, k = tokens used (thousands),
     l = window size (thousands). None if no usable assistant turn is found
     in the file's tail (e.g. a chat with no response yet).
+
+    ``context_window_k`` is the config override (thousands of tokens) from
+    read_context_window_k(): when set, every chat's limit is that value *
+    1000, no further guessing. When None (upstream default), the limit is a
+    per-chat heuristic — transcripts don't record the actual window size, so
+    we assume HEURISTIC_LONG_CONTEXT_TOKENS if the assistant message's model
+    string carries a "[1m]" marker (a long-context variant), else
+    HEURISTIC_STANDARD_CONTEXT_TOKENS — and if usage ever exceeds that
+    assumption, snap the limit up to 1M (and beyond, to the next 1M
+    multiple) so the gauge keeps tracking progress instead of pegging at
+    100% on a wrong guess. The override skips that snap-up: a user-declared
+    window is taken as fact, not a guess to correct.
     """
     try:
         with open(path, "rb") as f:
@@ -598,11 +628,25 @@ def _last_assistant_context(path: Path) -> dict | None:
         )
         if used <= 0:
             continue
-        limit = CONTEXT_WINDOW_TOKENS
-        if used > limit:
-            # Safety snap-up: round to the next 1M multiple so the gauge
-            # never wrongly pegs at >100% if usage ever exceeds the window.
-            limit = ((used // CONTEXT_WINDOW_TOKENS) + 1) * CONTEXT_WINDOW_TOKENS
+        if context_window_k:
+            limit = context_window_k * 1000
+        else:
+            model = (d.get("message") or {}).get("model") or ""
+            limit = (
+                HEURISTIC_LONG_CONTEXT_TOKENS
+                if "[1m]" in model
+                else HEURISTIC_STANDARD_CONTEXT_TOKENS
+            )
+            if used > limit:
+                # Safety snap-up: the heuristic is a guess, so if usage
+                # exceeds it, bump to 1M — and beyond, to the next 1M
+                # multiple — so the gauge keeps tracking progress instead
+                # of pegging at 100% on a wrong guess.
+                limit = HEURISTIC_LONG_CONTEXT_TOKENS
+                if used > limit:
+                    limit = (
+                        (used // HEURISTIC_LONG_CONTEXT_TOKENS) + 1
+                    ) * HEURISTIC_LONG_CONTEXT_TOKENS
         cwd = d.get("cwd") or ""
         name = (project or (Path(cwd).name if cwd else path.parent.name))[
             :CONTEXT_NAME_MAX
@@ -626,13 +670,18 @@ def scan_chat_contexts() -> list[dict]:
     something else becomes active, rather than the cc list going empty
     the moment a user pauses for more than CONTEXT_ACTIVE_SECS.
 
-    Rescanned every TICK, so results are cached per file by mtime — only
-    transcripts that actually changed get their tail re-read. The cached
-    entry deliberately excludes "a" (age in minutes): age changes every
-    tick even when mtime doesn't, so it's computed fresh below instead of
-    baked into the mtime-keyed cache.
+    Rescanned every TICK, so results are cached per file by (mtime,
+    context_window_k) — only transcripts that actually changed, or whose
+    cached entry was computed under a different `context_window_k`, get
+    their tail re-read. context_window_k is read once per call (see
+    read_context_window_k()) so users can change the config option and see
+    it take effect on the next scan without restarting the daemon. The
+    cached entry deliberately excludes "a" (age in minutes): age changes
+    every tick even when mtime doesn't, so it's computed fresh below instead
+    of baked into the cache.
     """
     now = time.time()
+    context_window_k = read_context_window_k()
     candidates: list[tuple[float, Path]] = []
     for cfg in read_config_dirs():
         projects = cfg / "projects"
@@ -651,10 +700,10 @@ def scan_chat_contexts() -> list[dict]:
 
     def entry_for(mt: float, f: Path) -> dict | None:
         cached = _ctx_cache.get(f)
-        if cached and cached[0] == mt:
-            return cached[1]
-        entry = _last_assistant_context(f)
-        _ctx_cache[f] = (mt, entry)
+        if cached and cached[0] == mt and cached[1] == context_window_k:
+            return cached[2]
+        entry = _last_assistant_context(f, context_window_k)
+        _ctx_cache[f] = (mt, context_window_k, entry)
         return entry
 
     def with_age(entry: dict, mt: float) -> dict:
