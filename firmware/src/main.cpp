@@ -119,9 +119,52 @@ static bool parse_json(const char* json, UsageData* out) {
     strlcpy(out->reset_date, doc["rd"] | "", sizeof(out->reset_date));
     out->clock_epoch = doc["t"] | 0L;
     out->clock_fmt = doc["tf"] | 24;
+
+    out->chat_count = 0;
+    for (JsonObjectConst o : doc["cc"].as<JsonArrayConst>()) {
+        if (out->chat_count >= CTX_MAX_CHATS) break;
+        ChatCtx& ch = out->chats[out->chat_count++];
+        strlcpy(ch.name, o["n"] | "?", sizeof(ch.name));
+        ch.pct = o["p"] | 0;
+        ch.used_k = o["k"] | 0;
+        ch.limit_k = o["l"] | 200;
+        ch.age_min = o["a"] | 0;   // minutes since this chat last moved tokens
+    }
+
     out->ok = doc["ok"] | false;
     out->valid = true;
     return true;
+}
+
+// Did this payload actually move tokens? Compares the numbers that only change
+// when Claude does work — session/weekly utilization and the per-chat context
+// fill — while ignoring the clock and the reset countdowns, which tick on every
+// payload and would otherwise read as permanent activity. This is what drives
+// the screensaver (see idle_cfg.h): no movement for IDLE_TIMEOUT_MS → screen
+// off; movement → screen back on, even untouched.
+static bool tokens_moved(const UsageData& cur) {
+    static UsageData prev = {};
+    static bool have_prev = false;
+
+    bool moved = false;
+    if (!have_prev) {
+        have_prev = true;          // first payload is the baseline, not movement
+    } else if (cur.session_pct != prev.session_pct ||
+               cur.weekly_pct  != prev.weekly_pct  ||
+               cur.chat_count  != prev.chat_count) {
+        moved = true;
+    } else {
+        for (int i = 0; i < cur.chat_count && i < CTX_MAX_CHATS; i++) {
+            const ChatCtx& a = cur.chats[i];
+            const ChatCtx& b = prev.chats[i];
+            if (a.pct != b.pct || a.used_k != b.used_k || strcmp(a.name, b.name) != 0) {
+                moved = true;
+                break;
+            }
+        }
+    }
+    prev = cur;
+    return moved;
 }
 
 // ---- Serial command buffer ----
@@ -300,49 +343,43 @@ void loop() {
     if (!idle_is_asleep()) display_hal_tick();
 
     // ---- Physical buttons ----
-    //   PRIMARY   → HID Space  (Claude Code voice-mode PTT)
-    //   SECONDARY → HID Shift+Tab  (mode toggle; only if the board has one)
-    //   PWR       → on splash: cycle animations; on usage: cycle brightness;
-    //               hold ~3s + release: pairing mode
-    // First press from sleep is consumed as a wake-only event by
-    // idle_consume_wake_press(); the normal action fires from the second
-    // press. Activity bookkeeping happens inside idle_consume_wake_press
-    // so no separate idle_note_activity() call is needed here.
+    // The top buttons drive the mode ring (the same ring a screen tap walks),
+    // so the device is fully navigable without touching the glass:
+    //   two-button boards → PRIMARY = previous mode, SECONDARY = next mode
+    //   one-button boards → PRIMARY = next mode
+    //   PWR               → on splash: cycle animations; on a mode: cycle
+    //                       brightness; hold ~3s + release: pairing mode
+    // Actions fire on the press edge. The first press from sleep is consumed as
+    // a wake-only event by idle_consume_wake_press(); the normal action fires
+    // from the second press. Activity bookkeeping happens inside
+    // idle_consume_wake_press so no separate idle_note_activity() call is
+    // needed here.
     {
+        const bool two_buttons = board_caps().button_count >= 2;
+
         static bool primary_was = false;
-        static bool primary_wake_swallowed = false;
         bool primary_now = input_hal_is_held(INPUT_BTN_PRIMARY);
         if (primary_now != primary_was) {
-            if (primary_now) {
-                if (idle_consume_wake_press()) primary_wake_swallowed = true;
-                else                            ble_keyboard_press(0x2C, 0);  // HID Space, no mods
-            } else {
-                if (primary_wake_swallowed) primary_wake_swallowed = false;
-                else                        ble_keyboard_release();
+            if (primary_now && !idle_consume_wake_press()) {
+                if (two_buttons) ui_mode_prev();
+                else             ui_mode_next();
             }
             primary_was = primary_now;
         }
 
-        if (board_caps().button_count >= 2) {
+        if (two_buttons) {
             static bool secondary_was = false;
-            static bool secondary_wake_swallowed = false;
             bool secondary_now = input_hal_is_held(INPUT_BTN_SECONDARY);
             if (secondary_now != secondary_was) {
-                if (secondary_now) {
-                    if (idle_consume_wake_press()) secondary_wake_swallowed = true;
-                    else                            ble_keyboard_press(0x2B, 0x02);  // HID Tab + LEFT_SHIFT
-                } else {
-                    if (secondary_wake_swallowed) secondary_wake_swallowed = false;
-                    else                          ble_keyboard_release();
-                }
+                if (secondary_now && !idle_consume_wake_press()) ui_mode_next();
                 secondary_was = secondary_now;
             }
         }
 
         if (power_hal_pwr_pressed()) {
             if (!idle_consume_wake_press()) {
-                // On splash: cycle animations. On the usage view: cycle
-                // screen brightness (single non-splash view, no more screens).
+                // On splash: cycle animations. On any mode: cycle screen
+                // brightness (mode navigation is tap + the top buttons).
                 if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
                 else                                          brightness_cycle();
             }
@@ -387,6 +424,9 @@ void loop() {
                     g_before, g_after, usage.session_pct);
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
+            // Tokens moving is what keeps the panel lit — and lights it back up
+            // if it had already gone to sleep.
+            if (tokens_moved(usage)) idle_note_activity();
             ui_update(&usage);
             ble_send_ack();
         } else {

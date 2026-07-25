@@ -47,8 +47,9 @@ void idle_note_activity(void) {
     last_activity_ms = millis();
     if (state == STATE_FADING_IN) return;
     if (state == STATE_AWAKE) return;
-    // Asleep/fading-out shouldn't reach here in normal flow (callers gate via
-    // idle_consume_wake_press first), but if it does: trigger a wake.
+    // Asleep or fading out: light the panel back up. This is the path token
+    // movement takes — the device should visibly come alive the moment Claude
+    // starts working again, without anyone touching it.
     begin_fade(awake_brightness, last_activity_ms);
     state = STATE_FADING_IN;
 }

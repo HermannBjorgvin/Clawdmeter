@@ -3,6 +3,12 @@
 
 void idle_init(void);
 void idle_tick(void);
+
+// Reset the sleep timer, and wake the panel if it is already dark. Called for
+// non-input activity — chiefly token movement (main.cpp compares each parsed
+// payload against the previous one), which is what keeps the screen alive
+// while Claude is working. Button/touch presses route through
+// idle_consume_wake_press() instead.
 void idle_note_activity(void);
 
 // Set the "awake" brightness target (0..255). idle owns display brightness

@@ -300,6 +300,10 @@ class ReqCallbacks : public NimBLECharacteristicCallbacks {
 
 void ble_init(void) {
     NimBLEDevice::init(DEVICE_NAME);
+    // The usage payload with per-chat context ("cc") can exceed the default
+    // 255-byte ATT MTU minus 3 write-without-response overhead; negotiate up
+    // so the daemon's single write always fits BLE_BUF_SIZE-sized payloads.
+    NimBLEDevice::setMTU(517);
     NimBLEDevice::setSecurityAuth(true, false, true);  // bonding, no MITM, SC
 
     // Restore the locked owner (if any) and drop any stale non-owner bonds so
