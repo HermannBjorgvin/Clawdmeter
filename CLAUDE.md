@@ -6,13 +6,15 @@ selected via PlatformIO's `build_src_filter`. Adding a board means dropping in
 a new folder + a new `[env:...]` block — `main.cpp`, `ui.cpp`, and `splash.cpp`
 never see board-specific code. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md).
 
-Five ports today (two SoC families, three panel sizes):
+Seven ports today (two SoC families, five panel sizes):
 
 - `boards/waveshare_amoled_216/` — original Waveshare ESP32-S3-Touch-AMOLED-2.16 (CO5300, 480×480 square, CST9220 touch, IMU rotation). Build env: `waveshare_amoled_216`.
 - `boards/waveshare_amoled_18/` — Waveshare ESP32-S3-Touch-AMOLED-1.8 (368×448 portrait, XCA9554 IO expander). Build env: `waveshare_amoled_18`. **Two panel revisions are auto-detected at boot** (`board_rev()` in `board_init.cpp`, enum in `board_rev.h`): original = SH8601 display + FT3168 touch (0x38); later = CO5300 display + CST816 touch (0x15). One binary drives both.
 - `boards/waveshare_amoled_216_c6/` — Waveshare ESP32-C6-Touch-AMOLED-2.16 (SH8601, 480×480, CST9217 touch). Build env: `waveshare_amoled_216_c6`. ESP32-C6 SoC: single-core RISC-V, **no PSRAM**, BLE 5 only.
 - `boards/waveshare_amoled_18_c6/` — Waveshare ESP32-C6-Touch-AMOLED-1.8 (368×448 portrait, SH8601, FT3168 touch, TCA9554 expander). Build env: `waveshare_amoled_18_c6`. Same panel as the S3 1.8 but on the C6 SoC. All subsystems (display, touch, BOOT + PWR buttons, battery, BLE) verified on hardware.
 - `boards/waveshare_amoled_206/` — Waveshare ESP32-S3-Touch-AMOLED-2.06 (CO5300, 410×502 watch form factor, FT3168 touch, no IO expander, 32 MB flash, PCF85063 RTC, ES8311 codec). Build env: `waveshare_amoled_206`. Display, touch, battery, IMU init, and BLE verified on hardware; the ES8311 chime path is not wired up (`sound.cpp` no-ops).
+- `boards/waveshare_lcd_154/` — Waveshare ESP32-S3-Touch-LCD-1.54 (ST7789, 240×240 square, plain 4-wire SPI — not QSPI/AMOLED, CST816T touch, ES8311 codec, battery via ADC divider, no PMU). Build env: `waveshare_lcd_154`.
+- `boards/waveshare_epaper_154/` — Waveshare ESP32-S3-ePaper-1.54 V2 (SSD1681, 200×200, 1bpp e-paper, no touch, no PMU, no IMU). Build env: `waveshare_epaper_154`. Touchless: PWR dismisses the splash instead of a screen tap (`has_touch=false`).
 
 **C6 ports have no PSRAM** — shared code gates on `BOARD_HAS_PSRAM` (absent on C6) to use `MALLOC_CAP_INTERNAL` for LVGL/splash buffers, and the `screenshot` serial command is disabled (`LV_USE_SNAPSHOT=0`), so UI changes on a C6 board must be eyeballed on hardware, not auto-captured.
 
@@ -61,6 +63,23 @@ ESP32-C6 sibling of the S3 1.8: same 368×448 SH8601 panel + FocalTech touch, di
 - Buttons: GPIO 0 (BOOT → Space/voice-mode), AXP PKEY (PWR → cycle screens; hold-to-pair). **No third button**.
 - Flash: 32 MB. Uses `default_32MB.csv` partition table.
 
+### LCD-1.54 (plain SPI, not AMOLED) — `waveshare_lcd_154`
+1.54" square kit built around a 240×240 ST7789 TFT over plain 4-wire SPI (CS=21, SCLK=38, MOSI=39, DC=45, RST=40, BL=46 backlight PWM) — the first port that isn't QSPI/AMOLED. Pin map taken from the BambuHelper project's `ws_lcd_154` config, hardware-tested there (display, touch, buttons, battery ADC, ES8311 all exercised).
+- Touch: **CST816T** @ I2C 0x15 (SDA=42, SCL=41, INT=48, RST=47).
+- Battery: **no PMU** — VBAT through a 3.0x divider to GPIO1 (ADC), plus a BAT_EN (GPIO2) power-hold line that **must be driven HIGH early in `board_init()`** or the board browns out running on battery.
+- Audio: **ES8311** mono codec + speaker over I2S (MCLK=8, BCLK=9, WS=10, DOUT=12, no mic path wired), amp enable on GPIO7.
+- Buttons: GPIO 0 (BOOT → Space/voice-mode), GPIO 5 (secondary → Shift+Tab), GPIO 4 (PWR-role → cycle screens/brightness/pairing; hold 8s = power off).
+- Flash: 16 MB (ESP32-S3R8: 8 MB octal PSRAM, `qio_opi`), `default_16MB.csv` partitions.
+
+### ePaper-1.54 (1bpp, no touch/PMU/IMU) — `waveshare_epaper_154`
+Waveshare ESP32-S3-ePaper-1.54 V2 — ESP32-S3-PICO-1-N8R8 (8 MB flash, 8 MB OPI PSRAM), 200×200 **SSD1681** e-paper over SPI (CS=11, SCLK=12, MOSI=13, DC=10, RST=9, BUSY=8). Vendored SSD1681 driver lives entirely in `boards/waveshare_epaper_154/epd.{h,cpp}` — no GFX Library dependency.
+- Panel power: **EPD_PWR (GPIO6) is active-LOW** — drive LOW to enable the panel's onboard regulator. Without it the SSD1681 has no Vcc and silently swallows SPI transactions while showing whatever was on-screen at power-on.
+- Battery: **VBAT_PWR (GPIO17) is a soft-power latch, active-HIGH** — on battery power the PWR button only momentarily applies the battery rail, so `board_init()` must immediately latch it HIGH or power collapses the instant the button releases (boots, draws one frame, dies). Voltage sense is a separate net: GPIO4 (ADC1_CH3) behind a 1:2 divider.
+- No touch, PMU, or IMU. `BoardCaps.has_touch = false` — `main.cpp` lets PWR dismiss the splash directly since there's no screen-tap gesture available.
+- Refresh cadence (`display.cpp`): boot full-refresh → partial steady-state (rate-limited to ~1/sec via `MIN_PARTIAL_MS`, keeping the slow panel's `wait_busy()` off the main loop's critical path) → 10-min timer-based full refresh solely to clear accumulated ghosting.
+- 1bpp legibility: `ui.cpp`'s `Layout.epaper_mono` flag (set for this tier in `compute_layout()`) drives every dark-theme-color-that-needs-to-become-ink decision — the `rgb565_is_white` luminance threshold in `display.cpp` is lowered 128→64 so even THEME_RED (lum 94) renders as ink while backgrounds stay white paper; `pct_color()`, the progress-bar border, and the "Current"/"Weekly" pill invert similarly, all gated on `epaper_mono` instead of scattering `#ifdef`/color overrides through shared code.
+- Buttons: GPIO 0 (BOOT → Space/voice-mode), GPIO 18 (PWR → cycle splash animations / dismiss splash). No secondary button.
+
 ## Architecture
 
 ```text
@@ -78,6 +97,8 @@ firmware/src/
     waveshare_amoled_216_c6/— C6: SH8601 + CST9217 + AXP PKEY, no PSRAM
     waveshare_amoled_18_c6/ — C6: SH8601 + FT3168 + AXP PKEY + TCA9554 (gates power), no PSRAM
     waveshare_amoled_206/   — CO5300 + FT3168 + AXP PKEY, no IO expander, 32 MB, no rotation
+    waveshare_lcd_154/      — ST7789 (plain SPI) + CST816T + battery ADC, no PMU
+    waveshare_epaper_154/   — SSD1681 1bpp e-paper, no touch/PMU/IMU
     template/               — copy this to bootstrap a new port
   main.cpp                  — setup() + loop(): HAL calls only, zero #ifdef BOARD_*
   ui.{h,cpp}                — 3-screen UI (splash, usage, bluetooth). compute_layout() picks fonts/positions from board_caps() (responsive — current breakpoint: H >= 460 → large, else compact)
@@ -105,6 +126,8 @@ pio run -d firmware -e waveshare_amoled_18                                      
 pio run -d firmware -e waveshare_amoled_216_c6                                  # build 2.16 (C6)
 pio run -d firmware -e waveshare_amoled_18_c6                                   # build 1.8 (C6)
 pio run -d firmware -e waveshare_amoled_206                                     # build 2.06 (S3, watch)
+pio run -d firmware -e waveshare_lcd_154                                        # build LCD-1.54 (S3, plain SPI)
+pio run -d firmware -e waveshare_epaper_154                                     # build ePaper-1.54 (S3, 1bpp)
 pio run -d firmware -e waveshare_amoled_18 -t upload --upload-port /dev/cu.usbmodem101   # flash 1.8 on macOS
 pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0         # flash 2.16 on Linux
 # C6 boards: same native USB-JTAG flashing; flag a chip mismatch ("This chip is ESP32-C6,
@@ -156,6 +179,7 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 
 ## Recent session highlights
 
+- **Merged main into eink, adding LCD-1.54 + ePaper-1.54 side by side (2026-07-26).** Main had grown the LCD-1.54 port (`waveshare_lcd_154`, 240×240 ST7789), enterprise-account support, a title clock, and per-tier `pair_y*`/`idle_px`/`small_icons` Layout fields since eink last merged; eink's own `compute_layout()` had independently renamed several of the same fields (`usage_pct_font` etc.) for its e-paper tier. Resolved by adopting main's field names throughout and adding a new `Layout.epaper_mono` flag (parallel to `small_icons`) so the e-paper tier's 1bpp color-inversion/pill-invert/bar-border/runtime-icon-scaling logic hooks in without scattered magic-number height checks — `compute_layout()` now has four tiers (large ≥460, compact ≥300, small ≥220 for LCD-1.54, e-paper below that). Also fixed two latent bugs the merge would otherwise have shipped: the three touch-capable boards main added (`amoled_18_c6`, `amoled_206`, `lcd_154`) never set `BoardCaps.has_touch` (silently defaulted false, breaking PWR-button splash navigation), and the AMOLED tiers' corner-logo `logo_y` was computing off a stale `title_y` because eink's branches re-set `margin`/`title_y` inline instead of the hoisted-before-the-if-chain assignment main relies on.
 - **AMOLED-1.8 chime verified on hardware + EXIO2 touch-kill fix (2026-07-13).** The 1.8's `amp_enable` hook drove both GPIO 46 and XCA9554 EXIO2 ("the unused one is harmless") — but pulling EXIO2 low takes the FT3168 off the I2C bus (chip stops ACKing; IDF reports it as `ESP_ERR_INVALID_STATE`, which reads like a driver wedge and cost a long I2S red-herring chase). Amp enable is GPIO 46 only; EXIO2 must stay HIGH. Chime, touch, buttons, and BLE bond persistence all verified on a real 1.8.
 - **Device-abstraction refactor (2026-05-18).** All board-conditional code moved out of shared files into `boards/<name>/` and behind a HAL in `hal/`. ~30 `#ifdef BOARD_*` blocks went to zero. UI is responsive via `compute_layout()` driven by `board_caps()`. New ports add a folder + a PlatformIO env — no shared file edits.
 - Added second board port: Waveshare AMOLED-1.8 (368×448 portrait, SH8601, FT3168, XCA9554 IO expander).
