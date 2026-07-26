@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
+#include <Preferences.h>
 
 #define DEVICE_NAME "Clawdmeter"
 
@@ -63,10 +64,87 @@ static NimBLECharacteristic* req_char = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
+
+// One-shot supervision-timeout pushback (see onConnParamsUpdate). Written by
+// NimBLE host-task callbacks, consumed by ble_tick() on the loop task.
+static const uint16_t CONN_HANDLE_NONE  = 0xFFFF;
+static const uint16_t DESIRED_TIMEOUT   = 600;   // ×10ms = 6s, matches PPCP
+static volatile uint16_t param_fix_handle = CONN_HANDLE_NONE;  // pending retry
+static volatile uint32_t param_fix_at_ms  = 0;                 // when to send it
+static volatile uint16_t param_fix_spent  = CONN_HANDLE_NONE;  // one per connection
 static char rx_buf[BLE_BUF_SIZE];
 static volatile bool data_ready = false;
 static volatile bool has_received_data = false;
 static char mac_str[18];
+
+// --- Single-owner lock -----------------------------------------------------
+//
+// The board is a BLE peripheral that any central in range could connect to and
+// write usage data to. To stop the display rotating to another machine's
+// account, it locks to ONE owner: the identity address of the machine it is
+// bonded to, persisted in NVS. Only that owner (over a bonded+encrypted link)
+// may write usage data; a second machine that pairs is rejected so the board
+// stays paired to a single machine. The hold-power bond-clear gesture resets
+// the owner so the board can be handed to a different machine.
+static Preferences prefs;
+static char owner_addr[18] = {0};   // owner identity address, e.g. "aa:bb:cc:dd:ee:ff"
+static bool owner_set = false;
+static const char* ZERO_ADDR = "00:00:00:00:00:00";
+
+static void save_owner() {
+    prefs.begin("clawd", false);
+    prefs.putString("owner", owner_addr);
+    prefs.end();
+}
+
+static void clear_owner() {
+    owner_set = false;
+    owner_addr[0] = '\0';
+    prefs.begin("clawd", false);
+    prefs.remove("owner");
+    prefs.end();
+}
+
+static void load_owner() {
+    prefs.begin("clawd", true);
+    String o = prefs.getString("owner", "");
+    prefs.end();
+    if (o.length() == 17) {  // "aa:bb:cc:dd:ee:ff"
+        strncpy(owner_addr, o.c_str(), sizeof(owner_addr) - 1);
+        owner_addr[sizeof(owner_addr) - 1] = '\0';
+        owner_set = true;
+        Serial.printf("BLE: owner loaded = %s\n", owner_addr);
+    }
+}
+
+// Delete every stored bond that isn't the owner, so the board stays paired to
+// exactly one machine. Removing a bond shifts the indices, so restart from 0.
+static void prune_foreign_bonds() {
+    if (!owner_set) return;
+    bool removed;
+    do {
+        removed = false;
+        int n = NimBLEDevice::getNumBonds();
+        for (int i = 0; i < n; i++) {
+            NimBLEAddress a = NimBLEDevice::getBondedAddress(i);
+            if (strcmp(a.toString().c_str(), owner_addr) != 0) {
+                Serial.printf("BLE: pruning non-owner bond %s\n", a.toString().c_str());
+                NimBLEDevice::deleteBond(a);
+                removed = true;
+                break;
+            }
+        }
+    } while (removed);
+}
+
+static void claim_owner(const std::string& id) {
+    strncpy(owner_addr, id.c_str(), sizeof(owner_addr) - 1);
+    owner_addr[sizeof(owner_addr) - 1] = '\0';
+    owner_set = true;
+    save_owner();
+    Serial.printf("BLE: owner claimed = %s\n", owner_addr);
+    prune_foreign_bonds();
+}
 
 static void start_advertising() {
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
@@ -105,6 +183,13 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         Serial.printf("BLE: connected from %s (active=%u)\n",
             info.getAddress().toString().c_str(),
             (unsigned)s->getConnectedCount());
+        // Log negotiated link timing — the difference between guessing and
+        // knowing when debugging disconnects (e.g. reason=520 supervision
+        // timeouts are only explainable next to the negotiated timeout).
+        // Units: interval ×1.25ms, timeout ×10ms, latency = skippable events.
+        Serial.printf("BLE: connparams itvl=%u(%.2fms) lat=%u timeout=%u(%ums)\n",
+            info.getConnInterval(), info.getConnInterval() * 1.25f,
+            info.getConnLatency(), info.getConnTimeout(), info.getConnTimeout() * 10);
         // Keep advertising while a connection slot is still free so a second
         // central (e.g. the host daemon alongside an OS-held HID link) can
         // discover and connect. NimBLE auto-stops advertising on each accept.
@@ -117,14 +202,81 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         // Only flip the UI state to DISCONNECTED when the last client leaves.
         if (s->getConnectedCount() == 0) state = BLE_STATE_DISCONNECTED;
         need_advertise = true;
+        // Drop any pending/spent param pushback for this handle — NimBLE
+        // reuses conn handles, so stale state would leak onto the next link.
+        if (param_fix_handle == info.getConnHandle()) param_fix_handle = CONN_HANDLE_NONE;
+        if (param_fix_spent  == info.getConnHandle()) param_fix_spent  = CONN_HANDLE_NONE;
         Serial.printf("BLE: disconnected (reason=%d, remaining=%u)\n",
             reason, (unsigned)s->getConnectedCount());
+    }
+
+    // Centrals re-negotiate parameters mid-connection. Windows in particular
+    // clamps the supervision timeout to 2s once an app GATT session goes
+    // active (captured on hardware; it honors 9.6s while only its HID driver
+    // holds the link) — and a 2s window is tight enough that ordinary radio
+    // gaps kill the link (HCI 0x208 → reason=520), which was the constant
+    // daemon reconnect churn. Push back ONCE per connection: schedule a
+    // deferred LL connection-parameter request for the same interval range but
+    // a 6s timeout (the mechanism Microsoft's accessory guidelines prescribe).
+    // Deferred ~2s so it can't race the central's own in-flight update
+    // transaction (Windows has a documented late-instant bug there), and
+    // one-shot so a central that re-clamps doesn't trigger an update war.
+    void onConnParamsUpdate(NimBLEConnInfo& info) override {
+        Serial.printf("BLE: connparams update itvl=%u(%.2fms) lat=%u timeout=%u(%ums)\n",
+            info.getConnInterval(), info.getConnInterval() * 1.25f,
+            info.getConnLatency(), info.getConnTimeout(), info.getConnTimeout() * 10);
+        if (info.getConnTimeout() < DESIRED_TIMEOUT &&
+            info.getConnHandle() != param_fix_spent) {
+            param_fix_handle = info.getConnHandle();
+            param_fix_at_ms  = millis() + 2000;
+        }
+    }
+
+    // Lock the board to a single owner machine. The first machine to bond
+    // becomes the owner; any other machine that pairs is un-bonded and dropped
+    // so the board never shows (or rotates to) a second machine's account.
+    void onAuthenticationComplete(NimBLEConnInfo& info) override {
+        std::string id = info.getIdAddress().toString();
+        Serial.printf("BLE: auth complete peer=%s bonded=%d enc=%d\n",
+            id.c_str(), info.isBonded() ? 1 : 0, info.isEncrypted() ? 1 : 0);
+        // Bonded reconnects START at the central's clamped parameters (no
+        // later update event fires), so the supervision-timeout pushback must
+        // also arm here, not just in onConnParamsUpdate.
+        if (info.getConnTimeout() < DESIRED_TIMEOUT &&
+            info.getConnHandle() != param_fix_spent) {
+            param_fix_handle = info.getConnHandle();
+            param_fix_at_ms  = millis() + 2000;
+        }
+        if (id == ZERO_ADDR) return;
+        if (!owner_set) {
+            claim_owner(id);
+        } else if (strcmp(id.c_str(), owner_addr) != 0) {
+            Serial.printf("BLE: rejecting non-owner %s (owner=%s)\n", id.c_str(), owner_addr);
+            NimBLEDevice::deleteBond(info.getIdAddress());
+            server->disconnect(info);
+        }
     }
 
 };
 
 class RxCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
+        // Only accept usage data over a bonded+encrypted link, and only from the
+        // owner machine. Another machine's daemon in range is ignored so the
+        // display never rotates to a foreign account. The first encrypted writer
+        // claims ownership when none is set yet (e.g. a fresh pairing).
+        std::string id = info.getIdAddress().toString();
+        if (!info.isEncrypted()) {
+            Serial.println("BLE: dropping RX write from unencrypted link");
+            return;
+        }
+        if (!owner_set && id != ZERO_ADDR) {
+            claim_owner(id);
+        }
+        if (owner_set && strcmp(id.c_str(), owner_addr) != 0) {
+            Serial.printf("BLE: dropping RX write from non-owner %s\n", id.c_str());
+            return;
+        }
         std::string val = chr->getValue();
         size_t len = std::min(val.length(), (size_t)(BLE_BUF_SIZE - 1));
         memcpy(rx_buf, val.c_str(), len);
@@ -149,6 +301,11 @@ class ReqCallbacks : public NimBLECharacteristicCallbacks {
 void ble_init(void) {
     NimBLEDevice::init(DEVICE_NAME);
     NimBLEDevice::setSecurityAuth(true, false, true);  // bonding, no MITM, SC
+
+    // Restore the locked owner (if any) and drop any stale non-owner bonds so
+    // the board stays paired to a single machine across reboots.
+    load_owner();
+    prune_foreign_bonds();
 
     // Format MAC address
     NimBLEAddress addr = NimBLEDevice::getAddress();
@@ -213,6 +370,17 @@ void ble_tick(void) {
         need_advertise = false;
         start_advertising();
     }
+    // Deferred one-shot supervision-timeout pushback (see onConnParamsUpdate).
+    if (param_fix_handle != CONN_HANDLE_NONE &&
+        (int32_t)(millis() - param_fix_at_ms) >= 0) {
+        uint16_t h = param_fix_handle;
+        param_fix_handle = CONN_HANDLE_NONE;
+        param_fix_spent  = h;
+        if (server && server->getConnectedCount() > 0) {
+            Serial.println("BLE: requesting 6s supervision timeout");
+            server->updateConnParams(h, 12, 24, 0, DESIRED_TIMEOUT);
+        }
+    }
 }
 
 ble_state_t ble_get_state(void) {
@@ -229,6 +397,7 @@ const char* ble_get_mac_address(void) {
 
 void ble_clear_bonds(void) {
     NimBLEDevice::deleteAllBonds();
+    clear_owner();  // release ownership so the board can be handed to another machine
     Serial.println("BLE: bonds cleared");
     if (state == BLE_STATE_CONNECTED) {
         server->disconnect(server->getPeerInfo(0).getConnHandle());
@@ -261,6 +430,12 @@ void ble_send_nack(void) {
         tx_char->setValue("{\"err\":true}");
         tx_char->notify();
     }
+}
+
+void ble_set_battery_level(int pct) {
+    if (!hid_dev || pct < 0) return;
+    if (pct > 100) pct = 100;
+    hid_dev->setBatteryLevel((uint8_t)pct, state == BLE_STATE_CONNECTED);
 }
 
 void ble_request_refresh(void) {
