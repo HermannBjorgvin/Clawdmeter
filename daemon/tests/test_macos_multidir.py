@@ -6,6 +6,7 @@ Covers read_config_dirs, read_token_for, PlanSelector, and poll_active_payload.
 Run: python -m pytest daemon/tests/test_macos_multidir.py -x -q
 """
 import asyncio
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -68,6 +69,81 @@ def test_token_for_file_wins_over_keychain(tmp_path, monkeypatch):
     (tmp_path / ".credentials.json").write_text('{"accessToken":"TOK_FILE"}')
     with patch.object(mod, "_read_token_keychain", return_value="TOK_KEYCHAIN"):
         assert read_token_for(tmp_path) == "TOK_FILE"
+
+
+def test_token_for_unexpired_file_still_wins_over_keychain(tmp_path, monkeypatch):
+    monkeypatch.setattr(mod, "DEFAULT_CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    future_ms = int((time.time() + 3600) * 1000)
+    (tmp_path / ".credentials.json").write_text(
+        '{"claudeAiOauth":{"accessToken":"TOK_FILE","expiresAt":%d}}' % future_ms
+    )
+    with patch.object(mod, "_read_token_keychain", return_value="TOK_KEYCHAIN"):
+        assert read_token_for(tmp_path) == "TOK_FILE"
+
+
+def test_token_for_expired_file_falls_back_to_keychain(tmp_path, monkeypatch):
+    """A stale .credentials.json must not shadow the Keychain token Claude Code refreshes.
+
+    Regression guard: returning the expired file token makes every poll 401 with
+    "OAuth access token has expired" and nothing recovers it (no daemon refreshes).
+    """
+    monkeypatch.setattr(mod, "DEFAULT_CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    past_ms = int((time.time() - 3600) * 1000)
+    (tmp_path / ".credentials.json").write_text(
+        '{"claudeAiOauth":{"accessToken":"TOK_STALE","expiresAt":%d}}' % past_ms
+    )
+    with patch.object(mod, "_read_token_keychain", return_value="TOK_KEYCHAIN"):
+        assert read_token_for(tmp_path) == "TOK_KEYCHAIN"
+
+
+def test_token_for_expired_file_no_keychain_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(mod.sys, "platform", "linux")
+    past_ms = int((time.time() - 3600) * 1000)
+    (tmp_path / ".credentials.json").write_text(
+        '{"claudeAiOauth":{"accessToken":"TOK_STALE","expiresAt":%d}}' % past_ms
+    )
+    assert read_token_for(tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# _extract_access_token — must pick claudeAiOauth, not the first OAuth entry
+# ---------------------------------------------------------------------------
+
+# Real blobs carry one accessToken per OAuth integration. Any non-claudeAiOauth
+# token as a Bearer 401s; the bash daemon already guards this
+# (tests/test_bash_token.sh) — these are the Python ports' equivalent.
+_MULTI_OAUTH = (
+    '{"designOauth":{"accessToken":"sk-ant-oat01-DESIGN-WRONG","refreshToken":"rt2"},'
+    '"mcpOAuth":{"contentful|abc":{"accessToken":"mcp-contentful-TOKEN","expiresAt":0}},'
+    '"claudeAiOauth":{"accessToken":"sk-ant-oat01-CLAUDE-REAL","refreshToken":"rt",'
+    '"expiresAt":1783620177377,"subscriptionType":"max"}}'
+)
+
+
+def test_extract_prefers_claude_ai_oauth():
+    assert mod._extract_access_token(_MULTI_OAUTH) == "sk-ant-oat01-CLAUDE-REAL"
+
+
+def test_extract_prefers_claude_ai_oauth_windows():
+    from daemon.claude_usage_daemon_windows import _extract_access_token as win_extract
+
+    assert win_extract(_MULTI_OAUTH) == "sk-ant-oat01-CLAUDE-REAL"
+
+
+def test_extract_empty_token_is_none():
+    assert mod._extract_access_token('{"accessToken": ""}') is None
+    assert mod._extract_access_token('{"claudeAiOauth":{"accessToken":"  "}}') is None
+    assert mod._extract_access_token("{}") is None
+
+
+def test_oauth_expired_handles_odd_shapes():
+    assert mod._oauth_expired('{"claudeAiOauth":{"expiresAt":1}}') is True
+    assert not mod._oauth_expired('{"claudeAiOauth":{"accessToken":"t"}}')  # no expiry
+    assert not mod._oauth_expired('{"accessToken":"t"}')
+    assert not mod._oauth_expired("[1,2,3]")
+    assert not mod._oauth_expired("not json")
 
 
 # ---------------------------------------------------------------------------
