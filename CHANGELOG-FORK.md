@@ -35,8 +35,11 @@ macOS daemon.
   over up to two lines. Start typing on the Mac and the screen dismisses
   itself.
 - False positives are filtered out: background tasks and parallel agents
-  are verified for real (lsof + transcript freshness), system notifications
-  don't count as user input, autonomous sessions never ring.
+  are verified for real — a shell task by the output file its shell holds
+  open (lsof), an agent by whether it has reported back to its session
+  (the harness's own completion notification), with transcript freshness
+  bounding both so a killed one can't pin the session as busy. System
+  notifications don't count as user input, autonomous sessions never ring.
 
 ## Calendar
 
@@ -66,6 +69,15 @@ macOS daemon.
   "No network"…) instead of rendering stale numbers; the poll interval
   backs off exponentially. The daemon deliberately never refreshes the
   token — refresh-token rotation could log Claude Code out.
+- **Credentials that outlive the app.** Claude Code refreshes its 8-hour
+  OAuth token only while it is running, so any longer gap used to leave the
+  display stuck on "Update token". The daemon now prefers a long-lived
+  token from `claude setup-token` (Keychain item `Clawdmeter-token`,
+  overridable via `token_keychain_service`) and falls back to Claude Code's
+  own entry when it is absent or rejected. It also skips a locally-expired
+  token instead of spending a guaranteed 401, and cuts the backoff short
+  the moment the stored credentials change — so the display recovers within
+  seconds of Claude Code refreshing, not up to 10 minutes later.
 
 ## Live activity indicator
 

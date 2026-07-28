@@ -39,7 +39,7 @@ upsert_config_key() {
 # which plans to show. The daemon polls all chosen dirs and displays whichever is
 # active. macOS note: the default ~/.claude stores its token in Keychain (often no
 # .credentials.json file), so it always counts as a candidate; additional dirs are
-# recognised by their credentials file — matching the daemon's read_token_for.
+# recognised by their credentials file — matching the daemon's token_sources_for.
 configure_config_dirs() {
     local -a candidates=()
     local d
@@ -170,8 +170,12 @@ if ! command -v blueutil >/dev/null 2>&1; then
         echo "        stale BLE bonds; otherwise you'll forget the device manually."
     fi
 fi
-if ! security find-generic-password -s "Claude Code-credentials" -a "$USER" -w >/dev/null 2>&1; then
-    echo "Warning: Claude Code OAuth token not found in Keychain (service 'Claude Code-credentials')."
+# Either credential is enough: the dedicated long-lived token (see the README)
+# or Claude Code's own entry, which the daemon falls back to.
+if ! security find-generic-password -s "Clawdmeter-token" -a "$USER" -w >/dev/null 2>&1 \
+   && ! security find-generic-password -s "Claude Code-credentials" -a "$USER" -w >/dev/null 2>&1; then
+    echo "Warning: no Claude token found in Keychain (services 'Clawdmeter-token'"
+    echo "  or 'Claude Code-credentials')."
     echo "  Sign in via Claude Code first, then re-run this installer."
     echo "  Continuing anyway — the daemon will retry on each poll."
 fi

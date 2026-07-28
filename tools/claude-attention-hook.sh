@@ -26,20 +26,41 @@ fi
 
 jqr() { printf '%s' "$IN" | jq -r "$1 // \"\"" 2>/dev/null; }
 
-# Does the session still have a live background task? A running task keeps its
-# .output file open — lsof sees that. The tasks dir is keyed by the session's
-# ORIGINAL project dir while the hook's cwd follows shell cd's, so locate it
-# by globbing the unique session id. (NB: lsof's exit code is useless — 1 even
-# with matches — test stdout.) Same heuristic as _bg_session_still_running in
-# daemon/claude_usage_daemon.py — keep the two in sync.
+# Does the session still have live background work? Two kinds share the tasks
+# dir (keyed by the session's ORIGINAL project dir while the hook's cwd
+# follows shell cd's, so locate it by globbing the unique session id):
+#   - shell tasks: regular .output files, held open by the running shell —
+#     lsof sees them (NB: its exit code is useless — 1 even with matches —
+#     test stdout);
+#   - async agents: symlinks to the agent's transcript, appended in bursts
+#     and never held open. A finished agent's transcript ends with its final
+#     end_turn message; anything else plus a recent write = still working.
+# When the last task finishes, the harness wakes the main session for a
+# summary turn — that turn's Stop is where "done" fires. Same heuristic as
+# _bg_session_still_running in daemon/claude_usage_daemon.py — keep in sync.
+AGENT_FRESH_S=300      # transcript idle longer than this = agent dead/killed
+# An agent that finished announces itself to its session as a <task-id>
+# notification in the session transcript — the only unambiguous completion
+# signal on disk. (The agent's own transcript tail can't provide one: a final
+# answer and a mid-turn message look alike, and 28% of finished agents don't
+# end on "end_turn".) Only fresh transcripts are worth the grep.
 has_running_tasks() {
-    local t
+    local t link aid main
+    for main in "$HOME"/.claude/projects/*/"$1".jsonl; do
+        [[ -f "$main" ]] && break
+    done
     for t in /private/tmp/claude-$(id -u)/*/"$1"/tasks; do
         [[ -d "$t" ]] || continue
         lsof -w +d "$t" 2>/dev/null | grep -q . && return 0
-        # Async agents don't hold their transcript open — the main process
-        # appends it in bursts. Fresh writes count as running work too.
-        [[ -n "$(find "$t" -type f -mtime -90s 2>/dev/null | head -1)" ]] && return 0
+        for link in "$t"/*; do
+            [[ -L "$link" && -f "$link" ]] || continue   # agent, target alive
+            [[ -n "$(find -L "$link" -mtime -${AGENT_FRESH_S}s 2>/dev/null)" ]] \
+                || continue                             # dead, or long finished
+            aid=${link##*/}; aid=${aid%.output}
+            [[ -f "$main" ]] && grep -qF "<task-id>$aid</task-id>" "$main" \
+                && continue                             # already reported back
+            return 0
+        done
     done
     return 1
 }

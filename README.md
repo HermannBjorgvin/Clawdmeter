@@ -121,6 +121,31 @@ launchctl unload ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist  # st
 launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # start
 ```
 
+#### Keeping the display alive overnight (optional)
+
+Claude Code's OAuth access token lives about 8 hours and is only refreshed
+while Claude Code itself is running. Leave the app closed longer than that —
+overnight, a weekend — and the daemon has nothing valid to poll with, so the
+display sits on "re-authenticate" until you next open Claude Code.
+
+Giving the daemon its own long-lived token removes that dependency. Mint one
+and store it in your Keychain (the `-w` at the end prompts, so the token never
+reaches your shell history):
+
+```bash
+claude setup-token
+```
+
+```bash
+security add-generic-password -U -s "Clawdmeter-token" -a "$USER" -w
+```
+
+The daemon prefers that token and falls back to Claude Code's own entry
+whenever it is missing or rejected, so setting it up is risk-free — the log
+line `Using token from …` tells you which one is live. Point it at a different
+Keychain item with `token_keychain_service` in
+`~/.config/claude-usage-monitor/config`.
+
 ## Linux installation
 
 ### Flash the firmware

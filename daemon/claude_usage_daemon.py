@@ -10,7 +10,9 @@ import asyncio
 import calendar
 import datetime
 import getpass
+import hashlib
 import json
+import mmap
 import os
 import re
 import shutil
@@ -19,6 +21,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import httpx
 from bleak import BleakClient
@@ -36,6 +39,17 @@ CONNECT_TIMEOUT = 20.0
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
 KEYCHAIN_SERVICE = "Claude Code-credentials"
+# Claude Code's own OAuth access token lives ~8 hours and is only refreshed
+# while Claude Code itself runs, so an overnight gap leaves us with a dead
+# token and the device stuck on "re-authenticate". A long-lived token minted
+# by `claude setup-token` and parked in the user's Keychain under this service
+# has no such dependency; we prefer it and fall back to Claude Code's entry.
+# Override the service name with `token_keychain_service` in the config.
+DAEMON_KEYCHAIN_SERVICE = "Clawdmeter-token"
+# Treat a token as dead slightly early so it can't expire mid-request.
+TOKEN_EXPIRY_SKEW = 60
+# How often to re-read the credentials while a poll is failing on auth.
+TOKEN_WATCH_S = 30
 DEFAULT_CONFIG_DIR = Path.home() / ".claude"
 STATE_DIR = Path.home() / ".config" / "claude-usage-monitor"
 SAVED_ADDR_FILE = STATE_DIR / "ble-address"
@@ -260,18 +274,43 @@ def check_cal_reminder(thresholds: tuple[int, ...]) -> tuple[str, float, int] | 
 # working/idle creature and the "·N" session counter.
 SESS_DIR = STATE_DIR / "sessions"
 SESS_TTL_FG = 4 * 60
+AGENT_FRESH_S = 300  # agent transcript idle longer than this = dead/killed
+
+
+def _agent_completed(agent_id: str, sid: str) -> bool:
+    """Has this background agent already reported back to its session?
+
+    When one finishes, the harness appends a <task-id> notification to the
+    session's own transcript — the only unambiguous completion signal on
+    disk. (An agent's transcript tail can't provide one: a final answer and a
+    mid-turn message are indistinguishable — measured across 110 transcripts,
+    28% of finished agents don't end on "end_turn", and text records that look
+    final account for ~11% of running time.)
+    """
+    mark = f"<task-id>{agent_id}</task-id>".encode()
+    for transcript in Path.home().glob(f".claude/projects/*/{sid}.jsonl"):
+        try:
+            with open(transcript, "rb") as fh, \
+                    mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                if mm.find(mark) != -1:
+                    return True
+        except (OSError, ValueError):   # unreadable, or empty (mmap rejects)
+            continue
+    return False
 
 
 def _bg_session_still_running(sid: str) -> bool:
-    """Is a bg-marked session's background task really still running?
+    """Is a bg-marked session's background work really still running?
 
-    A running shell task keeps its .output file open in the session's tasks
-    dir — lsof sees that. (Its exit code is useless: 1 even with matches;
-    test stdout instead.) Async agents don't hold their transcripts open —
-    the main process appends them in bursts — so fresh writes count as
-    running work too. Neither = the session died or never came back.
-    Same heuristic as has_running_tasks in tools/claude-attention-hook.sh —
-    keep the two in sync.
+    Shell tasks are regular .output files kept open by the running shell —
+    lsof sees them. (Its exit code is useless: 1 even with matches; test
+    stdout instead.) Async agents are symlinks to the agent's transcript,
+    appended in bursts and never held open, so they are judged by two
+    signals: a transcript idle past AGENT_FRESH_S is dead or finished long
+    ago, and a fresh one still counts as finished once the agent has
+    reported back (_agent_completed). Neither = the session died or never
+    came back. Same heuristic as has_running_tasks in
+    tools/claude-attention-hook.sh — keep the two in sync.
     """
     root = Path(f"/private/tmp/claude-{os.getuid()}")
     now = time.time()
@@ -285,10 +324,15 @@ def _bg_session_still_running(sid: str) -> bool:
                 return True
             for f in tasks_dir.iterdir():
                 try:
-                    if now - f.stat().st_mtime <= 90:
-                        return True
+                    if not f.is_symlink():
+                        continue
+                    if now - f.stat().st_mtime > AGENT_FRESH_S:
+                        continue   # dead, or finished long ago
                 except OSError:
                     continue
+                if not _agent_completed(f.name.removesuffix(".output"), sid):
+                    return True    # still working
+
     except (OSError, subprocess.SubprocessError):
         pass
     return False
@@ -338,13 +382,30 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def _extract_access_token(blob: str) -> str | None:
-    """Pull the accessToken out of a credentials blob.
+class Credentials(NamedTuple):
+    """An access token plus the expiry it advertises, if any.
+
+    ``expires_at`` is epoch seconds; None means the credential carries no
+    expiry (a long-lived setup token, or a shape we didn't recognise) and is
+    therefore only ever judged dead by the API itself.
+    """
+
+    token: str
+    expires_at: float | None
+    source: str
+
+    def expired(self) -> bool:
+        return (self.expires_at is not None
+                and time.time() + TOKEN_EXPIRY_SKEW >= self.expires_at)
+
+
+def _extract_credentials(blob: str, source: str) -> Credentials | None:
+    """Pull the accessToken (and its expiry) out of a credentials blob.
 
     Claude Code stores credentials as a JSON object; the blob may also be
-    nested ({"claudeAiOauth": {"accessToken": "..."}}). Fall back to a
-    regex match so unexpected shapes still work, and finally treat the
-    blob as a raw token if nothing else matches.
+    nested ({"claudeAiOauth": {"accessToken": "...", "expiresAt": <ms>}}).
+    Fall back to a regex match so unexpected shapes still work, and finally
+    treat the blob as a raw token if nothing else matches.
     """
     blob = blob.strip()
     if not blob:
@@ -354,30 +415,36 @@ def _extract_access_token(blob: str) -> str | None:
     except json.JSONDecodeError:
         data = None
     if isinstance(data, dict):
-        # direct: {"accessToken": "..."}
-        if isinstance(data.get("accessToken"), str):
-            return data["accessToken"]
-        # nested: {"claudeAiOauth": {"accessToken": "..."}}
-        for v in data.values():
-            if isinstance(v, dict) and isinstance(v.get("accessToken"), str):
-                return v["accessToken"]
+        # direct {"accessToken": ...} first, then one level of nesting
+        # ({"claudeAiOauth": {...}}) — Claude Code's own layout.
+        for holder in [data, *(v for v in data.values() if isinstance(v, dict))]:
+            token = holder.get("accessToken")
+            if isinstance(token, str) and token:
+                exp = holder.get("expiresAt")
+                valid_exp = isinstance(exp, (int, float)) and exp > 0
+                return Credentials(token, exp / 1000 if valid_exp else None, source)
     m = re.search(r'"accessToken"\s*:\s*"([^"]+)"', blob)
     if m:
-        return m.group(1)
+        return Credentials(m.group(1), None, source)
     # Raw token (no JSON wrapper) — must look plausible (sk-ant-... etc.)
     if re.fullmatch(r"[A-Za-z0-9_\-.~+/=]{20,}", blob):
-        return blob
+        return Credentials(blob, None, source)
     return None
 
 
-def _read_token_keychain() -> str | None:
+def _read_keychain(service: str, *, optional: bool = False) -> Credentials | None:
+    """Credentials from a Keychain generic-password item, or None.
+
+    ``optional`` silences the not-found log for items the user may simply
+    never have created (the dedicated long-lived token).
+    """
     try:
         out = subprocess.run(
             [
                 "security",
                 "find-generic-password",
                 "-s",
-                KEYCHAIN_SERVICE,
+                service,
                 "-a",
                 getpass.getuser(),
                 "-w",
@@ -388,12 +455,13 @@ def _read_token_keychain() -> str | None:
             timeout=10,
         )
     except subprocess.CalledProcessError as e:
-        log(f"Keychain read failed (rc={e.returncode}): {e.stderr.strip()}")
+        if not optional:
+            log(f"Keychain read failed (rc={e.returncode}): {e.stderr.strip()}")
         return None
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         log(f"Keychain access error: {e}")
         return None
-    return _extract_access_token(out.stdout)
+    return _extract_credentials(out.stdout, f"keychain:{service}")
 
 
 def read_config_dirs() -> list[Path]:
@@ -409,25 +477,57 @@ def read_config_dirs() -> list[Path]:
     return dirs or [DEFAULT_CONFIG_DIR]
 
 
-def read_token_for(config_dir: Path) -> str | None:
-    """Read the OAuth token for one config dir.
+def token_sources_for(config_dir: Path) -> list[Credentials]:
+    """Credentials to try for one config dir, best first.
 
-    Linux: each dir keeps its own ``<dir>/.credentials.json``. macOS: the default
-    install stores the token in Keychain with no file, so for the default dir we
-    fall back to Keychain when no file is present — preserving existing
-    single-plan macOS behavior. Additional macOS dirs are read from their files;
-    a work plan whose token lives only in the single Keychain entry can't be told
-    apart there (documented follow-up).
+    A dedicated long-lived token (``claude setup-token``, parked in Keychain
+    under DAEMON_KEYCHAIN_SERVICE) leads: it keeps working while Claude Code
+    is closed, which its own 8-hour OAuth token does not. Then the per-dir
+    credentials file (Linux layout, and extra macOS plans), then Claude Code's
+    own Keychain entry — the macOS default install stores the token there with
+    no file. A work plan whose token lives only in that single Keychain entry
+    can't be told apart from the default one (documented follow-up).
     """
+    sources: list[Credentials] = []
+    mac_default = sys.platform == "darwin" and config_dir == DEFAULT_CONFIG_DIR
+    if mac_default:
+        service = read_config().get("token_keychain_service",
+                                    DAEMON_KEYCHAIN_SERVICE)
+        dedicated = _read_keychain(service, optional=True)
+        if dedicated:
+            sources.append(dedicated)
     cred = config_dir / ".credentials.json"
     try:
         if cred.exists():
-            return _extract_access_token(cred.read_text())
+            from_file = _extract_credentials(cred.read_text(), str(cred))
+            if from_file:
+                sources.append(from_file)
     except OSError as e:
         log(f"Error reading credentials in {config_dir}: {e}")
-    if sys.platform == "darwin" and config_dir == DEFAULT_CONFIG_DIR:
-        return _read_token_keychain()
-    return None
+    if mac_default:
+        from_keychain = _read_keychain(KEYCHAIN_SERVICE)
+        if from_keychain:
+            sources.append(from_keychain)
+    return sources
+
+
+def fingerprint(sources: list[Credentials]) -> str:
+    """Cheap, non-reversible signature of a set of credentials.
+
+    While a poll is failing on auth there is nothing to win by retrying the
+    same dead token, but the moment Claude Code refreshes it (or the user
+    installs a long-lived one) we want to recover immediately rather than sit
+    out the backoff. Comparing fingerprints detects exactly that, without a
+    network call and without the token itself ever reaching a log.
+    """
+    return "|".join(hashlib.sha256(c.token.encode()).hexdigest()[:16]
+                    for c in sources)
+
+
+def token_fingerprint() -> str:
+    """fingerprint() over every source the next poll would try. Blocking."""
+    return fingerprint([c for d in read_config_dirs()
+                        for c in token_sources_for(d)])
 
 
 def load_cached_address() -> str | None:
@@ -896,6 +996,12 @@ class PlanSelector:
 
 # Module-level so the active-plan state survives reconnects.
 _SELECTOR = PlanSelector()
+# Which credential source last worked per config dir — logged on change so a
+# newly installed long-lived token visibly takes over.
+_active_source: dict[Path, str] = {}
+# fingerprint() of the sources the last poll enumerated, so the connected loop
+# can tell "the credentials moved" without re-reading them itself.
+_last_fingerprint = ""
 
 
 
@@ -906,21 +1012,37 @@ async def poll_active_payload(selector: PlanSelector = _SELECTOR) -> dict:
     usable payload this cycle. A single configured dir (the default) collapses
     to exactly the old single-poll path.
     """
+    global _last_fingerprint
     dirs = read_config_dirs()
     payloads: dict[Path, dict] = {}
     sessions: dict[Path, int] = {}
+    tried: list[Credentials] = []
     last_err: str | None = None
     for d in dirs:
-        token = read_token_for(d)
-        if not token:
+        sources = token_sources_for(d)
+        tried += sources
+        if not sources:
             log(f"No token in {d}; skipping")
             continue
-        result = await poll_api(token)
+        result: dict | str = "auth"
+        for creds in sources:
+            # A locally-expired token is a guaranteed 401, and repeated auth
+            # failures escalate to 429s — skip it and try the next source.
+            if creds.expired():
+                continue
+            result = await poll_api(creds.token)
+            if result != "auth":   # success, or an error no other token fixes
+                break
+            log(f"Token from {creds.source} rejected; trying next source")
         if isinstance(result, str):
             last_err = result
             continue
+        if _active_source.get(d) != creds.source:
+            log(f"Using token from {creds.source}")
+            _active_source[d] = creds.source
         payloads[d] = result
         sessions[d] = int(result.get("s", 0) or 0)
+    _last_fingerprint = fingerprint(tried)
     if not payloads:
         # Error beat: tells the firmware to flip to the idle view and show WHY
         # instead of rendering hours-old numbers as live ("token" = no config
@@ -1100,9 +1222,20 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     try:
         last_payload: dict | None = None
         poll_interval = POLL_INTERVAL   # grows exponentially while polls fail
+        stale_creds: str | None = None  # fingerprint of the creds that 401'd
+        last_creds_check = 0.0
         while client.is_connected and not stop_event.is_set():
             now = time.time()
             elapsed = now - last_poll
+            if stale_creds is not None and now - last_creds_check >= TOKEN_WATCH_S:
+                # Claude Code refreshed its token (or a long-lived one was
+                # installed) — poll now instead of sitting out the backoff.
+                # Reading them spawns `security`, so keep it off the BLE loop.
+                last_creds_check = now
+                if await asyncio.to_thread(token_fingerprint) != stale_creds:
+                    log("Credentials changed — retrying now")
+                    stale_creds, poll_interval = None, POLL_INTERVAL
+                    session.refresh_requested.set()
             attn, attn_project = read_attention_flag()
             cal_url, cal_thresholds = read_cal_config()
             cal = None
@@ -1125,11 +1258,15 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                 if payload.get("ok"):
                     last_payload = dict(payload)
                     poll_interval = POLL_INTERVAL
+                    stale_creds = None
                 else:
                     # Exponential backoff: a dead token means every retry is a
                     # guaranteed 401, and repeated auth failures escalate to
                     # 429s — don't hammer the API while there's nothing to win.
+                    # The wait is cut short as soon as the credentials change.
                     poll_interval = min(poll_interval * 2, 600)
+                    if payload.get("err") in ("auth", "token"):
+                        stale_creds = _last_fingerprint   # what the poll read
                     log(f"Poll failed ({payload.get('err')}); next attempt in {poll_interval}s")
                 # lsof inside can take a while — keep the BLE loop responsive.
                 payload["a"] = await asyncio.to_thread(count_active_sessions)
