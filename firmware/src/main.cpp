@@ -22,6 +22,7 @@
 #include "hal/sound_hal.h"
 
 static UsageData usage = {};
+static SessionList sessions = {};
 
 // ---- LVGL draw buffers (partial render mode) ----
 // PSRAM-equipped boards (S3) can comfortably hold larger strips. PSRAM-free
@@ -120,6 +121,53 @@ static bool parse_json(const char* json, UsageData* out) {
     out->clock_epoch = doc["t"] | 0L;
     out->clock_fmt = doc["tf"] | 24;
     out->ok = doc["ok"] | false;
+    out->valid = true;
+    return true;
+}
+
+// Parse the session-list JSON into SessionList.
+//
+// Shape (see to_ble_payload() in daemon/hook_listener.py):
+//   {"ss":[["netmap",6,82,240,1],...],"sn":7}
+// Positional rows keep this inside the MTU budget:
+//   [label, state_code, context_pct, elapsed_s, model_code]
+// `sn` is the TRUE running total, so `sn - count` is the "N more running" tail.
+static bool parse_sessions(const char* json, SessionList* out) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, json);
+    if (err) {
+        Serial.printf("Session JSON parse error: %s\n", err.c_str());
+        return false;
+    }
+
+    JsonArrayConst arr = doc["ss"].as<JsonArrayConst>();
+    if (arr.isNull()) {
+        Serial.println("Session JSON missing \"ss\" array");
+        return false;
+    }
+
+    out->count = 0;
+    // Iterating a JsonArrayConst yields JsonVariantConst, not JsonArrayConst.
+    for (JsonVariantConst row : arr) {
+        if (out->count >= MAX_SESSION_ROWS) break;   // daemon caps too; belt and braces
+        SessionRow* r = &out->rows[out->count];
+        strlcpy(r->label, row[0] | "", sizeof(r->label));
+        int state = row[1] | 0;
+        r->state     = (state >= 0 && state < SESS_STATE_COUNT)
+                       ? (uint8_t)state : (uint8_t)SESS_STARTING;
+        int pct      = row[2] | -1;
+        r->ctx_pct   = (pct >= 0 && pct <= 100) ? (int8_t)pct : (int8_t)-1;
+        long elapsed = row[3] | 0L;
+        r->elapsed_s = (elapsed < 0) ? 0 : (elapsed > 65535 ? 65535 : (uint16_t)elapsed);
+        int model    = row[4] | 0;
+        r->model     = (model >= 0 && model < SESS_MODEL_COUNT)
+                       ? (uint8_t)model : (uint8_t)SESS_MODEL_UNKNOWN;
+        out->count++;
+    }
+
+    int total = doc["sn"] | (int)out->count;
+    // A total below the rows we were given would render "-1 more running".
+    out->total = (total < out->count) ? out->count : (uint8_t)total;
     out->valid = true;
     return true;
 }
@@ -391,6 +439,14 @@ void loop() {
             ble_send_ack();
         } else {
             ble_send_nack();
+        }
+    }
+
+    if (ble_has_sessions()) {
+        // Ack/nack on TX is the usage channel's protocol; the daemon does not
+        // subscribe for session writes, so don't notify here.
+        if (parse_sessions(ble_get_sessions(), &sessions)) {
+            ui_update_sessions(&sessions);
         }
     }
 

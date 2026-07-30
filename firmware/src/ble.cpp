@@ -11,6 +11,7 @@
 #define RX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000002"  // host writes here
 #define TX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000003"  // device ack/nack notifies
 #define REQ_CHAR_UUID       "4c41555a-4465-7669-6365-000000000004"  // device-initiated refresh request
+#define SS_CHAR_UUID        "4c41555a-4465-7669-6365-000000000005"  // host writes session list here
 
 #define BLE_BUF_SIZE 512
 
@@ -61,6 +62,7 @@ static NimBLECharacteristic* input_kbd = nullptr;
 static NimBLECharacteristic* tx_char = nullptr;
 static NimBLECharacteristic* rx_char = nullptr;
 static NimBLECharacteristic* req_char = nullptr;
+static NimBLECharacteristic* ss_char = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
@@ -75,6 +77,10 @@ static volatile uint16_t param_fix_spent  = CONN_HANDLE_NONE;  // one per connec
 static char rx_buf[BLE_BUF_SIZE];
 static volatile bool data_ready = false;
 static volatile bool has_received_data = false;
+// Session list, written on its own characteristic so it gets a full MTU of its
+// own rather than sharing the usage payload's ~200-byte budget.
+static char ss_buf[BLE_BUF_SIZE];
+static volatile bool sessions_ready = false;
 static char mac_str[18];
 
 // --- Single-owner lock -----------------------------------------------------
@@ -259,30 +265,61 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
 };
 
+// Only accept data over a bonded+encrypted link, and only from the owner
+// machine. Another machine's daemon in range is ignored so the display never
+// rotates to a foreign account. The first encrypted writer claims ownership when
+// none is set yet (e.g. a fresh pairing). Shared by every host-writable
+// characteristic — a new one must never be an unguarded back door.
+static bool writer_is_owner(NimBLEConnInfo& info, const char* what) {
+    if (!info.isEncrypted()) {
+        Serial.printf("BLE: dropping %s write from unencrypted link\n", what);
+        return false;
+    }
+    std::string id = info.getIdAddress().toString();
+    if (!owner_set && id != ZERO_ADDR) {
+        claim_owner(id);
+    }
+    if (owner_set && strcmp(id.c_str(), owner_addr) != 0) {
+        Serial.printf("BLE: dropping %s write from non-owner %s\n", what, id.c_str());
+        return false;
+    }
+    return true;
+}
+
+// Copy a characteristic write into a NUL-terminated buffer. Returns false when
+// the value would not fit: a silent clamp produced truncated JSON that failed to
+// parse with no clue why, so an over-MTU payload now announces itself.
+static bool copy_write(NimBLECharacteristic* chr, char* dst, size_t cap,
+                       const char* what) {
+    std::string val = chr->getValue();
+    if (val.length() >= cap) {
+        Serial.printf("BLE: %s write too large (%u bytes, cap %u) — dropped\n",
+                      what, (unsigned)val.length(), (unsigned)(cap - 1));
+        return false;
+    }
+    memcpy(dst, val.c_str(), val.length());
+    dst[val.length()] = '\0';
+    return true;
+}
+
 class RxCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
-        // Only accept usage data over a bonded+encrypted link, and only from the
-        // owner machine. Another machine's daemon in range is ignored so the
-        // display never rotates to a foreign account. The first encrypted writer
-        // claims ownership when none is set yet (e.g. a fresh pairing).
-        std::string id = info.getIdAddress().toString();
-        if (!info.isEncrypted()) {
-            Serial.println("BLE: dropping RX write from unencrypted link");
-            return;
-        }
-        if (!owner_set && id != ZERO_ADDR) {
-            claim_owner(id);
-        }
-        if (owner_set && strcmp(id.c_str(), owner_addr) != 0) {
-            Serial.printf("BLE: dropping RX write from non-owner %s\n", id.c_str());
-            return;
-        }
-        std::string val = chr->getValue();
-        size_t len = std::min(val.length(), (size_t)(BLE_BUF_SIZE - 1));
-        memcpy(rx_buf, val.c_str(), len);
-        rx_buf[len] = '\0';
+        if (!writer_is_owner(info, "RX")) return;
+        if (!copy_write(chr, rx_buf, BLE_BUF_SIZE, "RX")) return;
         data_ready = true;
         has_received_data = true;
+    }
+};
+
+// Session list from the daemon's hook listener. Deliberately does NOT set
+// has_received_data: that flag gates the device-initiated refresh request, which
+// is about usage data. A board that has only ever seen session rows still needs
+// to ask for usage.
+class SsCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
+        if (!writer_is_owner(info, "SS")) return;
+        if (!copy_write(chr, ss_buf, BLE_BUF_SIZE, "SS")) return;
+        sessions_ready = true;
     }
 };
 
@@ -358,6 +395,13 @@ void ble_init(void) {
     static ReqCallbacks reqCb;
     req_char->setCallbacks(&reqCb);
 
+    ss_char = svc->createCharacteristic(
+        SS_CHAR_UUID,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+    );
+    static SsCallbacks ssCb;
+    ss_char->setCallbacks(&ssCb);
+
     svc->start();
     server->start();
     start_advertising();
@@ -416,6 +460,15 @@ bool ble_has_data(void) {
 const char* ble_get_data(void) {
     data_ready = false;
     return rx_buf;
+}
+
+bool ble_has_sessions(void) {
+    return sessions_ready;
+}
+
+const char* ble_get_sessions(void) {
+    sessions_ready = false;
+    return ss_buf;
 }
 
 void ble_send_ack(void) {

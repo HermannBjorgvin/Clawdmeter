@@ -17,6 +17,9 @@ void ble_clear_bonds(void);
 bool ble_has_bonds(void);
 bool ble_has_data(void);
 const char* ble_get_data(void);
+// Claude Code session list, written on its own characteristic (see SS_CHAR_UUID).
+bool ble_has_sessions(void);
+const char* ble_get_sessions(void);
 void ble_send_ack(void);
 void ble_send_nack(void);
 void ble_request_refresh(void);
