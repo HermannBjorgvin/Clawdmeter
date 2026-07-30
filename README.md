@@ -14,12 +14,12 @@ The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaa
 
 ## Screens
 
-The device boots into the splash. Tap the screen anywhere to switch to the Usage view; tap again to flip back to the splash.
+The device boots into the splash. Tap the screen anywhere to cycle: Usage → Sessions → Splash.
 
-|              Splash               |              Usage              |
-| :-------------------------------: | :-----------------------------: |
-| ![Splash](screenshots/splash.png) | ![Usage](screenshots/usage.png) |
-|   Splash; touch-toggle anytime    | Session and weekly utilization  |
+|               Splash              |              Usage              |                Sessions               |
+| :-------------------------------: | :-----------------------------: | :-----------------------------------: |
+| ![Splash](screenshots/splash.png) | ![Usage](screenshots/usage.png) | ![Sessions](screenshots/sessions.png) |
+|        Splash; tap to cycle       |  Session and weekly utilization |   Running sessions and their status   |
 
 While the splash is up, the middle (PWR) button cycles animations. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
 
@@ -193,8 +193,48 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
 3. The usage numbers come straight out of the response headers (`anthropic-ratelimit-unified-5h-utilization` and friends).
 4. The daemon connects to the ESP32 over BLE and writes a JSON payload to the GATT RX characteristic.
 5. The firmware parses it and updates the LVGL dashboard.
+5a. Separately, if the Sessions screen is enabled, Claude Code posts hook events to the daemon over loopback HTTP and the daemon writes the session list to the SS characteristic. No polling — a permission prompt reaches the device in milliseconds.
 6. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.
 7. The two side buttons are independent of all of this — they send Space and Shift+Tab as BLE HID keyboard input to the paired host directly.
+
+## Sessions screen (optional)
+
+Shows every running Claude Code session and what it's doing — thinking, running a tool, needing permission, asking you a question, or dead on a rate limit — with its context-window usage. Sessions that want your attention sort to the top and are the only ones drawn in colour.
+
+It's off by default and needs two pieces of setup, because the data comes from Claude Code's hooks rather than from polling.
+
+**1. Enable the listener** in the daemon config (`~/.config/claude-usage-monitor/config`, or `%LOCALAPPDATA%\Clawdmeter\config` on Windows):
+
+```ini
+hook_port = 25293
+```
+
+**2. Tell Claude Code to post to it** by adding this to `~/.claude/settings.json`. Hook entries merge across settings files and across entries, so these sit alongside anything already there — including hooks a VS Code extension manages — without overwriting them:
+
+```json
+{
+  "hooks": {
+    "SessionStart":      [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2 }] }],
+    "SessionEnd":        [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2 }] }],
+    "UserPromptSubmit":  [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2 }] }],
+    "PreToolUse":        [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2 }] }],
+    "PostToolUse":       [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2 }] }],
+    "PermissionRequest": [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2 }] }],
+    "Notification":      [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2 }] }],
+    "Stop":              [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2 }] }],
+    "StopFailure":       [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2 }] }],
+    "PostCompact":       [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2 }] }]
+  }
+}
+```
+
+Keep the port the same in both files. Restart the daemon afterwards, and restart any Claude Code session that was already running so it picks up the hooks.
+
+**On Linux**, run the Python daemon (`daemon/claude_usage_daemon.py`) rather than the bash one — only the Python daemons carry the listener. Repoint the systemd unit's `ExecStart` to it. Note that it finds the device from a pinned address in `~/.config/claude-usage-monitor/ble-address` and never scans by name, so run the bash daemon once first to pin that address. This combination hasn't been tested on BlueZ.
+
+Why each event is there: `Notification` is the only source for "waiting on a permission prompt" and "idle", since a session blocked on a prompt writes nothing to its transcript until you answer. `PreToolUse` also catches `AskUserQuestion`, `PostToolUse` clears the running-tool state, `StopFailure` reports rate limits, and `Stop`/`PostCompact` are when context usage is re-read.
+
+These hooks are read-only observers. The listener answers `204 No Content`, which Claude Code treats as "success, no output", so they cannot block a tool call or auto-approve a permission. It binds `127.0.0.1` only and refuses non-loopback connections, because hook payloads contain your prompt and response text.
 
 ## Physical buttons
 
@@ -212,12 +252,22 @@ Space and Shift+Tab go out as standard BLE HID keyboard reports, so they trigger
 
 The device advertises a custom GATT service alongside the standard HID keyboard service:
 
-|                            | UUID                                   |
-| -------------------------- | -------------------------------------- |
-| **Data Service**           | `4c41555a-4465-7669-6365-000000000001` |
-| RX Characteristic (write)  | `4c41555a-4465-7669-6365-000000000002` |
-| TX Characteristic (notify) | `4c41555a-4465-7669-6365-000000000003` |
-| **HID Service**            | `00001812-0000-1000-8000-00805f9b34fb` |
+|                             | UUID                                   |
+| --------------------------- | -------------------------------------- |
+| **Data Service**            | `4c41555a-4465-7669-6365-000000000001` |
+| RX Characteristic (write)   | `4c41555a-4465-7669-6365-000000000002` |
+| TX Characteristic (notify)  | `4c41555a-4465-7669-6365-000000000003` |
+| REQ Characteristic (notify) | `4c41555a-4465-7669-6365-000000000004` |
+| SS Characteristic (write)   | `4c41555a-4465-7669-6365-000000000005` |
+| **HID Service**             | `00001812-0000-1000-8000-00805f9b34fb` |
+
+The session list gets its own characteristic rather than sharing the usage write, because that payload already reaches 121 bytes worst case — leaving too little of the ~253-byte usable MTU for rows. Its format is positional JSON to keep the overhead down:
+
+```json
+{"ss":[["clawdmeter-36",6,44,61,1]],"sn":2}
+```
+
+`[name, state, context %, seconds in state, model]`, with `sn` the true number running so the device can render "N more running" after truncation. Context % of `-1` means unknown, and the device hides the bar rather than drawing it empty.
 
 JSON payload format (written to RX):
 

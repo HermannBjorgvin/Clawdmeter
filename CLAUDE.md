@@ -80,10 +80,10 @@ firmware/src/
     waveshare_amoled_206/   — CO5300 + FT3168 + AXP PKEY, no IO expander, 32 MB, no rotation
     template/               — copy this to bootstrap a new port
   main.cpp                  — setup() + loop(): HAL calls only, zero #ifdef BOARD_*
-  ui.{h,cpp}                — 3-screen UI (splash, usage, bluetooth). compute_layout() picks fonts/positions from board_caps() (responsive — current breakpoint: H >= 460 → large, else compact)
+  ui.{h,cpp}                — 3-screen UI (splash, usage, sessions), cycled by touch: usage → sessions → splash. PWR keeps brightness/animations. compute_layout() picks fonts/positions from board_caps() (breakpoints: H >= 460 large, >= 300 compact, else small)
   splash.{h,cpp}            — 20×20 pixel-art engine. CELL = min(W,H)/20, centered.
-  ble.{h,cpp}               — NimBLE peripheral: custom data service + HID keyboard
-  data.h                    — UsageData struct
+  ble.{h,cpp}               — NimBLE peripheral: custom data service + HID keyboard. RX = usage, SS = session list, both gated by writer_is_owner()
+  data.h                    — UsageData struct; SessionRow/SessionList + the session_state_t / session_model_t wire codes (APPEND ONLY — they cross the BLE boundary)
   icons.h                   — icon arrays. Battery (5×) are RGB565A8 with alpha; rest are raw RGB565.
   logo.h                    — 80×80 RGB565 logo
   font_*.c                  — pre-compiled LVGL 9 bitmap fonts (Tiempos 56/34, Styrene 48/28/24/20/16/14/12, Mono 32/18)
@@ -168,7 +168,35 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 
 ## Daemon / host side
 
-Bash daemon (`daemon/claude-usage-daemon.sh`) reads OAuth token, polls Anthropic API, sends JSON over BLE GATT. Run with `systemctl --user start claude-usage-daemon`. The unit file's `ExecStart` is the absolute path to the script — repoint it when switching between the worktree and the main checkout.
+**Three separate implementations, not one cross-platform daemon:**
+
+- Linux — `daemon/claude-usage-daemon.sh`, bash + `bluetoothctl`/dbus (bluez). Run with `systemctl --user start claude-usage-daemon`; the unit's `ExecStart` is an absolute path, so repoint it when switching between a worktree and the main checkout.
+- macOS — `daemon/claude_usage_daemon.py`, asyncio + bleak (CoreBluetooth), launched via `com.user.claude-usage-daemon.plist`.
+- Windows — `daemon/claude_usage_daemon_windows.py`, asyncio + bleak (WinRT), plus a tray icon and login autostart. See `daemon/README-windows.md`.
+
+All read the OAuth token, poll the Anthropic API for rate-limit headers, and write JSON over BLE GATT.
+
+**Only the two Python daemons carry the hook listener.** The bash daemon has no listener path — a file-drop bridge would fit its existing dbus-monitor→flag-file idiom — but that does *not* make the Sessions screen macOS/Windows only. `claude_usage_daemon.py` is called a "macOS port" in its docstring, and that undersells it: every macOS-specific piece is behind a `sys.platform == "darwin"` guard or a lazy in-function import (CoreBluetooth, `CentralManagerDelegate`, `blueutil`), while Linux paths are handled deliberately — credentials from `<dir>/.credentials.json`, a Linux MAC accepted by `load_cached_address()`, and `connect_and_run` documented as taking "either an address string (Linux) or a BLEDevice". The listener itself is pure stdlib asyncio, and bleak's BlueZ backend exposes the same API.
+
+So a Linux user wanting the Sessions screen runs `claude_usage_daemon.py` instead of the `.sh`, repointing the systemd unit's `ExecStart`. Three things to know before assuming that just works:
+
+- **Discovery needs a pre-pinned address.** On non-darwin, `discover_target()` returns `load_cached_address()` and deliberately never scans by name, so it cannot grab a stranger's device. It drops a dead entry from the cache but has no way to *populate* it — the bash daemon is what discovers by name and writes `~/.config/claude-usage-monitor/ble-address`. Run the bash daemon once to pin the address (or write that file by hand) before switching.
+- **No BlueZ-level recovery.** The bash daemon also runs `bluetoothctl remove` so a dead MAC cannot be re-picked; the Python daemon has no equivalent, and `_is_encryption_error()` / `unpair_macos()` are darwin-gated. A stale bond needs a manual re-pair, same as on Windows.
+- **Untested on BlueZ.** Nothing here has been run against Linux. `budget_from_mtu` degrades safely if BlueZ will not report an MTU (falls back to the conservative budget, shortening labels to 14 chars), but the discovery path above is the part most likely to bite.
+
+Tests: `python -m pip install -r daemon/requirements-dev.txt`, then `python -m pytest daemon/tests -q`. Note the suite shares the *production* rotating file logger on Windows (`_build_file_logger()` is gated on `sys.platform == "win32"`), so a misbehaving test writes into the real `daemon.log` — that once looked like a daemon spin-loop when it was actually a hung test.
+
+### Session monitor (hook listener)
+
+`daemon/hook_listener.py` receives Claude Code `"type": "http"` hook events on loopback and maintains a live session table, which the daemons push to the device on `SS_CHAR`. Off unless `hook_port` is set in the daemon config; the `~/.claude/settings.json` hook block is documented in README.md and `daemon/config.example`.
+
+Key points that are easy to get wrong:
+
+- **Hooks are the only source for "waiting on a permission prompt".** Nothing is written to the transcript until the prompt resolves, so no file-watching approach can see that state.
+- **Liveness and names come from `~/.claude/sessions/<pid>.json`**, not from timers or `basename(cwd)`. That file exists only while a process runs, and its `name` field is Claude Code's own per-session label — unique where the directory name is not, so two sessions in one repo read as `clawdmeter-36` and `clawdmeter-2c`. The discriminator is **alphanumeric, not a counter**; `ble_label()` preserves it by middle-eliding, and only when the label came from the roster (a bare `basename(cwd)` has no discriminator to protect).
+- **Context % is a heuristic.** Tokens come from the newest non-sidechain assistant record's `input_tokens + cache_read + cache_creation`, but transcripts record `message.model` with any `[1m]` suffix stripped, so the window size cannot be read from the name — a 1M session showed 100% until the token count itself was used as evidence of the limit. The authoritative figure is the statusline's `context_window.used_percentage`, which hooks do not provide.
+- **Row budget is derived from the measured ATT_MTU** (`budget_from_mtu`), not hardcoded. Windows/WinRT negotiates **256** (253 usable); CoreBluetooth and BlueZ are unmeasured. `to_ble_payload()` shrinks labels before ever dropping a row, because hiding a session is the one thing this screen must not do. Use `daemon/probe_mtu.py` to measure.
+- **Hook payloads contain prompt and response text**, so the listener binds `127.0.0.1` only and rejects non-loopback peers.
 
 **Discovery & resilience:**
 
