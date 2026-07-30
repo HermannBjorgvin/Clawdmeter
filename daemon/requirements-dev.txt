@@ -3,10 +3,25 @@
 # The runtime manifests (requirements-windows.txt, and the macOS/Linux daemons'
 # own deps) deliberately stay minimal, so the test runner lives here instead.
 #
+# This file provides the RUNNER ONLY. It is not sufficient on its own: the test
+# modules import the daemon modules under test, which import their third-party
+# deps at module scope, so pytest alone fails at collection rather than
+# skipping. The platform gates (e.g. the pytestmark in
+# test_windows_gatt_cache.py) skip test *execution*, but imports still have to
+# resolve for collection to succeed.
+#
+# On Windows, install the runtime manifest too:
+#
+#   python -m pip install -r daemon/requirements-windows.txt
 #   python -m pip install -r daemon/requirements-dev.txt
 #   python -m pytest daemon/tests -q
 #
-# test_hook_listener.py needs nothing but pytest — hook_listener.py is pure
-# stdlib. The other suites mock bleak/httpx, so install the runtime manifest for
-# your platform too if you want the whole suite to run.
+# That covers the whole suite: bleak/httpx for the daemons, plus pystray/Pillow
+# for the tray and icon suites (test_windows_tray.py imports daemon.tray_windows
+# and test_windows_icon.py imports daemon.icon_assets, both at module scope).
+#
+# Only the Windows path above has been exercised. On macOS/Linux the daemons
+# themselves need bleak and httpx; the Windows-only suites import their modules
+# at collection time regardless of platform, so expect to need those deps as
+# well, or to deselect those files.
 pytest
