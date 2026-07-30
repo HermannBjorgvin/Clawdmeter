@@ -1,6 +1,11 @@
 # Windows-only dependency manifest for claude_usage_daemon_windows.py
 # The macOS/Linux daemons manage their own dependencies separately.
-bleak
+#
+# bleak>=3: connect_and_run passes its WinRT options nested under `winrt=`,
+# which is the 3.x contract (the backend reads them via winrt.get(...)). Pinning
+# the floor keeps a resolver from selecting a version that predates it and
+# silently re-enabling the GATT cache. Guarded by tests/test_windows_gatt_cache.py.
+bleak>=3
 httpx
 pystray
 Pillow

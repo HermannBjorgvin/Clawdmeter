@@ -8,6 +8,7 @@ Covers:
 Run: python -m pytest daemon/tests/test_windows_reconnect.py -x -q
 """
 import asyncio
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -555,10 +556,14 @@ def test_requirements_windows_contains_required_deps():
     Phase 3 (reconnect) added no new deps; Phase 4 (tray) adds pystray + Pillow.
     This test asserts the final expected state: bleak, httpx, pystray, Pillow
     must be present; winreg must NOT be listed (it is stdlib — no install needed).
+
+    Compares distribution NAMES, so a pinned entry (`bleak>=3`) satisfies the
+    same assertion as a bare one — the manifest is free to carry version floors.
     """
     req_path = Path(__file__).parent.parent / "requirements-windows.txt"
     content = req_path.read_text()
-    lines = {line.strip().lower() for line in content.splitlines()
+    lines = {re.split(r"[=<>!~;\[]", line.strip(), maxsplit=1)[0].strip().lower()
+             for line in content.splitlines()
              if line.strip() and not line.strip().startswith("#")}
 
     assert "bleak" in lines, "bleak must be in requirements-windows.txt"
