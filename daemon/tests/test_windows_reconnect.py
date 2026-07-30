@@ -410,7 +410,15 @@ def test_main_scan_miss_uses_search_backoff():
 
     def capturing_Event():
         ev = real_Event()
-        internal_stop_event[0] = ev
+        # FIRST Event only. main() creates stop_event as its very first
+        # statement, so the first capture is unambiguously it. Keeping the LAST
+        # one instead assumed main() creates exactly one Event, which broke as
+        # soon as it also constructed a HookListener: this patch targets
+        # mod.asyncio.Event, and mod.asyncio IS the global asyncio module, so
+        # every Event anywhere was captured. internal_stop_event then pointed at
+        # the listener's event, setting it did not stop main(), and the test hung.
+        if internal_stop_event[0] is None:
+            internal_stop_event[0] = ev
         return ev
 
     recorded_timeouts = []
@@ -451,7 +459,15 @@ def test_main_connect_fail_uses_reconnect_backoff():
 
     def capturing_Event():
         ev = real_Event()
-        internal_stop_event[0] = ev
+        # FIRST Event only. main() creates stop_event as its very first
+        # statement, so the first capture is unambiguously it. Keeping the LAST
+        # one instead assumed main() creates exactly one Event, which broke as
+        # soon as it also constructed a HookListener: this patch targets
+        # mod.asyncio.Event, and mod.asyncio IS the global asyncio module, so
+        # every Event anywhere was captured. internal_stop_event then pointed at
+        # the listener's event, setting it did not stop main(), and the test hung.
+        if internal_stop_event[0] is None:
+            internal_stop_event[0] = ev
         return ev
 
     fake_device = _make_device()
@@ -462,7 +478,7 @@ def test_main_connect_fail_uses_reconnect_backoff():
     async def fake_acquire():
         return fake_device  # always finds device
 
-    async def fake_connect_and_run(device, event, tray_state=None):
+    async def fake_connect_and_run(device, event, tray_state=None, listener=None):
         return False  # always fails -> fast-reconnect regime
 
     async def fake_wait_for(coro, timeout):
@@ -496,7 +512,15 @@ def test_main_reconnect_backoff_reset_on_success():
 
     def capturing_Event():
         ev = real_Event()
-        internal_stop_event[0] = ev
+        # FIRST Event only. main() creates stop_event as its very first
+        # statement, so the first capture is unambiguously it. Keeping the LAST
+        # one instead assumed main() creates exactly one Event, which broke as
+        # soon as it also constructed a HookListener: this patch targets
+        # mod.asyncio.Event, and mod.asyncio IS the global asyncio module, so
+        # every Event anywhere was captured. internal_stop_event then pointed at
+        # the listener's event, setting it did not stop main(), and the test hung.
+        if internal_stop_event[0] is None:
+            internal_stop_event[0] = ev
         return ev
 
     fake_device = _make_device()
@@ -510,7 +534,7 @@ def test_main_reconnect_backoff_reset_on_success():
     async def fake_acquire():
         return fake_device
 
-    async def fake_connect_and_run(device, event, tray_state=None):
+    async def fake_connect_and_run(device, event, tray_state=None, listener=None):
         idx = connect_idx[0]
         connect_idx[0] += 1
         if idx < len(connect_results):

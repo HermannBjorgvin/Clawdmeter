@@ -24,10 +24,22 @@ import httpx
 from bleak import BleakClient
 from bleak.exc import BleakError
 
+try:
+    from .hook_listener import (HookListener, budget_from_mtu, read_hook_port,
+                                read_roster_dirs)
+except ImportError:
+    # Run directly as a script, which is how the launchd plist invokes it.
+    from hook_listener import (HookListener, budget_from_mtu, read_hook_port,
+                               read_roster_dirs)
+
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
+# Session list rides its own characteristic: the usage payload already reaches
+# ~121 bytes worst case, leaving too little of the ~200-byte MTU budget to fit
+# rows alongside it.
+SS_CHAR_UUID = "4c41555a-4465-7669-6365-000000000005"
 
 POLL_INTERVAL = 60
 TICK = 5
@@ -567,6 +579,34 @@ class Session:
             log(f"Write failed: {e}")
             return False
 
+    def session_budget(self) -> int:
+        """Row budget derived from the link's actual ATT_MTU.
+
+        Windows/WinRT measured 256 (253 usable). CoreBluetooth is unmeasured and
+        is known to report differently for write-without-response, so this reads
+        the live value per connection rather than assuming the Windows figure.
+        """
+        try:
+            mtu = self.client.mtu_size
+        except Exception:  # noqa: BLE001 - backend-dependent attribute
+            mtu = None
+        return budget_from_mtu(mtu)
+
+    async def write_sessions(self, fragment: dict) -> bool:
+        """Push the session list on SS_CHAR.
+
+        Failures are logged and swallowed: the sessions screen is an extra, and
+        a firmware without SS_CHAR (older build) must not break usage reporting.
+        """
+        data = json.dumps(fragment, separators=(",", ":")).encode()
+        log(f"Sending sessions ({len(data)}B): {data.decode()}")
+        try:
+            await self.client.write_gatt_char(SS_CHAR_UUID, data, response=False)
+            return True
+        except (BleakError, OSError) as e:
+            log(f"Session write failed (device may predate SS_CHAR): {e}")
+            return False
+
 
 def _is_encryption_error(exc: BaseException) -> bool:
     """True if a connect error is a macOS bonding/encryption mismatch.
@@ -653,7 +693,7 @@ def unpair_macos() -> bool:
     return True
 
 
-async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
+async def connect_and_run(target, stop_event: asyncio.Event, listener=None) -> bool:
     """Connect to a target and poll until disconnected or stopped.
 
     ``target`` is either an address string (Linux) or a BLEDevice carrying
@@ -705,10 +745,26 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                     last_poll = time.time()
                     used_successfully = True
 
+            # Push the session list whenever a hook has changed something, and
+            # once per poll cycle so the elapsed times on screen stay honest.
+            if listener is not None and listener.running:
+                if listener.updated.is_set() or elapsed >= POLL_INTERVAL:
+                    listener.updated.clear()
+                    await session.write_sessions(
+                        listener.table.to_ble_payload(max_bytes=session.session_budget()))
+
+            # Wake on a refresh request or a hook event, whichever lands first.
+            # Waking on hooks is what makes "needs permission" reach the device
+            # in milliseconds rather than up to TICK seconds later.
+            waiters = [asyncio.ensure_future(session.refresh_requested.wait())]
+            if listener is not None and listener.running:
+                waiters.append(asyncio.ensure_future(listener.updated.wait()))
             try:
-                await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
-            except asyncio.TimeoutError:
-                pass
+                await asyncio.wait(waiters, timeout=TICK,
+                                   return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for w in waiters:
+                    w.cancel()
     finally:
         try:
             await client.disconnect()
@@ -726,6 +782,13 @@ async def main() -> None:
     def _stop(*_args: object) -> None:
         log("Daemon stopping")
         stop_event.set()
+
+    # Claude Code hook listener. Disabled unless `hook_port` is set in the
+    # config; a bind failure is logged and ignored so the daemon keeps doing its
+    # existing job either way.
+    listener = HookListener(read_hook_port(CONFIG_FILE), log=log,
+                            config_dirs=read_roster_dirs(CONFIG_FILE))
+    await listener.start()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -753,7 +816,7 @@ async def main() -> None:
             continue
 
         addr = target if isinstance(target, str) else target.address
-        ok = await connect_and_run(target, stop_event)
+        ok = await connect_and_run(target, stop_event, listener)
         if not ok:
             if sys.platform == "darwin":
                 # No string cache to drop; instead skip this stale handle on

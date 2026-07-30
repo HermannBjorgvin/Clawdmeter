@@ -26,10 +26,24 @@ from bleak import BleakClient
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 
+try:
+    # Normal case: run as a module from the repo root (python -m daemon.…).
+    from .hook_listener import (HookListener, budget_from_mtu, read_hook_port,
+                                read_roster_dirs)
+except ImportError:
+    # Run directly as a script (python daemon/claude_usage_daemon_windows.py),
+    # which is how README-windows.md documents it.
+    from hook_listener import (HookListener, budget_from_mtu, read_hook_port,
+                               read_roster_dirs)
+
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
+# Session list rides its own characteristic: the usage payload already reaches
+# ~121 bytes worst case, leaving too little of the ~200-byte MTU budget to fit
+# rows alongside it.
+SS_CHAR_UUID = "4c41555a-4465-7669-6365-000000000005"
 
 POLL_INTERVAL = 60
 TICK = 5
@@ -391,6 +405,35 @@ class Session:
         except (BleakError, ValueError, OSError) as e:
             log(f"Refresh subscription unavailable: {e}")
 
+    def session_budget(self) -> int:
+        """Row budget derived from the link's actual ATT_MTU.
+
+        Measured 256 (253 usable) on Windows/WinRT, which buys 20-char labels
+        instead of 14. Falls back to the conservative default when the backend
+        won't report a usable figure -- bleak has to infer MTU on some backends,
+        so a bogus reading must not inflate the budget.
+        """
+        try:
+            mtu = self.client.mtu_size
+        except Exception:  # noqa: BLE001 - backend-dependent attribute
+            mtu = None
+        return budget_from_mtu(mtu)
+
+    async def write_sessions(self, fragment: dict) -> bool:
+        """Push the session list on SS_CHAR.
+
+        Failures are logged and swallowed: the sessions screen is an extra, and
+        a firmware without SS_CHAR (older build) must not break usage reporting.
+        """
+        data = json.dumps(fragment, separators=(",", ":")).encode()
+        log(f"Sending sessions ({len(data)}B): {data.decode()}")
+        try:
+            await self.client.write_gatt_char(SS_CHAR_UUID, data, response=False)
+            return True
+        except (BleakError, OSError) as e:
+            log(f"Session write failed (device may predate SS_CHAR): {e}")
+            return False
+
     async def write_payload(self, payload: dict) -> bool:
         data = json.dumps(payload, separators=(",", ":")).encode()
         log(f"Sending: {data.decode()}")
@@ -524,7 +567,8 @@ async def _wait_first(*events: asyncio.Event, timeout: float) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) -> bool:
+async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None,
+                          listener=None) -> bool:
     """Connect to device and poll until disconnected or stopped.
 
     Returns True if at least one successful write occurred.
@@ -629,12 +673,27 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                     # as an auth problem (SC#5). Leave tray state unchanged; the next
                     # tick retries and set_connected() recovers it.
 
+            # Push the session list whenever a hook has changed something, and
+            # once per poll cycle so the elapsed times on screen stay honest.
+            # Independent of the usage poll: a session state change should reach
+            # the device in milliseconds, not on the next 60s boundary.
+            if listener is not None and listener.running:
+                if listener.updated.is_set() or elapsed >= POLL_INTERVAL:
+                    listener.updated.clear()
+                    await session.write_sessions(
+                        listener.table.to_ble_payload(max_bytes=session.session_budget()))
+
             # Wake on a refresh request OR a stop, whichever comes first. Waking
             # promptly on stop_event is what lets the finally below run
             # client.disconnect() before the process exits, so the peer gets a
             # clean GATT disconnect (returns to its waiting screen) instead of
             # being left frozen on stale data after Quit (SC#3 graceful shutdown).
-            await _wait_first(session.refresh_requested, stop_event, timeout=TICK)
+            wake_on = [session.refresh_requested, stop_event]
+            # Waking on a hook event too is what makes "needs permission" appear
+            # on the device near-instantly rather than up to TICK seconds later.
+            if listener is not None and listener.running:
+                wake_on.append(listener.updated)
+            await _wait_first(*wake_on, timeout=TICK)
     finally:
         # Clean GATT disconnect on the way out — this is what tells the peripheral
         # the link is gone. WinRT can surface a raw OSError (not BleakError) here,
@@ -675,6 +734,13 @@ async def main(tray_state=None) -> None:
         log("Daemon stopping")
         stop_event.set()
 
+    # Claude Code hook listener. Disabled unless `hook_port` is set in the
+    # config; a bind failure is logged and ignored so the daemon keeps doing its
+    # existing job either way.
+    listener = HookListener(read_hook_port(CONFIG_FILE), log=log,
+                            config_dirs=read_roster_dirs(CONFIG_FILE))
+    await listener.start()
+
     # OS signal handlers can only be installed from the main thread, and
     # loop.add_signal_handler is unsupported on Windows. When running under the
     # tray (04-03) the loop lives in a background thread and the tray owns clean
@@ -711,7 +777,7 @@ async def main(tray_state=None) -> None:
             search_backoff = _next_backoff(search_backoff, 60)
             continue
 
-        ok = await connect_and_run(device, stop_event, tray_state)
+        ok = await connect_and_run(device, stop_event, tray_state, listener)
         if not ok:
             # Fast-reconnect regime: had/attempted a link that dropped — retry quickly
             if tray_state:
