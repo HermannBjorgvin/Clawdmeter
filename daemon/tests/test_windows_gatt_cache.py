@@ -105,8 +105,15 @@ def test_daemon_does_not_force_address_type():
     from daemon import claude_usage_daemon_windows as d
 
     code = _strip_comments(inspect.getsource(d.connect_and_run))
-    assert "address_type" not in code, (
+    # Assert the forbidden CALL-SITE forms, not a bare substring. _strip_comments
+    # only drops whole-line comments, so it leaves the function's docstring and
+    # any trailing inline comment in place — a bare `"address_type" not in code`
+    # would fail on someone merely *documenting* that it stays unset.
+    why = (
         "address_type is set again — if that is deliberate, confirm the board's "
         "address really is random, because forcing the wrong type surfaces as "
         "BleakDeviceNotFoundError rather than as a type mismatch"
     )
+    assert "address_type=" not in code, why          # top-level kwarg
+    assert '"address_type"' not in code, why         # nested in the winrt dict
+    assert "'address_type'" not in code, why
