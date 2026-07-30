@@ -1,0 +1,12 @@
+# Test/dev dependencies for the daemon test suite.
+#
+# The runtime manifests (requirements-windows.txt, and the macOS/Linux daemons'
+# own deps) deliberately stay minimal, so the test runner lives here instead.
+#
+#   python -m pip install -r daemon/requirements-dev.txt
+#   python -m pytest daemon/tests -q
+#
+# test_hook_listener.py needs nothing but pytest — hook_listener.py is pure
+# stdlib. The other suites mock bleak/httpx, so install the runtime manifest for
+# your platform too if you want the whole suite to run.
+pytest
