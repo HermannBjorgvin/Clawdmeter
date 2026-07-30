@@ -56,6 +56,14 @@ struct Layout {
     int16_t pair_y1, pair_y2, pair_y3;
     int16_t idle_px;                 // sleeping-creature size on the idle screen
 
+    // Sessions screen
+    int16_t sess_row_h;              // height of one session row
+    int16_t sess_row_gap;
+    int16_t sess_bar_w, sess_bar_h;  // context-usage bar
+    const lv_font_t* sess_label_font;   // project name
+    const lv_font_t* sess_state_font;   // "waiting - 4m"
+    const lv_font_t* sess_more_font;    // "2 more running"
+
     // Bluetooth screen
     int16_t bt_info_panel_h;
     int16_t bt_reset_zone_h;
@@ -109,6 +117,15 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 16;
         L.usage_bar_y = 56;
         L.usage_reset_y = 94;
+        // 5 rows at 60px + 8px gaps ends at y=440, leaving room for the
+        // "N more running" tail below it without touching the bottom edge.
+        L.sess_row_h = 60;
+        L.sess_row_gap = 8;
+        L.sess_bar_w = 70;
+        L.sess_bar_h = 8;
+        L.sess_label_font = &font_styrene_28;
+        L.sess_state_font = &font_styrene_20;
+        L.sess_more_font  = &font_styrene_20;
         L.bt_info_panel_h = 160;
         L.bt_reset_zone_h = 110;
         L.bt_title_font    = &font_tiempos_56;
@@ -123,6 +140,13 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 12;
         L.usage_bar_y = 48;
         L.usage_reset_y = 78;
+        L.sess_row_h = 54;
+        L.sess_row_gap = 6;
+        L.sess_bar_w = 56;
+        L.sess_bar_h = 7;
+        L.sess_label_font = &font_styrene_24;
+        L.sess_state_font = &font_styrene_16;
+        L.sess_more_font  = &font_styrene_16;
         L.bt_info_panel_h = 140;
         L.bt_reset_zone_h = 90;
         L.bt_title_font    = &font_tiempos_34;
@@ -165,6 +189,16 @@ static void compute_layout(const BoardCaps& c) {
         L.pair_y2 = 56;
         L.pair_y3 = 80;
         L.idle_px = 96;
+        // 240px tall leaves ~190px under the title, so rows go single-line: the
+        // state text sits beside the label rather than beneath it.
+        // 30+2 rather than 34+3: five rows plus the tail must fit in 240px.
+        L.sess_row_h = 30;
+        L.sess_row_gap = 2;
+        L.sess_bar_w = 36;
+        L.sess_bar_h = 5;
+        L.sess_label_font = &font_styrene_14;
+        L.sess_state_font = &font_styrene_12;
+        L.sess_more_font  = &font_styrene_12;
         L.bt_info_panel_h = 90;
         L.bt_reset_zone_h = 60;
         L.bt_title_font    = &font_tiempos_34;
@@ -538,6 +572,230 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
 }
 
+// ======== Sessions screen ========
+//
+// Shows what each running Claude Code session is doing, fed by the daemon's
+// hook listener over SS_CHAR. Rows are pre-truncated and pre-ordered by the
+// daemon (attention-worthy first), so this code only renders — it never sorts
+// or decides what to drop.
+
+static lv_obj_t* sessions_container = nullptr;
+static lv_obj_t* sess_row_group[MAX_SESSION_ROWS] = {nullptr};
+static lv_obj_t* sess_lbl_name[MAX_SESSION_ROWS]  = {nullptr};
+static lv_obj_t* sess_lbl_state[MAX_SESSION_ROWS] = {nullptr};
+static lv_obj_t* sess_bar_ctx[MAX_SESSION_ROWS]   = {nullptr};
+static lv_obj_t* sess_dot[MAX_SESSION_ROWS]       = {nullptr};
+static lv_obj_t* lbl_sess_more = nullptr;
+static lv_obj_t* lbl_sess_empty = nullptr;
+static SessionList sess_cache = {};
+
+// Human text per wire code. Indexed by session_state_t, so this array and the
+// enum must stay the same length.
+static const char* const SESS_STATE_TEXT[SESS_STATE_COUNT] = {
+    "starting",         // SESS_STARTING
+    "idle",             // SESS_IDLE
+    "thinking",         // SESS_THINKING
+    "responding",       // SESS_RESPONDING
+    "running tool",     // SESS_RUNNING_TOOL
+    "compacting",       // SESS_COMPACTING
+    "needs permission", // SESS_WAIT_PERMISSION
+    "asking you",       // SESS_WAIT_QUESTION
+    "needs input",      // SESS_WAIT_INPUT
+    "error",            // SESS_ERROR
+    "ended",            // SESS_ENDED
+};
+
+// Dot colour: accent for anything wanting the user, dim for idle/ended, text
+// colour for active work. Keeps the "does anything need me?" read instant.
+static lv_color_t sess_state_color(uint8_t state) {
+    switch (state) {
+    case SESS_WAIT_PERMISSION:
+    case SESS_WAIT_QUESTION:
+    case SESS_WAIT_INPUT:
+    case SESS_ERROR:
+        return COL_ACCENT;
+    case SESS_IDLE:
+    case SESS_ENDED:
+    case SESS_STARTING:
+        return COL_DIM;
+    default:
+        return COL_TEXT;
+    }
+}
+
+// "4m" / "2h" / "45s" — compact enough for the row's right edge.
+static void format_elapsed(uint16_t secs, char* buf, size_t len) {
+    if (secs < 60)        snprintf(buf, len, "%us", (unsigned)secs);
+    else if (secs < 3600) snprintf(buf, len, "%um", (unsigned)(secs / 60));
+    else                  snprintf(buf, len, "%uh", (unsigned)(secs / 3600));
+}
+
+static void init_sessions_screen(lv_obj_t* scr) {
+    sessions_container = lv_obj_create(scr);
+    lv_obj_set_size(sessions_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(sessions_container, 0, 0);
+    lv_obj_set_style_bg_opa(sessions_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(sessions_container, 0, 0);
+    lv_obj_set_style_pad_all(sessions_container, 0, 0);
+    lv_obj_clear_flag(sessions_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(sessions_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(sessions_container, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t* title = lv_label_create(sessions_container);
+    lv_label_set_text(title, "Sessions");
+    lv_obj_set_style_text_font(title, L.title_font, 0);
+    lv_obj_set_style_text_color(title, COL_TEXT, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, L.title_nudge, L.title_y);
+
+    // Every row is built up front and hidden; the update path only sets text and
+    // visibility, so no allocation happens on the BLE callback path.
+    for (int i = 0; i < MAX_SESSION_ROWS; i++) {
+        int y = L.content_y + i * (L.sess_row_h + L.sess_row_gap);
+
+        lv_obj_t* row = lv_obj_create(sessions_container);
+        lv_obj_set_size(row, L.scr_w - 2 * L.margin, L.sess_row_h);
+        lv_obj_set_pos(row, L.margin, y);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
+        sess_row_group[i] = row;
+
+        // State dot, vertically centred against the label.
+        lv_obj_t* dot = lv_obj_create(row);
+        int dot_px = L.small_icons ? 6 : 10;
+        lv_obj_set_size(dot, dot_px, dot_px);
+        lv_obj_set_pos(dot, 0, (L.sess_label_font->line_height - dot_px) / 2);
+        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(dot, 0, 0);
+        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+        lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+        sess_dot[i] = dot;
+
+        int text_x = dot_px + (L.small_icons ? 6 : 12);
+
+        lv_obj_t* name = lv_label_create(row);
+        lv_label_set_text(name, "");
+        lv_obj_set_style_text_font(name, L.sess_label_font, 0);
+        lv_obj_set_style_text_color(name, COL_TEXT, 0);
+        lv_obj_set_pos(name, text_x, 0);
+        // Bound the width and let LVGL ellipsize. The daemon caps the label by
+        // CHARACTER count, which says nothing about pixel width, so a 20-char
+        // name in a proportional face could otherwise run under the context bar.
+        // LV_LABEL_LONG_DOT uses ASCII dots, which these fonts do have.
+        lv_obj_set_width(name, L.scr_w - 2 * L.margin - text_x - L.sess_bar_w - 12);
+        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+        sess_lbl_name[i] = name;
+
+        lv_obj_t* st = lv_label_create(row);
+        lv_label_set_text(st, "");
+        lv_obj_set_style_text_font(st, L.sess_state_font, 0);
+        lv_obj_set_style_text_color(st, COL_DIM, 0);
+        // On the 240px board the row is too short to stack, so the state text
+        // sits on the same line, right-aligned instead of under the name.
+        if (L.sess_row_h < 40) lv_obj_align(st, LV_ALIGN_RIGHT_MID, -L.sess_bar_w - 8, 0);
+        else                   lv_obj_set_pos(st, text_x, L.sess_label_font->line_height);
+        sess_lbl_state[i] = st;
+
+        lv_obj_t* bar = make_bar(row, 0, 0, L.sess_bar_w, L.sess_bar_h);
+        lv_obj_align(bar, LV_ALIGN_RIGHT_MID, 0, 0);
+        // make_bar() paints the indicator COL_GREEN, which is the usage screen's
+        // semantic language (green/amber/red by headroom). Context usage is not
+        // that kind of signal, and a green bar next to a terra-cotta "needs you"
+        // row competes with it for attention. Neutral text colour instead, so the
+        // only colour on this screen means "wants you".
+        lv_obj_set_style_bg_color(bar, COL_TEXT, LV_PART_INDICATOR);
+        sess_bar_ctx[i] = bar;
+    }
+
+    // Tail line: "2 more running" when the daemon truncated the list.
+    //
+    // Positioned below the LAST POSSIBLE row rather than against the bottom
+    // edge. Bottom-anchoring collided with row 5 on both the 480px and 240px
+    // breakpoints, and anchoring to the last *visible* row would make the label
+    // jump vertically as sessions come and go.
+    lbl_sess_more = lv_label_create(sessions_container);
+    lv_label_set_text(lbl_sess_more, "");
+    lv_obj_set_style_text_font(lbl_sess_more, L.sess_more_font, 0);
+    lv_obj_set_style_text_color(lbl_sess_more, COL_DIM, 0);
+    lv_obj_align(lbl_sess_more, LV_ALIGN_TOP_MID, 0,
+                 L.content_y + MAX_SESSION_ROWS * (L.sess_row_h + L.sess_row_gap)
+                 + L.sess_row_gap);
+    lv_obj_add_flag(lbl_sess_more, LV_OBJ_FLAG_HIDDEN);
+
+    lbl_sess_empty = lv_label_create(sessions_container);
+    lv_label_set_text(lbl_sess_empty, "No sessions running");
+    lv_obj_set_style_text_font(lbl_sess_empty, L.sess_label_font, 0);
+    lv_obj_set_style_text_color(lbl_sess_empty, COL_DIM, 0);
+    lv_obj_align(lbl_sess_empty, LV_ALIGN_CENTER, 0, 0);
+}
+
+static void render_sessions(void) {
+    if (!sessions_container) return;
+
+    // No data at all is different from "zero sessions running": before the first
+    // write we say so rather than claiming nothing is running.
+    if (!sess_cache.valid) {
+        lv_label_set_text(lbl_sess_empty, "Waiting for host");
+        lv_obj_clear_flag(lbl_sess_empty, LV_OBJ_FLAG_HIDDEN);
+    } else if (sess_cache.count == 0) {
+        lv_label_set_text(lbl_sess_empty, "No sessions running");
+        lv_obj_clear_flag(lbl_sess_empty, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(lbl_sess_empty, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    for (int i = 0; i < MAX_SESSION_ROWS; i++) {
+        if (i >= sess_cache.count) {
+            lv_obj_add_flag(sess_row_group[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        const SessionRow* r = &sess_cache.rows[i];
+        lv_obj_clear_flag(sess_row_group[i], LV_OBJ_FLAG_HIDDEN);
+
+        lv_label_set_text(sess_lbl_name[i], r->label);
+
+        const char* state_text = (r->state < SESS_STATE_COUNT)
+                                 ? SESS_STATE_TEXT[r->state] : "?";
+        char line[48];
+        if (r->elapsed_s > 0) {
+            char ago[8];
+            format_elapsed(r->elapsed_s, ago, sizeof(ago));
+            snprintf(line, sizeof(line), "%s  %s", state_text, ago);
+        } else {
+            snprintf(line, sizeof(line), "%s", state_text);
+        }
+        lv_label_set_text(sess_lbl_state[i], line);
+
+        lv_color_t col = sess_state_color(r->state);
+        lv_obj_set_style_bg_color(sess_dot[i], col, 0);
+        lv_obj_set_style_text_color(sess_lbl_state[i],
+            (r->state == SESS_WAIT_PERMISSION || r->state == SESS_WAIT_QUESTION ||
+             r->state == SESS_WAIT_INPUT || r->state == SESS_ERROR) ? COL_ACCENT : COL_DIM, 0);
+
+        // ctx_pct -1 means the daemon could not read the transcript; an empty
+        // bar would read as "0% used", so hide it instead.
+        if (r->ctx_pct < 0) {
+            lv_obj_add_flag(sess_bar_ctx[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(sess_bar_ctx[i], LV_OBJ_FLAG_HIDDEN);
+            lv_bar_set_value(sess_bar_ctx[i], r->ctx_pct, LV_ANIM_OFF);
+        }
+    }
+
+    int hidden = (int)sess_cache.total - (int)sess_cache.count;
+    if (sess_cache.valid && hidden > 0) {
+        char more[32];
+        snprintf(more, sizeof(more), "%d more running", hidden);
+        lv_label_set_text(lbl_sess_more, more);
+        lv_obj_clear_flag(lbl_sess_more, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(lbl_sess_more, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 // ======== Public API ========
 
 void ui_init(void) {
@@ -552,6 +810,8 @@ void ui_init(void) {
     init_battery_icons();
 
     init_usage_screen(scr);
+    init_sessions_screen(scr);
+    render_sessions();          // paints the "Waiting for host" placeholder
     splash_init(scr);
 
     if (splash_get_root()) {
@@ -746,17 +1006,30 @@ static void apply_battery_visibility(void) {
 
 static void global_click_cb(lv_event_t* e) {
     (void)e;
-    if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
-    else                                  ui_show_screen(SCREEN_SPLASH);
+    // Touch cycles the three views: usage -> sessions -> splash -> usage.
+    //
+    // Touch is already the screen-switching gesture here, so the new screen
+    // joins that cycle rather than the PWR button: PWR keeps its existing jobs
+    // (brightness on a data view, next animation on the splash) and no gesture
+    // changes meaning for existing users.
+    switch (current_screen) {
+    case SCREEN_USAGE:    ui_show_screen(SCREEN_SESSIONS); break;
+    case SCREEN_SESSIONS: ui_show_screen(SCREEN_SPLASH);   break;
+    default:              ui_show_screen(SCREEN_USAGE);    break;
+    }
 }
 
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+    if (sessions_container) lv_obj_add_flag(sessions_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
     case SCREEN_SPLASH:  splash_show(); break;
     case SCREEN_USAGE:   lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_SESSIONS:
+        if (sessions_container) lv_obj_clear_flag(sessions_container, LV_OBJ_FLAG_HIDDEN);
+        break;
     default: break;
     }
 
@@ -777,6 +1050,15 @@ void ui_toggle_splash(void) {
 
 screen_t ui_get_current_screen(void) {
     return current_screen;
+}
+
+void ui_update_sessions(const SessionList* sessions) {
+    if (!sessions || !sessions->valid) return;
+    sess_cache = *sessions;
+    // Repaint unconditionally rather than only when visible: the screen is
+    // hidden, not destroyed, so it must already be correct the moment the user
+    // touches through to it.
+    render_sessions();
 }
 
 void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) {
