@@ -30,3 +30,33 @@ chime = off
 #   12   = show the clock, forced 12-hour  (e.g. 6:28 PM)
 #   24   = show the clock, forced 24-hour  (e.g. 18:28)
 clock = off
+
+# Show running Claude Code sessions and their status on the device's Sessions
+# screen (touch the Usage screen to reach it).
+#
+# This opens a listener on loopback that Claude Code posts hook events to, so
+# the device learns instantly when a session needs permission, is asking you a
+# question, or has hit a rate limit — no polling.
+#   off   = no listener (default; an upgrade never opens a port by itself)
+#   on    = listen on the default port, 25293 ("clawd" on a phone keypad)
+#   <n>   = listen on port n
+#
+# It only ever binds 127.0.0.1: hook payloads contain prompt text, so this must
+# not be reachable from the network.
+#
+# Enabling this alone does nothing — Claude Code has to be told to post to it.
+# Add to ~/.claude/settings.json (these merge with any hooks already there,
+# including ones a VS Code extension manages, so nothing is overwritten):
+#
+#   "hooks": {
+#     "Notification":     [{"hooks": [{"type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2}]}],
+#     "SessionStart":     [{"hooks": [{"type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2}]}],
+#     "SessionEnd":       [{"hooks": [{"type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2}]}],
+#     "Stop":             [{"hooks": [{"type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2}]}],
+#     "StopFailure":      [{"hooks": [{"type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2}]}],
+#     "PostCompact":      [{"hooks": [{"type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2}]}],
+#     "PermissionRequest":[{"hooks": [{"type": "http", "url": "http://127.0.0.1:25293/hook", "timeout": 2}]}]
+#   }
+#
+# Keep the port here and in settings.json in step.
+hook_port = off
