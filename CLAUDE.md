@@ -14,6 +14,8 @@ Five ports today (two SoC families, three panel sizes):
 - `boards/waveshare_amoled_18_c6/` — Waveshare ESP32-C6-Touch-AMOLED-1.8 (368×448 portrait, SH8601, FT3168 touch, TCA9554 expander). Build env: `waveshare_amoled_18_c6`. Same panel as the S3 1.8 but on the C6 SoC. All subsystems (display, touch, BOOT + PWR buttons, battery, BLE) verified on hardware.
 - `boards/waveshare_amoled_206/` — Waveshare ESP32-S3-Touch-AMOLED-2.06 (CO5300, 410×502 watch form factor, FT3168 touch, no IO expander, 32 MB flash, PCF85063 RTC, ES8311 codec). Build env: `waveshare_amoled_206`. Display, touch, battery, IMU init, and BLE verified on hardware; the ES8311 chime path is not wired up (`sound.cpp` no-ops).
 
+Plus one non-hardware target: `boards/sim/` — **native desktop simulator** (SDL2 window, 480×480, `platform = native`). Build env: `sim`. See "Desktop simulator" below.
+
 **C6 ports have no PSRAM** — shared code gates on `BOARD_HAS_PSRAM` (absent on C6) to use `MALLOC_CAP_INTERNAL` for LVGL/splash buffers, and the `screenshot` serial command is disabled (`LV_USE_SNAPSHOT=0`), so UI changes on a C6 board must be eyeballed on hardware, not auto-captured.
 
 The shared code calls a small HAL (`firmware/src/hal/`) that each board implements: display, touch, input, power, IMU. Optional features are guarded by `BoardCaps` (runtime) and `BOARD_HAS_*` (compile-time) rather than `#ifdef BOARD_*`.
@@ -78,6 +80,7 @@ firmware/src/
     waveshare_amoled_216_c6/— C6: SH8601 + CST9217 + AXP PKEY, no PSRAM
     waveshare_amoled_18_c6/ — C6: SH8601 + FT3168 + AXP PKEY + TCA9554 (gates power), no PSRAM
     waveshare_amoled_206/   — CO5300 + FT3168 + AXP PKEY, no IO expander, 32 MB, no rotation
+    sim/                    — native desktop simulator: SDL2 + Arduino shims + scenario playback
     template/               — copy this to bootstrap a new port
   main.cpp                  — setup() + loop(): HAL calls only, zero #ifdef BOARD_*
   ui.{h,cpp}                — 3-screen UI (splash, usage, bluetooth). compute_layout() picks fonts/positions from board_caps() (responsive — current breakpoint: H >= 460 → large, else compact)
@@ -114,6 +117,35 @@ pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0
 If `pio` isn't on PATH: try `~/.platformio/penv/bin/pio` (Linux/macOS pio install) or `brew install platformio` on macOS.
 
 Device path differs by OS: `/dev/cu.usbmodem*` on macOS, `/dev/ttyACM0` on Linux. Both expose the ESP32-S3 native USB-JTAG (no boot-mode dance needed).
+
+## Desktop simulator (`-e sim`) — develop UI without hardware
+
+```bash
+sudo apt install libsdl2-dev   # once (macOS: brew install sdl2)
+pio run -d firmware -e sim && (cd firmware && .pio/build/sim/program)
+```
+
+An SDL2 window stands in for the 480×480 panel; the **full firmware loop runs
+unmodified** — `main.cpp`, `ui.cpp`, `splash.cpp`, idle fade, pair gesture,
+JSON parsing, usage-rate/chime logic. Only `ble.cpp`/`chime.cpp` are swapped
+for stubs. How it works: `boards/sim/` implements the HAL against SDL2, thin
+Arduino shims live in `boards/sim/shim/` (`millis`/`Serial`→stdio,
+`heap_caps`→malloc, in-memory `Preferences`), and `ble_sim.cpp` plays back
+daemon payloads from `firmware/sim/scenario.jsonl` (one JSON line per state +
+optional `name`/`hold_ms`; override with `SIM_SCENARIO=<path>`).
+
+Controls (full map in `boards/sim/board.h`): mouse = touch · space =
+play/pause scenario · ←/→ = step · 1-9 = jump · d = BLE link toggle ·
+b/n = BOOT/secondary buttons · p = PWR · c/-/= = charging/battery ·
+s = screenshot BMP · esc = quit.
+
+Headless screenshots (works in CI, no display):
+`SDL_VIDEODRIVER=dummy SIM_AUTOSHOT_MS=6000 .pio/build/sim/program` saves
+`sim-autoshot.bmp` (or `SIM_AUTOSHOT_PATH`) after 6 s and exits. Combine with
+the boot-screen swap trick below to capture any screen. **The sim renders with
+desktop LVGL and fake data — always do a final check on real hardware before
+merging panel-related changes** (col offsets, rotation, rounding live in the
+hardware boards, not shared code).
 
 ## QA your own UI changes — don't ask the user
 
