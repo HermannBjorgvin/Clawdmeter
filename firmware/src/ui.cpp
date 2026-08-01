@@ -714,23 +714,14 @@ static void build_chat_card(ChatCard* c, lv_obj_t* parent, int x, int y, bool fo
 
     const int cw = L.content_w - 2 * L.panel_pad_x;
 
-    // Name width budgets for the widest realistic right-side neighbor so a
-    // long session name ellipsizes instead of colliding: the model pill at
-    // "sonnet-5.2" (future model naming) on the focus card, the token label
-    // ("999K" / fallback "100%") on list cards.
-    int name_w;
-    if (focus) {
-        lv_point_t psz;
-        lv_text_get_size(&psz, "sonnet-5.2", &font_styrene_20, 0, 0,
-                         LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        name_w = cw - (psz.x + 2 * 12 /*pill pad*/) - 12 /*gap*/;
-    } else {
-        name_w = cw - 78;
-    }
+    // Name width starts at the full row; every content update re-budgets it
+    // against the measured width of the actual right-side neighbor (the model
+    // pill on the focus card, the token label on list cards) so a long name
+    // ellipsizes right up to its neighbor instead of a worst-case gap.
     c->name_font = f_name;
-    c->name_w = name_w;
+    c->name_w = cw;
     c->lbl_name = make_card_label(c->card, f_name, COL_TEXT);
-    lv_obj_set_width(c->lbl_name, name_w);
+    lv_obj_set_width(c->lbl_name, cw);
     // One line, exactly — the ellipsis itself is applied firmware-side (see
     // label_set_ellipsized); the fixed box just guards against any wrap.
     lv_obj_set_height(c->lbl_name, lv_font_get_line_height(f_name));
@@ -821,9 +812,40 @@ static void chat_card_set_row(ChatCard* c, const SessionRow* r) {
     const int bucket = session_bucket(r->state);
     c->waiting = (bucket == SESSION_BUCKET_WAITING);
 
+    char buf[24];
+    // Top-right label (list cards): token count when the host sends one,
+    // ctx% as the older-host fallback, hidden when both are unknown. Set
+    // BEFORE the name so the name's ellipsis budget can track the rendered
+    // width of its actual neighbor (a hidden label gives the name the row).
+    if (c->lbl_ctx) {
+        const int cw = L.content_w - 2 * L.panel_pad_x;
+        bool shown = true;
+        if (r->tok >= 0) {
+            session_tok_text(r->tok, buf, sizeof(buf));
+        } else if (r->ctx_pct >= 0) {
+            snprintf(buf, sizeof(buf), "%d%%", r->ctx_pct);
+        } else {
+            shown = false;
+        }
+        int nw = cw;
+        if (shown) {
+            set_label_if_changed(c->lbl_ctx, buf);
+            lv_obj_clear_flag(c->lbl_ctx, LV_OBJ_FLAG_HIDDEN);
+            lv_point_t sz;
+            lv_text_get_size(&sz, buf, c->name_font, 0, 0,
+                             LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+            nw = cw - sz.x - 12;   // min gap between name end and neighbor
+        } else {
+            lv_obj_add_flag(c->lbl_ctx, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (nw != c->name_w) {
+            c->name_w = nw;
+            lv_obj_set_width(c->lbl_name, nw);
+        }
+    }
+
     label_set_ellipsized(c->lbl_name, r->label, c->name_font, c->name_w);
 
-    char buf[24];
     // Context bar: hidden entirely when the percentage is unknown — an empty
     // bar reads as "0% used" (§5).
     if (r->ctx_pct < 0) {
@@ -831,21 +853,6 @@ static void chat_card_set_row(ChatCard* c, const SessionRow* r) {
     } else {
         lv_obj_clear_flag(c->bar, LV_OBJ_FLAG_HIDDEN);
         lv_bar_set_value(c->bar, r->ctx_pct, LV_ANIM_OFF);
-    }
-    // Top-right label (list cards): token count when the host sends one,
-    // ctx% as the older-host fallback, hidden when both are unknown.
-    if (c->lbl_ctx) {
-        if (r->tok >= 0) {
-            session_tok_text(r->tok, buf, sizeof(buf));
-            set_label_if_changed(c->lbl_ctx, buf);
-            lv_obj_clear_flag(c->lbl_ctx, LV_OBJ_FLAG_HIDDEN);
-        } else if (r->ctx_pct >= 0) {
-            snprintf(buf, sizeof(buf), "%d%%", r->ctx_pct);
-            set_label_if_changed(c->lbl_ctx, buf);
-            lv_obj_clear_flag(c->lbl_ctx, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(c->lbl_ctx, LV_OBJ_FLAG_HIDDEN);
-        }
     }
 
     char sbuf[32];
@@ -889,15 +896,31 @@ static void chat_card_set_row(ChatCard* c, const SessionRow* r) {
 }
 
 static void focus_set_content(const SessionRow* r) {
-    chat_card_set_row(&focus_card, r);
-    s_focus_waiting = focus_card.waiting;
-
     static const char* const model_names[] = { "", "opus", "sonnet", "haiku", "fable" };
     const char* model = r->model <= SESSION_MODEL_FABLE ? model_names[r->model] : "";
     set_label_if_changed(focus_lbl_model, model);
-    // An empty pill would render as a bare chip — hide it with its text.
-    if (model[0]) lv_obj_clear_flag(focus_lbl_model, LV_OBJ_FLAG_HIDDEN);
-    else          lv_obj_add_flag(focus_lbl_model, LV_OBJ_FLAG_HIDDEN);
+    // Budget the name against the pill actually rendered (its text width +
+    // padding + a 12px gap) — not a worst case — so a long name runs right up
+    // to the pill. An empty pill would render as a bare chip: hide it with
+    // its text and give the name the full row.
+    const int cw = L.content_w - 2 * L.panel_pad_x;
+    int nw = cw;
+    if (model[0]) {
+        lv_obj_clear_flag(focus_lbl_model, LV_OBJ_FLAG_HIDDEN);
+        lv_point_t sz;
+        lv_text_get_size(&sz, model, &font_styrene_20, 0, 0,
+                         LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        nw = cw - (sz.x + 2 * 12 /*pill pad*/) - 12 /*gap*/;
+    } else {
+        lv_obj_add_flag(focus_lbl_model, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (nw != focus_card.name_w) {
+        focus_card.name_w = nw;
+        lv_obj_set_width(focus_card.lbl_name, nw);
+    }
+
+    chat_card_set_row(&focus_card, r);
+    s_focus_waiting = focus_card.waiting;
 
     // Context row: percentage (spelled out — it doubles as onboarding for
     // the terse multi-chat bars) on the left, token counter on the right.
