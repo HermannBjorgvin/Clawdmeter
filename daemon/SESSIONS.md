@@ -93,6 +93,32 @@ or approve a permission.
    cat ~/.clawdmeter/sessions.json          # what the daemon will ship
    ```
 
+## Wire format
+
+The payload is `{"ss":[...]}` with one positional row per session, already
+sorted attention-first (waiting, working, idle; most recent first within each):
+
+```
+[sid, label, state, ctx, elapsed_s, model, tool, ntools, nagents, tdone, ttotal, tok]
+```
+
+| # | Field | Meaning |
+| - | --- | --- |
+| 0 | `sid` | 2 hex chars, stable for the session's life (keys the reorder animation) |
+| 1 | `label` | Display name, already middle-elided to fit the budget |
+| 2 | `state` | State code 0–10 (issue #135 §3; append-only) |
+| 3 | `ctx` | Context window used, percent; `-1` = unknown (firmware hides the bar) |
+| 4 | `elapsed_s` | Seconds in the current state at write time |
+| 5 | `model` | `0` unknown, `1` opus, `2` sonnet, `3` haiku, `4` fable |
+| 6 | `tool` | `0` other/none, `1` Bash, `2` Read, `3` Edit, `4` Write, `5` Grep, `6` Glob, `7` Task, `8` WebFetch, `9` WebSearch |
+| 7 | `ntools` | OPEN tool calls (concurrent, not cumulative) |
+| 8 | `nagents` | Subagents currently in flight |
+| 9–10 | `tdone` / `ttotal` | Todo counts; badge hidden when `ttotal` is 0 |
+| 11 | `tok` | Context tokens used, in 1k units (rounded to nearest) — the absolute number behind `ctx`, from the same transcript read. `-1` exactly when `ctx` is `-1` |
+
+Fields are append-only: firmware ignores indices it doesn't know, and new
+fields only ever go on the end.
+
 ## Config reference
 
 | Key | Default | Meaning |

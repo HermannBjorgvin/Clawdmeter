@@ -16,7 +16,7 @@ from daemon.clawdmeter_sessions import (
     STATE_RUNNING_TOOL, STATE_COMPACTING, STATE_WAITING_PERMISSION,
     STATE_WAITING_QUESTION, STATE_WAITING_INPUT, STATE_ERROR,
     SessionTable, compute_window, context_percent, elide_label,
-    encode_payload, fit_payload, model_code, state_bucket, tool_code,
+    encode_payload, fit_payload, model_code, state_bucket, tokens_k, tool_code,
 )
 
 SID = "a3f10c2e-0000-4000-8000-000000000001"
@@ -318,7 +318,7 @@ def test_elide_floor_is_eight_chars():
 # ---------------------------------------------------------------------------
 
 def _row(sid, label, state=STATE_THINKING):
-    return [sid, label, state, 50, 10, 2, 0, 0, 0, 0, 0]
+    return [sid, label, state, 50, 10, 2, 0, 0, 0, 0, 0, 100]
 
 
 FIT_ROWS = [
@@ -421,6 +421,7 @@ def test_context_read_from_transcript(tmp_path):
     t.handle_event(ev("SessionStart", transcript_path=str(transcript)))
     s = sess(t)
     assert s.ctx == 80          # 160k of 200k
+    assert s.tok == 160         # same read, absolute: 160,000 tokens -> 160
     assert s.model == 4         # fable
 
 
@@ -428,6 +429,54 @@ def test_context_unknown_when_transcript_missing():
     t = make_table()
     t.handle_event(ev("SessionStart", transcript_path="/nonexistent/nope.jsonl"))
     assert sess(t).ctx == -1
+    assert sess(t).tok == -1    # tok is -1 exactly when ctx is -1
+
+
+# ---------------------------------------------------------------------------
+# tok — absolute context tokens in 1k units, consistent with ctx
+# ---------------------------------------------------------------------------
+
+def test_tokens_k_units_and_rounding():
+    assert tokens_k(None) == -1
+    assert tokens_k(0) == 0
+    assert tokens_k(160_000) == 160
+    assert tokens_k(160_499) == 160     # round to nearest...
+    assert tokens_k(160_500) == 161     # ...half rounds up, deterministically
+    assert tokens_k(1_234_567) == 1235
+
+
+def _table_with_transcript(tmp_path, tokens):
+    transcript = tmp_path / "t.jsonl"
+    rec = {"type": "assistant", "isSidechain": False,
+           "message": {"model": "claude-sonnet-4-5",
+                       "usage": {"input_tokens": tokens}}}
+    transcript.write_text(json.dumps(rec) + "\n")
+    t = make_table()
+    t.handle_event(ev("SessionStart", transcript_path=str(transcript)))
+    return t
+
+
+def test_tok_known_ctx_correct_k_value(tmp_path):
+    t = _table_with_transcript(tmp_path, 412_345)
+    s = sess(t)
+    assert s.tok == 412                 # 412k, NOT divided by the window
+    assert s.ctx == 41                  # 412,345 of a snapped-up 1M window
+
+
+def test_tok_and_ctx_come_from_the_same_read(tmp_path):
+    t = _table_with_transcript(tmp_path, 100_000)
+    assert (sess(t).ctx, sess(t).tok) == (50, 100)
+    # transcript disappears; Stop triggers a re-read -> both go unknown together
+    os.remove(sess(t).transcript_path)
+    t.handle_event(ev("Stop"))
+    assert (sess(t).ctx, sess(t).tok) == (-1, -1)
+
+
+def test_tok_on_the_wire_at_index_11(tmp_path):
+    t = _table_with_transcript(tmp_path, 190_000)
+    row = json.loads(t.project(4096))["ss"][0]
+    assert row[3] == 95                 # ctx
+    assert row[11] == 190               # tok appended at the end
 
 
 # ---------------------------------------------------------------------------
@@ -445,8 +494,9 @@ def test_wire_row_shape_and_codes():
     rows = json.loads(t.project(4096))["ss"]
     assert len(rows) == 1
     row = rows[0]
-    assert len(row) == 11
-    sid, label, state, ctx, elapsed, model, tool, ntools, nagents, tdone, ttotal = row
+    assert len(row) == 12
+    (sid, label, state, ctx, elapsed, model, tool,
+     ntools, nagents, tdone, ttotal, tok) = row
     assert sid == SID[:2] and len(sid) == 2
     assert label == "clawdmeter"          # basename(cwd) fallback
     assert state == STATE_RUNNING_TOOL
@@ -455,6 +505,7 @@ def test_wire_row_shape_and_codes():
     assert model == 0
     assert tool == 1                       # Bash
     assert (ntools, nagents, tdone, ttotal) == (1, 1, 0, 0)
+    assert tok == -1                       # unknown together with ctx
 
 
 def test_model_and_tool_code_tables():

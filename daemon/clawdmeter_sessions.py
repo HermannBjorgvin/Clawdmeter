@@ -264,6 +264,14 @@ def context_percent(observed_tokens, model_str, pinned_k=None):
     return max(0, min(100, round(observed_tokens * 100 / window)))
 
 
+def tokens_k(observed_tokens):
+    """Absolute context tokens in 1k units, rounded half-up (deterministic —
+    Python's round() would banker-round 160500 down). -1 when unknown."""
+    if observed_tokens is None:
+        return -1
+    return int((observed_tokens + 500) // 1000)
+
+
 def munge_cwd(cwd):
     """Claude Code's project-dir munging: every non-alphanumeric becomes '-'.
     ('/home/x/JBT Marel/Clawdmeter' -> '-home-x-JBT-Marel-Clawdmeter')"""
@@ -406,7 +414,7 @@ class Session:
     __slots__ = (
         "session_id", "sid", "state", "state_since", "last_event_at",
         "roster_name", "cwd", "transcript_path", "current_tool", "open_tools",
-        "nagents", "tdone", "ttotal", "ctx", "model", "missing_since",
+        "nagents", "tdone", "ttotal", "ctx", "tok", "model", "missing_since",
     )
 
     def __init__(self, session_id, now):
@@ -424,6 +432,7 @@ class Session:
         self.tdone = 0
         self.ttotal = 0
         self.ctx = -1
+        self.tok = -1  # context tokens in 1k units; -1 whenever ctx is -1
         self.model = 0
         self.missing_since = None  # first time the roster didn't vouch for us
 
@@ -589,6 +598,10 @@ class SessionTable:
         if model_str:
             sess.model = model_code(model_str)
         sess.ctx = context_percent(tokens, model_str, self.pinned_window_k)
+        # tok mirrors the SAME read: the same token sum in 1k units, not divided
+        # by the window. Forced to -1 whenever ctx is -1 so the pair can never
+        # disagree on the wire.
+        sess.tok = tokens_k(tokens) if sess.ctx != -1 else -1
 
     def _guess_transcript(self, sess):
         """Fallback when no hook carried transcript_path:
@@ -641,7 +654,9 @@ class SessionTable:
     # -- projection (§5) ------------------------------------------------------
 
     def rows(self):
-        """Full-label rows, already sorted: (bucket, -last_event_at)."""
+        """Full-label rows, already sorted: (bucket, -last_event_at).
+        Row: [sid, label, state, ctx, elapsed_s, model, tool, ntools,
+              nagents, tdone, ttotal, tok] — append-only, like the codes."""
         now = self.now_fn()
         with self._lock:
             ordered = sorted(
@@ -661,6 +676,7 @@ class SessionTable:
                     s.nagents,
                     s.tdone,
                     s.ttotal,
+                    s.tok,
                 ]
                 for s in ordered
             ]
