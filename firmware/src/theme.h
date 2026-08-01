@@ -11,4 +11,8 @@
 #define THEME_GREEN    lv_color_hex(0x788c5d)
 #define THEME_AMBER    lv_color_hex(0xd97757)
 #define THEME_RED      lv_color_hex(0xc0392b)
+// Muted lavender for the subagent badge — derived to sit in the palette's
+// family: hue 265°, saturation 30% (between olive's 20% and terra's 63%),
+// lightness 64% (the badge/dim tier, so it never outranks the accent).
+#define THEME_PURPLE   lv_color_hex(0x9e87be)
 #define THEME_BAR_BG   lv_color_hex(0x2a2a28)   // unfilled bar track

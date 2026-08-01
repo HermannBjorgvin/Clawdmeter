@@ -129,7 +129,8 @@ static SessionList sessions = {};
 
 // Parse a session payload (issue #135 §5) into a SessionList. Rows are
 // positional and arrive pre-sorted by the host:
-//   {"ss":[[sid,label,state,ctx,elapsed_s,model,tool,ntools,nagents,tdone,ttotal],...]}
+//   {"ss":[[sid,label,state,ctx,elapsed_s,model,tool,ntools,nagents,tdone,ttotal,tok],...]}
+// (tok is optional — appended in a later wire revision.)
 // Returns false on a malformed payload — caller keeps the last good list.
 static bool parse_sessions(const char* json, SessionList* out) {
     JsonDocument doc;
@@ -159,6 +160,9 @@ static bool parse_sessions(const char* json, SessionList* out) {
         r->nagents   = (uint8_t)(int)(row[8]  | 0);
         r->tdone     = (uint8_t)(int)(row[9]  | 0);
         r->ttotal    = (uint8_t)(int)(row[10] | 0);
+        // Index 11 (tok, 1k units) was appended after the first host release —
+        // absent on older hosts, so out-of-range reads default to "unknown".
+        r->tok       = (int32_t)(row[11]      | -1);
         out->count++;
     }
     return true;

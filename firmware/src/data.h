@@ -67,7 +67,8 @@ enum session_tool_t : uint8_t {
 // The panel fits 3.5 cards; rows past this cap are parsed only to be dropped.
 // The host sorts before it sends, so what's dropped is what matters least.
 #define SESSION_MAX_ROWS  6
-#define SESSION_LABEL_MAX 24     // host middle-elides to fit the MTU budget
+#define SESSION_LABEL_MAX 32     // host middle-elides to fit the MTU budget;
+                                 // the UI ellipsizes to the card width itself
 
 struct SessionRow {
     char    sid[3];                  // 2 hex chars + NUL, stable for the session's
@@ -82,6 +83,9 @@ struct SessionRow {
     uint8_t nagents;                 // running subagents; badge hidden at 0
     uint8_t tdone;                   // todos done
     uint8_t ttotal;                  // todos total; badge hidden at 0
+    int32_t tok;                     // context tokens used, in units of 1k
+                                     // (190 = 190k, 1200 = 1.2M); -1 = unknown.
+                                     // Wire index 11; absent (older host) → -1.
 };
 
 struct SessionList {
