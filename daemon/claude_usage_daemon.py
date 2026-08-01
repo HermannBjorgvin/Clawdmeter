@@ -75,19 +75,39 @@ def _extract_access_token(blob: str) -> str | None:
         data = None
     if isinstance(data, dict):
         # direct: {"accessToken": "..."}
-        if isinstance(data.get("accessToken"), str):
-            return data["accessToken"]
-        # nested: {"claudeAiOauth": {"accessToken": "..."}}
-        for v in data.values():
-            if isinstance(v, dict) and isinstance(v.get("accessToken"), str):
-                return v["accessToken"]
+        tok = data.get("accessToken")
+        if isinstance(tok, str) and tok.strip():
+            return tok.strip()
+        # nested: {"claudeAiOauth": {"accessToken": "..."}}. claudeAiOauth is
+        # tried FIRST — a real blob holds one accessToken per OAuth integration
+        # (MCP servers, design tools) and any of those as a Bearer 401s. Same
+        # rule as the bash daemon's read_token_for (tests/test_bash_token.sh).
+        for v in (data.get("claudeAiOauth"), *data.values()):
+            if isinstance(v, dict):
+                tok = v.get("accessToken")
+                if isinstance(tok, str) and tok.strip():
+                    return tok.strip()
     m = re.search(r'"accessToken"\s*:\s*"([^"]+)"', blob)
-    if m:
-        return m.group(1)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
     # Raw token (no JSON wrapper) — must look plausible (sk-ant-... etc.)
     if re.fullmatch(r"[A-Za-z0-9_\-.~+/=]{20,}", blob):
         return blob
     return None
+
+
+def _oauth_expired(blob: str) -> bool:
+    """True iff the blob's claudeAiOauth.expiresAt is already in the past.
+
+    expiresAt is JS-convention epoch milliseconds. An absent or unparseable
+    expiry counts as not-expired — trying a token and reading the API's answer
+    beats skipping a good one.
+    """
+    try:
+        exp = json.loads(blob)["claudeAiOauth"]["expiresAt"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return False
+    return isinstance(exp, (int, float)) and exp / 1000 <= time.time()
 
 
 def _read_token_keychain() -> str | None:
@@ -149,11 +169,22 @@ def read_token_for(config_dir: Path) -> str | None:
     single-plan macOS behavior. Additional macOS dirs are read from their files;
     a work plan whose token lives only in the single Keychain entry can't be told
     apart there (documented follow-up).
+
+    An expired file is skipped rather than returned: on macOS a leftover
+    .credentials.json shadows the Keychain entry that Claude Code actually
+    keeps refreshed, so preferring the file means every poll 401s
+    ("OAuth access token has expired") forever with nothing to self-heal it.
     """
     cred = config_dir / ".credentials.json"
     try:
         if cred.exists():
-            return _extract_access_token(cred.read_text())
+            blob = cred.read_text()
+            if not _oauth_expired(blob):
+                token = _extract_access_token(blob)
+                if token is not None:
+                    return token
+            else:
+                log(f"Ignoring expired token in {cred} (re-run `claude login` if this persists)")
     except OSError as e:
         log(f"Error reading credentials in {config_dir}: {e}")
     if sys.platform == "darwin" and config_dir == DEFAULT_CONFIG_DIR:

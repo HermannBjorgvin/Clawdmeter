@@ -66,7 +66,7 @@ After flashing, open **System Settings → Bluetooth** and click *Connect* next 
 
 ### Install the daemon
 
-The daemon reads your Claude OAuth token from the macOS Keychain (service `Claude Code-credentials`), polls usage every 60 s, and pushes it to the display over BLE.
+The daemon reads your Claude OAuth token from the macOS Keychain (service `Claude Code-credentials`), polls usage every 60 s, and pushes it to the display over BLE. A `~/.claude/.credentials.json` file takes priority when present and unexpired — an expired one is ignored so it can't shadow the Keychain entry Claude Code keeps refreshed. If the log shows `API HTTP 401 … OAuth access token has expired` every cycle, re-run `claude login`.
 
 ```bash
 ./install-mac.sh

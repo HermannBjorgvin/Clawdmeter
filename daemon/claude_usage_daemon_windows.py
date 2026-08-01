@@ -427,16 +427,19 @@ def _extract_access_token(blob: str) -> str | None:
         # direct: {"accessToken": "..."}
         tok = data.get("accessToken")
         if isinstance(tok, str) and tok.strip():
-            return tok
-        # nested: {"claudeAiOauth": {"accessToken": "..."}}
-        for v in data.values():
+            return tok.strip()
+        # nested: {"claudeAiOauth": {"accessToken": "..."}}. claudeAiOauth is
+        # tried FIRST — a real blob holds one accessToken per OAuth integration
+        # (MCP servers, design tools) and any of those as a Bearer 401s. Same
+        # rule as the bash daemon's read_token_for (tests/test_bash_token.sh).
+        for v in (data.get("claudeAiOauth"), *data.values()):
             if isinstance(v, dict):
                 tok = v.get("accessToken")
                 if isinstance(tok, str) and tok.strip():
-                    return tok
+                    return tok.strip()
     m = re.search(r'"accessToken"\s*:\s*"([^"]+)"', blob)
-    if m:
-        return m.group(1)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
     # Raw token (no JSON wrapper) — must look plausible (sk-ant-... etc.)
     if re.fullmatch(r"[A-Za-z0-9_\-.~+/=]{20,}", blob):
         return blob
