@@ -77,7 +77,7 @@ def _extract_access_token(blob: str) -> str | None:
         # direct: {"accessToken": "..."}
         tok = data.get("accessToken")
         if isinstance(tok, str) and tok.strip():
-            return tok
+            return tok.strip()
         # nested: {"claudeAiOauth": {"accessToken": "..."}}. claudeAiOauth is
         # tried FIRST — a real blob holds one accessToken per OAuth integration
         # (MCP servers, design tools) and any of those as a Bearer 401s. Same
@@ -86,10 +86,10 @@ def _extract_access_token(blob: str) -> str | None:
             if isinstance(v, dict):
                 tok = v.get("accessToken")
                 if isinstance(tok, str) and tok.strip():
-                    return tok
+                    return tok.strip()
     m = re.search(r'"accessToken"\s*:\s*"([^"]+)"', blob)
     if m and m.group(1).strip():
-        return m.group(1)
+        return m.group(1).strip()
     # Raw token (no JSON wrapper) — must look plausible (sk-ant-... etc.)
     if re.fullmatch(r"[A-Za-z0-9_\-.~+/=]{20,}", blob):
         return blob
@@ -180,8 +180,11 @@ def read_token_for(config_dir: Path) -> str | None:
         if cred.exists():
             blob = cred.read_text()
             if not _oauth_expired(blob):
-                return _extract_access_token(blob)
-            log(f"Ignoring expired token in {cred} (re-run `claude login` if this persists)")
+                token = _extract_access_token(blob)
+                if token is not None:
+                    return token
+            else:
+                log(f"Ignoring expired token in {cred} (re-run `claude login` if this persists)")
     except OSError as e:
         log(f"Error reading credentials in {config_dir}: {e}")
     if sys.platform == "darwin" and config_dir == DEFAULT_CONFIG_DIR:

@@ -82,6 +82,14 @@ def test_token_for_unexpired_file_still_wins_over_keychain(tmp_path, monkeypatch
         assert read_token_for(tmp_path) == "TOK_FILE"
 
 
+def test_token_for_unusable_file_falls_back_to_keychain(tmp_path, monkeypatch):
+    monkeypatch.setattr(mod, "DEFAULT_CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    (tmp_path / ".credentials.json").write_text('{"claudeAiOauth":{}}')
+    with patch.object(mod, "_read_token_keychain", return_value="TOK_KEYCHAIN"):
+        assert read_token_for(tmp_path) == "TOK_KEYCHAIN"
+
+
 def test_token_for_expired_file_falls_back_to_keychain(tmp_path, monkeypatch):
     """A stale .credentials.json must not shadow the Keychain token Claude Code refreshes.
 
@@ -136,6 +144,15 @@ def test_extract_empty_token_is_none():
     assert mod._extract_access_token('{"accessToken": ""}') is None
     assert mod._extract_access_token('{"claudeAiOauth":{"accessToken":"  "}}') is None
     assert mod._extract_access_token("{}") is None
+
+
+def test_extract_strips_token_whitespace_for_both_python_daemons():
+    from daemon.claude_usage_daemon_windows import _extract_access_token as win_extract
+
+    for extract in (mod._extract_access_token, win_extract):
+        assert extract('{"accessToken":"  TOK_DIRECT  "}') == "TOK_DIRECT"
+        assert extract('{"claudeAiOauth":{"accessToken":"  TOK_NESTED  "}}') == "TOK_NESTED"
+        assert extract('[{"accessToken":"  TOK_REGEX  "}]') == "TOK_REGEX"
 
 
 def test_oauth_expired_handles_odd_shapes():
