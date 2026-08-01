@@ -11,8 +11,13 @@
 #define RX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000002"  // host writes here
 #define TX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000003"  // device ack/nack notifies
 #define REQ_CHAR_UUID       "4c41555a-4465-7669-6365-000000000004"  // device-initiated refresh request
+#define SS_CHAR_UUID        "4c41555a-4465-7669-6365-000000000005"  // host writes session rows here
 
 #define BLE_BUF_SIZE 512
+// Session payloads carry up to SESSION_MAX_ROWS positional rows and get their
+// own, larger budget (the device requests a 517-byte MTU; 1024 leaves headroom
+// for a long write).
+#define BLE_SS_BUF_SIZE 1024
 
 // HID keyboard report descriptor (standard 6-KRO boot-protocol-compatible).
 // Includes the LED output report (Num/Caps/Scroll Lock indicators) — without
@@ -61,6 +66,7 @@ static NimBLECharacteristic* input_kbd = nullptr;
 static NimBLECharacteristic* tx_char = nullptr;
 static NimBLECharacteristic* rx_char = nullptr;
 static NimBLECharacteristic* req_char = nullptr;
+static NimBLECharacteristic* ss_char = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
@@ -75,6 +81,8 @@ static volatile uint16_t param_fix_spent  = CONN_HANDLE_NONE;  // one per connec
 static char rx_buf[BLE_BUF_SIZE];
 static volatile bool data_ready = false;
 static volatile bool has_received_data = false;
+static char ss_buf[BLE_SS_BUF_SIZE];
+static volatile bool ss_ready = false;
 static char mac_str[18];
 
 // --- Single-owner lock -----------------------------------------------------
@@ -259,30 +267,50 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
 };
 
+// Single-owner write guard shared by every host-writable characteristic (RX
+// usage, SS sessions). Only accept data over a bonded+encrypted link, and only
+// from the owner machine. Another machine's daemon in range is ignored so the
+// display never rotates to a foreign account. The first encrypted writer
+// claims ownership when none is set yet (e.g. a fresh pairing).
+static bool write_allowed(NimBLEConnInfo& info, const char* what) {
+    std::string id = info.getIdAddress().toString();
+    if (!info.isEncrypted()) {
+        Serial.printf("BLE: dropping %s write from unencrypted link\n", what);
+        return false;
+    }
+    if (!owner_set && id != ZERO_ADDR) {
+        claim_owner(id);
+    }
+    if (owner_set && strcmp(id.c_str(), owner_addr) != 0) {
+        Serial.printf("BLE: dropping %s write from non-owner %s\n", what, id.c_str());
+        return false;
+    }
+    return true;
+}
+
 class RxCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
-        // Only accept usage data over a bonded+encrypted link, and only from the
-        // owner machine. Another machine's daemon in range is ignored so the
-        // display never rotates to a foreign account. The first encrypted writer
-        // claims ownership when none is set yet (e.g. a fresh pairing).
-        std::string id = info.getIdAddress().toString();
-        if (!info.isEncrypted()) {
-            Serial.println("BLE: dropping RX write from unencrypted link");
-            return;
-        }
-        if (!owner_set && id != ZERO_ADDR) {
-            claim_owner(id);
-        }
-        if (owner_set && strcmp(id.c_str(), owner_addr) != 0) {
-            Serial.printf("BLE: dropping RX write from non-owner %s\n", id.c_str());
-            return;
-        }
+        if (!write_allowed(info, "RX")) return;
         std::string val = chr->getValue();
         size_t len = std::min(val.length(), (size_t)(BLE_BUF_SIZE - 1));
         memcpy(rx_buf, val.c_str(), len);
         rx_buf[len] = '\0';
         data_ready = true;
         has_received_data = true;
+    }
+};
+
+// Session rows (issue #135). Same guard as RX; separate buffer because the
+// two feeds have unrelated cadences (quota every 60s, sessions on change) and
+// must not clobber each other between main-loop polls.
+class SsCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
+        if (!write_allowed(info, "SS")) return;
+        std::string val = chr->getValue();
+        size_t len = std::min(val.length(), (size_t)(BLE_SS_BUF_SIZE - 1));
+        memcpy(ss_buf, val.c_str(), len);
+        ss_buf[len] = '\0';
+        ss_ready = true;
     }
 };
 
@@ -301,6 +329,9 @@ class ReqCallbacks : public NimBLECharacteristicCallbacks {
 void ble_init(void) {
     NimBLEDevice::init(DEVICE_NAME);
     NimBLEDevice::setSecurityAuth(true, false, true);  // bonding, no MITM, SC
+    // Session payloads want room for several rows in one write. The host
+    // derives its row budget from the negotiated MTU, so ask for the max.
+    NimBLEDevice::setMTU(517);
 
     // Restore the locked owner (if any) and drop any stale non-owner bonds so
     // the board stays paired to a single machine across reboots.
@@ -357,6 +388,16 @@ void ble_init(void) {
     );
     static ReqCallbacks reqCb;
     req_char->setCallbacks(&reqCb);
+
+    // Session rows (write-only from the host). max_len raised above NimBLE's
+    // 512-byte attribute default so a long write can fill the SS buffer.
+    ss_char = svc->createCharacteristic(
+        SS_CHAR_UUID,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR,
+        BLE_SS_BUF_SIZE
+    );
+    static SsCallbacks ssCb;
+    ss_char->setCallbacks(&ssCb);
 
     svc->start();
     server->start();
@@ -416,6 +457,15 @@ bool ble_has_data(void) {
 const char* ble_get_data(void) {
     data_ready = false;
     return rx_buf;
+}
+
+bool ble_has_session_data(void) {
+    return ss_ready;
+}
+
+const char* ble_get_session_data(void) {
+    ss_ready = false;
+    return ss_buf;
 }
 
 void ble_send_ack(void) {

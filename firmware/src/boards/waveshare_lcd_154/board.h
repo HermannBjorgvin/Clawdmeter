@@ -64,3 +64,4 @@
 #define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      0
 #define BOARD_HAS_SOUND            1
+#define BOARD_HAS_SESSION_VIEWS    0   // 240x240 is too small for chat cards

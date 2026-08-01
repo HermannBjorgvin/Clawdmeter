@@ -11,6 +11,7 @@ static const BoardCaps caps = {
     .has_rotation = (bool)BOARD_HAS_ROTATION,
     .has_battery  = (bool)BOARD_HAS_BATTERY,
     .has_imu      = (bool)BOARD_HAS_IMU,
+    .has_session_views = (bool)BOARD_HAS_SESSION_VIEWS,
 };
 
 const BoardCaps& board_caps(void) { return caps; }

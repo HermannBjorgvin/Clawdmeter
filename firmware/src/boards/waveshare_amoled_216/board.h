@@ -59,3 +59,4 @@
 #define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      0
 #define BOARD_HAS_SOUND            1
+#define BOARD_HAS_SESSION_VIEWS    1   // 480x480 verified; PSRAM for the animated card list
