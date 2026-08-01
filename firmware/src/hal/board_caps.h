@@ -18,6 +18,7 @@ struct BoardCaps {
     bool    has_rotation;    // IMU-driven CPU rotation in the flush callback
     bool    has_battery;     // AXP2101 battery measurement is meaningful
     bool    has_imu;         // QMI8658 (or compatible) is populated
+    bool    has_session_views; // panel can host the chat views (issue #135 §1.3/§1.4)
 };
 
 const BoardCaps& board_caps(void);

@@ -4,6 +4,9 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_NAME="claude-usage-daemon"
 SERVICE_FILE="$SCRIPT_DIR/daemon/$SERVICE_NAME.service"
+SESSIONS_SERVICE_NAME="clawdmeter-sessions"
+SESSIONS_SERVICE_FILE="$SCRIPT_DIR/daemon/$SESSIONS_SERVICE_NAME.service"
+SESSIONS_BIN="$SCRIPT_DIR/daemon/clawdmeter_sessions.py"
 USER_SERVICE_DIR="$HOME/.config/systemd/user"
 CONFIG_FILE="$HOME/.config/claude-usage-monitor/config"
 
@@ -106,6 +109,61 @@ configure_clock() {
     echo "  Set: clock = $ans"
 }
 
+# Offer live session awareness (issue #135): a loopback hook listener that
+# shows your open Claude Code chats on the device — what each one is doing and
+# whether any is waiting on you. Needs hook_port in the daemon config plus a
+# hook block in each Claude config dir's settings.json; both are written here,
+# with a prompt before touching settings.json. See daemon/SESSIONS.md.
+configure_sessions() {
+    if [ ! -t 0 ]; then
+        [ -n "$(current_config_value hook_port)" ] && return 0
+        echo "  Non-interactive shell — skipping live session awareness."
+        echo "  To enable later, see daemon/SESSIONS.md."
+        return 0
+    fi
+
+    local cur ans port
+    cur=$(current_config_value hook_port)
+    if [ -n "$cur" ]; then
+        echo "  Live session awareness already enabled (hook_port = $cur)."
+        port="$cur"
+    else
+        read -r -p "  Show live Claude Code session activity on the device? [Y/n] " ans || ans=""
+        if [[ "$ans" =~ ^[Nn]$ ]]; then
+            echo "  Live session awareness off (default)."
+            return 0
+        fi
+        read -r -p "  Hook listener port (loopback only) [45999] " port || port=""
+        port=${port:-45999}
+        case "$port" in
+            *[!0-9]*|'') echo "  Invalid port '$port' — skipping."; return 0 ;;
+        esac
+        upsert_config_key hook_port "$port"
+        echo "  Set: hook_port = $port"
+    fi
+
+    # Merge the hook block into each configured Claude config dir's
+    # settings.json (prompt per dir, default yes). The hooks are read-only
+    # observers POSTing to 127.0.0.1; a backup of settings.json is kept.
+    local url="http://127.0.0.1:$port/"
+    local raw d
+    raw=$(current_config_value config_dirs)
+    [ -z "$raw" ] && raw="~/.claude"
+    local IFS=','
+    for d in $raw; do
+        d=$(echo "$d" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+        [ -z "$d" ] && continue
+        case "$d" in
+            "~")   d="$HOME" ;;
+            "~/"*) d="$HOME/${d#\~/}" ;;
+        esac
+        read -r -p "  Add the Clawdmeter hook block to $(_tilde "$d")/settings.json? [Y/n] " ans || ans=""
+        [[ "$ans" =~ ^[Nn]$ ]] && continue
+        python3 "$SESSIONS_BIN" --install-hooks "$d/settings.json" "$url" \
+            || echo "  Hook install failed for $d — see daemon/SESSIONS.md for the manual snippet."
+    done
+}
+
 # Offer the optional session-reset chime (sound through the board speaker).
 configure_chime() {
     [ -t 0 ] || return 0
@@ -128,30 +186,37 @@ echo ""
 
 # Check dependencies
 echo "[1/4] Checking dependencies..."
-for cmd in curl awk bluetoothctl busctl; do
+for cmd in curl awk bluetoothctl busctl python3; do
     command -v "$cmd" >/dev/null || { echo "Error: $cmd is required but not installed"; exit 1; }
 done
 echo "  All dependencies found"
 echo ""
 
-# Install systemd user service with resolved path
-echo "[2/4] Installing systemd user service..."
+# Install systemd user services with resolved paths
+echo "[2/4] Installing systemd user services..."
 mkdir -p "$USER_SERVICE_DIR"
 DAEMON_BIN="$SCRIPT_DIR/daemon/$SERVICE_NAME.sh"
 sed "s|DAEMON_PATH|${DAEMON_BIN}|g" "$SERVICE_FILE" > "$USER_SERVICE_DIR/$SERVICE_NAME.service"
+sed "s|DAEMON_PATH|${SESSIONS_BIN}|g" "$SESSIONS_SERVICE_FILE" > "$USER_SERVICE_DIR/$SESSIONS_SERVICE_NAME.service"
 systemctl --user daemon-reload
 
-# Interactive daemon configuration: which plans to poll, plus the optional
-# clock display and session-reset chime. All re-read by the daemon each poll.
+# Interactive daemon configuration: which plans to poll, live session
+# awareness, plus the optional clock display and session-reset chime. All
+# re-read by the daemon each poll.
 echo "[3/4] Configuring the daemon..."
 configure_config_dirs
+configure_sessions
 configure_clock
 configure_chime
 echo ""
 
-# Enable service
-echo "[4/4] Enabling service..."
+# Enable services (the sessions sidecar only when the feature is on)
+echo "[4/4] Enabling services..."
 systemctl --user enable "$SERVICE_NAME"
+if [ -n "$(current_config_value hook_port)" ]; then
+    systemctl --user enable "$SESSIONS_SERVICE_NAME"
+    echo "  Enabled $SESSIONS_SERVICE_NAME (live session awareness)"
+fi
 
 echo ""
 echo "=== Done! ==="
@@ -172,4 +237,8 @@ echo "  systemctl --user status $SERVICE_NAME    # check status"
 echo "  journalctl --user -u $SERVICE_NAME -f    # view logs"
 echo "  systemctl --user restart $SERVICE_NAME   # restart"
 echo "  systemctl --user stop $SERVICE_NAME      # stop"
+if [ -n "$(current_config_value hook_port)" ]; then
+    echo "  systemctl --user start $SESSIONS_SERVICE_NAME   # live session awareness sidecar"
+    echo "  journalctl --user -u $SESSIONS_SERVICE_NAME -f  # sidecar logs"
+fi
 echo ""

@@ -17,6 +17,11 @@ void ble_clear_bonds(void);
 bool ble_has_bonds(void);
 bool ble_has_data(void);
 const char* ble_get_data(void);
+// Session-awareness feed (issue #135) — mirrors ble_has_data/ble_get_data for
+// the SS characteristic. Present on every board; boards without
+// BOARD_HAS_SESSION_VIEWS simply never drain it.
+bool ble_has_session_data(void);
+const char* ble_get_session_data(void);
 void ble_send_ack(void);
 void ble_send_nack(void);
 void ble_request_refresh(void);

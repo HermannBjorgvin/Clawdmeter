@@ -187,6 +187,7 @@ static void compute_layout(const BoardCaps& c) {
 #define COL_GREEN     THEME_GREEN
 #define COL_AMBER     THEME_AMBER
 #define COL_RED       THEME_RED
+#define COL_PURPLE    THEME_PURPLE
 #define COL_BAR_BG    THEME_BAR_BG
 
 // ---- Usage screen widgets (single non-splash view) ----
@@ -467,6 +468,764 @@ static void build_idle_group(lv_obj_t* parent) {
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
 }
 
+// ======== Live session awareness (issue #135) ========
+// Two additional usage-screen sub-views — ONE-CHAT (§1.3) and SEVERAL-CHATS
+// (§1.4) — compiled only on boards whose panel can host them
+// (BOARD_HAS_SESSION_VIEWS). No new screen_t: update_view_state() picks them
+// exactly like it picks pairing / no-data / quota.
+
+static void update_view_state(void);       // defined below ui_update
+static void apply_anim_visibility(void);   // status-line rule (§2.3)
+
+#if BOARD_HAS_SESSION_VIEWS
+
+// How long the chat view is held after the last live chat disappears before
+// returning to RESTING (§2.1). A waiting chat pins the view past this timer.
+#ifndef CHAT_LINGER_MS
+#define CHAT_LINGER_MS (10u * 60u * 1000u)
+#endif
+
+// Geometry — the capability gate limits these views to 480×480-class panels
+// (the S3 2.16 and the sim); other geometries need a layout pass before their
+// flag can flip, so these are tuned constants, not breakpoints.
+// Quota strip + vertical rhythm ported from PR #129's combined 5h/7d row
+// (the visual language issue #135 credits): a 30px band at content_y with
+// dim styrene_20 tags, styrene_24 percentages in a fixed right-aligned
+// column, 10px bars, and a 14px(+4) gap down to the first card.
+#define CHAT_ROW_H        30    // strip band height; text/bar vcentered in it
+#define CHAT_ROW_BAR_H    10
+#define CHAT_ROW_LBL_W    32    // "5h"/"7d" column
+#define CHAT_ROW_PCT_W    58    // percentage column (right-aligned, fixed)
+#define CHAT_ROW_COL_GAP  12    // label|bar|pct column gap
+#define CHAT_ROW_HALF_GAP 20    // between the 5h and 7d halves
+#define CHAT_ROW_GAP      14    // strip band ↓ card list (plus 4, per #129)
+#define CHAT_CARD_H       80
+#define CHAT_CARD_GAP     10    // between cards (#129 ch_card_gap)
+#define CHAT_CARD_PITCH   (CHAT_CARD_H + CHAT_CARD_GAP)
+#define CHAT_CARD_PAD_Y   8
+#define CHAT_FADE_H       60    // bottom fade band: transparent → panel black
+// ONE-CHAT: two boxes — the 5h quota panel (exact RESTING "Current" panel)
+// on top, the chat card below it.
+#define FOCUS_CARD_H      150
+#define FOCUS_PANEL_GAP   16    // 5h panel ↔ chat card
+
+// One chat card's widget set. Cards keep stable identity: each card widget is
+// bound to a chat (keyed by sid), not to a slot, so a reorder moves the widget
+// instead of mutating every row's contents (§2.3).
+struct ChatCard {
+    lv_obj_t* card;
+    lv_obj_t* lbl_name;
+    lv_obj_t* lbl_ctx;      // ctx% top-right (list cards only; focus has the big pct)
+    lv_obj_t* bar;          // context bar — hidden entirely when ctx is unknown
+    lv_obj_t* dot;          // state indicator; pulses when waiting
+    lv_obj_t* lbl_state;
+    lv_obj_t* img_todo;
+    lv_obj_t* lbl_todo;
+    lv_obj_t* img_agents;
+    lv_obj_t* lbl_agents;
+    lv_obj_t* lbl_elapsed;
+    const lv_font_t* name_font;  // for the firmware-side name ellipsis
+    int  name_w;
+    char sid[3];
+    int  target_y;          // slide destination (list cards)
+    bool used;
+    bool waiting;
+    bool claimed;           // per-update matching scratch
+};
+
+static lv_obj_t* focus_group = nullptr;   // ONE-CHAT (§1.3)
+static lv_obj_t* chats_group = nullptr;   // SEVERAL-CHATS (§1.4)
+static lv_obj_t* cards_cont  = nullptr;   // clipping viewport for the card list
+static ChatCard  chat_cards[SESSION_MAX_ROWS];
+static ChatCard  focus_card;
+static lv_obj_t* focus_lbl_model = nullptr;
+static lv_obj_t* focus_lbl_ctx   = nullptr;   // context % (left, on its own row)
+static lv_obj_t* focus_lbl_tok   = nullptr;   // token counter (right of the % row)
+
+// Full-size 5h quota panel on the ONE-CHAT view — same anatomy and weight as
+// the RESTING "Current" panel. The 7d row is deliberately absent here: it
+// moves on a scale of days, stays one glance away on RESTING / SEVERAL-CHATS,
+// and a slim extra row would crowd the chat card against the status line.
+static lv_obj_t* f5_pct, *f5_pill, *f5_bar, *f5_reset;
+
+// One-line quota strip (chats view)
+static lv_obj_t* cq_tag[2], *cq_bar[2], *cq_pct[2];
+
+static lv_image_dsc_t icon_todo_dsc, icon_todo_small_dsc;
+static lv_image_dsc_t icon_agents_dsc, icon_agents_small_dsc;
+
+// Resolver inputs (§2.1), fed by ui_update_sessions()
+static uint8_t  s_live_count    = 0;      // rows in the last received list
+static bool     s_any_waiting   = false;  // any row in the waiting bucket
+static bool     s_focus_waiting = false;  // rows[0] waiting → status line hides
+static bool     s_chats_linger  = false;  // holding a chat view after the last chat closed
+static uint32_t s_chats_gone_ms = 0;
+static int      s_linger_view   = 2;
+static UsageData s_usage_cache  = {};     // latest quota payload, for the mini bars
+
+enum {
+    SESSION_BUCKET_IDLE    = 0,
+    SESSION_BUCKET_WORKING = 1,
+    SESSION_BUCKET_WAITING = 2,
+};
+
+static int session_bucket(uint8_t state) {
+    if (state >= SESSION_WAITING_PERMISSION && state <= SESSION_ERROR)
+        return SESSION_BUCKET_WAITING;
+    if (state >= SESSION_THINKING && state <= SESSION_COMPACTING)
+        return SESSION_BUCKET_WORKING;
+    if (state <= SESSION_IDLE)
+        return SESSION_BUCKET_IDLE;
+    return SESSION_BUCKET_WORKING;  // unknown future codes render neutral, never alarming
+}
+
+static const char* const session_tool_names[] = {
+    "tool", "Bash", "Read", "Edit", "Write",
+    "Grep", "Glob", "Task", "WebFetch", "WebSearch",
+};
+
+static void session_state_text(const SessionRow* r, char* buf, size_t n) {
+    switch (r->state) {
+    case SESSION_STARTING:   snprintf(buf, n, "starting");   return;
+    case SESSION_IDLE:       snprintf(buf, n, "idle");       return;
+    case SESSION_THINKING:   snprintf(buf, n, "thinking");   return;
+    case SESSION_RESPONDING: snprintf(buf, n, "responding"); return;
+    case SESSION_RUNNING_TOOL:
+        if (r->ntools > 1) snprintf(buf, n, "%d tools", r->ntools);
+        else snprintf(buf, n, "running %s",
+                      session_tool_names[r->tool <= SESSION_TOOL_WEBSEARCH ? r->tool : 0]);
+        return;
+    case SESSION_COMPACTING:         snprintf(buf, n, "compacting");       return;
+    case SESSION_WAITING_PERMISSION: snprintf(buf, n, "needs permission"); return;
+    case SESSION_WAITING_QUESTION:   snprintf(buf, n, "asking you");       return;
+    case SESSION_WAITING_INPUT:      snprintf(buf, n, "needs input");      return;
+    case SESSION_ERROR:              snprintf(buf, n, "error");            return;
+    default:                         snprintf(buf, n, "busy");             return;
+    }
+}
+
+// Render elapsed_s as-received: 8s / 40s / 1m / 4m / 2h / 3d.
+static void session_elapsed_text(int32_t s, char* buf, size_t n) {
+    if (s < 0) s = 0;
+    if (s < 60)          snprintf(buf, n, "%ds", (int)s);
+    else if (s < 3600)   snprintf(buf, n, "%dm", (int)(s / 60));
+    else if (s < 86400)  snprintf(buf, n, "%dh", (int)(s / 3600));
+    else                 snprintf(buf, n, "%dd", (int)(s / 86400));
+}
+
+// Render a token count (1k units): 412 → "412K", 1000 → "1.0M", 1234 → "1.2M".
+static void session_tok_text(int32_t tok_k, char* buf, size_t n) {
+    if (tok_k < 1000) snprintf(buf, n, "%dK", (int)tok_k);
+    else              snprintf(buf, n, "%d.%dM", (int)(tok_k / 1000),
+                               (int)((tok_k % 1000) / 100));
+}
+
+// A routine content refresh must not animate anything (§2.3) — and rewriting
+// a label always invalidates it, so compare first.
+static void set_label_if_changed(lv_obj_t* lbl, const char* txt) {
+    if (strcmp(lv_label_get_text(lbl), txt) != 0) lv_label_set_text(lbl, txt);
+}
+
+// Ellipsize in firmware: measure, truncate, append "…" (three dots). LVGL's
+// LONG_DOT places its dots via the label's line-box math, which parks them on
+// the (hidden) wrapped second line when the box is exactly one line tall — so
+// the truncation is done deterministically here instead.
+static void label_set_ellipsized(lv_obj_t* lbl, const char* txt,
+                                 const lv_font_t* font, int max_w) {
+    lv_point_t sz;
+    lv_text_get_size(&sz, txt, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    if (sz.x <= max_w) {
+        set_label_if_changed(lbl, txt);
+        return;
+    }
+    char buf[SESSION_LABEL_MAX + 4];
+    size_t len = strlen(txt);
+    if (len >= SESSION_LABEL_MAX) len = SESSION_LABEL_MAX - 1;
+    while (len > 0) {
+        memcpy(buf, txt, len);
+        buf[len] = '\0';
+        strcat(buf, "...");
+        lv_text_get_size(&sz, buf, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        if (sz.x <= max_w) break;
+        len--;
+    }
+    set_label_if_changed(lbl, buf);
+}
+
+// ---- The pulse (§2.3) ----
+// One module-level animation drives a shared value every waiting indicator
+// reads, so two chats waiting at once pulse in unison. Only waiting states
+// pulse; the text never does.
+static int32_t pulse_val = (int32_t)LV_OPA_COVER;
+
+static void pulse_exec_cb(void* var, int32_t v) {
+    (void)var;
+    pulse_val = v;
+    // Indicator and state text pulse together, in one shared phase.
+    for (auto& c : chat_cards)
+        if (c.used && c.waiting) {
+            lv_obj_set_style_bg_opa(c.dot, (lv_opa_t)v, 0);
+            lv_obj_set_style_text_opa(c.lbl_state, (lv_opa_t)v, 0);
+        }
+    if (s_focus_waiting && focus_card.dot) {
+        lv_obj_set_style_bg_opa(focus_card.dot, (lv_opa_t)v, 0);
+        lv_obj_set_style_text_opa(focus_card.lbl_state, (lv_opa_t)v, 0);
+    }
+}
+
+// ---- Card motion callbacks (§2.3) ----
+static void card_y_anim_cb(void* obj, int32_t v)   { lv_obj_set_y((lv_obj_t*)obj, v); }
+// Plain opa, never opa_layered: the recursive style lookup in the draw path
+// fades the whole subtree without allocating a composite buffer (§7).
+static void card_opa_anim_cb(void* obj, int32_t v) { lv_obj_set_style_opa((lv_obj_t*)obj, (lv_opa_t)v, 0); }
+static void card_fadeout_done_cb(lv_anim_t* a)     { lv_obj_add_flag((lv_obj_t*)a->var, LV_OBJ_FLAG_HIDDEN); }
+
+// Idle cards recede wholesale (§3): plain opa on the card fades labels, bar
+// and both icons through the recursive style lookup.
+static lv_opa_t session_tier_opa(uint8_t state) {
+    return session_bucket(state) == SESSION_BUCKET_IDLE ? LV_OPA_60 : LV_OPA_COVER;
+}
+
+// ---- Card construction ----
+
+static lv_obj_t* make_badge_icon(lv_obj_t* parent, const lv_image_dsc_t* dsc, lv_color_t col) {
+    lv_obj_t* img = lv_image_create(parent);
+    lv_image_set_src(img, dsc);
+    // Runtime recolor of the white-tinted RGB565A8 glyph — the badge color
+    // rides on the same draw path as the labels, so the idle card's 60%
+    // dimming still applies. Position comes from layout_badge_cluster().
+    lv_obj_set_style_image_recolor(img, col, 0);
+    lv_obj_set_style_image_recolor_opa(img, LV_OPA_COVER, 0);
+    lv_obj_add_flag(img, LV_OBJ_FLAG_HIDDEN);
+    return img;
+}
+
+static lv_obj_t* make_card_label(lv_obj_t* parent, const lv_font_t* font, lv_color_t col) {
+    lv_obj_t* lbl = lv_label_create(parent);
+    lv_label_set_text(lbl, "");
+    lv_obj_set_style_text_font(lbl, font, 0);
+    lv_obj_set_style_text_color(lbl, col, 0);
+    return lbl;
+}
+
+// Build one chat card. Both anatomies are §1.1's three lines — name row,
+// context bar, state line — the focus variant is just bigger and swaps the
+// top-right ctx% for the model name + a big percentage.
+static void build_chat_card(ChatCard* c, lv_obj_t* parent, int x, int y, bool focus) {
+    const lv_font_t* f_name = focus ? &font_styrene_28 : &font_styrene_20;
+    const lv_font_t* f_line = focus ? &font_styrene_20 : &font_styrene_16;
+    const int h = focus ? FOCUS_CARD_H : CHAT_CARD_H;
+
+    c->card = make_panel(parent, x, y, L.content_w, h);
+    if (!focus) {
+        lv_obj_set_style_pad_top(c->card, CHAT_CARD_PAD_Y, 0);
+        lv_obj_set_style_pad_bottom(c->card, CHAT_CARD_PAD_Y, 0);
+    }
+
+    const int cw = L.content_w - 2 * L.panel_pad_x;
+
+    // Name width starts at the full row; every content update re-budgets it
+    // against the measured width of the actual right-side neighbor (the model
+    // pill on the focus card, the token label on list cards) so a long name
+    // ellipsizes right up to its neighbor instead of a worst-case gap.
+    c->name_font = f_name;
+    c->name_w = cw;
+    c->lbl_name = make_card_label(c->card, f_name, COL_TEXT);
+    lv_obj_set_width(c->lbl_name, cw);
+    // One line, exactly — the ellipsis itself is applied firmware-side (see
+    // label_set_ellipsized); the fixed box just guards against any wrap.
+    lv_obj_set_height(c->lbl_name, lv_font_get_line_height(f_name));
+    lv_obj_align(c->lbl_name, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    if (!focus) {
+        c->lbl_ctx = make_card_label(c->card, f_name, COL_TEXT);
+        lv_obj_align(c->lbl_ctx, LV_ALIGN_TOP_RIGHT, 0, 0);
+    } else {
+        c->lbl_ctx = nullptr;
+    }
+
+    c->bar = make_bar(c->card, 0, 0, cw, focus ? 12 : 8);
+    lv_obj_set_style_bg_color(c->bar, COL_DIM, LV_PART_INDICATOR);  // context stays neutral (§1.3)
+    lv_obj_align(c->bar, LV_ALIGN_BOTTOM_LEFT, 0, focus ? -34 : -26);
+
+    // State line — everything shares one visual center line, `line_c` px above
+    // the card content's bottom edge. The dot sits flush with the card's left
+    // content edge (same x as the name and the bar above it).
+    const int dot_sz  = focus ? 14 : 10;
+    const int line_h  = lv_font_get_line_height(f_line);
+    const int line_dy = focus ? -2 : 0;   // base line, from content bottom
+    // Dot center = label line-box center (measured: Styrene's lowercase
+    // x-height band centers on its line box). On list cards the text rides
+    // 1 px lower than the box math — user-tuned against hardware.
+    const int dot_dy  = line_dy - (line_h - dot_sz) / 2;
+    const int text_dy = focus ? line_dy : line_dy + 1;
+
+    c->dot = lv_obj_create(c->card);
+    lv_obj_set_size(c->dot, dot_sz, dot_sz);
+    lv_obj_set_style_radius(c->dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(c->dot, COL_DIM, 0);
+    lv_obj_set_style_bg_opa(c->dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(c->dot, 0, 0);
+    lv_obj_set_style_pad_all(c->dot, 0, 0);
+    lv_obj_add_flag(c->dot, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_align(c->dot, LV_ALIGN_BOTTOM_LEFT, 0, dot_dy);
+    c->lbl_state = make_card_label(c->card, f_line, COL_DIM);
+    lv_label_set_long_mode(c->lbl_state, LV_LABEL_LONG_DOT);  // state ellipsizes before a badge drops (§5)
+    lv_obj_set_width(c->lbl_state, focus ? 174 : 168);
+    // One text line, exactly: with a free-growing height an over-long state
+    // would wrap to a second line instead of taking the DOT ellipsis.
+    lv_obj_set_height(c->lbl_state, line_h);
+    lv_obj_align(c->lbl_state, LV_ALIGN_BOTTOM_LEFT, dot_sz + 8, text_dy);
+
+    // Badges + timer form a right-aligned cluster (timer rightmost); their x
+    // positions are recomputed per update in layout_badge_cluster().
+    // Badge colors: todo = terra-cotta accent, subagents = the palette's
+    // muted purple; icon and count share the color so each badge reads as
+    // one unit.
+    c->img_todo = make_badge_icon(c->card, focus ? &icon_todo_dsc : &icon_todo_small_dsc,
+                                  COL_ACCENT);
+    c->lbl_todo = make_card_label(c->card, f_line, COL_ACCENT);
+    c->img_agents = make_badge_icon(c->card, focus ? &icon_agents_dsc : &icon_agents_small_dsc,
+                                    COL_PURPLE);
+    c->lbl_agents = make_card_label(c->card, f_line, COL_PURPLE);
+
+    c->lbl_elapsed = make_card_label(c->card, f_line, COL_DIM);
+    lv_obj_align(c->lbl_elapsed, LV_ALIGN_BOTTOM_RIGHT, 0, text_dy);
+
+    c->sid[0] = 0;
+    c->target_y = -1;
+    c->used = c->waiting = c->claimed = false;
+}
+
+// Right-align the badge cluster: timer rightmost, subagent badge to its left,
+// todo badge left of that, evenly spaced. Chained from the timer so hidden
+// badges leave no gap. Runs after the labels' texts are set (layout works on
+// hidden subtrees too — layout_update_core doesn't skip LV_OBJ_FLAG_HIDDEN).
+static void layout_badge_cluster(ChatCard* c) {
+    const int gap = 20;       // between cluster items
+    const int icon_gap = 6;   // icon ↔ its count
+    lv_obj_update_layout(c->card);
+    lv_obj_t* anchor = c->lbl_elapsed;
+    if (!lv_obj_has_flag(c->img_agents, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_align_to(c->lbl_agents, anchor, LV_ALIGN_OUT_LEFT_MID, -gap, 0);
+        lv_obj_align_to(c->img_agents, c->lbl_agents, LV_ALIGN_OUT_LEFT_MID, -icon_gap, 0);
+        anchor = c->img_agents;
+    }
+    if (!lv_obj_has_flag(c->img_todo, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_align_to(c->lbl_todo, anchor, LV_ALIGN_OUT_LEFT_MID, -gap, 0);
+        lv_obj_align_to(c->img_todo, c->lbl_todo, LV_ALIGN_OUT_LEFT_MID, -icon_gap, 0);
+    }
+}
+
+// Fill a card from a row. Content only — no motion here (§2.3).
+static void chat_card_set_row(ChatCard* c, const SessionRow* r) {
+    const int bucket = session_bucket(r->state);
+    c->waiting = (bucket == SESSION_BUCKET_WAITING);
+
+    char buf[24];
+    // Top-right label (list cards): token count when the host sends one,
+    // ctx% as the older-host fallback, hidden when both are unknown. Set
+    // BEFORE the name so the name's ellipsis budget can track the rendered
+    // width of its actual neighbor (a hidden label gives the name the row).
+    if (c->lbl_ctx) {
+        const int cw = L.content_w - 2 * L.panel_pad_x;
+        bool shown = true;
+        if (r->tok >= 0) {
+            session_tok_text(r->tok, buf, sizeof(buf));
+        } else if (r->ctx_pct >= 0) {
+            snprintf(buf, sizeof(buf), "%d%%", r->ctx_pct);
+        } else {
+            shown = false;
+        }
+        int nw = cw;
+        if (shown) {
+            set_label_if_changed(c->lbl_ctx, buf);
+            lv_obj_clear_flag(c->lbl_ctx, LV_OBJ_FLAG_HIDDEN);
+            lv_point_t sz;
+            lv_text_get_size(&sz, buf, c->name_font, 0, 0,
+                             LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+            nw = cw - sz.x - 12;   // min gap between name end and neighbor
+        } else {
+            lv_obj_add_flag(c->lbl_ctx, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (nw != c->name_w) {
+            c->name_w = nw;
+            lv_obj_set_width(c->lbl_name, nw);
+        }
+    }
+
+    label_set_ellipsized(c->lbl_name, r->label, c->name_font, c->name_w);
+
+    // Context bar: hidden entirely when the percentage is unknown — an empty
+    // bar reads as "0% used" (§5).
+    if (r->ctx_pct < 0) {
+        lv_obj_add_flag(c->bar, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(c->bar, LV_OBJ_FLAG_HIDDEN);
+        lv_bar_set_value(c->bar, r->ctx_pct, LV_ANIM_OFF);
+    }
+
+    char sbuf[32];
+    session_state_text(r, sbuf, sizeof(sbuf));
+    set_label_if_changed(c->lbl_state, sbuf);
+    lv_obj_set_style_text_color(c->lbl_state, c->waiting ? COL_ACCENT : COL_DIM, 0);
+    // Waiting text pulses in phase with the indicator; anything else is solid.
+    lv_obj_set_style_text_opa(c->lbl_state, c->waiting ? (lv_opa_t)pulse_val : LV_OPA_COVER, 0);
+
+    // Indicator: dim when idle, neutral when working, accent + pulse when
+    // the session needs a human (§1.1).
+    lv_obj_set_style_bg_color(c->dot,
+        c->waiting ? COL_ACCENT :
+        (bucket == SESSION_BUCKET_WORKING) ? COL_TEXT : COL_DIM, 0);
+    lv_obj_set_style_bg_opa(c->dot, c->waiting ? (lv_opa_t)pulse_val : LV_OPA_COVER, 0);
+
+    // Badges are hidden when they'd say nothing (§1.1).
+    if (r->ttotal > 0) {
+        snprintf(buf, sizeof(buf), "%d/%d", r->tdone, r->ttotal);
+        set_label_if_changed(c->lbl_todo, buf);
+        lv_obj_clear_flag(c->img_todo, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(c->lbl_todo, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(c->img_todo, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(c->lbl_todo, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (r->nagents > 0) {
+        snprintf(buf, sizeof(buf), "%d", r->nagents);
+        set_label_if_changed(c->lbl_agents, buf);
+        lv_obj_clear_flag(c->img_agents, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(c->lbl_agents, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(c->img_agents, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(c->lbl_agents, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    session_elapsed_text(r->elapsed_s, buf, sizeof(buf));
+    set_label_if_changed(c->lbl_elapsed, buf);
+
+    layout_badge_cluster(c);
+}
+
+static void focus_set_content(const SessionRow* r) {
+    static const char* const model_names[] = { "", "opus", "sonnet", "haiku", "fable" };
+    const char* model = r->model <= SESSION_MODEL_FABLE ? model_names[r->model] : "";
+    set_label_if_changed(focus_lbl_model, model);
+    // Budget the name against the pill actually rendered (its text width +
+    // padding + a 12px gap) — not a worst case — so a long name runs right up
+    // to the pill. An empty pill would render as a bare chip: hide it with
+    // its text and give the name the full row.
+    const int cw = L.content_w - 2 * L.panel_pad_x;
+    int nw = cw;
+    if (model[0]) {
+        lv_obj_clear_flag(focus_lbl_model, LV_OBJ_FLAG_HIDDEN);
+        lv_point_t sz;
+        lv_text_get_size(&sz, model, &font_styrene_20, 0, 0,
+                         LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        nw = cw - (sz.x + 2 * 12 /*pill pad*/) - 12 /*gap*/;
+    } else {
+        lv_obj_add_flag(focus_lbl_model, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (nw != focus_card.name_w) {
+        focus_card.name_w = nw;
+        lv_obj_set_width(focus_card.lbl_name, nw);
+    }
+
+    chat_card_set_row(&focus_card, r);
+    s_focus_waiting = focus_card.waiting;
+
+    // Context row: percentage (spelled out — it doubles as onboarding for
+    // the terse multi-chat bars) on the left, token counter on the right.
+    char buf[32];
+    if (r->ctx_pct < 0) {
+        lv_obj_add_flag(focus_lbl_ctx, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        snprintf(buf, sizeof(buf), "%d%% of context used", r->ctx_pct);
+        set_label_if_changed(focus_lbl_ctx, buf);
+        lv_obj_clear_flag(focus_lbl_ctx, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (r->tok < 0) {
+        lv_obj_add_flag(focus_lbl_tok, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        session_tok_text(r->tok, buf, sizeof(buf));
+        set_label_if_changed(focus_lbl_tok, buf);
+        lv_obj_clear_flag(focus_lbl_tok, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    lv_anim_delete(focus_card.card, card_opa_anim_cb);
+    lv_obj_set_style_opa(focus_card.card, session_tier_opa(r->state), 0);
+}
+
+// ---- Card pool: identity-stable matching + the reorder slide (§2.3) ----
+
+static ChatCard* chat_card_by_sid(const char* sid) {
+    for (auto& c : chat_cards)
+        if (c.used && !c.claimed && strcmp(c.sid, sid) == 0) return &c;
+    return nullptr;
+}
+
+static ChatCard* chat_card_alloc(void) {
+    for (auto& c : chat_cards)   // prefer a fully retired card…
+        if (!c.used && lv_obj_has_flag(c.card, LV_OBJ_FLAG_HIDDEN)) return &c;
+    for (auto& c : chat_cards) { // …else steal one mid-fade-out
+        if (!c.used) { lv_anim_delete(c.card, NULL); return &c; }
+    }
+    return nullptr;              // unreachable: pool size == max rows
+}
+
+static void chats_set_content(const SessionList* list) {
+    // Motion only while the list is on screen: entering the view (or updating
+    // it while another view is up) positions everything instantly.
+    const bool animate = (view_state == 4);
+
+    for (auto& c : chat_cards) c.claimed = false;
+
+    for (int i = 0; i < list->count; i++) {
+        const SessionRow* r = &list->rows[i];
+        const int target_y = i * CHAT_CARD_PITCH;
+        ChatCard* c = chat_card_by_sid(r->sid);
+        if (c) {
+            c->claimed = true;
+            chat_card_set_row(c, r);
+            lv_anim_delete(c->card, card_opa_anim_cb);   // cancel a stale fade before restyling
+            lv_obj_set_style_opa(c->card, session_tier_opa(r->state), 0);
+            if (c->target_y != target_y) {
+                c->target_y = target_y;
+                lv_anim_delete(c->card, card_y_anim_cb);  // re-sort mid-flight: restart from here
+                if (animate) {
+                    lv_anim_t a;
+                    lv_anim_init(&a);
+                    lv_anim_set_var(&a, c->card);
+                    lv_anim_set_exec_cb(&a, card_y_anim_cb);
+                    lv_anim_set_values(&a, lv_obj_get_y(c->card), target_y);
+                    lv_anim_set_duration(&a, 260);
+                    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+                    lv_anim_start(&a);
+                } else {
+                    lv_obj_set_y(c->card, target_y);
+                }
+            }
+        } else {
+            c = chat_card_alloc();
+            if (!c) continue;
+            snprintf(c->sid, sizeof(c->sid), "%s", r->sid);
+            c->used = true;
+            c->claimed = true;
+            c->target_y = target_y;
+            lv_anim_delete(c->card, NULL);
+            lv_obj_set_y(c->card, target_y);
+            chat_card_set_row(c, r);
+            lv_obj_clear_flag(c->card, LV_OBJ_FLAG_HIDDEN);
+            const lv_opa_t tier = session_tier_opa(r->state);
+            if (animate) {
+                // New chat: fade in at its slot (§2.3)
+                lv_obj_set_style_opa(c->card, LV_OPA_TRANSP, 0);
+                lv_anim_t a;
+                lv_anim_init(&a);
+                lv_anim_set_var(&a, c->card);
+                lv_anim_set_exec_cb(&a, card_opa_anim_cb);
+                lv_anim_set_values(&a, LV_OPA_TRANSP, tier);
+                lv_anim_set_duration(&a, 260);
+                lv_anim_start(&a);
+            } else {
+                lv_obj_set_style_opa(c->card, tier, 0);
+            }
+        }
+    }
+
+    // Chats that closed: fade out; their slot is reclaimed by the slide (§2.3).
+    for (auto& c : chat_cards) {
+        if (!c.used || c.claimed) continue;
+        c.used = false;
+        c.waiting = false;
+        c.sid[0] = 0;
+        c.target_y = -1;
+        lv_anim_delete(c.card, NULL);
+        if (animate) {
+            lv_anim_t a;
+            lv_anim_init(&a);
+            lv_anim_set_var(&a, c.card);
+            lv_anim_set_exec_cb(&a, card_opa_anim_cb);
+            lv_anim_set_values(&a, lv_obj_get_style_opa(c.card, LV_PART_MAIN), LV_OPA_TRANSP);
+            lv_anim_set_duration(&a, 260);
+            lv_anim_set_completed_cb(&a, card_fadeout_done_cb);
+            lv_anim_start(&a);
+        } else {
+            lv_obj_add_flag(c.card, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+// Refresh the chat views' quota widgets from the cached usage payload. Values
+// match the RESTING panels; enterprise accounts map spending → slot 1,
+// period → slot 2.
+static void session_quota_refresh(void) {
+    if (!focus_group || !s_usage_cache.valid) return;
+    const UsageData* d = &s_usage_cache;
+
+    const int s_pct = (int)(d->session_pct + 0.5f);
+    const int w_pct = d->enterprise ? d->time_pct : (int)(d->weekly_pct + 0.5f);
+    const lv_color_t col0 = pct_color(d->session_pct);
+    const lv_color_t col1 = pct_color((float)w_pct);
+
+    char pct0[8], pct1[8], buf[48];
+    snprintf(pct0, sizeof(pct0), "%d%%", s_pct);
+    snprintf(pct1, sizeof(pct1), "%d%%", w_pct);
+
+    // ONE-CHAT 5h panel — same treatment as the RESTING "Current" panel.
+    set_label_if_changed(f5_pct, pct0);
+    set_label_if_changed(f5_pill, d->enterprise ? "Spending" : "Current");
+    lv_bar_set_value(f5_bar, s_pct, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(f5_bar, col0, LV_PART_INDICATOR);
+    if (d->enterprise) {
+        lv_obj_add_flag(f5_reset, LV_OBJ_FLAG_HIDDEN);  // spending has no reset clock
+    } else {
+        format_reset_time(d->session_reset_mins, buf, sizeof(buf));
+        set_label_if_changed(f5_reset, buf);
+        lv_obj_clear_flag(f5_reset, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // SEVERAL-CHATS one-line strip.
+    set_label_if_changed(cq_tag[0], d->enterprise ? "$"  : "5h");
+    set_label_if_changed(cq_tag[1], d->enterprise ? "pd" : "7d");
+    set_label_if_changed(cq_pct[0], pct0);
+    set_label_if_changed(cq_pct[1], pct1);
+    lv_bar_set_value(cq_bar[0], s_pct, LV_ANIM_OFF);
+    lv_bar_set_value(cq_bar[1], w_pct, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(cq_bar[0], col0, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(cq_bar[1], col1, LV_PART_INDICATOR);
+}
+
+// Transparent full-screen group, same pattern as usage_group / pair_group.
+static lv_obj_t* make_session_group(lv_obj_t* parent) {
+    lv_obj_t* g = lv_obj_create(parent);
+    lv_obj_set_size(g, L.scr_w, L.scr_h);
+    lv_obj_set_pos(g, 0, 0);
+    lv_obj_set_style_bg_opa(g, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(g, 0, 0);
+    lv_obj_set_style_pad_all(g, 0, 0);
+    lv_obj_clear_flag(g, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(g, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(g, LV_OBJ_FLAG_HIDDEN);   // update_view_state decides
+    return g;
+}
+
+static void build_session_views(lv_obj_t* parent) {
+    init_icon_dsc_rgb565a8(&icon_todo_dsc, ICON_LIST_TODO_W, ICON_LIST_TODO_H, icon_list_todo_data);
+    init_icon_dsc_rgb565a8(&icon_todo_small_dsc, ICON_LIST_TODO_SMALL_W, ICON_LIST_TODO_SMALL_H, icon_list_todo_small_data);
+    init_icon_dsc_rgb565a8(&icon_agents_dsc, ICON_USERS_ROUND_W, ICON_USERS_ROUND_H, icon_users_round_data);
+    init_icon_dsc_rgb565a8(&icon_agents_small_dsc, ICON_USERS_ROUND_SMALL_W, ICON_USERS_ROUND_SMALL_H, icon_users_round_small_data);
+
+    // ---- ONE-CHAT (§1.3): two boxes ----
+    // The 5h quota panel (exact RESTING "Current" panel — it carries the most
+    // minute-to-minute value) on top, the chat card below it. One box per
+    // concern, so a future multi-account build gets a box per account. The
+    // 7d row is dropped here (see the f5_* rationale).
+    focus_group = make_session_group(parent);
+    make_usage_panel(focus_group, L.content_y, "Current",
+                     &f5_pct, &f5_pill, &f5_bar, &f5_reset);
+    const int focus_card_y = L.content_y + L.usage_panel_h + FOCUS_PANEL_GAP;
+    build_chat_card(&focus_card, focus_group, L.margin, focus_card_y, true);
+
+    // Chat card extras: model pill (quota-pill treatment at the chat card's
+    // own text size) + the context line.
+    focus_lbl_model = make_card_label(focus_card.card, &font_styrene_20, COL_TEXT);
+    lv_obj_set_style_bg_color(focus_lbl_model, COL_BAR_BG, 0);
+    lv_obj_set_style_bg_opa(focus_lbl_model, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(focus_lbl_model, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_left(focus_lbl_model, 12, 0);
+    lv_obj_set_style_pad_right(focus_lbl_model, 12, 0);
+    lv_obj_set_style_pad_top(focus_lbl_model, 4, 0);
+    lv_obj_set_style_pad_bottom(focus_lbl_model, 4, 0);
+    lv_obj_align(focus_lbl_model, LV_ALIGN_TOP_RIGHT, 0, 0);
+    focus_lbl_ctx = make_card_label(focus_card.card, &font_styrene_20, COL_TEXT);
+    lv_obj_align(focus_lbl_ctx, LV_ALIGN_TOP_LEFT, 0, 44);
+    focus_lbl_tok = make_card_label(focus_card.card, &font_styrene_20, COL_TEXT);
+    lv_obj_align(focus_lbl_tok, LV_ALIGN_TOP_RIGHT, 0, 44);
+
+    // ---- SEVERAL-CHATS (§1.4): one-line quota strip + the card list ----
+    chats_group = make_session_group(parent);
+    // Combined 5h/7d row, PR #129 geometry: [dim tag | bar | big pct] twice,
+    // each element vertically centered in the CHAT_ROW_H band.
+    const int half = (L.content_w - CHAT_ROW_HALF_GAP) / 2;
+    const int strip_bar_w = half - CHAT_ROW_LBL_W - CHAT_ROW_PCT_W - 2 * CHAT_ROW_COL_GAP;
+    const int tag_y = L.content_y +
+        (CHAT_ROW_H - lv_font_get_line_height(&font_styrene_20)) / 2;
+    const int pct_y = L.content_y +
+        (CHAT_ROW_H - lv_font_get_line_height(&font_styrene_24)) / 2;
+    for (int i = 0; i < 2; i++) {
+        const int x0 = L.margin + i * (half + CHAT_ROW_HALF_GAP);
+        cq_tag[i] = make_card_label(chats_group, &font_styrene_20, COL_DIM);
+        lv_obj_set_width(cq_tag[i], CHAT_ROW_LBL_W);
+        lv_obj_set_pos(cq_tag[i], x0, tag_y);
+        cq_bar[i] = make_bar(chats_group,
+                             x0 + CHAT_ROW_LBL_W + CHAT_ROW_COL_GAP,
+                             L.content_y + (CHAT_ROW_H - CHAT_ROW_BAR_H) / 2,
+                             strip_bar_w, CHAT_ROW_BAR_H);
+        cq_pct[i] = make_card_label(chats_group, &font_styrene_24, COL_TEXT);
+        lv_obj_set_width(cq_pct[i], CHAT_ROW_PCT_W);
+        lv_obj_set_style_text_align(cq_pct[i], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_pos(cq_pct[i],
+                       x0 + CHAT_ROW_LBL_W + 2 * CHAT_ROW_COL_GAP + strip_bar_w,
+                       pct_y);
+    }
+
+    // Card viewport: runs from the strip to the PHYSICAL bottom edge — this
+    // sub-view alone drops the bottom margin, because clipped content tapers
+    // out through the fade band below instead of hitting a hard cut (§2.5's
+    // mid-card affordance, softened; the 4th card shows 62 of 80 px, the last
+    // 60 of them fading). Side margins stay. No scrolling in this round —
+    // ordering guarantees everything urgent is above the fold.
+    const int list_y = L.content_y + CHAT_ROW_H + CHAT_ROW_GAP + 4;  // #129 ch_list_y
+    const int list_h = L.scr_h - list_y;
+    cards_cont = lv_obj_create(chats_group);
+    lv_obj_set_pos(cards_cont, L.margin, list_y);
+    lv_obj_set_size(cards_cont, L.content_w, list_h);
+    lv_obj_set_style_bg_opa(cards_cont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cards_cont, 0, 0);
+    lv_obj_set_style_pad_all(cards_cont, 0, 0);
+    lv_obj_clear_flag(cards_cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(cards_cont, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    for (auto& c : chat_cards) {
+        build_chat_card(&c, cards_cont, 0, 0, false);
+        lv_obj_add_flag(c.card, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Bottom fade: whatever pokes below the fold tapers into the panel's
+    // bottom edge instead of ending in a hard cut + dead black band. A pure
+    // style gradient — per-end background opacity, no intermediate buffers —
+    // so PSRAM-free ports can enable it as-is. Created after the card pool:
+    // it's a later sibling of cards_cont, so reorder slides and pool churn
+    // inside the container can never draw above it. Input-transparent (not
+    // clickable), so the tap-anywhere splash toggle works through it.
+    lv_obj_t* fade = lv_obj_create(chats_group);
+    lv_obj_set_pos(fade, 0, L.scr_h - CHAT_FADE_H);
+    lv_obj_set_size(fade, L.scr_w, CHAT_FADE_H);
+    lv_obj_set_style_radius(fade, 0, 0);
+    lv_obj_set_style_border_width(fade, 0, 0);
+    lv_obj_set_style_pad_all(fade, 0, 0);
+    lv_obj_set_style_bg_color(fade, COL_BG, 0);
+    lv_obj_set_style_bg_grad_color(fade, COL_BG, 0);
+    lv_obj_set_style_bg_grad_dir(fade, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_opa(fade, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_main_opa(fade, LV_OPA_TRANSP, 0);  // top: fully see-through
+    lv_obj_set_style_bg_grad_opa(fade, LV_OPA_COVER, 0);   // bottom: panel black
+    lv_obj_clear_flag(fade, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(fade, LV_OBJ_FLAG_SCROLLABLE);
+
+    // The shared pulse: LV_OPA_COVER ↔ LV_OPA_30, 700 ms each way, forever.
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, &pulse_val);
+    lv_anim_set_exec_cb(&a, pulse_exec_cb);
+    lv_anim_set_values(&a, LV_OPA_COVER, LV_OPA_30);
+    lv_anim_set_duration(&a, 700);
+    lv_anim_set_playback_duration(&a, 700);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_start(&a);
+}
+
+#endif  // BOARD_HAS_SESSION_VIEWS
+
 static void init_usage_screen(lv_obj_t* scr) {
     usage_container = lv_obj_create(scr);
     lv_obj_set_size(usage_container, L.scr_w, L.scr_h);
@@ -529,6 +1288,9 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     build_pair_group(usage_container);
     build_idle_group(usage_container);
+#if BOARD_HAS_SESSION_VIEWS
+    if (board_caps().has_session_views) build_session_views(usage_container);
+#endif
 
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
@@ -654,29 +1416,89 @@ void ui_update(const UsageData* data) {
         format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
         lv_label_set_text(lbl_weekly_reset, buf);
     }
+
+#if BOARD_HAS_SESSION_VIEWS
+    // The chat views carry their own mini quota widgets (§1.3/§1.4) — keep
+    // them in step with the panels above.
+    if (board_caps().has_session_views) {
+        s_usage_cache = *data;
+        session_quota_refresh();
+    }
+#endif
 }
 
-// Pick the usage-view sub-screen: pairing hint (BLE down), the idle "Zzz" screen
-// (connected but data has gone stale), or the live usage panels. Only re-lays-out
-// on an actual change. The animated status line stays visible everywhere — it
-// reads "Listening…" on the idle screen, keeping it alive rather than frozen.
+// The `✻` status line yields when it has nothing to say (§2.3): no room for
+// it on SEVERAL-CHATS, and nothing for it to say once the focused chat is
+// waiting on you. Everywhere else it stays.
+static void apply_anim_visibility(void) {
+    if (!lbl_anim) return;
+    bool hide = false;
+#if BOARD_HAS_SESSION_VIEWS
+    if (view_state == 4 || (view_state == 3 && s_focus_waiting)) hide = true;
+#endif
+    if (hide) lv_obj_add_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+    else      lv_obj_clear_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+}
+
+// The view resolver (§2.1) — one function, run every tick; nothing else
+// chooses a view. Picks the usage-screen sub-view: pairing hint (BLE down),
+// the idle "Zzz" screen (connected but data stale), the live quota panels
+// (RESTING), or — on boards with session views — ONE-CHAT / SEVERAL-CHATS.
+// Only re-lays-out on an actual change.
 static void update_view_state(void) {
     if (!usage_group || !pair_group || !idle_group) return;
+    const uint32_t now = lv_tick_get();
+    const bool fresh = data_received && (now - last_data_ms) < DATA_FRESH_MS;
     int v;
     if (!s_ble_connected) {
         v = 0;  // pairing hint
-    } else if (data_received && (lv_tick_get() - last_data_ms) < DATA_FRESH_MS) {
-        v = 2;  // live usage
-    } else {
+    }
+#if BOARD_HAS_SESSION_VIEWS
+    else if (board_caps().has_session_views && s_any_waiting) {
+        // A waiting chat pins the view (§2.1): it bypasses the freshness
+        // check and the linger timer. A session that has sat on a permission
+        // prompt for forty minutes is precisely the case this feature exists
+        // for, and a plain inactivity timeout would hide it.
+        v = (s_live_count <= 1) ? 3 : 4;
+    }
+#endif
+    else if (!fresh) {
         v = 1;  // idle / Zzz
+    }
+#if BOARD_HAS_SESSION_VIEWS
+    else if (board_caps().has_session_views && s_live_count == 1) {
+        v = 3;  // ONE CHAT (§1.3)
+    } else if (board_caps().has_session_views && s_live_count >= 2) {
+        v = 4;  // SEVERAL CHATS (§1.4)
+    } else if (board_caps().has_session_views && s_chats_linger &&
+               (now - s_chats_gone_ms) < CHAT_LINGER_MS) {
+        v = s_linger_view;  // hold the chat view after the last chat closed (§2.1)
+    }
+#endif
+    else {
+#if BOARD_HAS_SESSION_VIEWS
+        s_chats_linger = false;  // linger expired (or never armed)
+#endif
+        v = 2;  // RESTING — live quota panels
     }
     if (v == view_state) return;
     view_state = v;
+    // Instant swap. §2.3's 280 ms RESTING↔chat cross-fade is deliberately
+    // deferred — the existing sub-view pattern is instant, and the fade is
+    // cosmetic-only.
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
+#if BOARD_HAS_SESSION_VIEWS
+    if (focus_group) lv_obj_add_flag(focus_group, LV_OBJ_FLAG_HIDDEN);
+    if (chats_group) lv_obj_add_flag(chats_group, LV_OBJ_FLAG_HIDDEN);
+    if (v == 3) lv_obj_clear_flag(focus_group, LV_OBJ_FLAG_HIDDEN);
+    else if (v == 4) lv_obj_clear_flag(chats_group, LV_OBJ_FLAG_HIDDEN);
+    else
+#endif
     lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group : usage_group,
                       LV_OBJ_FLAG_HIDDEN);
+    apply_anim_visibility();
 }
 
 void ui_tick_anim(void) {
@@ -788,6 +1610,56 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
     // pair / idle / usage — picked from connection + data freshness.
     update_view_state();
 }
+
+#if BOARD_HAS_SESSION_VIEWS
+void ui_update_sessions(const SessionList* list) {
+    if (!list || !focus_group || !board_caps().has_session_views) return;
+
+    const uint8_t prev_count = s_live_count;
+    s_live_count = list->count;
+    s_any_waiting = false;
+    for (int i = 0; i < list->count; i++)
+        if (session_bucket(list->rows[i].state) == SESSION_BUCKET_WAITING)
+            s_any_waiting = true;
+
+    if (list->count == 0) {
+        if (prev_count > 0 && (view_state == 3 || view_state == 4)) {
+            // The last live chat disappeared → hold the current view for
+            // CHAT_LINGER_MS (§2.1). Cards keep their final content, but the
+            // waiting treatment is dropped: a chat that ended can't need you,
+            // and the pulse must keep meaning "come here".
+            s_chats_linger = true;
+            s_chats_gone_ms = lv_tick_get();
+            s_linger_view = view_state;
+            s_focus_waiting = false;
+            if (focus_card.dot) {
+                lv_obj_set_style_bg_opa(focus_card.dot, LV_OPA_COVER, 0);
+                lv_obj_set_style_text_opa(focus_card.lbl_state, LV_OPA_COVER, 0);
+            }
+            for (auto& c : chat_cards) {
+                c.waiting = false;
+                if (c.used) {
+                    lv_obj_set_style_bg_opa(c.dot, LV_OPA_COVER, 0);
+                    lv_obj_set_style_text_opa(c.lbl_state, LV_OPA_COVER, 0);
+                }
+            }
+        }
+        update_view_state();
+        apply_anim_visibility();
+        return;
+    }
+
+    s_chats_linger = false;
+    focus_set_content(&list->rows[0]);
+    chats_set_content(list);
+    update_view_state();
+    apply_anim_visibility();
+}
+#else
+// Boards without session views compile to today's behavior; the call sites
+// in main.cpp are gated too, so this stub only keeps the public API total.
+void ui_update_sessions(const SessionList* list) { (void)list; }
+#endif
 
 void ui_update_battery(int percent, bool charging) {
     if (!battery_img) return;

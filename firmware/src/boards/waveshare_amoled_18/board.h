@@ -71,3 +71,4 @@
 #define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      1
 #define BOARD_HAS_SOUND            1
+#define BOARD_HAS_SESSION_VIEWS    0   // needs a portrait layout pass (issue #135 §7)

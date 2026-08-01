@@ -57,3 +57,4 @@
 #define BOARD_HAS_IMU              1    // present + initialized for I2C bus health
 #define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      0    // TCA9554 exists on board but only services audio
+#define BOARD_HAS_SESSION_VIEWS    0   // same geometry as the S3 2.16; flip after a reorder-smoothness check on hardware

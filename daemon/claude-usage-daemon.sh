@@ -9,6 +9,8 @@ DEVICE_MAC="${DEVICE_MAC:-}"  # auto-discovered if empty
 SERVICE_UUID="4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID="4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID="4c41555a-4465-7669-6365-000000000004"
+SS_CHAR_UUID="4c41555a-4465-7669-6365-000000000005"  # live session rows (issue #135)
+SESSIONS_FILE="$HOME/.clawdmeter/sessions.json"
 POLL_INTERVAL=60
 TICK=5
 SAVED_MAC_FILE="$HOME/.config/claude-usage-monitor/ble-address"
@@ -16,6 +18,8 @@ CONFIG_FILE="$HOME/.config/claude-usage-monitor/config"
 REFRESH_FLAG="/tmp/claude-usage-refresh-$$"
 DBUS_DEST="org.bluez"
 NOTIFY_PID=""
+SS_CHAR_PATH=""
+LAST_SESSIONS_SIG=""
 
 log() {
     echo "[$(date '+%H:%M:%S')] $1"
@@ -275,6 +279,62 @@ write_gatt() {
         WriteValue "aya{sv}" "$count" $bytes 0 2>/dev/null
 }
 
+# UTF-8-safe GATT write. write_gatt() above converts per CHARACTER, which is
+# fine for the all-ASCII usage payload but corrupts multi-byte UTF-8 (e.g. the
+# "…" in middle-elided session labels: printf "'…" yields the code point 0x2026,
+# not bytes). od emits the actual byte values, whatever the locale.
+write_gatt_bytes() {
+    local char_path="$1"
+    local data="$2"
+    local bytes count
+    bytes=$(printf '%s' "$data" | od -An -v -tu1 | tr -s ' \n' ' ')
+    count=$(printf '%s' "$data" | wc -c)
+    # shellcheck disable=SC2086  # $bytes is a deliberate word list
+    busctl call "$DBUS_DEST" "$char_path" org.bluez.GattCharacteristic1 \
+        WriteValue "aya{sv}" "$count" $bytes 0 2>/dev/null
+}
+
+# --- Live session awareness (issue #135) -----------------------------------
+# The clawdmeter-sessions sidecar (see SESSIONS.md) listens for Claude Code
+# hook events and writes an already-fitted wire payload to
+# ~/.clawdmeter/sessions.json on every session state change. On the existing
+# 5s tick, ship that payload to the SS characteristic whenever the file's
+# content changed. Fully inert when the file doesn't exist (feature off /
+# sidecar not running) and when the firmware doesn't expose the characteristic
+# (older firmware) — no errors, no log spam.
+maybe_send_sessions() {
+    [ -f "$SESSIONS_FILE" ] || return 0
+    local sig
+    sig=$(md5sum "$SESSIONS_FILE" 2>/dev/null | awk '{print $1}')
+    [ -z "$sig" ] && return 0
+    [ "$sig" = "$LAST_SESSIONS_SIG" ] && return 0
+    # Resolve the SS char lazily, at most once per changed payload, so a
+    # sidecar started after connect gets picked up without running busctl
+    # tree on every idle tick.
+    if [ -z "$SS_CHAR_PATH" ]; then
+        SS_CHAR_PATH=$(find_char_path_by_uuid "$SS_CHAR_UUID")
+        if [ -z "$SS_CHAR_PATH" ]; then
+            LAST_SESSIONS_SIG="$sig"  # firmware without SS: retry on next change
+            return 0
+        fi
+        log "GATT SS path: $SS_CHAR_PATH"
+    fi
+    # sessions.json holds {"ts":..., "payload":"<wire string>"}. The payload is
+    # stored as a string so the exact bytes the sidecar fitted to the budget
+    # are what goes over the air.
+    local payload
+    payload=$(PYTHONIOENCODING=utf-8 python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1]))["payload"])
+except Exception:
+    pass' "$SESSIONS_FILE" 2>/dev/null)
+    [ -z "$payload" ] && { LAST_SESSIONS_SIG="$sig"; return 0; }
+    if write_gatt_bytes "$SS_CHAR_PATH" "$payload"; then
+        LAST_SESSIONS_SIG="$sig"
+    fi
+    return 0
+}
+
 # Build the device payload for one OAuth token. Echoes the JSON payload on
 # success (empty + non-zero return on failure). Pure: no logging, no GATT write
 # — poll() owns picking the active plan and sending it.
@@ -487,6 +547,11 @@ while true; do
     fi
     log "GATT RX path: $RX_CHAR_PATH"
 
+    # Characteristic paths change across reconnects; re-resolve SS lazily and
+    # resend the current session payload to the freshly connected device.
+    SS_CHAR_PATH=""
+    LAST_SESSIONS_SIG=""
+
     BACKOFF=1  # reset backoff on successful connection
 
     start_notify_subscriber
@@ -503,6 +568,7 @@ while true; do
             fi
             poll && LAST_POLL=$NOW
         fi
+        maybe_send_sessions
         sleep "$TICK"
     done
 

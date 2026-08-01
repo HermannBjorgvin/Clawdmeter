@@ -10,6 +10,11 @@ enum screen_t {
 
 void ui_init(void);
 void ui_update(const UsageData* data);
+// Live session awareness (issue #135). No new screen_t: the chat views are
+// auto-selected sub-views of the usage screen, picked by the same resolver
+// that chooses pairing / no-data / quota. No-op on boards without
+// BOARD_HAS_SESSION_VIEWS.
+void ui_update_sessions(const SessionList* list);
 void ui_tick_anim(void);
 void ui_show_screen(screen_t screen);
 void ui_toggle_splash(void);

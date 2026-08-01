@@ -23,6 +23,7 @@ Keep the two in sync. The pattern in `caps.cpp` does this for you:
 | `BOARD_HAS_IMU`                | 0       | Whether the accelerometer is populated and initialized. Distinct from `BOARD_HAS_ROTATION` — the AMOLED-1.8 has the QMI8658 (so `HAS_IMU=1`) but the kit's enclosure mounts the panel at a fixed orientation, so rotation is off. |
 | `BOARD_HAS_BATTERY`            | 0       | Whether PMU battery measurement is meaningful on this board. UI hides the battery indicator when false. |
 | `BOARD_HAS_IO_EXPANDER`        | 0       | Whether an IO expander gates display / touch reset lines. Doesn't directly gate any code path — but signals to the porter that `board_init()` must release the expander before `display_hal_init()`. |
+| `BOARD_HAS_SESSION_VIEWS`      | 0       | The live-session chat views (issue #135): the one-chat card and the sorted chat list inside the usage screen. Needs room for ~3 cards plus a panel/refresh model that tolerates animation. **Consumed by shared code (`ui.cpp`, `main.cpp`), so unlike the other flags it must also be set as a `-DBOARD_HAS_SESSION_VIEWS=1` build flag in the board's `platformio.ini` env** (same mechanism as `BOARD_HAS_PSRAM`); keep the env flag and `board.h` in agreement. When 0, the card pool, animations, and session parsing aren't compiled at all and the view resolver keeps today's three-way pairing / no-data / quota behavior. |
 
 ## Build-flag macros
 

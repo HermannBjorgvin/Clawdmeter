@@ -124,6 +124,51 @@ static bool parse_json(const char* json, UsageData* out) {
     return true;
 }
 
+#if BOARD_HAS_SESSION_VIEWS
+static SessionList sessions = {};
+
+// Parse a session payload (issue #135 §5) into a SessionList. Rows are
+// positional and arrive pre-sorted by the host:
+//   {"ss":[[sid,label,state,ctx,elapsed_s,model,tool,ntools,nagents,tdone,ttotal,tok],...]}
+// (tok is optional — appended in a later wire revision.)
+// Returns false on a malformed payload — caller keeps the last good list.
+static bool parse_sessions(const char* json, SessionList* out) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, json);
+    if (err) {
+        Serial.printf("SS parse error: %s\n", err.c_str());
+        return false;
+    }
+    JsonArray ss = doc["ss"].as<JsonArray>();
+    if (ss.isNull()) return false;
+
+    out->count = 0;
+    for (JsonArray row : ss) {
+        // The panel fits 3.5 cards; the host sorts before sending, so rows
+        // past the cap are the least urgent — parse them only to drop them.
+        if (out->count >= SESSION_MAX_ROWS) break;
+        if (row.isNull() || row.size() < 11) continue;  // skip malformed rows
+        SessionRow* r = &out->rows[out->count];
+        snprintf(r->sid, sizeof(r->sid), "%s", (const char*)(row[0] | ""));
+        snprintf(r->label, sizeof(r->label), "%s", (const char*)(row[1] | ""));
+        r->state     = (uint8_t)(int)(row[2]  | 0);
+        r->ctx_pct   = (int8_t)(int)(row[3]   | -1);
+        r->elapsed_s = (int32_t)(row[4]       | 0);
+        r->model     = (uint8_t)(int)(row[5]  | 0);
+        r->tool      = (uint8_t)(int)(row[6]  | 0);
+        r->ntools    = (uint8_t)(int)(row[7]  | 0);
+        r->nagents   = (uint8_t)(int)(row[8]  | 0);
+        r->tdone     = (uint8_t)(int)(row[9]  | 0);
+        r->ttotal    = (uint8_t)(int)(row[10] | 0);
+        // Index 11 (tok, 1k units) was appended after the first host release —
+        // absent on older hosts, so out-of-range reads default to "unknown".
+        r->tok       = (int32_t)(row[11]      | -1);
+        out->count++;
+    }
+    return true;
+}
+#endif  // BOARD_HAS_SESSION_VIEWS
+
 // ---- Serial command buffer ----
 #define CMD_BUF_SIZE 64
 static char cmd_buf[CMD_BUF_SIZE];
@@ -393,6 +438,18 @@ void loop() {
             ble_send_nack();
         }
     }
+
+#if BOARD_HAS_SESSION_VIEWS
+    if (ble_has_session_data()) {
+        if (parse_sessions(ble_get_session_data(), &sessions)) {
+            // Claude counts as activity (§2.4): a session state change wakes
+            // a sleeping panel and resets the sleep timer.
+            idle_note_activity();
+            ui_update_sessions(&sessions);
+        }
+        // Malformed payload → ignored; the last good list stays on screen.
+    }
+#endif
 
     delay(5);
 }

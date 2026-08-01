@@ -1,0 +1,11 @@
+[Unit]
+Description=Clawdmeter Session Awareness Sidecar (Claude Code hook listener)
+
+[Service]
+Type=simple
+ExecStart="DAEMON_PATH"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
