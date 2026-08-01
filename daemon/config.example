@@ -30,3 +30,30 @@ chime = off
 #   12   = show the clock, forced 12-hour  (e.g. 6:28 PM)
 #   24   = show the clock, forced 24-hour  (e.g. 18:28)
 clock = off
+
+# --- Live session awareness (optional) ---------------------------------------
+# Show your open Claude Code chats on the device: what each one is doing, how
+# full its context window is, and whether any of them is waiting on you.
+# Off by default. Enabling it takes three things (see daemon/SESSIONS.md):
+#   1. hook_port set below,
+#   2. a hook block in each Claude config dir's settings.json
+#      (install.sh offers to write it, or run:
+#       daemon/clawdmeter_sessions.py --install-hooks ~/.claude/settings.json \
+#           http://127.0.0.1:45999/),
+#   3. the sidecar running (Linux: systemctl --user start clawdmeter-sessions).
+
+# Loopback port the hook listener serves on. Unset (default) = feature off:
+# the sidecar exits and the daemon never sends session data.
+# hook_port = 45999
+
+# Pin the context window size in kilotokens (e.g. 200 or 1000) if you know it.
+# Blank/unset = heuristic: 200k default, 1M on a [1m] model marker, snapping up
+# to the next 1M multiple when observed usage exceeds the assumption. A pinned
+# value is treated as fact and disables the snap-up.
+# context_window_k =
+
+# Byte budget for the session payload written to ~/.clawdmeter/sessions.json.
+# The sidecar shrinks labels (8-char floor), then drops the least urgent rows
+# until the payload fits. Keep below the BLE MTU the device negotiates; the
+# default is conservative and fits 3-4 chat rows.
+# sessions_budget_bytes = 180
