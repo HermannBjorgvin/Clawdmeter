@@ -503,6 +503,7 @@ static void apply_anim_visibility(void);   // status-line rule (§2.3)
 #define CHAT_CARD_GAP     10    // between cards (#129 ch_card_gap)
 #define CHAT_CARD_PITCH   (CHAT_CARD_H + CHAT_CARD_GAP)
 #define CHAT_CARD_PAD_Y   8
+#define CHAT_FADE_H       60    // bottom fade band: transparent → panel black
 // ONE-CHAT: two boxes — the 5h quota panel (exact RESTING "Current" panel)
 // on top, the chat card below it.
 #define FOCUS_CARD_H      150
@@ -1167,12 +1168,14 @@ static void build_session_views(lv_obj_t* parent) {
                        pct_y);
     }
 
-    // Card viewport: fills from the strip down to the bottom margin, so an
-    // overfull list is visibly cut mid-card (§2.5 — with the #129 pitch the
-    // 4th card shows 42 of 80 px). No scrolling in this round — ordering
-    // guarantees everything urgent is above the fold.
+    // Card viewport: runs from the strip to the PHYSICAL bottom edge — this
+    // sub-view alone drops the bottom margin, because clipped content tapers
+    // out through the fade band below instead of hitting a hard cut (§2.5's
+    // mid-card affordance, softened; the 4th card shows 62 of 80 px, the last
+    // 60 of them fading). Side margins stay. No scrolling in this round —
+    // ordering guarantees everything urgent is above the fold.
     const int list_y = L.content_y + CHAT_ROW_H + CHAT_ROW_GAP + 4;  // #129 ch_list_y
-    const int list_h = L.scr_h - L.margin - list_y;
+    const int list_h = L.scr_h - list_y;
     cards_cont = lv_obj_create(chats_group);
     lv_obj_set_pos(cards_cont, L.margin, list_y);
     lv_obj_set_size(cards_cont, L.content_w, list_h);
@@ -1186,6 +1189,28 @@ static void build_session_views(lv_obj_t* parent) {
         build_chat_card(&c, cards_cont, 0, 0, false);
         lv_obj_add_flag(c.card, LV_OBJ_FLAG_HIDDEN);
     }
+
+    // Bottom fade: whatever pokes below the fold tapers into the panel's
+    // bottom edge instead of ending in a hard cut + dead black band. A pure
+    // style gradient — per-end background opacity, no intermediate buffers —
+    // so PSRAM-free ports can enable it as-is. Created after the card pool:
+    // it's a later sibling of cards_cont, so reorder slides and pool churn
+    // inside the container can never draw above it. Input-transparent (not
+    // clickable), so the tap-anywhere splash toggle works through it.
+    lv_obj_t* fade = lv_obj_create(chats_group);
+    lv_obj_set_pos(fade, 0, L.scr_h - CHAT_FADE_H);
+    lv_obj_set_size(fade, L.scr_w, CHAT_FADE_H);
+    lv_obj_set_style_radius(fade, 0, 0);
+    lv_obj_set_style_border_width(fade, 0, 0);
+    lv_obj_set_style_pad_all(fade, 0, 0);
+    lv_obj_set_style_bg_color(fade, COL_BG, 0);
+    lv_obj_set_style_bg_grad_color(fade, COL_BG, 0);
+    lv_obj_set_style_bg_grad_dir(fade, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_opa(fade, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_main_opa(fade, LV_OPA_TRANSP, 0);  // top: fully see-through
+    lv_obj_set_style_bg_grad_opa(fade, LV_OPA_COVER, 0);   // bottom: panel black
+    lv_obj_clear_flag(fade, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(fade, LV_OBJ_FLAG_SCROLLABLE);
 
     // The shared pulse: LV_OPA_COVER ↔ LV_OPA_30, 700 ms each way, forever.
     lv_anim_t a;
