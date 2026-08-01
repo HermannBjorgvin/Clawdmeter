@@ -488,12 +488,21 @@ static void apply_anim_visibility(void);   // status-line rule (§2.3)
 // Geometry — the capability gate limits these views to 480×480-class panels
 // (the S3 2.16 and the sim); other geometries need a layout pass before their
 // flag can flip, so these are tuned constants, not breakpoints.
-#define CHAT_QSTRIP_Y     104   // chats view: one-line quota strip
-#define CHAT_LIST_Y       140   // top of the card viewport
-#define CHAT_CARD_PITCH   88
+// Quota strip + vertical rhythm ported from PR #129's combined 5h/7d row
+// (the visual language issue #135 credits): a 30px band at content_y with
+// dim styrene_20 tags, styrene_24 percentages in a fixed right-aligned
+// column, 10px bars, and a 14px(+4) gap down to the first card.
+#define CHAT_ROW_H        30    // strip band height; text/bar vcentered in it
+#define CHAT_ROW_BAR_H    10
+#define CHAT_ROW_LBL_W    32    // "5h"/"7d" column
+#define CHAT_ROW_PCT_W    58    // percentage column (right-aligned, fixed)
+#define CHAT_ROW_COL_GAP  12    // label|bar|pct column gap
+#define CHAT_ROW_HALF_GAP 20    // between the 5h and 7d halves
+#define CHAT_ROW_GAP      14    // strip band ↓ card list (plus 4, per #129)
 #define CHAT_CARD_H       80
+#define CHAT_CARD_GAP     10    // between cards (#129 ch_card_gap)
+#define CHAT_CARD_PITCH   (CHAT_CARD_H + CHAT_CARD_GAP)
 #define CHAT_CARD_PAD_Y   8
-#define CHAT_LIST_H       (3 * CHAT_CARD_PITCH + CHAT_CARD_PITCH / 2)  // 3.5 pitches (§2.5)
 // ONE-CHAT: two boxes — the 5h quota panel (exact RESTING "Current" panel)
 // on top, the chat card below it.
 #define FOCUS_CARD_H      150
@@ -1133,29 +1142,40 @@ static void build_session_views(lv_obj_t* parent) {
 
     // ---- SEVERAL-CHATS (§1.4): one-line quota strip + the card list ----
     chats_group = make_session_group(parent);
-    const int half = L.content_w / 2;
-    // Tags and percentages center on the bar: the label line box is taller
-    // than the bar, so its y derives from the bar's midline. Measured against
-    // zoomed screenshots: Styrene's digit mass centers on its line box, so no
-    // extra nudge is needed.
-    const int strip_lh = lv_font_get_line_height(&font_styrene_16);
-    const int strip_bar_h = 10;
-    const int strip_txt_y = CHAT_QSTRIP_Y + strip_bar_h / 2 - strip_lh / 2;
+    // Combined 5h/7d row, PR #129 geometry: [dim tag | bar | big pct] twice,
+    // each element vertically centered in the CHAT_ROW_H band.
+    const int half = (L.content_w - CHAT_ROW_HALF_GAP) / 2;
+    const int strip_bar_w = half - CHAT_ROW_LBL_W - CHAT_ROW_PCT_W - 2 * CHAT_ROW_COL_GAP;
+    const int tag_y = L.content_y +
+        (CHAT_ROW_H - lv_font_get_line_height(&font_styrene_20)) / 2;
+    const int pct_y = L.content_y +
+        (CHAT_ROW_H - lv_font_get_line_height(&font_styrene_24)) / 2;
     for (int i = 0; i < 2; i++) {
-        const int x0 = L.margin + i * (half + 10);
-        cq_tag[i] = make_card_label(chats_group, &font_styrene_16, COL_DIM);
-        lv_obj_set_pos(cq_tag[i], x0, strip_txt_y);
-        cq_bar[i] = make_bar(chats_group, x0 + 32, CHAT_QSTRIP_Y, 122, strip_bar_h);
-        cq_pct[i] = make_card_label(chats_group, &font_styrene_16, COL_TEXT);
-        lv_obj_set_pos(cq_pct[i], x0 + 164, strip_txt_y);
+        const int x0 = L.margin + i * (half + CHAT_ROW_HALF_GAP);
+        cq_tag[i] = make_card_label(chats_group, &font_styrene_20, COL_DIM);
+        lv_obj_set_width(cq_tag[i], CHAT_ROW_LBL_W);
+        lv_obj_set_pos(cq_tag[i], x0, tag_y);
+        cq_bar[i] = make_bar(chats_group,
+                             x0 + CHAT_ROW_LBL_W + CHAT_ROW_COL_GAP,
+                             L.content_y + (CHAT_ROW_H - CHAT_ROW_BAR_H) / 2,
+                             strip_bar_w, CHAT_ROW_BAR_H);
+        cq_pct[i] = make_card_label(chats_group, &font_styrene_24, COL_TEXT);
+        lv_obj_set_width(cq_pct[i], CHAT_ROW_PCT_W);
+        lv_obj_set_style_text_align(cq_pct[i], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_pos(cq_pct[i],
+                       x0 + CHAT_ROW_LBL_W + 2 * CHAT_ROW_COL_GAP + strip_bar_w,
+                       pct_y);
     }
 
-    // Card viewport: sized to 3½ card pitches so an overfull list is visibly
-    // cut mid-card (§2.5). No scrolling in this round — ordering guarantees
-    // everything urgent is above the fold.
+    // Card viewport: fills from the strip down to the bottom margin, so an
+    // overfull list is visibly cut mid-card (§2.5 — with the #129 pitch the
+    // 4th card shows 42 of 80 px). No scrolling in this round — ordering
+    // guarantees everything urgent is above the fold.
+    const int list_y = L.content_y + CHAT_ROW_H + CHAT_ROW_GAP + 4;  // #129 ch_list_y
+    const int list_h = L.scr_h - L.margin - list_y;
     cards_cont = lv_obj_create(chats_group);
-    lv_obj_set_pos(cards_cont, L.margin, CHAT_LIST_Y);
-    lv_obj_set_size(cards_cont, L.content_w, CHAT_LIST_H);
+    lv_obj_set_pos(cards_cont, L.margin, list_y);
+    lv_obj_set_size(cards_cont, L.content_w, list_h);
     lv_obj_set_style_bg_opa(cards_cont, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(cards_cont, 0, 0);
     lv_obj_set_style_pad_all(cards_cont, 0, 0);
