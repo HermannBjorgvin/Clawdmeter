@@ -260,12 +260,28 @@ def _billing_period_info(now: float, reset_ts: str) -> dict:
         period_end = float(reset_ts)
     except ValueError:
         return {"tp": 0, "pd": 30, "rd": ""}
-    dt_end = datetime.datetime.fromtimestamp(period_end)
-    prev_month = dt_end.month - 1 or 12
-    prev_year = dt_end.year if dt_end.month > 1 else dt_end.year - 1
-    prev_day = min(dt_end.day, calendar.monthrange(prev_year, prev_month)[1])
-    dt_start = dt_end.replace(year=prev_year, month=prev_month, day=prev_day)
-    period_start = dt_start.timestamp()
+    if period_end <= 0:
+        # reset_ts defaults to "0" whenever the overage-reset header is absent
+        # (e.g. a 200 that simply carries no billing headers). fromtimestamp(0)
+        # is 1970; stepping one month back lands in 1969, and datetime.timestamp()
+        # raises OSError for pre-1970 dates on Windows — taking the whole poll
+        # loop down. Bail out to the neutral default instead.
+        return {"tp": 0, "pd": 30, "rd": ""}
+    try:
+        dt_end = datetime.datetime.fromtimestamp(period_end)
+        prev_month = dt_end.month - 1 or 12
+        prev_year = dt_end.year if dt_end.month > 1 else dt_end.year - 1
+        prev_day = min(dt_end.day, calendar.monthrange(prev_year, prev_month)[1])
+        dt_start = dt_end.replace(year=prev_year, month=prev_month, day=prev_day)
+        period_start = dt_start.timestamp()
+    except (OSError, OverflowError, ValueError):
+        # Belt-and-braces beyond the <= 0 guard above (#104): Windows
+        # datetime.timestamp()/fromtimestamp() also raise OSError(22)/
+        # OverflowError/ValueError for out-of-range NON-zero values (e.g. a
+        # far-future "99999999999999" header, which overflows fromtimestamp).
+        # Garbage must never crash the daemon thread — degrade to the safe
+        # default instead (field report: OSError(22) killed the poll loop).
+        return {"tp": 0, "pd": 30, "rd": ""}
     period_len = period_end - period_start
     if period_len <= 0:
         return {"tp": 0, "pd": 30, "rd": ""}
@@ -533,8 +549,15 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
         )
         try:
             await client.connect()
-        except (BleakError, asyncio.TimeoutError) as e:
-            log(f"Connection attempt {attempt + 1}/{CONNECT_RETRIES} failed: {e}")
+        except (BleakError, OSError, asyncio.TimeoutError, AssertionError) as e:
+            # WinRT service discovery inside connect() can surface a raw OSError
+            # (WinError) or even a bare AssertionError from bleak's FutureLike
+            # (assert self._result) when the peer drops the link mid-discovery —
+            # neither is wrapped as BleakError. Treat them as a normal failed
+            # attempt so the D-01 retry loop handles them, instead of letting an
+            # uncaught exception kill the daemon thread (the "daemon crashed"
+            # tray toast + silent polling stop, field report).
+            log(f"Connection attempt {attempt + 1}/{CONNECT_RETRIES} failed: {type(e).__name__}: {e}")
             try:
                 await client.disconnect()
             except BleakError:
@@ -636,7 +659,10 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
         # so swallow both; the link tears down regardless once we exit.
         try:
             await client.disconnect()
-        except (BleakError, OSError):
+        except (BleakError, OSError, AssertionError):
+            # bleak's WinRT disconnect() also has bare asserts (e.g. assert char
+            # while tearing down notifications on an already-gone peer); swallow
+            # it too — the link tears down regardless once we exit.
             pass
 
     log("Device disconnected" if not stop_event.is_set() else "Stopping")

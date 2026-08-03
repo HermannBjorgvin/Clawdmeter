@@ -362,6 +362,7 @@ void loop() {
     int  pct      = power_hal_battery_pct();
     bool charging = power_hal_is_charging();
     if (pct != last_pct || charging != last_charging) {
+        if (pct != last_pct) ble_set_battery_level(pct);
         last_pct = pct;
         last_charging = charging;
         ui_update_battery(pct, charging);

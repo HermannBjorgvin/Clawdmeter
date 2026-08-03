@@ -41,15 +41,16 @@
 #define XCA9554_ADDR         0x20
 #define IOX_PIN_TP_RST       0     // EXIO0 → touch reset (active LOW)
 #define IOX_PIN_LCD_RST      1     // EXIO1 → display reset (active LOW)
-#define IOX_PIN_PA_EN        2     // EXIO2 → audio amp enable
+#define IOX_PIN_PA_EN        2     // EXIO2 — must stay HIGH; driving it low kills
+                                   // FT3168 touch (it is NOT a usable amp switch,
+                                   // the amp enable is SND_PA_PIN / GPIO 46)
 #define IOX_PIN_PWR_BTN      4     // EXIO4 → PWR button input, active HIGH
 
 // ---- Audio (ES8311 mono codec + speaker, I2S) ----
-// Same ES8311 + I2S path as the 2.16, different MCLK pin (16 vs 42). Amp enable
-// is ambiguous across 1.8 hardware revisions: Waveshare's V2 example drives a
-// plain GPIO 46, while this board's XCA9554 also exposes an amp-enable on EXIO2
-// (IOX_PIN_PA_EN above). sound.cpp drives BOTH to be revision-safe. Pins from
-// Waveshare's factory 15_ES8311 example. Untested on hardware in this repo.
+// Same ES8311 + I2S path as the 2.16, different MCLK pin (16 vs 42). Pins from
+// Waveshare's factory 15_ES8311 example, verified on hardware. Amp enable is
+// GPIO 46 only — do NOT use IOX_PIN_PA_EN (EXIO2) as an amp switch; pulling it
+// low kills the FT3168 touch controller on this revision (see sound.cpp).
 #define SND_I2S_MCLK         16
 #define SND_I2S_BCLK         9
 #define SND_I2S_WS           45     // LRCK

@@ -481,6 +481,12 @@ def _billing_period_info(now: float, reset_ts: str) -> dict:
         period_end = float(reset_ts)
     except ValueError:
         return {"tp": 0, "pd": 30}
+    if period_end <= 0:
+        # reset_ts defaults to "0" when the overage-reset header is absent.
+        # fromtimestamp(0) is 1970; stepping a month back lands in 1969, and
+        # datetime.timestamp() raises OSError for pre-1970 dates on Windows.
+        # Benign on macOS/Linux, but guard here too to keep the daemons parallel.
+        return {"tp": 0, "pd": 30}
     dt_end = datetime.datetime.fromtimestamp(period_end)
     prev_month = dt_end.month - 1 or 12
     prev_year = dt_end.year if dt_end.month > 1 else dt_end.year - 1

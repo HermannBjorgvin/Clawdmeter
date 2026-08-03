@@ -64,6 +64,14 @@ static NimBLECharacteristic* req_char = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
+
+// One-shot supervision-timeout pushback (see onConnParamsUpdate). Written by
+// NimBLE host-task callbacks, consumed by ble_tick() on the loop task.
+static const uint16_t CONN_HANDLE_NONE  = 0xFFFF;
+static const uint16_t DESIRED_TIMEOUT   = 600;   // ×10ms = 6s, matches PPCP
+static volatile uint16_t param_fix_handle = CONN_HANDLE_NONE;  // pending retry
+static volatile uint32_t param_fix_at_ms  = 0;                 // when to send it
+static volatile uint16_t param_fix_spent  = CONN_HANDLE_NONE;  // one per connection
 static char rx_buf[BLE_BUF_SIZE];
 static volatile bool data_ready = false;
 static volatile bool has_received_data = false;
@@ -175,6 +183,13 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         Serial.printf("BLE: connected from %s (active=%u)\n",
             info.getAddress().toString().c_str(),
             (unsigned)s->getConnectedCount());
+        // Log negotiated link timing — the difference between guessing and
+        // knowing when debugging disconnects (e.g. reason=520 supervision
+        // timeouts are only explainable next to the negotiated timeout).
+        // Units: interval ×1.25ms, timeout ×10ms, latency = skippable events.
+        Serial.printf("BLE: connparams itvl=%u(%.2fms) lat=%u timeout=%u(%ums)\n",
+            info.getConnInterval(), info.getConnInterval() * 1.25f,
+            info.getConnLatency(), info.getConnTimeout(), info.getConnTimeout() * 10);
         // Keep advertising while a connection slot is still free so a second
         // central (e.g. the host daemon alongside an OS-held HID link) can
         // discover and connect. NimBLE auto-stops advertising on each accept.
@@ -187,8 +202,34 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         // Only flip the UI state to DISCONNECTED when the last client leaves.
         if (s->getConnectedCount() == 0) state = BLE_STATE_DISCONNECTED;
         need_advertise = true;
+        // Drop any pending/spent param pushback for this handle — NimBLE
+        // reuses conn handles, so stale state would leak onto the next link.
+        if (param_fix_handle == info.getConnHandle()) param_fix_handle = CONN_HANDLE_NONE;
+        if (param_fix_spent  == info.getConnHandle()) param_fix_spent  = CONN_HANDLE_NONE;
         Serial.printf("BLE: disconnected (reason=%d, remaining=%u)\n",
             reason, (unsigned)s->getConnectedCount());
+    }
+
+    // Centrals re-negotiate parameters mid-connection. Windows in particular
+    // clamps the supervision timeout to 2s once an app GATT session goes
+    // active (captured on hardware; it honors 9.6s while only its HID driver
+    // holds the link) — and a 2s window is tight enough that ordinary radio
+    // gaps kill the link (HCI 0x208 → reason=520), which was the constant
+    // daemon reconnect churn. Push back ONCE per connection: schedule a
+    // deferred LL connection-parameter request for the same interval range but
+    // a 6s timeout (the mechanism Microsoft's accessory guidelines prescribe).
+    // Deferred ~2s so it can't race the central's own in-flight update
+    // transaction (Windows has a documented late-instant bug there), and
+    // one-shot so a central that re-clamps doesn't trigger an update war.
+    void onConnParamsUpdate(NimBLEConnInfo& info) override {
+        Serial.printf("BLE: connparams update itvl=%u(%.2fms) lat=%u timeout=%u(%ums)\n",
+            info.getConnInterval(), info.getConnInterval() * 1.25f,
+            info.getConnLatency(), info.getConnTimeout(), info.getConnTimeout() * 10);
+        if (info.getConnTimeout() < DESIRED_TIMEOUT &&
+            info.getConnHandle() != param_fix_spent) {
+            param_fix_handle = info.getConnHandle();
+            param_fix_at_ms  = millis() + 2000;
+        }
     }
 
     // Lock the board to a single owner machine. The first machine to bond
@@ -198,6 +239,14 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         std::string id = info.getIdAddress().toString();
         Serial.printf("BLE: auth complete peer=%s bonded=%d enc=%d\n",
             id.c_str(), info.isBonded() ? 1 : 0, info.isEncrypted() ? 1 : 0);
+        // Bonded reconnects START at the central's clamped parameters (no
+        // later update event fires), so the supervision-timeout pushback must
+        // also arm here, not just in onConnParamsUpdate.
+        if (info.getConnTimeout() < DESIRED_TIMEOUT &&
+            info.getConnHandle() != param_fix_spent) {
+            param_fix_handle = info.getConnHandle();
+            param_fix_at_ms  = millis() + 2000;
+        }
         if (id == ZERO_ADDR) return;
         if (!owner_set) {
             claim_owner(id);
@@ -321,6 +370,17 @@ void ble_tick(void) {
         need_advertise = false;
         start_advertising();
     }
+    // Deferred one-shot supervision-timeout pushback (see onConnParamsUpdate).
+    if (param_fix_handle != CONN_HANDLE_NONE &&
+        (int32_t)(millis() - param_fix_at_ms) >= 0) {
+        uint16_t h = param_fix_handle;
+        param_fix_handle = CONN_HANDLE_NONE;
+        param_fix_spent  = h;
+        if (server && server->getConnectedCount() > 0) {
+            Serial.println("BLE: requesting 6s supervision timeout");
+            server->updateConnParams(h, 12, 24, 0, DESIRED_TIMEOUT);
+        }
+    }
 }
 
 ble_state_t ble_get_state(void) {
@@ -370,6 +430,12 @@ void ble_send_nack(void) {
         tx_char->setValue("{\"err\":true}");
         tx_char->notify();
     }
+}
+
+void ble_set_battery_level(int pct) {
+    if (!hid_dev || pct < 0) return;
+    if (pct > 100) pct = 100;
+    hid_dev->setBatteryLevel((uint8_t)pct, state == BLE_STATE_CONNECTED);
 }
 
 void ble_request_refresh(void) {

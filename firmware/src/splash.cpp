@@ -1,16 +1,20 @@
 #include "splash.h"
 #include "splash_animations.h"
+#include "splash_geometry.h"
 #include "theme.h"
 #include "usage_rate.h"
 #include "hal/board_caps.h"
+#include "hal/display_hal.h"
 #include <Arduino.h>
 #include <string.h>
 #include <esp_heap_caps.h>
 
 // 20×20 grid. CELL sized so the canvas fits the smaller display dimension —
 // the canvas is square and centered, so on portrait or letterboxed panels
-// it leaves vertical margin rather than cropping.
-#define GRID         20
+// it leaves vertical margin rather than cropping. On PSRAM-less boards the
+// buffer is rendered tiny (cell == 1) and LVGL scales it up to fill the panel;
+// the geometry decision lives in splash_compute_geometry() (splash_geometry.h).
+#define GRID         SPLASH_GRID
 static int  cell      = 24;        // recomputed in splash_init()
 static int  canvas_w  = GRID * 24;
 static int  canvas_h  = GRID * 24;
@@ -71,7 +75,86 @@ static void resolve_group_lists(void) {
     }
 }
 
-static uint16_t *row_buf = NULL;   // scratch row, sized to canvas_w
+static uint16_t *row_buf = NULL;   // scratch row, sized to canvas_w (PSRAM path)
+
+// ─── Two render paths ────────────────────────────────────────────────────────
+// PSRAM boards (S3) draw the pixel art into an LVGL canvas at native size and
+// let LVGL flush it — they have the RAM and cores to spare, no transform needed.
+//
+// PSRAM-less boards (C6) can't hold a 480×480 canvas. The prior approach (tiny
+// 20×20 canvas + LVGL image-scale) made LVGL software-transform the whole
+// upscaled frame on every redraw — measured ~0.76 µs/output-px, i.e. 100–220 ms
+// per frame on the single-core C6, and partial invalidation of a transformed
+// image both fails to clip the transform and smears. Instead we upscale the
+// 20×20 cells ourselves with trivial nearest-neighbour replication and push only
+// the *changed* cells straight to the panel via the display HAL, bypassing LVGL.
+// That removes the transform cost (leaving just the QSPI flush) and the
+// dirty-rect is exact, so no smearing.
+#ifndef BOARD_HAS_PSRAM
+#  define SPLASH_DIRECT_DRAW 1
+#else
+#  define SPLASH_DIRECT_DRAW 0
+#endif
+
+#if SPLASH_DIRECT_DRAW
+static uint16_t*       strip_buf = NULL;   // one grid-row band: (GRID*scr_cell)×scr_cell
+static int             scr_cell  = 24;     // on-screen px per grid cell
+static int             scr_offx  = 0;      // centering offsets (square art on panel)
+static int             scr_offy  = 0;
+static uint8_t         prev_cells[GRID * GRID];
+static const uint16_t* prev_palette = NULL;
+static bool            prev_valid   = false;
+static bool            force_full   = false;  // repaint everything on the next render
+
+// Upscale grid cells [gx0..gx1]×[gy0..gy1] and push them to the panel, one
+// grid-row band at a time so the scratch buffer stays (GRID*scr_cell × scr_cell).
+static void blit_cells(const uint8_t* cells, const uint16_t* palette,
+                       int gx0, int gy0, int gx1, int gy1) {
+    if (!strip_buf) return;
+    const int spc = scr_cell;
+    const int bw  = (gx1 - gx0 + 1) * spc;          // band width, px
+    const int px  = scr_offx + gx0 * spc;
+    for (int gy = gy0; gy <= gy1; gy++) {
+        for (int gx = gx0; gx <= gx1; gx++) {       // expand one source row across
+            uint8_t code = cells[gy * GRID + gx];
+            uint16_t color = (palette && code < SPLASH_PALETTE_SIZE) ? palette[code] : COL_EMPTY;
+            uint16_t* p = &strip_buf[(gx - gx0) * spc];
+            for (int i = 0; i < spc; i++) p[i] = color;
+        }
+        for (int dy = 1; dy < spc; dy++)             // replicate that row down
+            memcpy(&strip_buf[dy * bw], strip_buf, bw * 2);
+        display_hal_draw_bitmap(px, scr_offy + gy * spc, bw, spc, strip_buf);
+    }
+}
+
+static void render_frame(const uint8_t *cells, const uint16_t *palette) {
+    if (!strip_buf) return;
+    if (!active) return;          // never draw to the panel while not shown
+    bool full = force_full || !prev_valid || palette != prev_palette;
+    force_full = false;
+
+    int gx0 = 0, gy0 = 0, gx1 = GRID - 1, gy1 = GRID - 1;
+    if (!full) {                                     // bounding box of changed cells
+        gx0 = GRID; gy0 = GRID; gx1 = -1; gy1 = -1;
+        for (int gy = 0; gy < GRID; gy++)
+            for (int gx = 0; gx < GRID; gx++)
+                if (cells[gy * GRID + gx] != prev_cells[gy * GRID + gx]) {
+                    if (gx < gx0) gx0 = gx;
+                    if (gx > gx1) gx1 = gx;
+                    if (gy < gy0) gy0 = gy;
+                    if (gy > gy1) gy1 = gy;
+                }
+        if (gx1 < 0) return;                         // identical frame, nothing to do
+    }
+
+    blit_cells(cells, palette, gx0, gy0, gx1, gy1);
+
+    memcpy(prev_cells, cells, GRID * GRID);
+    prev_palette = palette;
+    prev_valid   = true;
+}
+
+#else  // ── PSRAM: LVGL canvas render (unchanged) ──
 
 static void render_frame(const uint8_t *cells, const uint16_t *palette) {
     if (!row_buf || !canvas_buf) return;
@@ -88,6 +171,7 @@ static void render_frame(const uint8_t *cells, const uint16_t *palette) {
     }
     if (canvas) lv_obj_invalidate(canvas);
 }
+#endif
 
 // ---- Mini creature: a small animated creature for embedding in other screens
 //      (e.g. the idle "sleeping" indicator). Self-contained — its own canvas and
@@ -150,43 +234,22 @@ void splash_mini_tick(void) {
 }
 
 static void show_placeholder() {
-    // Solid dark background + centered status label.
+    // Solid dark background + centered status label. On the direct-draw path
+    // there's no canvas; the black container is the background and the LVGL
+    // label shows over it.
+#if !SPLASH_DIRECT_DRAW
     if (canvas_buf) {
         for (int i = 0; i < canvas_w * canvas_h; i++) canvas_buf[i] = COL_EMPTY;
     }
     if (canvas) lv_obj_invalidate(canvas);
+#endif
     if (label_status) lv_obj_clear_flag(label_status, LV_OBJ_FLAG_HIDDEN);
 }
 
 void splash_init(lv_obj_t *parent) {
     const BoardCaps& c = board_caps();
-    int min_dim = (c.width < c.height) ? c.width : c.height;
-    cell     = min_dim / GRID;       // fits within the smaller display dimension
-    if (cell < 4) cell = 4;
 
-#ifdef BOARD_HAS_PSRAM
-    const uint32_t canvas_caps = MALLOC_CAP_SPIRAM;
-#else
-    // Without PSRAM the full 480×480 RGB565 canvas (460 KB) won't fit. Cap
-    // the canvas so the buffer stays under ~80 KB, leaving the rest of
-    // internal SRAM free for LVGL, NimBLE, and the audio/PMU stacks. The
-    // canvas is centered, so the cost is extra black border around the
-    // pixel art — not cropping.
-    const uint32_t canvas_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-    const int MAX_CELL_NO_PSRAM = 10;  // 10*20=200; 200*200*2=78 KB
-    if (cell > MAX_CELL_NO_PSRAM) cell = MAX_CELL_NO_PSRAM;
-#endif
-
-    canvas_w = GRID * cell;
-    canvas_h = GRID * cell;
-
-    canvas_buf = (uint16_t*)heap_caps_malloc(canvas_w * canvas_h * 2, canvas_caps);
-    row_buf    = (uint16_t*)heap_caps_malloc(canvas_w * 2,             canvas_caps);
-    if (!canvas_buf || !row_buf) {
-        Serial.println("splash: failed to alloc canvas buffer");
-        return;
-    }
-
+    // Shared full-screen black container — the splash background.
     splash_container = lv_obj_create(parent);
     lv_obj_set_size(splash_container, c.width, c.height);
     lv_obj_set_pos(splash_container, 0, 0);
@@ -196,9 +259,46 @@ void splash_init(lv_obj_t *parent) {
     lv_obj_set_style_pad_all(splash_container, 0, 0);
     lv_obj_clear_flag(splash_container, LV_OBJ_FLAG_SCROLLABLE);
 
+#if SPLASH_DIRECT_DRAW
+    // Direct-to-panel path (no PSRAM): no LVGL canvas. Compute on-screen cell
+    // size + centering, and a scratch band buffer sized for one grid-row strip
+    // across the square art (GRID*scr_cell × scr_cell). On the C6 that's
+    // 480×24×2 ≈ 23 KB of internal SRAM.
+    int mind = (c.width < c.height) ? c.width : c.height;
+    scr_cell = mind / GRID;
+    int side = GRID * scr_cell;
+    scr_offx = (c.width  - side) / 2;
+    scr_offy = (c.height - side) / 2;
+    strip_buf = (uint16_t*)heap_caps_malloc((size_t)side * scr_cell * 2,
+                                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!strip_buf) {
+        Serial.println("splash: strip buffer alloc failed");
+        return;
+    }
+#else
+    // PSRAM path: render into an LVGL canvas at native size (no transform).
+    SplashGeometry geo = splash_compute_geometry(c.width, c.height, true);
+    cell                = geo.cell;
+    canvas_w            = geo.canvas_dim;
+    canvas_h            = geo.canvas_dim;
+    const int img_scale = geo.scale;
+
+    canvas_buf = (uint16_t*)heap_caps_malloc(canvas_w * canvas_h * 2, MALLOC_CAP_SPIRAM);
+    row_buf    = (uint16_t*)heap_caps_malloc(canvas_w * 2,            MALLOC_CAP_SPIRAM);
+    if (!canvas_buf || !row_buf) {
+        Serial.println("splash: failed to alloc canvas buffer");
+        return;
+    }
+
     canvas = lv_canvas_create(splash_container);
     lv_canvas_set_buffer(canvas, canvas_buf, canvas_w, canvas_h, LV_COLOR_FORMAT_RGB565);
+    if (img_scale != SPLASH_SCALE_UNITY) {
+        lv_image_set_antialias(canvas, false);
+        lv_image_set_pivot(canvas, canvas_w / 2, canvas_h / 2);
+        lv_image_set_scale(canvas, img_scale);
+    }
     lv_obj_center(canvas);
+#endif
 
     // Placeholder label (visible only when no animations are loaded)
     label_status = lv_label_create(splash_container);
@@ -217,8 +317,13 @@ void splash_init(lv_obj_t *parent) {
         show_placeholder();
     } else {
         lv_obj_add_flag(label_status, LV_OBJ_FLAG_HIDDEN);
+#if !SPLASH_DIRECT_DRAW
+        // PSRAM path pre-renders frame 0 into the canvas buffer. The direct
+        // path draws nothing here — render_frame() bails while inactive, so the
+        // splash never paints to the panel before it's actually shown.
         const splash_anim_def_t *a = &splash_anims[0];
         render_frame(a->frames[0], a->palette);
+#endif
         frame_started_ms = millis();
     }
 
@@ -227,6 +332,15 @@ void splash_init(lv_obj_t *parent) {
 
 void splash_tick(void) {
     if (!active || SPLASH_ANIM_COUNT == 0) return;
+
+#if SPLASH_DIRECT_DRAW
+    // Deferred full repaint after a (re)show — runs now that LVGL has drawn the
+    // black background this loop iteration.
+    if (force_full) {
+        const splash_anim_def_t *fa = &splash_anims[cur_anim];
+        if (fa->frame_count) render_frame(fa->frames[cur_frame], fa->palette);
+    }
+#endif
 
     // Auto-rotate to the next animation in the current group.
     if (millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
@@ -277,9 +391,15 @@ void splash_pick_for_current_rate(void) {
 bool splash_is_active(void) { return active; }
 
 void splash_show(void) {
-    splash_pick_for_current_rate();
+    splash_pick_for_current_rate();   // select animation; direct path defers the draw
     if (splash_container) lv_obj_clear_flag(splash_container, LV_OBJ_FLAG_HIDDEN);
     active = true;
+#if SPLASH_DIRECT_DRAW
+    // LVGL fills the container black once on unhide; that would erase a creature
+    // drawn now. Defer the full repaint to the next splash_tick(), which runs
+    // after lv_timer_handler() in the main loop.
+    force_full = true;
+#endif
 }
 
 void splash_hide(void) {
