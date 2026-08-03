@@ -337,13 +337,31 @@ build_payload_for_token() {
         s5h_util=${s5h_util:-0}; s5h_reset=${s5h_reset:-0}
         s7d_util=${s7d_util:-0}; s7d_reset=${s7d_reset:-0}
         s5h_status=${s5h_status:-unknown}
-        payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$s5h_status" -v now="$now" -v clk="$clock_fragment" -v chm="$chime_fragment" \
+
+        # Optional weekly Fable (scoped-model) limit. NOT in the rate-limit
+        # headers above — the scoped 7d_oi headers only appear on requests made
+        # WITH the scoped model, and polling with it would spend the allowance
+        # being measured. The OAuth usage endpoint (what `/usage` renders)
+        # reports it for free as a limits[] entry with kind "weekly_scoped";
+        # its reset equals the 7d reset. Accounts without a Fable allowance
+        # have no such entry -> "f" omitted -> firmware keeps today's layout.
+        local fable_fragment="" usage_json fable_pct
+        usage_json=$(curl -s "https://api.anthropic.com/api/oauth/usage" \
+            -H "Authorization: Bearer $token" \
+            -H "anthropic-beta: oauth-2025-04-20" \
+            -H "User-Agent: claude-code/2.1.5" 2>/dev/null)
+        fable_pct=$(echo "$usage_json" \
+            | grep -o '"kind":"weekly_scoped"[^}]*"percent":[0-9]*' | head -1 \
+            | grep -o '[0-9]*$')
+        [ -n "$fable_pct" ] && fable_fragment=",\"f\":$fable_pct"
+
+        payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$s5h_status" -v now="$now" -v fbl="$fable_fragment" -v clk="$clock_fragment" -v chm="$chime_fragment" \
             'BEGIN {
                 sp = sprintf("%.0f", u5 * 100);
                 sr = (r5 - now) / 60; sr = sr > 0 ? sprintf("%.0f", sr) : 0;
                 wp = sprintf("%.0f", u7 * 100);
                 wr = (r7 - now) / 60; wr = wr > 0 ? sprintf("%.0f", wr) : 0;
-                printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"acct\":\"pro\"%s%s,\"ok\":true}", sp, sr, wp, wr, st, clk, chm;
+                printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"acct\":\"pro\"%s%s%s,\"ok\":true}", sp, sr, wp, wr, st, fbl, clk, chm;
             }')
     else
         # Enterprise account — spending-limit model

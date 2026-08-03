@@ -47,6 +47,7 @@ RECONNECT_BACKOFF_CAP = 8  # D-05: fast-reconnect cap (seconds); keeps stacked r
 CONFIG_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "config"
 
 API_URL = "https://api.anthropic.com/v1/messages"
+OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
     "anthropic-beta": "oauth-2025-04-20",
@@ -183,6 +184,59 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
+async def fetch_fable_pct(token: str) -> int | None:
+    """Weekly Fable (scoped-model) utilization percent, or None when the account
+    has no Fable allowance (or the lookup failed).
+
+    This number is NOT in the /v1/messages rate-limit headers the poll reads:
+    the scoped headers (anthropic-ratelimit-unified-7d_oi-*) only appear on
+    requests made WITH the scoped model, and polling with that model would
+    spend the very allowance being measured — and fail outright for accounts
+    without it. The OAuth usage endpoint (the same data `/usage` renders)
+    reports it for free as a limits[] entry with kind "weekly_scoped" and a
+    model scope. Its reset equals the 7d reset, so no separate reset is needed.
+    Accounts without a Fable allowance have no such entry -> None -> the "f"
+    key is omitted and the firmware keeps today's layout.
+    """
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": API_HEADERS_TEMPLATE["anthropic-beta"],
+        "User-Agent": API_HEADERS_TEMPLATE["User-Agent"],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.get(OAUTH_USAGE_URL, headers=headers)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+    limits = data.get("limits") if isinstance(data, dict) else None
+    if not isinstance(limits, list):
+        return None
+    for lim in limits:
+        if (
+            isinstance(lim, dict)
+            and lim.get("kind") == "weekly_scoped"
+            and isinstance(lim.get("scope"), dict)
+            and lim["scope"].get("model")
+        ):
+            try:
+                return max(0, min(100, int(round(float(lim.get("percent"))))))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+async def add_fable_field(payload: dict, token: str) -> None:
+    """Add "f":<0-100> to a Pro/Max payload when the account has a weekly
+    Fable allowance. Omitted entirely otherwise — the firmware treats an
+    absent key as "no Fable allowance" and renders the classic layout."""
+    fable = await fetch_fable_pct(token)
+    if fable is not None:
+        payload["f"] = fable
+
+
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
@@ -232,6 +286,7 @@ async def poll_api(token: str) -> dict | None:
             "acct": "pro",
             "ok": True,
         }
+        await add_fable_field(payload, token)   # adds "f" iff a Fable allowance exists
     else:
         reset_ts = hdr("anthropic-ratelimit-unified-overage-reset")
         payload = {

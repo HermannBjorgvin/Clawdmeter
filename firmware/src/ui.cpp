@@ -36,6 +36,14 @@ struct Layout {
     int16_t usage_bar_y;
     int16_t usage_reset_y;
     int16_t bar_h;
+    // Weekly-card Fable row — only rendered when the daemon sends a weekly
+    // Fable (scoped-model) percent; the card is pixel-identical without it.
+    int16_t fable_main_bar_y;  // main weekly bar y while the Fable row is shown
+    int16_t fable_main_bar_h;  // main weekly bar height while the Fable row is shown
+    int16_t fable_row_y;       // Fable thin-bar y
+    int16_t fable_bar_h;       // Fable thin-bar height
+    int16_t fable_bar_w;       // Fable thin-bar width; 0 = text-only fallback (small screens)
+    const lv_font_t* fable_font;  // "All models" / "Fable" / percent labels
     int16_t panel_pad_x, panel_pad_y;
     int16_t pill_pad_x, pill_pad_y;
     const lv_font_t* title_font;     // screen title / clock
@@ -109,6 +117,12 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 16;
         L.usage_bar_y = 56;
         L.usage_reset_y = 94;
+        L.fable_main_bar_y = 52;
+        L.fable_main_bar_h = 14;
+        L.fable_row_y = 76;
+        L.fable_bar_h = 12;
+        L.fable_bar_w = 120;
+        L.fable_font = &font_styrene_16;
         L.bt_info_panel_h = 160;
         L.bt_reset_zone_h = 110;
         L.bt_title_font    = &font_tiempos_56;
@@ -123,6 +137,12 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 12;
         L.usage_bar_y = 48;
         L.usage_reset_y = 78;
+        L.fable_main_bar_y = 46;
+        L.fable_main_bar_h = 12;
+        L.fable_row_y = 64;
+        L.fable_bar_h = 10;
+        L.fable_bar_w = 90;
+        L.fable_font = &font_styrene_14;
         L.bt_info_panel_h = 140;
         L.bt_reset_zone_h = 90;
         L.bt_title_font    = &font_tiempos_34;
@@ -142,6 +162,14 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_bar_y = 30;
         L.usage_reset_y = 46;
         L.bar_h = 12;
+        // No room for a second bar row in a 74px panel: the Fable reading
+        // degrades to right-aligned text on the shared reset row.
+        L.fable_main_bar_y = 30;
+        L.fable_main_bar_h = 12;
+        L.fable_row_y = 0;
+        L.fable_bar_h = 0;
+        L.fable_bar_w = 0;
+        L.fable_font = &font_styrene_14;
         L.panel_pad_x = 10;
         L.panel_pad_y = 6;
         L.pill_pad_x = 8;
@@ -210,6 +238,12 @@ static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 static lv_obj_t* panel_session = nullptr;
 static lv_obj_t* panel_weekly = nullptr;
+// Fable row inside panel_weekly — hidden unless the daemon reports a weekly
+// Fable (scoped-model) allowance. Shares the Weekly reset line (same instant).
+static lv_obj_t* lbl_fable_allmodels = nullptr;  // "All models" caption for the main bar
+static lv_obj_t* lbl_fable_name = nullptr;       // "Fable"
+static lv_obj_t* bar_fable = nullptr;            // thin Fable bar
+static lv_obj_t* lbl_fable_pct = nullptr;        // Fable percent (or "Fable NN%" in text-only mode)
 // Enterprise-only widgets inside panel_session
 static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
 static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
@@ -528,6 +562,30 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
 
+    // Fable row widgets — created hidden; ui_update positions and reveals them
+    // only when the payload carries a weekly Fable percent.
+    lbl_fable_allmodels = lv_label_create(panel_weekly);
+    lv_label_set_text(lbl_fable_allmodels, "All models");
+    lv_obj_set_style_text_font(lbl_fable_allmodels, L.fable_font, 0);
+    lv_obj_set_style_text_color(lbl_fable_allmodels, COL_DIM, 0);
+    lv_obj_add_flag(lbl_fable_allmodels, LV_OBJ_FLAG_HIDDEN);
+
+    lbl_fable_name = lv_label_create(panel_weekly);
+    lv_label_set_text(lbl_fable_name, "Fable");
+    lv_obj_set_style_text_font(lbl_fable_name, L.fable_font, 0);
+    lv_obj_set_style_text_color(lbl_fable_name, COL_DIM, 0);
+    lv_obj_add_flag(lbl_fable_name, LV_OBJ_FLAG_HIDDEN);
+
+    bar_fable = make_bar(panel_weekly, 0, L.fable_row_y,
+                         L.fable_bar_w > 0 ? L.fable_bar_w : 10, L.fable_bar_h > 0 ? L.fable_bar_h : 10);
+    lv_obj_add_flag(bar_fable, LV_OBJ_FLAG_HIDDEN);
+
+    lbl_fable_pct = lv_label_create(panel_weekly);
+    lv_label_set_text(lbl_fable_pct, "");
+    lv_obj_set_style_text_font(lbl_fable_pct, L.fable_font, 0);
+    lv_obj_set_style_text_color(lbl_fable_pct, COL_TEXT, 0);
+    lv_obj_add_flag(lbl_fable_pct, LV_OBJ_FLAG_HIDDEN);
+
     build_pair_group(usage_container);
     build_idle_group(usage_container);
 
@@ -636,6 +694,47 @@ void ui_update(const UsageData* data) {
 
     lv_bar_set_value(bar_session, s_pct, LV_ANIM_ON);
     lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
+
+    // Weekly Fable (scoped-model) allowance — only some plans have one. The
+    // sentinel is key-absence (-1), never 0: 0% used is a real reading. With no
+    // allowance every Fable widget stays hidden and the main bar keeps its
+    // original geometry, so the card renders exactly as it always has.
+    bool show_fable = !data->enterprise && data->fable_pct >= 0.0f;
+    bool fable_bar_mode = show_fable && L.fable_bar_w > 0;
+    lv_obj_set_pos(bar_weekly, 0, fable_bar_mode ? L.fable_main_bar_y : L.usage_bar_y);
+    lv_obj_set_height(bar_weekly, fable_bar_mode ? L.fable_main_bar_h : L.bar_h);
+    if (show_fable) {
+        int f_pct = (int)(data->fable_pct + 0.5f);
+        int lbl_y;  // centers the row's labels on the thin bar
+        if (fable_bar_mode) {
+            lbl_y = L.fable_row_y +
+                    (L.fable_bar_h - (int)lv_font_get_line_height(L.fable_font)) / 2;
+            lv_label_set_text_fmt(lbl_fable_pct, "%d%%", f_pct);
+            lv_obj_align(lbl_fable_pct, LV_ALIGN_TOP_RIGHT, 0, lbl_y);
+            lv_obj_align_to(bar_fable, lbl_fable_pct, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+            lv_obj_align_to(lbl_fable_name, bar_fable, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+            lv_obj_align(lbl_fable_allmodels, LV_ALIGN_TOP_LEFT, 0, lbl_y);
+            lv_bar_set_value(bar_fable, f_pct, LV_ANIM_ON);
+            lv_obj_set_style_bg_color(bar_fable, pct_color(data->fable_pct), LV_PART_INDICATOR);
+            lv_obj_clear_flag(lbl_fable_allmodels, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(lbl_fable_name, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(bar_fable, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            // Small screens: no room for a second bar row — the Fable reading
+            // rides the shared reset row as right-aligned text.
+            lv_label_set_text_fmt(lbl_fable_pct, "Fable %d%%", f_pct);
+            lv_obj_align(lbl_fable_pct, LV_ALIGN_TOP_RIGHT, 0, L.usage_reset_y);
+            lv_obj_add_flag(lbl_fable_allmodels, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(lbl_fable_name, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(bar_fable, LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_obj_clear_flag(lbl_fable_pct, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(lbl_fable_allmodels, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_fable_name, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(bar_fable, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_fable_pct, LV_OBJ_FLAG_HIDDEN);
+    }
 
     if (data->enterprise) {
         // Period box: time % + dynamic pace color + "Resets <date>" label

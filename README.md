@@ -227,6 +227,8 @@ JSON payload format (written to RX):
 
 Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
 
+Optional fields (omitted when not applicable; the firmware treats absence as "feature off"): `f` = weekly Fable (scoped-model) % for plans that have a separate Fable allowance — it shares the weekly reset, so no separate reset field is sent.
+
 ## Recompiling fonts
 
 The `firmware/src/font_*.c` files are pre-compiled LVGL bitmap fonts.
