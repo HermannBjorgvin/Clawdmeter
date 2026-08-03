@@ -36,13 +36,6 @@ struct Layout {
     int16_t usage_bar_y;
     int16_t usage_reset_y;
     int16_t bar_h;
-    // Weekly-card Fable split — only rendered when the daemon sends a weekly
-    // Fable (scoped-model) percent; the card is pixel-identical without it.
-    // The weekly bar keeps its exact position and outer envelope but splits
-    // into two stacked stripes (all-models on top, Fable in blue below), and a
-    // "Fable NN%" legend rides the right end of the shared reset row. Stripe
-    // geometry derives from usage_bar_y/bar_h, so only the legend font is here.
-    const lv_font_t* fable_font;  // "Fable NN%" legend on the reset row
     int16_t panel_pad_x, panel_pad_y;
     int16_t pill_pad_x, pill_pad_y;
     const lv_font_t* title_font;     // screen title / clock
@@ -116,7 +109,6 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 16;
         L.usage_bar_y = 56;
         L.usage_reset_y = 94;
-        L.fable_font = &font_styrene_16;
         L.bt_info_panel_h = 160;
         L.bt_reset_zone_h = 110;
         L.bt_title_font    = &font_tiempos_56;
@@ -131,7 +123,6 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 12;
         L.usage_bar_y = 48;
         L.usage_reset_y = 78;
-        L.fable_font = &font_styrene_14;
         L.bt_info_panel_h = 140;
         L.bt_reset_zone_h = 90;
         L.bt_title_font    = &font_tiempos_34;
@@ -151,7 +142,6 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_bar_y = 30;
         L.usage_reset_y = 46;
         L.bar_h = 12;
-        L.fable_font = &font_styrene_12;
         L.panel_pad_x = 10;
         L.panel_pad_y = 6;
         L.pill_pad_x = 8;
@@ -221,11 +211,16 @@ static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 static lv_obj_t* panel_session = nullptr;
 static lv_obj_t* panel_weekly = nullptr;
-// Fable stripe inside panel_weekly — hidden unless the daemon reports a weekly
-// Fable (scoped-model) allowance. Shares the Weekly reset line (same instant).
-static lv_obj_t* lbl_fable_name = nullptr;       // "Fable" legend text (blue)
-static lv_obj_t* bar_fable = nullptr;            // lower stripe of the split weekly bar
-static lv_obj_t* lbl_fable_pct = nullptr;        // Fable percent in the legend
+// Weekly-card face flip — accounts with a weekly Fable (scoped-model)
+// allowance alternate the Weekly card between its classic face and a Fable
+// face (blue bar, "Fable" pill), switching in step with the status ticker's
+// word change so the screen feels coordinated. Both limits reset at the same
+// instant, so the reset line is truthful on either face. Without an
+// allowance the card never flips and renders exactly as it always has.
+static float cached_weekly_pct = 0;     // last payload's weekly (all-models) %
+static int   cached_weekly_reset = -1;  // last payload's weekly reset minutes
+static float cached_fable_pct = -1;     // last payload's Fable %; -1 = no allowance
+static bool  fable_face = false;        // which face the Weekly card shows
 // Enterprise-only widgets inside panel_session
 static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
 static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
@@ -544,28 +539,6 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
 
-    // Fable widgets — created hidden; ui_update positions and reveals them
-    // only when the payload carries a weekly Fable percent. The stripe reuses
-    // the weekly bar's exact envelope: top half = bar_weekly, bottom half =
-    // bar_fable, 2px apart.
-    int fable_stripe_h = (L.bar_h - 2) / 2;
-    bar_fable = make_bar(panel_weekly, 0, L.usage_bar_y + fable_stripe_h + 2,
-                         L.content_w - 2 * L.panel_pad_x, fable_stripe_h);
-    lv_obj_set_style_bg_color(bar_fable, COL_BLUE, LV_PART_INDICATOR);
-    lv_obj_add_flag(bar_fable, LV_OBJ_FLAG_HIDDEN);
-
-    lbl_fable_name = lv_label_create(panel_weekly);
-    lv_label_set_text(lbl_fable_name, "Fable");
-    lv_obj_set_style_text_font(lbl_fable_name, L.fable_font, 0);
-    lv_obj_set_style_text_color(lbl_fable_name, COL_BLUE, 0);
-    lv_obj_add_flag(lbl_fable_name, LV_OBJ_FLAG_HIDDEN);
-
-    lbl_fable_pct = lv_label_create(panel_weekly);
-    lv_label_set_text(lbl_fable_pct, "");
-    lv_obj_set_style_text_font(lbl_fable_pct, L.fable_font, 0);
-    lv_obj_set_style_text_color(lbl_fable_pct, COL_TEXT, 0);
-    lv_obj_add_flag(lbl_fable_pct, LV_OBJ_FLAG_HIDDEN);
-
     build_pair_group(usage_container);
     build_idle_group(usage_container);
 
@@ -575,6 +548,27 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_font(lbl_anim, L.anim_font, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
+}
+
+// Draw the Weekly card's current face from the cached payload values. The
+// classic face is byte-for-byte today's rendering; the Fable face swaps the
+// number, fills the bar in THEME_BLUE and relabels the pill "Fable". The
+// reset line is identical on both faces (the two limits reset together).
+// Face flips pass animate=false so the bar snaps rather than sliding
+// 95→73→95 every few seconds.
+static void render_weekly_face(bool animate) {
+    bool fable = fable_face && cached_fable_pct >= 0.0f;
+    float pct = fable ? cached_fable_pct : cached_weekly_pct;
+    int p = (int)(pct + 0.5f);
+    lv_label_set_text(lbl_weekly_label, fable ? "Fable" : "Weekly");
+    lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", p);
+    lv_bar_set_value(bar_weekly, p, animate ? LV_ANIM_ON : LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(bar_weekly,
+                              fable ? COL_BLUE : pct_color(cached_weekly_pct),
+                              LV_PART_INDICATOR);
+    char buf[48];
+    format_reset_time(cached_weekly_reset, buf, sizeof(buf));
+    lv_label_set_text(lbl_weekly_reset, buf);
 }
 
 // ======== Public API ========
@@ -676,33 +670,18 @@ void ui_update(const UsageData* data) {
     lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
 
     // Weekly Fable (scoped-model) allowance — only some plans have one. The
-    // sentinel is key-absence (-1), never 0: 0% used is a real reading. With no
-    // allowance every Fable widget stays hidden and the weekly bar keeps its
-    // full height, so the card renders exactly as it always has. With one, the
-    // bar splits in half inside its exact envelope — all-models stripe on top,
-    // blue Fable stripe below — and a "Fable NN%" legend rides the right end
-    // of the shared reset row (both limits reset at the same instant).
-    bool show_fable = !data->enterprise && data->fable_pct >= 0.0f;
-    int fable_stripe_h = (L.bar_h - 2) / 2;
-    lv_obj_set_height(bar_weekly, show_fable ? fable_stripe_h : L.bar_h);
-    if (show_fable) {
-        int f_pct = (int)(data->fable_pct + 0.5f);
-        lv_bar_set_value(bar_fable, f_pct, LV_ANIM_ON);
-        // Legend, vertically centered against the reset text's line box.
-        lv_label_set_text_fmt(lbl_fable_pct, "%d%%", f_pct);
-        int legend_y = L.usage_reset_y +
-                       ((int)lv_font_get_line_height(L.reset_font) -
-                        (int)lv_font_get_line_height(L.fable_font)) / 2;
-        lv_obj_align(lbl_fable_pct, LV_ALIGN_TOP_RIGHT, 0, legend_y);
-        lv_obj_align_to(lbl_fable_name, lbl_fable_pct, LV_ALIGN_OUT_LEFT_MID, -6, 0);
-        lv_obj_clear_flag(bar_fable, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(lbl_fable_name, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(lbl_fable_pct, LV_OBJ_FLAG_HIDDEN);
+    // sentinel is key-absence (-1), never 0: 0% used is a real reading. Cache
+    // the weekly numbers so ui_tick_anim can redraw the card's other face
+    // between payloads; with no allowance the face pins to classic Weekly and
+    // the card renders exactly as it always has.
+    if (data->enterprise) {
+        cached_fable_pct = -1.0f;
     } else {
-        lv_obj_add_flag(bar_fable, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_fable_name, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_fable_pct, LV_OBJ_FLAG_HIDDEN);
+        cached_weekly_pct = data->weekly_pct;
+        cached_weekly_reset = data->weekly_reset_mins;
+        cached_fable_pct = data->fable_pct;
     }
+    if (cached_fable_pct < 0.0f) fable_face = false;
 
     if (data->enterprise) {
         // Period box: time % + dynamic pace color + "Resets <date>" label
@@ -717,12 +696,7 @@ void ui_update(const UsageData* data) {
                  pace_hex, pace_text, data->reset_date);
         lv_label_set_text(lbl_weekly_reset, buf);
     } else {
-        int w_pct = (int)(data->weekly_pct + 0.5f);
-        lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
-        lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
-        lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
-        format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
-        lv_label_set_text(lbl_weekly_reset, buf);
+        render_weekly_face(true);
     }
 }
 
@@ -780,6 +754,12 @@ void ui_tick_anim(void) {
     if (now - anim_msg_start >= ANIM_MSG_MS) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
         anim_msg_start = now;
+        // Accounts with a weekly Fable allowance flip the Weekly card's face
+        // in step with the ticker word, so the whole screen changes together.
+        if (cached_fable_pct >= 0.0f && view_state == 2) {
+            fable_face = !fable_face;
+            render_weekly_face(false);
+        }
     }
 
     if (now - anim_last_ms < spinner_ms[anim_spinner_idx]) return;
