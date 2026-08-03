@@ -608,6 +608,72 @@ def test_start_notify_oserror_does_not_crash_connect_and_run():
 
 
 # ---------------------------------------------------------------------------
+# #89: start_notify() must be BOUNDED — a half-open link can't wedge the daemon
+# ---------------------------------------------------------------------------
+
+def test_start_notify_hang_times_out_and_proceeds(capsys):
+    """#89 regression: on a half-open link WinRT's CCCD-write confirmation never
+    arrives, so start_notify() never returns at all. Unbounded, that await wedges
+    the daemon between "Connected" and the first poll — stale data, nothing
+    logged, no recovery until a manual restart. The except block does not help:
+    it catches a raised error, never an await that hangs forever.
+
+    setup_refresh_subscription() must bound the subscribe and return, since the
+    refresh subscription is optional (the poll loop runs without it).
+
+    The real 10s bound is shortened through the module's asyncio.wait_for so the
+    test is fast while still exercising the genuine timeout path. The real
+    wait_for is captured before patching — calling the patched name from inside
+    the replacement would recurse.
+    """
+    real_wait_for = asyncio.wait_for
+
+    async def never_returns(*_args, **_kwargs):
+        await asyncio.Event().wait()  # never set — the confirmation that never comes
+
+    mock_client = AsyncMock()
+    mock_client.start_notify = AsyncMock(side_effect=never_returns)
+
+    seen_timeouts = []
+
+    async def fast_wait_for(coro, timeout):
+        seen_timeouts.append(timeout)
+        return await real_wait_for(coro, 0.05)
+
+    session = Session(mock_client)
+
+    with patch("daemon.claude_usage_daemon_windows.asyncio.wait_for",
+               side_effect=fast_wait_for):
+        _run(session.setup_refresh_subscription())  # must return, not hang
+
+    # The subscribe really is wrapped, with the intended bound.
+    assert seen_timeouts == [10]
+    assert mock_client.start_notify.call_count == 1
+    assert "Refresh subscription timed out" in capsys.readouterr().out
+
+
+def test_start_notify_bleak_error_still_reports_unavailable(capsys):
+    """The raised-error path must survive the added timeout branch.
+
+    Together with the test above this pins both branches, which is what guards
+    the clause ordering. asyncio.TimeoutError IS the builtin TimeoutError on
+    Python 3.11+, and TimeoutError subclasses OSError, so moving the
+    (BleakError, ValueError, OSError) clause back above the asyncio.TimeoutError
+    one makes the timeout branch dead code — the hang test then fails with an
+    empty "Refresh subscription unavailable: ". This test fails instead if the
+    timeout branch is ever widened enough to capture genuine raised errors.
+    """
+    mock_client = AsyncMock()
+    mock_client.start_notify = AsyncMock(side_effect=BleakError("Unreachable"))
+    session = Session(mock_client)
+
+    _run(session.setup_refresh_subscription())  # must not raise
+
+    assert mock_client.start_notify.call_count == 1
+    assert "Refresh subscription unavailable: Unreachable" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # SC#2 field report: write_payload() OSError must not crash the daemon thread
 # ---------------------------------------------------------------------------
 
