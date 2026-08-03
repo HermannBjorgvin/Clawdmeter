@@ -770,11 +770,14 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                         used_successfully = True
                 elif dead:
                     # No live token in any config dir (missing, or a 401/expired
-                    # token) -> show "No data" now instead of stale numbers.
+                    # token) -> show "No data" now instead of stale numbers. Guard
+                    # last_poll on the write result (like the data path) so a
+                    # failed beat retries next tick instead of throttling what may
+                    # be a healthy link for a full POLL_INTERVAL.
                     log("No usable token; signalling no-data to device — run "
                         "`claude login` or use the CLI to let Claude Code renew it")
-                    await session.write_payload({"ok": False})
-                    last_poll = time.time()
+                    if await session.write_payload({"ok": False}):
+                        last_poll = time.time()
                 else:
                     # Transient poll failure (a live token that didn't answer this
                     # cycle) -> stay silent and retry next tick.
