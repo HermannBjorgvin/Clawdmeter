@@ -507,6 +507,142 @@ def _read_expiry() -> str:
     return "expiry unknown"
 
 
+# --- Multi config-dir support (#97, mirrors #95) ---------------------------
+# Claude Code can run against more than one config dir (e.g. ~/.claude for a
+# personal plan and ~/.claude-work for a work plan, selected via
+# CLAUDE_CONFIG_DIR). When the `config_dirs` option is set, the daemon polls
+# each dir's token every cycle and shows whichever plan is "active".
+
+
+def read_config_dirs() -> list[Path]:
+    """Claude config dirs to poll, from the `config_dirs` option (comma list).
+
+    Returns [] when unset/blank so the caller keeps the existing read_token()
+    candidate-list behavior (env overrides + probe list) — zero change for
+    current single-plan setups (#97). Unlike #95's Linux/macOS daemons there
+    is no single default dir to substitute here (the default is a probe LIST),
+    hence [] rather than [~/.claude]. ~ is expanded; blank entries dropped.
+    """
+    raw = ""
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "config_dirs":
+                    raw = val.strip()
+    except OSError:
+        pass
+    if not raw:
+        return []
+    return [Path(p.strip()).expanduser() for p in raw.split(",") if p.strip()]
+
+
+def read_token_for(config_dir: Path) -> str | None:
+    """Read the OAuth token for one configured dir (<dir>/.credentials.json).
+
+    Mirrors #95's read_token_for. Windows keeps tokens in plain files (no
+    Keychain analogue), so there is no fallback here; the env-override /
+    candidate probing stays in read_token() for the unset-config_dirs path.
+    """
+    try:
+        return _extract_access_token(
+            (config_dir / ".credentials.json").read_text(encoding="utf-8")
+        )
+    except OSError:
+        return None
+
+
+class PlanSelector:
+    """Decide which config dir's plan is "active" across polls.
+
+    "Active" = the plan whose session % rose most recently (recent API activity).
+    A rise stamps a monotonic poll counter, so the choice is sticky and a window
+    reset (a drop to 0) isn't mistaken for use. Before any rise is seen (startup)
+    the highest current session % wins. Mirrors #95's Linux/macOS daemons.
+    """
+
+    def __init__(self) -> None:
+        self.prev_s: dict[Path, int] = {}
+        self.last_active: dict[Path, int] = {}
+        self.seq = 0
+
+    def choose(self, sessions: dict[Path, int]) -> Path:
+        """Update state from this cycle's {dir: session_pct} and return the active dir."""
+        self.seq += 1
+        for d, s in sessions.items():
+            if d in self.prev_s and s > self.prev_s[d]:
+                self.last_active[d] = self.seq
+            self.prev_s[d] = s
+        # Most recent activity wins; ties (and the startup case) break by highest %.
+        return max(sessions, key=lambda d: (self.last_active.get(d, 0), sessions[d]))
+
+
+# Module-level so the active-plan state survives reconnects (#95).
+_SELECTOR = PlanSelector()
+
+
+async def poll_active_payload(selector: PlanSelector = _SELECTOR, tray_state=None) -> dict | None:
+    """Poll the configured config dir(s) and return the active plan's payload.
+
+    With `config_dirs` unset this is EXACTLY the old single-token path —
+    read_token() candidate list, "No token" toast, AuthError toast — so current
+    users see zero change (#97). With it set, every dir is polled and the
+    PlanSelector picks whose payload to send; the "token expired" toast then
+    fires only when NO dir yields a payload, so a working plan is never hidden
+    behind a sibling plan's expired token.
+    """
+    dirs = read_config_dirs()
+    if not dirs:
+        token = read_token()  # D-09: fresh each cycle
+        if not token:
+            log("No token; skipping poll")
+            if tray_state:
+                tray_state.set_error("token expired — run claude login")
+            return None
+        try:
+            return await poll_api(token)
+        except AuthError:
+            # Real 401/403 — token genuinely needs a refresh.
+            if tray_state:
+                tray_state.set_error("token expired — run claude login")
+            return None
+
+    payloads: dict[Path, dict] = {}
+    sessions: dict[Path, int] = {}
+    token_seen = False
+    auth_rejected = False
+    for d in dirs:
+        token = read_token_for(d)  # D-09: fresh each cycle
+        if not token:
+            log(f"No token in {d}; skipping")
+            continue
+        token_seen = True
+        try:
+            payload = await poll_api(token)
+        except AuthError:
+            log(f"Auth rejected for {d}")
+            auth_rejected = True
+            continue
+        if payload is not None:
+            payloads[d] = payload
+            sessions[d] = int(payload.get("s", 0) or 0)
+    if not payloads:
+        log("No usable config dir this cycle")
+        # Toast only for token trouble (missing or rejected everywhere). An
+        # all-TRANSIENT cycle (network/DNS, timeout, 5xx) must NOT fire the
+        # "token expired" toast — same rule as single-dir mode (SC#5).
+        if tray_state and (auth_rejected or not token_seen):
+            tray_state.set_error("token expired — run claude login")
+        return None
+    active = selector.choose(sessions)
+    if len(dirs) > 1:
+        log(f"Active plan: {active} (s={sessions[active]})")
+    return payloads[active]
+
+
 async def _wait_first(*events: asyncio.Event, timeout: float) -> None:
     """Return when any of `events` is set, or after `timeout` seconds.
 
@@ -595,39 +731,30 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
-                token = read_token()  # D-09: fresh each cycle
-                if not token:
-                    log("No token; skipping poll")
-                    if tray_state:
-                        tray_state.set_error("token expired — run claude login")
-                else:
-                    try:
-                        payload = await poll_api(token)
-                    except AuthError:
-                        # Real 401/403 — token genuinely needs a refresh.
+                # #97: single- and multi-dir polling both route through
+                # poll_active_payload, which owns the tray-toast decision.
+                payload = await poll_active_payload(tray_state=tray_state)
+                if payload is not None:
+                    if await session.write_payload(payload):
+                        last_poll = time.time()
+                        used_successfully = True
+                        consecutive_failures = 0  # D-03: reset on success
                         if tray_state:
-                            tray_state.set_error("token expired — run claude login")
-                        payload = None
-                    if payload is not None:
-                        if await session.write_payload(payload):
-                            last_poll = time.time()
-                            used_successfully = True
-                            consecutive_failures = 0  # D-03: reset on success
-                            if tray_state:
-                                tray_state.set_connected(time.time())
-                        else:
-                            consecutive_failures += 1
-                            if consecutive_failures >= ZOMBIE_BREAK_LIMIT:
-                                log(
-                                    f"Zombie link detected ({consecutive_failures} consecutive"
-                                    f" write failures); abandoning connection"
-                                )
-                                break
-                    # else: payload is None from a TRANSIENT failure (network/DNS,
-                    # timeout, rate-limit, 5xx). poll_api already logged it; do NOT
-                    # toast "token expired" — that mislabeled a boot-time DNS blip
-                    # as an auth problem (SC#5). Leave tray state unchanged; the next
-                    # tick retries and set_connected() recovers it.
+                            tray_state.set_connected(time.time())
+                    else:
+                        consecutive_failures += 1
+                        if consecutive_failures >= ZOMBIE_BREAK_LIMIT:
+                            log(
+                                f"Zombie link detected ({consecutive_failures} consecutive"
+                                f" write failures); abandoning connection"
+                            )
+                            break
+                # else: payload is None — poll_active_payload already logged why
+                # and toasted only for genuine token trouble. A TRANSIENT failure
+                # (network/DNS, timeout, rate-limit, 5xx) must NOT toast "token
+                # expired" — that mislabeled a boot-time DNS blip as an auth
+                # problem (SC#5). Leave tray state unchanged; the next tick
+                # retries and set_connected() recovers it.
 
             # Wake on a refresh request OR a stop, whichever comes first. Waking
             # promptly on stop_event is what lets the finally below run
