@@ -89,7 +89,10 @@ TOOL_CODES = {
 
 DEFAULT_BUDGET_BYTES = 180   # conservative fit target; see sessions_budget_bytes
 LABEL_FLOOR = 8              # labels never elide below this many characters
-ELLIPSIS = "…"
+# ASCII on purpose: the firmware's Styrene fonts cover 32..126 only, so a real
+# U+2026 renders as tofu on the device. Same UTF-8 byte count (3), so the
+# payload byte-budget math is unaffected.
+ELLIPSIS = "..."
 
 ROSTER_GRACE_S = 30          # roster absence tolerated this long (first hook may
                              # beat the roster file)
