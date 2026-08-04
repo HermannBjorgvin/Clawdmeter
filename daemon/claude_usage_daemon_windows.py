@@ -184,19 +184,22 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
-async def fetch_fable_pct(token: str) -> int | None:
-    """Weekly Fable (scoped-model) utilization percent, or None when the account
-    has no Fable allowance (or the lookup failed).
+async def fetch_scoped_weekly(token: str) -> list[dict] | None:
+    """Every weekly scoped-model limit as [{"n": <label>, "p": <0-100>}, ...],
+    or None when the account has none (or the lookup failed).
 
-    This number is NOT in the /v1/messages rate-limit headers the poll reads:
-    the scoped headers (anthropic-ratelimit-unified-7d_oi-*) only appear on
-    requests made WITH the scoped model, and polling with that model would
-    spend the very allowance being measured — and fail outright for accounts
-    without it. The OAuth usage endpoint (the same data `/usage` renders)
-    reports it for free as a limits[] entry with kind "weekly_scoped" and a
-    model scope. Its reset equals the 7d reset, so no separate reset is needed.
-    Accounts without a Fable allowance have no such entry -> None -> the "f"
-    key is omitted and the firmware keeps today's layout.
+    These numbers are NOT in the /v1/messages rate-limit headers the poll
+    reads: the scoped headers (anthropic-ratelimit-unified-7d_oi-*) only
+    appear on requests made WITH the scoped model, and polling with that model
+    would spend the very allowance being measured — and fail outright for
+    accounts without it. The OAuth usage endpoint (the same data `/usage`
+    renders) reports them for free as limits[] entries with kind
+    "weekly_scoped" and a model scope. Their reset equals the 7d reset, so no
+    separate reset is sent. The label is the API's own display name (today
+    only "Fable" exists; a future scoped model — e.g. a returning Sonnet
+    bucket — rides along automatically). Accounts without scoped limits have
+    no such entries -> None -> the "ws" key is omitted and the firmware keeps
+    today's layout.
     """
     headers = {
         "Authorization": f"Bearer {token}",
@@ -214,27 +217,36 @@ async def fetch_fable_pct(token: str) -> int | None:
     limits = data.get("limits") if isinstance(data, dict) else None
     if not isinstance(limits, list):
         return None
+    scoped = []
     for lim in limits:
-        if (
+        if not (
             isinstance(lim, dict)
             and lim.get("kind") == "weekly_scoped"
             and isinstance(lim.get("scope"), dict)
-            and lim["scope"].get("model")
         ):
-            try:
-                return max(0, min(100, int(round(float(lim.get("percent"))))))
-            except (TypeError, ValueError):
-                return None
-    return None
+            continue
+        model = lim["scope"].get("model")
+        if not isinstance(model, dict):
+            continue
+        name = model.get("display_name") or model.get("id")
+        if not isinstance(name, str) or not name:
+            continue
+        try:
+            pct = max(0, min(100, int(round(float(lim.get("percent"))))))
+        except (TypeError, ValueError):
+            continue
+        scoped.append({"n": name, "p": pct})
+    return scoped or None
 
 
-async def add_fable_field(payload: dict, token: str) -> None:
-    """Add "f":<0-100> to a Pro/Max payload when the account has a weekly
-    Fable allowance. Omitted entirely otherwise — the firmware treats an
-    absent key as "no Fable allowance" and renders the classic layout."""
-    fable = await fetch_fable_pct(token)
-    if fable is not None:
-        payload["f"] = fable
+async def add_scoped_weekly_field(payload: dict, token: str) -> None:
+    """Add "ws":[{"n","p"},...] to a Pro/Max payload when the account has
+    weekly scoped-model limits. Omitted entirely otherwise — the firmware
+    treats an absent key as "no scoped limits" and renders the classic
+    layout."""
+    scoped = await fetch_scoped_weekly(token)
+    if scoped:
+        payload["ws"] = scoped
 
 
 async def poll_api(token: str) -> dict | None:
@@ -286,7 +298,7 @@ async def poll_api(token: str) -> dict | None:
             "acct": "pro",
             "ok": True,
         }
-        await add_fable_field(payload, token)   # adds "f" iff a Fable allowance exists
+        await add_scoped_weekly_field(payload, token)   # adds "ws" iff scoped weekly limits exist
     else:
         reset_ts = hdr("anthropic-ratelimit-unified-overage-reset")
         payload = {

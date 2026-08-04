@@ -338,22 +338,28 @@ build_payload_for_token() {
         s7d_util=${s7d_util:-0}; s7d_reset=${s7d_reset:-0}
         s5h_status=${s5h_status:-unknown}
 
-        # Optional weekly Fable (scoped-model) limit. NOT in the rate-limit
-        # headers above — the scoped 7d_oi headers only appear on requests made
-        # WITH the scoped model, and polling with it would spend the allowance
-        # being measured. The OAuth usage endpoint (what `/usage` renders)
-        # reports it for free as a limits[] entry with kind "weekly_scoped";
-        # its reset equals the 7d reset. Accounts without a Fable allowance
-        # have no such entry -> "f" omitted -> firmware keeps today's layout.
-        local fable_fragment="" usage_json fable_pct
+        # Optional weekly scoped-model limits (today: Fable). NOT in the
+        # rate-limit headers above — the scoped 7d_oi headers only appear on
+        # requests made WITH the scoped model, and polling with it would spend
+        # the allowance being measured. The OAuth usage endpoint (what
+        # `/usage` renders) reports them for free as limits[] entries with
+        # kind "weekly_scoped"; their reset equals the 7d reset. Each entry
+        # becomes {"n":<label>,"p":<pct>} in a "ws" array, labeled with the
+        # API's own display name so future scoped models ride along. Accounts
+        # without scoped limits -> "ws" omitted -> firmware keeps today's
+        # layout.
+        local fable_fragment="" usage_json scoped_entries="" m p n
         usage_json=$(curl -s "https://api.anthropic.com/api/oauth/usage" \
             -H "Authorization: Bearer $token" \
             -H "anthropic-beta: oauth-2025-04-20" \
             -H "User-Agent: claude-code/2.1.5" 2>/dev/null)
-        fable_pct=$(echo "$usage_json" \
-            | grep -o '"kind":"weekly_scoped"[^}]*"percent":[0-9]*' | head -1 \
-            | grep -o '[0-9]*$')
-        [ -n "$fable_pct" ] && fable_fragment=",\"f\":$fable_pct"
+        while IFS= read -r m; do
+            [ -z "$m" ] && continue
+            p=$(echo "$m" | grep -o '"percent":[0-9]*' | head -1 | cut -d: -f2)
+            n=$(echo "$m" | grep -o '"display_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+            [ -n "$p" ] && [ -n "$n" ] && scoped_entries="$scoped_entries,{\"n\":\"$n\",\"p\":$p}"
+        done < <(echo "$usage_json" | grep -o '"kind":"weekly_scoped"[^{]*{"model":{[^}]*}')
+        [ -n "$scoped_entries" ] && fable_fragment=",\"ws\":[${scoped_entries#,}]"
 
         payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$s5h_status" -v now="$now" -v fbl="$fable_fragment" -v clk="$clock_fragment" -v chm="$chime_fragment" \
             'BEGIN {

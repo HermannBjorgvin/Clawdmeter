@@ -227,7 +227,7 @@ JSON payload format (written to RX):
 
 Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
 
-Optional fields (omitted when not applicable; the firmware treats absence as "feature off"): `f` = weekly Fable (scoped-model) % for plans that have a separate Fable allowance — it shares the weekly reset, so no separate reset field is sent.
+Optional fields (omitted when not applicable; the firmware treats absence as "feature off"): `ws` = weekly scoped-model limits for plans that meter specific models separately, as `[{"n":"Fable","p":75}, ...]` — one entry per scoped model, labeled with the API's own display name. They share the weekly reset, so no separate reset field is sent.
 
 ## Recompiling fonts
 

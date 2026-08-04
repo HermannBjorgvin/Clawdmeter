@@ -211,16 +211,19 @@ static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 static lv_obj_t* panel_session = nullptr;
 static lv_obj_t* panel_weekly = nullptr;
-// Weekly-card face flip — accounts with a weekly Fable (scoped-model)
-// allowance alternate the Weekly card between its classic face and a Fable
-// face (blue bar, "Fable" pill), switching in step with the status ticker's
-// word change so the screen feels coordinated. Both limits reset at the same
-// instant, so the reset line is truthful on either face. Without an
-// allowance the card never flips and renders exactly as it always has.
+// Weekly-card face rotation — accounts with weekly scoped-model limits
+// (today: Fable) rotate the Weekly card through 1+N faces: the classic
+// all-models face, then one face per scoped model (pill = the model's own
+// label from the payload; Fable fills blue, unrecognized models fill the
+// theme grey), switching in step with the status ticker's word change so the
+// screen feels coordinated. All weekly limits reset at the same instant, so
+// the reset line is truthful on every face. Without scoped limits the card
+// never rotates and renders exactly as it always has.
 static float cached_weekly_pct = 0;     // last payload's weekly (all-models) %
 static int   cached_weekly_reset = -1;  // last payload's weekly reset minutes
-static float cached_fable_pct = -1;     // last payload's Fable %; -1 = no allowance
-static bool  fable_face = false;        // which face the Weekly card shows
+static int   cached_scoped_count = 0;   // scoped models in the last payload; 0 = none
+static ScopedWeekly cached_scoped[MAX_SCOPED_WEEKLY];
+static int   weekly_face = 0;           // 0 = all models, i>0 = cached_scoped[i-1]
 // Enterprise-only widgets inside panel_session
 static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
 static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
@@ -550,22 +553,26 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
 }
 
-// Draw the Weekly card's current face from the cached payload values. The
-// classic face is byte-for-byte today's rendering; the Fable face swaps the
-// number, fills the bar in THEME_BLUE and relabels the pill "Fable". The
-// reset line is identical on both faces (the two limits reset together).
-// Face flips pass animate=false so the bar snaps rather than sliding
-// 95→73→95 every few seconds.
+// Draw the Weekly card's current face from the cached payload values. Face 0
+// is byte-for-byte today's rendering; scoped faces swap the number, relabel
+// the pill with the model's own label and fill the bar in THEME_BLUE for
+// Fable or the theme grey for a scoped model this firmware doesn't know.
+// The reset line is identical on every face (all weekly limits reset
+// together). Face flips pass animate=false so the bar snaps rather than
+// sliding 95→73→95 every few seconds.
 static void render_weekly_face(bool animate) {
-    bool fable = fable_face && cached_fable_pct >= 0.0f;
-    float pct = fable ? cached_fable_pct : cached_weekly_pct;
+    int idx = (weekly_face > cached_scoped_count) ? 0 : weekly_face;
+    bool scoped = idx > 0;
+    const ScopedWeekly* s = scoped ? &cached_scoped[idx - 1] : nullptr;
+    float pct = scoped ? s->pct : cached_weekly_pct;
     int p = (int)(pct + 0.5f);
-    lv_label_set_text(lbl_weekly_label, fable ? "Fable" : "Weekly");
+    lv_label_set_text(lbl_weekly_label, scoped ? s->name : "Weekly");
     lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", p);
     lv_bar_set_value(bar_weekly, p, animate ? LV_ANIM_ON : LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(bar_weekly,
-                              fable ? COL_BLUE : pct_color(cached_weekly_pct),
-                              LV_PART_INDICATOR);
+    lv_color_t fill = !scoped ? pct_color(cached_weekly_pct)
+                    : (strncmp(s->name, "Fable", 5) == 0) ? COL_BLUE
+                    : COL_DIM;
+    lv_obj_set_style_bg_color(bar_weekly, fill, LV_PART_INDICATOR);
     char buf[48];
     format_reset_time(cached_weekly_reset, buf, sizeof(buf));
     lv_label_set_text(lbl_weekly_reset, buf);
@@ -669,19 +676,20 @@ void ui_update(const UsageData* data) {
     lv_bar_set_value(bar_session, s_pct, LV_ANIM_ON);
     lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
 
-    // Weekly Fable (scoped-model) allowance — only some plans have one. The
-    // sentinel is key-absence (-1), never 0: 0% used is a real reading. Cache
-    // the weekly numbers so ui_tick_anim can redraw the card's other face
-    // between payloads; with no allowance the face pins to classic Weekly and
-    // the card renders exactly as it always has.
+    // Weekly scoped-model limits — only some plans have them. The sentinel is
+    // key-absence (count 0), never 0%: 0% used is a real reading. Cache the
+    // weekly numbers so ui_tick_anim can redraw the card's other faces
+    // between payloads; with no scoped limits the face pins to classic Weekly
+    // and the card renders exactly as it always has.
     if (data->enterprise) {
-        cached_fable_pct = -1.0f;
+        cached_scoped_count = 0;
     } else {
         cached_weekly_pct = data->weekly_pct;
         cached_weekly_reset = data->weekly_reset_mins;
-        cached_fable_pct = data->fable_pct;
+        cached_scoped_count = data->scoped_weekly_count;
+        for (int i = 0; i < cached_scoped_count; i++) cached_scoped[i] = data->scoped_weekly[i];
     }
-    if (cached_fable_pct < 0.0f) fable_face = false;
+    if (weekly_face > cached_scoped_count) weekly_face = 0;
 
     if (data->enterprise) {
         // Period box: time % + dynamic pace color + "Resets <date>" label
@@ -754,10 +762,10 @@ void ui_tick_anim(void) {
     if (now - anim_msg_start >= ANIM_MSG_MS) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
         anim_msg_start = now;
-        // Accounts with a weekly Fable allowance flip the Weekly card's face
-        // in step with the ticker word, so the whole screen changes together.
-        if (cached_fable_pct >= 0.0f && view_state == 2) {
-            fable_face = !fable_face;
+        // Accounts with weekly scoped-model limits rotate the Weekly card's
+        // face in step with the ticker word, so the screen changes together.
+        if (cached_scoped_count > 0 && view_state == 2) {
+            weekly_face = (weekly_face + 1) % (cached_scoped_count + 1);
             render_weekly_face(false);
         }
     }

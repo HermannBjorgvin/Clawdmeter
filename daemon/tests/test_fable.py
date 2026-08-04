@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Tests for the conditional weekly Fable (scoped-model) field ("f").
+"""Tests for the conditional weekly scoped-model limits field ("ws").
 
-The Fable percent comes from the OAuth usage endpoint's limits[] array
-(kind "weekly_scoped" with a model scope), NOT from the /v1/messages
-rate-limit headers — see fetch_fable_pct's docstring. The contract under
-test is the omit-when-absent gate:
+Scoped weekly percents (today only Fable; historically Opus/Sonnet had their
+own buckets) come from the OAuth usage endpoint's limits[] array (kind
+"weekly_scoped" with a model scope), NOT from the /v1/messages rate-limit
+headers — see fetch_scoped_weekly's docstring. The contract under test is the
+omit-when-absent gate and the labeled-array shape:
 
-  - allowance present  -> payload carries "f":<0-100>
-  - allowance absent   -> "f" key omitted entirely (no 0, no null)
-  - Enterprise account -> usage endpoint never queried, "f" omitted
-  - endpoint failure   -> "f" omitted (never blocks the main payload)
+  - scoped limits present -> payload carries "ws":[{"n":<label>,"p":<0-100>},...]
+  - none                  -> "ws" key omitted entirely (no [], no null)
+  - Enterprise account    -> usage endpoint never queried, "ws" omitted
+  - endpoint failure      -> "ws" omitted (never blocks the main payload)
 
 Both Python daemons (macOS + Windows) are exercised with the same cases.
 All tests mock httpx so no real network calls are made.
@@ -87,7 +88,16 @@ def _ent_headers(now):
     }
 
 
-def _usage_json(with_fable=True, percent=71):
+def _scoped_entry(name="Fable", percent=71):
+    return {
+        "kind": "weekly_scoped", "group": "weekly", "percent": percent,
+        "severity": "normal",
+        "scope": {"model": {"id": None, "display_name": name}, "surface": None},
+        "is_active": False,
+    }
+
+
+def _usage_json(scoped=({"name": "Fable", "percent": 71},)):
     """Realistic /api/oauth/usage body (captured 2026-08-03, trimmed)."""
     limits = [
         {"kind": "session", "group": "session", "percent": 30,
@@ -95,32 +105,27 @@ def _usage_json(with_fable=True, percent=71):
         {"kind": "weekly_all", "group": "weekly", "percent": 90,
          "severity": "critical", "scope": None, "is_active": True},
     ]
-    if with_fable:
-        limits.append({
-            "kind": "weekly_scoped", "group": "weekly", "percent": percent,
-            "severity": "normal",
-            "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None},
-            "is_active": False,
-        })
+    for s in scoped:
+        limits.append(_scoped_entry(s["name"], s["percent"]))
     return {"limits": limits}
 
 
 # ---------------------------------------------------------------------------
-# poll_api integration: the omit-when-absent gate
+# poll_api integration: the omit-when-absent gate + labeled-array shape
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("daemon", DAEMONS)
-def test_fable_present_adds_f_key(daemon):
-    """An account with a weekly Fable allowance gets "f" in the payload."""
+def test_scoped_present_adds_ws_key(daemon):
+    """An account with a weekly Fable allowance gets a labeled ws entry."""
     now = time.time()
     client = _mock_client(
         post_resp=_mock_response(headers=_pro_headers(now)),
-        get_resp=_mock_response(json_data=_usage_json(with_fable=True, percent=71)),
+        get_resp=_mock_response(json_data=_usage_json()),
     )
     with patch.object(daemon.httpx, "AsyncClient", return_value=client):
         payload = _run(daemon.poll_api("fake-token"))
     assert payload is not None
-    assert payload["f"] == 71
+    assert payload["ws"] == [{"n": "Fable", "p": 71}]
     # The rest of the payload is unchanged by the new field
     assert payload["s"] == 30
     assert payload["w"] == 90
@@ -128,38 +133,56 @@ def test_fable_present_adds_f_key(daemon):
 
 
 @pytest.mark.parametrize("daemon", DAEMONS)
-def test_no_fable_allowance_omits_f_key(daemon):
-    """No weekly_scoped entry -> "f" absent entirely (not 0, not null)."""
+def test_multiple_scoped_models_all_ride_along(daemon):
+    """A returning per-model bucket (e.g. Sonnet) is sent alongside Fable, in
+    API order, each with its own label."""
+    now = time.time()
+    body = _usage_json(scoped=(
+        {"name": "Fable", "percent": 71},
+        {"name": "Sonnet", "percent": 40},
+    ))
+    client = _mock_client(
+        post_resp=_mock_response(headers=_pro_headers(now)),
+        get_resp=_mock_response(json_data=body),
+    )
+    with patch.object(daemon.httpx, "AsyncClient", return_value=client):
+        payload = _run(daemon.poll_api("fake-token"))
+    assert payload["ws"] == [{"n": "Fable", "p": 71}, {"n": "Sonnet", "p": 40}]
+
+
+@pytest.mark.parametrize("daemon", DAEMONS)
+def test_no_scoped_limits_omits_ws_key(daemon):
+    """No weekly_scoped entries -> "ws" absent entirely (not [], not null)."""
     now = time.time()
     client = _mock_client(
         post_resp=_mock_response(headers=_pro_headers(now)),
-        get_resp=_mock_response(json_data=_usage_json(with_fable=False)),
+        get_resp=_mock_response(json_data=_usage_json(scoped=())),
     )
     with patch.object(daemon.httpx, "AsyncClient", return_value=client):
         payload = _run(daemon.poll_api("fake-token"))
     assert payload is not None
-    assert "f" not in payload
+    assert "ws" not in payload
 
 
 @pytest.mark.parametrize("daemon", DAEMONS)
 def test_enterprise_never_queries_usage_endpoint(daemon):
-    """Enterprise has no weekly window at all — no "f", and no extra request."""
+    """Enterprise has no weekly window at all — no "ws", and no extra request."""
     now = time.time()
     client = _mock_client(
         post_resp=_mock_response(headers=_ent_headers(now)),
-        get_resp=_mock_response(json_data=_usage_json(with_fable=True)),
+        get_resp=_mock_response(json_data=_usage_json()),
     )
     with patch.object(daemon.httpx, "AsyncClient", return_value=client):
         payload = _run(daemon.poll_api("fake-token"))
     assert payload is not None
     assert payload["acct"] == "ent"
-    assert "f" not in payload
+    assert "ws" not in payload
     client.get.assert_not_called()
 
 
 @pytest.mark.parametrize("daemon", DAEMONS)
 @pytest.mark.parametrize("failure", ["http_500", "network", "bad_json"])
-def test_usage_endpoint_failure_omits_f_but_keeps_payload(daemon, failure):
+def test_usage_endpoint_failure_omits_ws_but_keeps_payload(daemon, failure):
     """A broken usage endpoint must never take down the main payload."""
     now = time.time()
     if failure == "http_500":
@@ -175,62 +198,85 @@ def test_usage_endpoint_failure_omits_f_but_keeps_payload(daemon, failure):
         payload = _run(daemon.poll_api("fake-token"))
     assert payload is not None
     assert payload["s"] == 30
-    assert "f" not in payload
+    assert "ws" not in payload
 
 
 # ---------------------------------------------------------------------------
-# fetch_fable_pct unit cases
+# fetch_scoped_weekly unit cases
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("daemon", DAEMONS)
-def test_fetch_fable_pct_zero_is_a_legitimate_value(daemon):
-    """0% used is a real reading — must return 0, not None (sentinel is
-    key-absence, never 0)."""
-    client = _mock_client(get_resp=_mock_response(json_data=_usage_json(percent=0)))
+def test_zero_percent_is_a_legitimate_value(daemon):
+    """0% used is a real reading — must be sent, not dropped (the firmware's
+    "off" sentinel is key-absence, never 0)."""
+    body = _usage_json(scoped=({"name": "Fable", "percent": 0},))
+    client = _mock_client(get_resp=_mock_response(json_data=body))
     with patch.object(daemon.httpx, "AsyncClient", return_value=client):
-        assert _run(daemon.fetch_fable_pct("fake-token")) == 0
+        assert _run(daemon.fetch_scoped_weekly("fake-token")) == [{"n": "Fable", "p": 0}]
 
 
 @pytest.mark.parametrize("daemon", DAEMONS)
-def test_fetch_fable_pct_clamps_to_0_100(daemon):
-    client = _mock_client(get_resp=_mock_response(json_data=_usage_json(percent=140)))
+def test_percent_clamps_to_0_100(daemon):
+    body = _usage_json(scoped=({"name": "Fable", "percent": 140},))
+    client = _mock_client(get_resp=_mock_response(json_data=body))
     with patch.object(daemon.httpx, "AsyncClient", return_value=client):
-        assert _run(daemon.fetch_fable_pct("fake-token")) == 100
+        assert _run(daemon.fetch_scoped_weekly("fake-token")) == [{"n": "Fable", "p": 100}]
 
 
 @pytest.mark.parametrize("daemon", DAEMONS)
-def test_fetch_fable_pct_requires_model_scope(daemon):
+def test_requires_model_scope(daemon):
     """A weekly_scoped entry without a model scope (e.g. a future
-    surface-scoped limit) must not be mistaken for the Fable allowance."""
+    surface-scoped limit) must not be sent as a model bucket."""
     body = {"limits": [{"kind": "weekly_scoped", "group": "weekly", "percent": 40,
                         "scope": {"model": None, "surface": "cowork"}}]}
     client = _mock_client(get_resp=_mock_response(json_data=body))
     with patch.object(daemon.httpx, "AsyncClient", return_value=client):
-        assert _run(daemon.fetch_fable_pct("fake-token")) is None
+        assert _run(daemon.fetch_scoped_weekly("fake-token")) is None
 
 
 @pytest.mark.parametrize("daemon", DAEMONS)
-def test_fetch_fable_pct_malformed_body_returns_none(daemon):
+def test_label_falls_back_to_model_id(daemon):
+    """A null display_name falls back to the model id; no usable name -> the
+    entry is skipped (a bar the user can't identify is noise)."""
+    body = {"limits": [
+        {"kind": "weekly_scoped", "group": "weekly", "percent": 40,
+         "scope": {"model": {"id": "claude-sonnet-5", "display_name": None}}},
+        {"kind": "weekly_scoped", "group": "weekly", "percent": 20,
+         "scope": {"model": {"id": None, "display_name": None}}},
+    ]}
+    client = _mock_client(get_resp=_mock_response(json_data=body))
+    with patch.object(daemon.httpx, "AsyncClient", return_value=client):
+        assert _run(daemon.fetch_scoped_weekly("fake-token")) == [
+            {"n": "claude-sonnet-5", "p": 40}
+        ]
+
+
+@pytest.mark.parametrize("daemon", DAEMONS)
+def test_malformed_body_returns_none(daemon):
     for body in (None, [], {}, {"limits": None}, {"limits": ["nope"]}):
         client = _mock_client(get_resp=_mock_response(json_data=body))
         with patch.object(daemon.httpx, "AsyncClient", return_value=client):
-            assert _run(daemon.fetch_fable_pct("fake-token")) is None, f"body={body!r}"
+            assert _run(daemon.fetch_scoped_weekly("fake-token")) is None, f"body={body!r}"
 
 
 # ---------------------------------------------------------------------------
-# Wire shape: "f" rides in the same compact JSON, well under BLE_BUF_SIZE
+# Wire shape: "ws" rides in the same compact JSON, well under BLE_BUF_SIZE
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("daemon", DAEMONS)
-def test_wire_shape_with_fable(daemon):
+def test_wire_shape_with_scoped_limits(daemon):
     import json
     now = time.time()
+    body = _usage_json(scoped=(
+        {"name": "Fable", "percent": 71},
+        {"name": "Sonnet", "percent": 40},
+    ))
     client = _mock_client(
         post_resp=_mock_response(headers=_pro_headers(now)),
-        get_resp=_mock_response(json_data=_usage_json(percent=71)),
+        get_resp=_mock_response(json_data=body),
     )
     with patch.object(daemon.httpx, "AsyncClient", return_value=client):
         payload = _run(daemon.poll_api("fake-token"))
     wire = json.dumps(payload, separators=(",", ":"))
-    assert '"f":71' in wire
+    assert '"ws":[{"n":"Fable","p":71},{"n":"Sonnet","p":40}]' in wire
     assert len(wire.encode()) < 512  # firmware BLE_BUF_SIZE
