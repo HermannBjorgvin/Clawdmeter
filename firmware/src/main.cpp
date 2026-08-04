@@ -20,6 +20,7 @@
 #include "hal/power_hal.h"
 #include "hal/imu_hal.h"
 #include "hal/sound_hal.h"
+#include "touch_rotate.h"
 
 static UsageData usage = {};
 
@@ -36,6 +37,20 @@ static UsageData usage = {};
 #endif
 static uint16_t* buf1 = nullptr;
 static uint16_t* buf2 = nullptr;
+
+static lv_display_t* g_disp = nullptr;   // for lv_display_set_rotation on IMU quadrant change
+
+// Map the board's IMU rotation quadrant to the LVGL rotation that lines touch
+// input up with the CPU-rotated display. (See touch_rotate.h — the display
+// rotates but touch reports native, so we let LVGL rotate the input to match.)
+static lv_display_rotation_t quadrant_to_rotation(uint8_t q) {
+    switch (q) {
+        case 1:  return LV_DISPLAY_ROTATION_270;
+        case 2:  return LV_DISPLAY_ROTATION_180;
+        case 3:  return LV_DISPLAY_ROTATION_90;
+        default: return LV_DISPLAY_ROTATION_0;
+    }
+}
 
 static uint32_t my_tick(void) { return millis(); }
 
@@ -59,10 +74,16 @@ static void rounder_cb(lv_event_t* e) {
 //           panel is dark, so pets/sleeves can't wake it overnight and LVGL
 //           can't quietly toggle splash<->usage on a black panel.
 static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
-    uint16_t x, y;
+    uint16_t rx, ry;
     bool pressed;
-    touch_hal_read(&x, &y, &pressed);
+    touch_hal_read(&rx, &ry, &pressed);
     const bool raw_pressed = pressed;
+
+    // Align the raw touch to the panel frame; LVGL applies the per-orientation
+    // rotation (lv_display_set_rotation, set from the IMU quadrant in loop()), so
+    // taps land correctly whatever way the display is turned.
+    uint16_t x, y;
+    touch_to_panel(rx, ry, &x, &y);
 
     if (IDLE_WAKE_ON_TOUCH) {
         static bool touch_was = false;
@@ -215,6 +236,7 @@ void setup() {
     buf2 = (uint16_t*)heap_caps_malloc(W * BUF_LINES * 2, LV_BUF_CAPS);
 
     lv_display_t* disp = lv_display_create(W, H);
+    g_disp = disp;
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
     lv_display_set_flush_cb(disp, my_flush_cb);
     lv_display_set_buffers(disp, buf1, buf2, W * BUF_LINES * 2,
@@ -292,6 +314,13 @@ void loop() {
     ble_tick();
     power_hal_tick();
     imu_hal_tick();
+    // Mirror the display auto-rotation into LVGL so it rotates touch input to
+    // match (see touch_rotate.h). Set before display_hal_tick invalidates.
+    {
+        static uint8_t last_q = 255;
+        uint8_t q = imu_hal_rotation_quadrant();
+        if (q != last_q) { lv_display_set_rotation(g_disp, quadrant_to_rotation(q)); last_q = q; }
+    }
     sound_hal_tick();
     splash_tick();
     // Rotation transition (blank + ramp) would fight the idle fade — skip
