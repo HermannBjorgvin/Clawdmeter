@@ -386,8 +386,26 @@ class Session:
         # e.g. a just-power-cycled ESP32 whose server is not yet ready (G-03-01, SC#3).
         # Degrade gracefully instead of crashing the daemon so it stays single-process
         # across a power-cycle reconnect (SC#4, no restart).
+        #
+        # It can also never complete at all. On a half-open link WinRT's CCCD-write
+        # confirmation never arrives, and an unbounded await then wedges the daemon
+        # between "Connected" and the first poll — stale data on the device, nothing
+        # logged, no recovery until a manual restart. An except block cannot help
+        # there: it catches a raised error, never an await that hangs forever. Same
+        # failure shape as the CoreBluetooth hang bounded in claude_usage_daemon.py,
+        # so bound it the same way and proceed on timeout.
+        #
+        # Clause order is load-bearing: on Python 3.11+ asyncio.TimeoutError IS the
+        # builtin TimeoutError, which is a subclass of OSError. With the OSError
+        # clause first it would swallow the timeout and report it as an empty
+        # "Refresh subscription unavailable: ". Keep TimeoutError above it.
         try:
-            await self.client.start_notify(REQ_CHAR_UUID, self._on_refresh)
+            await asyncio.wait_for(
+                self.client.start_notify(REQ_CHAR_UUID, self._on_refresh),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            log("Refresh subscription timed out; polling without it")
         except (BleakError, ValueError, OSError) as e:
             log(f"Refresh subscription unavailable: {e}")
 
