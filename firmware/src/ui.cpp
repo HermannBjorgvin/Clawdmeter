@@ -503,6 +503,11 @@ static void apply_anim_visibility(void);   // status-line rule (§2.3)
 #define CHAT_CARD_GAP     10    // between cards (#129 ch_card_gap)
 #define CHAT_CARD_PITCH   (CHAT_CARD_H + CHAT_CARD_GAP)
 #define CHAT_CARD_PAD_Y   8
+// Chat cards (and the ONE-CHAT quota box) bleed to the physical left/right
+// edges — the card's own corner radius is the relief at the glass edge. The
+// inner side padding keeps text at the same 20px inset the old screen margin
+// provided, clear of the panel's rounded corners.
+#define CHAT_CARD_PAD_X   20
 #define CHAT_FADE_H       60    // bottom fade band: transparent → panel black
 // ONE-CHAT: two boxes — the 5h quota panel (exact RESTING "Current" panel)
 // on top, the chat card below it.
@@ -716,13 +721,15 @@ static void build_chat_card(ChatCard* c, lv_obj_t* parent, int x, int y, bool fo
     const lv_font_t* f_line = focus ? &font_styrene_20 : &font_styrene_16;
     const int h = focus ? FOCUS_CARD_H : CHAT_CARD_H;
 
-    c->card = make_panel(parent, x, y, L.content_w, h);
+    c->card = make_panel(parent, x, y, L.scr_w, h);   // full-bleed (see CHAT_CARD_PAD_X)
+    lv_obj_set_style_pad_left(c->card, CHAT_CARD_PAD_X, 0);
+    lv_obj_set_style_pad_right(c->card, CHAT_CARD_PAD_X, 0);
     if (!focus) {
         lv_obj_set_style_pad_top(c->card, CHAT_CARD_PAD_Y, 0);
         lv_obj_set_style_pad_bottom(c->card, CHAT_CARD_PAD_Y, 0);
     }
 
-    const int cw = L.content_w - 2 * L.panel_pad_x;
+    const int cw = L.scr_w - 2 * CHAT_CARD_PAD_X;
 
     // Name width starts at the full row; every content update re-budgets it
     // against the measured width of the actual right-side neighbor (the model
@@ -828,7 +835,7 @@ static void chat_card_set_row(ChatCard* c, const SessionRow* r) {
     // BEFORE the name so the name's ellipsis budget can track the rendered
     // width of its actual neighbor (a hidden label gives the name the row).
     if (c->lbl_ctx) {
-        const int cw = L.content_w - 2 * L.panel_pad_x;
+        const int cw = L.scr_w - 2 * CHAT_CARD_PAD_X;
         bool shown = true;
         if (r->tok >= 0) {
             session_tok_text(r->tok, buf, sizeof(buf));
@@ -913,7 +920,7 @@ static void focus_set_content(const SessionRow* r) {
     // padding + a 12px gap) — not a worst case — so a long name runs right up
     // to the pill. An empty pill would render as a bare chip: hide it with
     // its text and give the name the full row.
-    const int cw = L.content_w - 2 * L.panel_pad_x;
+    const int cw = L.scr_w - 2 * CHAT_CARD_PAD_X;
     int nw = cw;
     if (model[0]) {
         lv_obj_clear_flag(focus_lbl_model, LV_OBJ_FLAG_HIDDEN);
@@ -1120,10 +1127,18 @@ static void build_session_views(lv_obj_t* parent) {
     // concern, so a future multi-account build gets a box per account. The
     // 7d row is dropped here (see the f5_* rationale).
     focus_group = make_session_group(parent);
-    make_usage_panel(focus_group, L.content_y, "Current",
-                     &f5_pct, &f5_pill, &f5_bar, &f5_reset);
+    lv_obj_t* p5 = make_usage_panel(focus_group, L.content_y, "Current",
+                                    &f5_pct, &f5_pill, &f5_bar, &f5_reset);
+    // Full-bleed like the chat card below it. make_usage_panel stays shared
+    // with the untouched RESTING view, so the width/pad/bar adjustments are
+    // applied here instead: text keeps a 20px inset from the glass edge.
+    lv_obj_set_pos(p5, 0, L.content_y);
+    lv_obj_set_size(p5, L.scr_w, L.usage_panel_h);
+    lv_obj_set_style_pad_left(p5, CHAT_CARD_PAD_X, 0);
+    lv_obj_set_style_pad_right(p5, CHAT_CARD_PAD_X, 0);
+    lv_obj_set_width(f5_bar, L.scr_w - 2 * CHAT_CARD_PAD_X);
     const int focus_card_y = L.content_y + L.usage_panel_h + FOCUS_PANEL_GAP;
-    build_chat_card(&focus_card, focus_group, L.margin, focus_card_y, true);
+    build_chat_card(&focus_card, focus_group, 0, focus_card_y, true);
 
     // Chat card extras: model pill (quota-pill treatment at the chat card's
     // own text size) + the context line.
@@ -1177,8 +1192,8 @@ static void build_session_views(lv_obj_t* parent) {
     const int list_y = L.content_y + CHAT_ROW_H + CHAT_ROW_GAP + 4;  // #129 ch_list_y
     const int list_h = L.scr_h - list_y;
     cards_cont = lv_obj_create(chats_group);
-    lv_obj_set_pos(cards_cont, L.margin, list_y);
-    lv_obj_set_size(cards_cont, L.content_w, list_h);
+    lv_obj_set_pos(cards_cont, 0, list_y);              // full-bleed card column
+    lv_obj_set_size(cards_cont, L.scr_w, list_h);
     lv_obj_set_style_bg_opa(cards_cont, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(cards_cont, 0, 0);
     lv_obj_set_style_pad_all(cards_cont, 0, 0);
