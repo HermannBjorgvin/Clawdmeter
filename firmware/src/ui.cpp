@@ -494,12 +494,12 @@ static void apply_anim_visibility(void);   // status-line rule (§2.3)
 // column, 10px bars, and a 14px(+4) gap down to the first card.
 #define CHAT_ROW_H        30    // strip band height; text/bar vcentered in it
 #define CHAT_ROW_BAR_H    10
-#define CHAT_ROW_LBL_W    32    // "5h"/"7d" column
-#define CHAT_ROW_PCT_W    58    // percentage column (right-aligned, fixed)
+#define CHAT_ROW_LBL_W    40    // "5h"/"7d" column
+#define CHAT_ROW_PCT_W    72    // percentage column (right-aligned, fixed)
 #define CHAT_ROW_COL_GAP  12    // label|bar|pct column gap
 #define CHAT_ROW_HALF_GAP 20    // between the 5h and 7d halves
 #define CHAT_ROW_GAP      14    // strip band ↓ card list (plus 4, per #129)
-#define CHAT_CARD_H       80
+#define CHAT_CARD_H       108
 #define CHAT_CARD_GAP     10    // between cards (#129 ch_card_gap)
 #define CHAT_CARD_PITCH   (CHAT_CARD_H + CHAT_CARD_GAP)
 #define CHAT_CARD_PAD_Y   8
@@ -511,7 +511,7 @@ static void apply_anim_visibility(void);   // status-line rule (§2.3)
 #define CHAT_FADE_H       60    // bottom fade band: transparent → panel black
 // ONE-CHAT: two boxes — the 5h quota panel (exact RESTING "Current" panel)
 // on top, the chat card below it.
-#define FOCUS_CARD_H      150
+#define FOCUS_CARD_H      176
 #define FOCUS_PANEL_GAP   16    // 5h panel ↔ chat card
 
 // One chat card's widget set. Cards keep stable identity: each card widget is
@@ -631,10 +631,12 @@ static void set_label_if_changed(lv_obj_t* lbl, const char* txt) {
     if (strcmp(lv_label_get_text(lbl), txt) != 0) lv_label_set_text(lbl, txt);
 }
 
-// Ellipsize in firmware: measure, truncate, append "…" (three dots). LVGL's
-// LONG_DOT places its dots via the label's line-box math, which parks them on
-// the (hidden) wrapped second line when the box is exactly one line tall — so
-// the truncation is done deterministically here instead.
+// Ellipsize in firmware: measure, then middle-elide with "..." (three dots),
+// keeping the label's trailing characters — that tail is the host's session
+// discriminator ("clawdmeter-36" vs "clawdmeter-2c" must stay distinct, §5).
+// LVGL's LONG_DOT places its dots via the label's line-box math, which parks
+// them on the (hidden) wrapped second line when the box is exactly one line
+// tall — so the truncation is done deterministically here instead.
 static void label_set_ellipsized(lv_obj_t* lbl, const char* txt,
                                  const lv_font_t* font, int max_w) {
     lv_point_t sz;
@@ -646,13 +648,17 @@ static void label_set_ellipsized(lv_obj_t* lbl, const char* txt,
     char buf[SESSION_LABEL_MAX + 4];
     size_t len = strlen(txt);
     if (len >= SESSION_LABEL_MAX) len = SESSION_LABEL_MAX - 1;
-    while (len > 0) {
-        memcpy(buf, txt, len);
-        buf[len] = '\0';
+    const size_t tail = len > 8 ? 4 : 0;   // keep the sid discriminator
+    size_t head = len - tail;
+    while (head > 0) {
+        memcpy(buf, txt, head);
+        buf[head] = '\0';
         strcat(buf, "...");
+        memcpy(buf + head + 3, txt + len - tail, tail);
+        buf[head + 3 + tail] = '\0';
         lv_text_get_size(&sz, buf, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
         if (sz.x <= max_w) break;
-        len--;
+        head--;
     }
     set_label_if_changed(lbl, buf);
 }
@@ -717,8 +723,8 @@ static lv_obj_t* make_card_label(lv_obj_t* parent, const lv_font_t* font, lv_col
 // context bar, state line — the focus variant is just bigger and swaps the
 // top-right ctx% for the model name + a big percentage.
 static void build_chat_card(ChatCard* c, lv_obj_t* parent, int x, int y, bool focus) {
-    const lv_font_t* f_name = focus ? &font_styrene_28 : &font_styrene_20;
-    const lv_font_t* f_line = focus ? &font_styrene_20 : &font_styrene_16;
+    const lv_font_t* f_name = focus ? &font_styrene_48 : &font_styrene_28;
+    const lv_font_t* f_line = focus ? &font_styrene_24 : &font_styrene_24;
     const int h = focus ? FOCUS_CARD_H : CHAT_CARD_H;
 
     c->card = make_panel(parent, x, y, L.scr_w, h);   // full-bleed (see CHAT_CARD_PAD_X)
@@ -753,12 +759,12 @@ static void build_chat_card(ChatCard* c, lv_obj_t* parent, int x, int y, bool fo
 
     c->bar = make_bar(c->card, 0, 0, cw, focus ? 12 : 8);
     lv_obj_set_style_bg_color(c->bar, COL_DIM, LV_PART_INDICATOR);  // context stays neutral (§1.3)
-    lv_obj_align(c->bar, LV_ALIGN_BOTTOM_LEFT, 0, focus ? -34 : -26);
+    lv_obj_align(c->bar, LV_ALIGN_BOTTOM_LEFT, 0, focus ? -40 : -38);
 
     // State line — everything shares one visual center line, `line_c` px above
     // the card content's bottom edge. The dot sits flush with the card's left
     // content edge (same x as the name and the bar above it).
-    const int dot_sz  = focus ? 14 : 10;
+    const int dot_sz  = focus ? 14 : 14;
     const int line_h  = lv_font_get_line_height(f_line);
     const int line_dy = focus ? -2 : 0;   // base line, from content bottom
     // Dot center = label line-box center (measured: Styrene's lowercase
@@ -778,7 +784,7 @@ static void build_chat_card(ChatCard* c, lv_obj_t* parent, int x, int y, bool fo
     lv_obj_align(c->dot, LV_ALIGN_BOTTOM_LEFT, 0, dot_dy);
     c->lbl_state = make_card_label(c->card, f_line, COL_DIM);
     lv_label_set_long_mode(c->lbl_state, LV_LABEL_LONG_DOT);  // state ellipsizes before a badge drops (§5)
-    lv_obj_set_width(c->lbl_state, focus ? 174 : 168);
+    lv_obj_set_width(c->lbl_state, focus ? 200 : 200);
     // One text line, exactly: with a free-growing height an over-long state
     // would wrap to a second line instead of taking the DOT ellipsis.
     lv_obj_set_height(c->lbl_state, line_h);
@@ -1142,7 +1148,7 @@ static void build_session_views(lv_obj_t* parent) {
 
     // Chat card extras: model pill (quota-pill treatment at the chat card's
     // own text size) + the context line.
-    focus_lbl_model = make_card_label(focus_card.card, &font_styrene_20, COL_TEXT);
+    focus_lbl_model = make_card_label(focus_card.card, &font_styrene_24, COL_TEXT);
     lv_obj_set_style_bg_color(focus_lbl_model, COL_BAR_BG, 0);
     lv_obj_set_style_bg_opa(focus_lbl_model, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(focus_lbl_model, LV_RADIUS_CIRCLE, 0);
@@ -1151,10 +1157,10 @@ static void build_session_views(lv_obj_t* parent) {
     lv_obj_set_style_pad_top(focus_lbl_model, 4, 0);
     lv_obj_set_style_pad_bottom(focus_lbl_model, 4, 0);
     lv_obj_align(focus_lbl_model, LV_ALIGN_TOP_RIGHT, 0, 0);
-    focus_lbl_ctx = make_card_label(focus_card.card, &font_styrene_20, COL_TEXT);
-    lv_obj_align(focus_lbl_ctx, LV_ALIGN_TOP_LEFT, 0, 44);
-    focus_lbl_tok = make_card_label(focus_card.card, &font_styrene_20, COL_TEXT);
-    lv_obj_align(focus_lbl_tok, LV_ALIGN_TOP_RIGHT, 0, 44);
+    focus_lbl_ctx = make_card_label(focus_card.card, &font_styrene_24, COL_TEXT);
+    lv_obj_align(focus_lbl_ctx, LV_ALIGN_TOP_LEFT, 0, 64);
+    focus_lbl_tok = make_card_label(focus_card.card, &font_styrene_24, COL_TEXT);
+    lv_obj_align(focus_lbl_tok, LV_ALIGN_TOP_RIGHT, 0, 64);
 
     // ---- SEVERAL-CHATS (§1.4): one-line quota strip + the card list ----
     chats_group = make_session_group(parent);
@@ -1163,19 +1169,19 @@ static void build_session_views(lv_obj_t* parent) {
     const int half = (L.content_w - CHAT_ROW_HALF_GAP) / 2;
     const int strip_bar_w = half - CHAT_ROW_LBL_W - CHAT_ROW_PCT_W - 2 * CHAT_ROW_COL_GAP;
     const int tag_y = L.content_y +
-        (CHAT_ROW_H - lv_font_get_line_height(&font_styrene_20)) / 2;
-    const int pct_y = L.content_y +
         (CHAT_ROW_H - lv_font_get_line_height(&font_styrene_24)) / 2;
+    const int pct_y = L.content_y +
+        (CHAT_ROW_H - lv_font_get_line_height(&font_styrene_28)) / 2;
     for (int i = 0; i < 2; i++) {
         const int x0 = L.margin + i * (half + CHAT_ROW_HALF_GAP);
-        cq_tag[i] = make_card_label(chats_group, &font_styrene_20, COL_DIM);
+        cq_tag[i] = make_card_label(chats_group, &font_styrene_24, COL_DIM);
         lv_obj_set_width(cq_tag[i], CHAT_ROW_LBL_W);
         lv_obj_set_pos(cq_tag[i], x0, tag_y);
         cq_bar[i] = make_bar(chats_group,
                              x0 + CHAT_ROW_LBL_W + CHAT_ROW_COL_GAP,
                              L.content_y + (CHAT_ROW_H - CHAT_ROW_BAR_H) / 2,
                              strip_bar_w, CHAT_ROW_BAR_H);
-        cq_pct[i] = make_card_label(chats_group, &font_styrene_24, COL_TEXT);
+        cq_pct[i] = make_card_label(chats_group, &font_styrene_28, COL_TEXT);
         lv_obj_set_width(cq_pct[i], CHAT_ROW_PCT_W);
         lv_obj_set_style_text_align(cq_pct[i], LV_TEXT_ALIGN_RIGHT, 0);
         lv_obj_set_pos(cq_pct[i],
