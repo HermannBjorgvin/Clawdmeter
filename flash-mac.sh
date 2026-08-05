@@ -20,11 +20,27 @@ if [ -z "$BOARD" ]; then
 fi
 
 if [ -z "$PORT" ]; then
-    PORT=$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)
-    if [ -z "$PORT" ]; then
-        echo "Error: no /dev/cu.usbmodem* device found. Plug in via USB-C."
-        exit 1
-    fi
+    case "$BOARD" in
+        m5stack_fire)
+            # ESP32-classic over a CH9102 UART bridge → /dev/cu.usbserial-* or
+            # /dev/cu.wchusbserial* (NOT the native-USB usbmodem* the S3/C6 use).
+            PORT=$(ls /dev/cu.usbserial-* /dev/cu.wchusbserial* 2>/dev/null | head -1)
+            if [ -z "$PORT" ]; then
+                echo "Error: no /dev/cu.usbserial-* (CH9102 UART bridge) device found."
+                echo "Plug the M5Stack FIRE in via USB-C. If it still isn't seen, install"
+                echo "the CH34x/CH9102 driver from https://www.wch-ic.com/downloads/CH34XSER_MAC_ZIP.html"
+                exit 1
+            fi
+            ;;
+        *)
+            # S3 / C6 boards expose a native USB-JTAG serial → /dev/cu.usbmodem*
+            PORT=$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)
+            if [ -z "$PORT" ]; then
+                echo "Error: no /dev/cu.usbmodem* device found. Plug in via USB-C."
+                exit 1
+            fi
+            ;;
+    esac
 fi
 
 if ! command -v pio >/dev/null; then
