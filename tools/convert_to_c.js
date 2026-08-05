@@ -15,7 +15,11 @@ const path = require('path');
 const args = process.argv.slice(2);
 const opt = (k, def) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : def; };
 
-const IN_DIR = path.resolve(opt('--in', path.join(__dirname, 'claudepix_data')));
+// Comma-separated so hand-composed animations live in their own directory:
+// the scraper owns claudepix_data/ outright and is free to wipe it, while
+// custom_anims/ (built by make_custom_anims.js) survives a re-scrape.
+const IN_DIRS = opt('--in', ['claudepix_data', 'custom_anims'].join(','))
+  .split(',').map(d => path.resolve(__dirname, d.trim()));
 const OUT_FILE = path.resolve(opt('--out',
   path.join(__dirname, '..', 'firmware', 'src', 'splash_animations.h')));
 
@@ -53,18 +57,23 @@ function paletteToRgb565(palette) {
 }
 
 function main() {
-  if (!fs.existsSync(IN_DIR)) {
-    console.error(`No scraped data at ${IN_DIR}. Run scrape_claudepix.js first.`);
-    process.exit(1);
-  }
-
-  const indexPath = path.join(IN_DIR, '_index.json');
-  if (!fs.existsSync(indexPath)) {
-    console.error(`Missing ${indexPath}.`);
-    process.exit(1);
-  }
-
-  const index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+  // Collect (dir, meta) pairs across every source directory. A missing
+  // custom_anims/ is fine — only the first directory is required, since without
+  // it there's nothing to build at all.
+  const index = [];
+  IN_DIRS.forEach((dir, i) => {
+    const indexPath = path.join(dir, '_index.json');
+    if (!fs.existsSync(indexPath)) {
+      if (i === 0) {
+        console.error(`No animation index at ${indexPath}. Run scrape_claudepix.js first.`);
+        process.exit(1);
+      }
+      return;
+    }
+    const metas = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    for (const meta of metas) index.push({ dir, meta });
+    console.log(`  ${path.basename(dir)}: ${metas.length}`);
+  });
   console.log(`Converting ${index.length} animations`);
 
   let out = '';
@@ -73,6 +82,8 @@ function main() {
   out += '// Source: https://claudepix.vercel.app (20x20 pixel-art creature\n';
   out += '// animation library). Frames extracted by tools/scrape_claudepix.js\n';
   out += '// from per-animation HTML files served by the source site.\n';
+  out += '// Also includes hand-composed animations from tools/custom_anims/,\n';
+  out += '// built by tools/make_custom_anims.js by posing the same characters.\n';
   out += '// Do not edit by hand — re-run the scraper + converter to refresh.\n';
   out += '// ============================================================\n';
   out += '// Each animation carries a 10-entry RGB565 palette.\n';
@@ -92,9 +103,9 @@ function main() {
 
   const entries = [];
 
-  for (const meta of index) {
+  for (const { dir, meta } of index) {
     const ident = safeIdent(meta.filename.replace(/\.html?$/, ''));
-    const dataPath = path.join(IN_DIR, meta.filename.replace(/\.html?$/, '.json'));
+    const dataPath = path.join(dir, meta.filename.replace(/\.html?$/, '.json'));
     const data = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
 
     const pal565 = paletteToRgb565(data.palette);
