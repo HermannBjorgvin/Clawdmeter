@@ -18,6 +18,9 @@ struct BoardCaps {
     bool    has_rotation;    // IMU-driven CPU rotation in the flush callback
     bool    has_battery;     // AXP2101 battery measurement is meaningful
     bool    has_imu;         // QMI8658 (or compatible) is populated
+    bool    has_touch;       // has a touch panel. Touchless boards (M5Stack FIRE)
+                             // can't tap to leave the splash, so shared code
+                             // routes the splash<->usage toggle to the PWR button.
 };
 
 const BoardCaps& board_caps(void);
