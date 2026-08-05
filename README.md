@@ -227,6 +227,8 @@ JSON payload format (written to RX):
 
 Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
 
+Optional fields (omitted when not applicable; the firmware treats absence as "feature off"): `ws` = weekly scoped-model limits for plans that meter specific models separately, as `[{"n":"Fable","p":75}, ...]` — one entry per scoped model, labeled with the API's own display name. They share the weekly reset, so no separate reset field is sent. When `ws` is present, `w` is re-based on the same OAuth-usage source as the scoped percentages rather than the rate-limit header, so both weekly numbers carry identical rounding (the header is a 2-decimal fraction, the endpoint a rounded integer — mixing them can render a real 12.6/12.4 pair as 12/12).
+
 ## Recompiling fonts
 
 The `firmware/src/font_*.c` files are pre-compiled LVGL bitmap fonts.

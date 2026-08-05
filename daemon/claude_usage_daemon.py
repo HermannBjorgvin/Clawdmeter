@@ -41,6 +41,7 @@ SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-addres
 CONFIG_FILE = Path.home() / ".config" / "claude-usage-monitor" / "config"
 
 API_URL = "https://api.anthropic.com/v1/messages"
+OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
     "anthropic-beta": "oauth-2025-04-20",
@@ -401,6 +402,98 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
+async def fetch_weekly_limits(token: str) -> dict | None:
+    """The weekly window as the usage endpoint reports it, or None on failure:
+
+        {"all": <0-100>|None, "scoped": [{"n": <label>, "p": <0-100>}, ...]}
+
+    Both numbers come from this ONE source on purpose. The rate-limit headers
+    quantize differently (a 2-decimal fraction, e.g. "0.12") than this
+    endpoint (a rounded integer), so taking all-models from the header and
+    scoped from here can show the same underlying pair as 12/12 when it is
+    really 12.2/11.7 — or disagree with the settings UI, which renders these
+    same integers. poll_api therefore prefers "all" over the header value and
+    only falls back to the header when this lookup fails.
+
+    These numbers are NOT in the /v1/messages rate-limit headers the poll
+    reads: the scoped headers (anthropic-ratelimit-unified-7d_oi-*) only
+    appear on requests made WITH the scoped model, and polling with that model
+    would spend the very allowance being measured — and fail outright for
+    accounts without it. The OAuth usage endpoint (the same data `/usage`
+    renders) reports them for free as limits[] entries with kind
+    "weekly_scoped" and a model scope. Their reset equals the 7d reset, so no
+    separate reset is sent. The label is the API's own display name (today
+    only "Fable" exists; a future scoped model — e.g. a returning Sonnet
+    bucket — rides along automatically). Accounts without scoped limits have
+    no such entries -> None -> the "ws" key is omitted and the firmware keeps
+    today's layout.
+    """
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": API_HEADERS_TEMPLATE["anthropic-beta"],
+        "User-Agent": API_HEADERS_TEMPLATE["User-Agent"],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.get(OAUTH_USAGE_URL, headers=headers)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+    limits = data.get("limits") if isinstance(data, dict) else None
+    if not isinstance(limits, list):
+        return None
+
+    def _pct(value):
+        try:
+            return max(0, min(100, int(round(float(value)))))
+        except (TypeError, ValueError):
+            return None
+
+    weekly_all = None
+    scoped = []
+    for lim in limits:
+        if not isinstance(lim, dict):
+            continue
+        if lim.get("kind") == "weekly_all" and lim.get("scope") is None:
+            weekly_all = _pct(lim.get("percent"))
+            continue
+        if lim.get("kind") != "weekly_scoped" or not isinstance(lim.get("scope"), dict):
+            continue
+        model = lim["scope"].get("model")
+        if not isinstance(model, dict):
+            continue
+        name = model.get("display_name") or model.get("id")
+        if not isinstance(name, str) or not name:
+            continue
+        pct = _pct(lim.get("percent"))
+        if pct is None:
+            continue
+        scoped.append({"n": name, "p": pct})
+    return {"all": weekly_all, "scoped": scoped}
+
+
+async def apply_weekly_limits(payload: dict, token: str) -> None:
+    """Fold the usage endpoint's weekly window into a Pro/Max payload.
+
+    Adds "ws":[{"n","p"},...] when the account has weekly scoped-model limits
+    (omitted entirely otherwise — the firmware treats an absent key as "no
+    scoped limits" and renders the classic layout), and overrides "w" with the
+    endpoint's all-models percent so both weekly numbers share one source and
+    one rounding. A failed lookup leaves the header-derived "w" in place.
+    """
+    limits = await fetch_weekly_limits(token)
+    if not limits:
+        return
+    if limits["scoped"]:
+        payload["ws"] = limits["scoped"]
+        # Only worth re-basing "w" when a scoped number sits beside it; on
+        # plans without one the header value is already self-consistent.
+        if limits["all"] is not None:
+            payload["w"] = limits["all"]
+
+
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
@@ -448,6 +541,7 @@ async def poll_api(token: str) -> dict | None:
             "acct": "pro",
             "ok": True,
         }
+        await apply_weekly_limits(payload, token)   # adds "ws" iff scoped weekly limits exist
     else:
         reset_ts = hdr("anthropic-ratelimit-unified-overage-reset")
         payload = {

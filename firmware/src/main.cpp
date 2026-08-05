@@ -110,6 +110,17 @@ static bool parse_json(const char* json, UsageData* out) {
     out->session_reset_mins = doc["sr"] | -1;
     out->weekly_pct = doc["w"] | 0.0f;
     out->weekly_reset_mins = doc["wr"] | -1;
+    // Weekly scoped-model limits. Absent key (no scoped limits / old daemon)
+    // → count 0 and the Weekly card never flips; 0% is a real value.
+    out->scoped_weekly_count = 0;
+    for (JsonObject lim : doc["ws"].as<JsonArray>()) {
+        if (out->scoped_weekly_count >= MAX_SCOPED_WEEKLY) break;
+        const char* n = lim["n"] | "";
+        if (!n[0]) continue;
+        ScopedWeekly& s = out->scoped_weekly[out->scoped_weekly_count++];
+        strlcpy(s.name, n, sizeof(s.name));
+        s.pct = lim["p"] | 0.0f;
+    }
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->chime = doc["c"] | false;   // absent (old daemon / chime off) → stay silent
     const char* acct = doc["acct"] | "pro";

@@ -188,6 +188,7 @@ static void compute_layout(const BoardCaps& c) {
 #define COL_AMBER     THEME_AMBER
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
+#define COL_BLUE      THEME_BLUE
 
 // ---- Usage screen widgets (single non-splash view) ----
 static lv_obj_t* usage_container;
@@ -210,6 +211,19 @@ static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 static lv_obj_t* panel_session = nullptr;
 static lv_obj_t* panel_weekly = nullptr;
+// Weekly-card face rotation — accounts with weekly scoped-model limits
+// (today: Fable) rotate the Weekly card through 1+N faces: the classic
+// all-models face, then one face per scoped model (pill = the model's own
+// label from the payload; Fable fills blue, unrecognized models fill the
+// theme grey), switching in step with the status ticker's word change so the
+// screen feels coordinated. All weekly limits reset at the same instant, so
+// the reset line is truthful on every face. Without scoped limits the card
+// never rotates and renders exactly as it always has.
+static float cached_weekly_pct = 0;     // last payload's weekly (all-models) %
+static int   cached_weekly_reset = -1;  // last payload's weekly reset minutes
+static int   cached_scoped_count = 0;   // scoped models in the last payload; 0 = none
+static ScopedWeekly cached_scoped[MAX_SCOPED_WEEKLY];
+static int   weekly_face = 0;           // 0 = all models, i>0 = cached_scoped[i-1]
 // Enterprise-only widgets inside panel_session
 static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
 static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
@@ -539,6 +553,31 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
 }
 
+// Draw the Weekly card's current face from the cached payload values. Face 0
+// is byte-for-byte today's rendering; scoped faces swap the number, relabel
+// the pill with the model's own label and fill the bar in THEME_BLUE for
+// Fable or the theme grey for a scoped model this firmware doesn't know.
+// The reset line is identical on every face (all weekly limits reset
+// together). Face flips pass animate=false so the bar snaps rather than
+// sliding 95→73→95 every few seconds.
+static void render_weekly_face(bool animate) {
+    int idx = (weekly_face > cached_scoped_count) ? 0 : weekly_face;
+    bool scoped = idx > 0;
+    const ScopedWeekly* s = scoped ? &cached_scoped[idx - 1] : nullptr;
+    float pct = scoped ? s->pct : cached_weekly_pct;
+    int p = (int)(pct + 0.5f);
+    lv_label_set_text(lbl_weekly_label, scoped ? s->name : "Weekly");
+    lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", p);
+    lv_bar_set_value(bar_weekly, p, animate ? LV_ANIM_ON : LV_ANIM_OFF);
+    lv_color_t fill = !scoped ? pct_color(cached_weekly_pct)
+                    : (strncmp(s->name, "Fable", 5) == 0) ? COL_BLUE
+                    : COL_DIM;
+    lv_obj_set_style_bg_color(bar_weekly, fill, LV_PART_INDICATOR);
+    char buf[48];
+    format_reset_time(cached_weekly_reset, buf, sizeof(buf));
+    lv_label_set_text(lbl_weekly_reset, buf);
+}
+
 // ======== Public API ========
 
 void ui_init(void) {
@@ -637,6 +676,21 @@ void ui_update(const UsageData* data) {
     lv_bar_set_value(bar_session, s_pct, LV_ANIM_ON);
     lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
 
+    // Weekly scoped-model limits — only some plans have them. The sentinel is
+    // key-absence (count 0), never 0%: 0% used is a real reading. Cache the
+    // weekly numbers so ui_tick_anim can redraw the card's other faces
+    // between payloads; with no scoped limits the face pins to classic Weekly
+    // and the card renders exactly as it always has.
+    if (data->enterprise) {
+        cached_scoped_count = 0;
+    } else {
+        cached_weekly_pct = data->weekly_pct;
+        cached_weekly_reset = data->weekly_reset_mins;
+        cached_scoped_count = data->scoped_weekly_count;
+        for (int i = 0; i < cached_scoped_count; i++) cached_scoped[i] = data->scoped_weekly[i];
+    }
+    if (weekly_face > cached_scoped_count) weekly_face = 0;
+
     if (data->enterprise) {
         // Period box: time % + dynamic pace color + "Resets <date>" label
         lv_label_set_text(lbl_weekly_label, "Period");
@@ -650,12 +704,7 @@ void ui_update(const UsageData* data) {
                  pace_hex, pace_text, data->reset_date);
         lv_label_set_text(lbl_weekly_reset, buf);
     } else {
-        int w_pct = (int)(data->weekly_pct + 0.5f);
-        lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
-        lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
-        lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
-        format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
-        lv_label_set_text(lbl_weekly_reset, buf);
+        render_weekly_face(true);
     }
 }
 
@@ -713,6 +762,12 @@ void ui_tick_anim(void) {
     if (now - anim_msg_start >= ANIM_MSG_MS) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
         anim_msg_start = now;
+        // Accounts with weekly scoped-model limits rotate the Weekly card's
+        // face in step with the ticker word, so the screen changes together.
+        if (cached_scoped_count > 0 && view_state == 2) {
+            weekly_face = (weekly_face + 1) % (cached_scoped_count + 1);
+            render_weekly_face(false);
+        }
     }
 
     if (now - anim_last_ms < spinner_ms[anim_spinner_idx]) return;
