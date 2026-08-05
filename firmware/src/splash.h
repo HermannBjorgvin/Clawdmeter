@@ -27,10 +27,19 @@ bool splash_is_active(void);
 // Root container (so ui.cpp can attach a click event).
 lv_obj_t* splash_get_root(void);
 
-// Mini animated creature for embedding elsewhere (e.g. the idle screen).
-// Renders the named claudepix animation (e.g. "expression sleep") at ~px×px
-// inside `parent`; returns the canvas object (position it with lv_obj_align) or
-// NULL if the animation isn't found / allocation fails. Drive it with
-// splash_mini_tick(). One mini creature at a time.
-lv_obj_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px);
-void splash_mini_tick(void);
+// Mini animated creature for embedding elsewhere (the idle "Zzz" panel, the
+// corner badge on the usage screen). Each instance owns its canvas, buffer and
+// frame clock, so several can run at once.
+//
+// `anim_name` picks a claudepix animation by name (e.g. "expression sleep");
+// pass NULL to follow the live usage-rate group instead, re-picking on the same
+// cadence as the full-screen splash. Renders at ~px×px inside `parent`.
+// Returns NULL if the animation isn't found or allocation fails.
+//
+// Position the instance via splash_mini_canvas(); drive it with
+// splash_mini_tick(). Both are NULL-safe.
+typedef struct splash_mini splash_mini_t;
+
+splash_mini_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px);
+lv_obj_t*      splash_mini_canvas(splash_mini_t *m);
+void           splash_mini_tick(splash_mini_t *m);

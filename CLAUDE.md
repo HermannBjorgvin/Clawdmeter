@@ -143,15 +143,38 @@ The boot screen is `SCREEN_SPLASH` and only advances on a physical button press,
 
 ## Splash animations
 
-13 × 20×20 pixel-art creature animations sourced from
-[claudepix.vercel.app](https://claudepix.vercel.app). Pipeline:
+16 × 20×20 pixel-art creature animations: 13 scraped from
+[claudepix.vercel.app](https://claudepix.vercel.app) plus 3 composed locally.
+Pipeline:
 
 ```bash
-node tools/scrape_claudepix.js  # → tools/claudepix_data/*.json
-node tools/convert_to_c.js      # → firmware/src/splash_animations.h
+node tools/scrape_claudepix.js   # → tools/claudepix_data/*.json   (scraped; wiped and rewritten)
+node tools/make_custom_anims.js  # → tools/custom_anims/*.json     (composed; also wiped and rewritten)
+node tools/convert_to_c.js       # both dirs → firmware/src/splash_animations.h
 ```
 
 Each animation has a per-animation 10-color RGB565 palette. Cell values 0..9 index it. Default boot screen.
+
+**The two source dirs are separate on purpose** — the scraper owns
+`claudepix_data/` and is free to wipe it, so anything hand-made there would be
+lost on the next re-scrape. `convert_to_c.js` reads a comma-separated `--in`
+list and defaults to both.
+
+`make_custom_anims.js` does **not** draw characters. Each output takes a
+claudepix animation as its base and overlays props that track the creature
+frame by frame (it locates his head per frame, so headphones ride a bounce
+instead of being pinned to fixed coordinates). Current outputs: `fm listening`
+(headphones + drifting notes over `dance_bounce`), `idle hearts` and
+`idle blossom` (over `idle_breathe`). Run it with `--preview <prefix>` to get a
+contact sheet PNG per animation — the only way to judge these without hardware,
+and worth doing first every time. Two things learned the hard way: props must
+be **light** (the panel background is black, so a dark prop is invisible), and
+a 3×3 heart is **not legible** — its two top humps read as antennae, so the
+heart is 5×3 and beats via brightness rather than by resizing.
+
+Animations reach the screen through the rate groups in `splash.cpp`
+(`GROUP_NAMES`), matched by literal name — adding a JSON is not enough, the
+name has to be listed in a group or nothing will ever pick it.
 
 ## User profile / preferences
 

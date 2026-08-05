@@ -1,0 +1,23 @@
+[
+  {
+    "filename": "fm_listening.html",
+    "name": "fm listening",
+    "category": "Dance",
+    "frame_count": 16,
+    "palette_size": 7
+  },
+  {
+    "filename": "idle_hearts.html",
+    "name": "idle hearts",
+    "category": "Idle",
+    "frame_count": 16,
+    "palette_size": 5
+  },
+  {
+    "filename": "idle_blossom.html",
+    "name": "idle blossom",
+    "category": "Idle",
+    "frame_count": 16,
+    "palette_size": 5
+  }
+]

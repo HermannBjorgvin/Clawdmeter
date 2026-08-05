@@ -219,6 +219,10 @@ static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idl
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
 static lv_obj_t* logo_img;
+// The corner slot holds one of two things, never both: the live creature while
+// usage data is fresh, the logo otherwise. See apply_corner_badge().
+static splash_mini_t* header_creature = nullptr;
+static splash_mini_t* idle_creature   = nullptr;
 static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 
 // ---- Live-data freshness → which usage sub-view to show ----
@@ -312,6 +316,7 @@ static void format_reset_time(int mins, char* buf, size_t len) {
 
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
+static void apply_corner_badge(void);
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -462,7 +467,8 @@ static void build_idle_group(lv_obj_t* parent) {
     // A shrunk-down sleeping creature (reused claudepix "expression sleep" art)
     // sits between the header and the status line; the animated "Listening…"
     // status line carries the words, so no extra text is needed here.
-    lv_obj_t* creature = splash_mini_create(idle_group, "expression sleep", L.idle_px);
+    idle_creature = splash_mini_create(idle_group, "expression sleep", L.idle_px);
+    lv_obj_t* creature = splash_mini_canvas(idle_creature);
     if (creature) lv_obj_align(creature, LV_ALIGN_CENTER, 0, -20);
 
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
@@ -562,6 +568,18 @@ void ui_init(void) {
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
     lv_obj_set_pos(logo_img, L.margin, L.logo_y);
+
+    // Corner creature: same slot and size as the logo, but animated and tracking
+    // the usage rate (NULL name = follow usage_rate_group()). It only stands in
+    // for the logo while data is fresh — on the pairing and idle screens the
+    // logo comes back, since a dancing creature there would be claiming a
+    // liveness the numbers don't have.
+    header_creature = splash_mini_create(scr, NULL,
+                                         L.small_icons ? LOGO_SMALL_WIDTH : LOGO_WIDTH);
+    if (lv_obj_t* badge = splash_mini_canvas(header_creature)) {
+        lv_obj_set_pos(badge, L.margin, L.logo_y);
+        lv_obj_add_flag(badge, LV_OBJ_FLAG_HIDDEN);   // apply_corner_badge() decides
+    }
 
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
@@ -680,12 +698,15 @@ static void update_view_state(void) {
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group : usage_group,
                       LV_OBJ_FLAG_HIDDEN);
+    apply_corner_badge();   // creature only stands in for the logo in state 2
 }
 
 void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
     update_view_state();
-    if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
+    // Only the visible creature ticks — the other one would just burn redraws.
+    if      (view_state == 1) splash_mini_tick(idle_creature);     // sleeping, idle screen
+    else if (view_state == 2) splash_mini_tick(header_creature);   // corner badge, live usage
 
     uint32_t now = lv_tick_get();
 
@@ -747,6 +768,24 @@ static void apply_battery_visibility(void) {
     else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
+// Creature in the corner slot while usage data is live, logo the rest of the
+// time, neither on the splash (which is already all creature). Driven by both
+// axes that can change independently — the current screen and the view state —
+// so it's called from ui_show_screen() and update_view_state() alike.
+static void apply_corner_badge(void) {
+    lv_obj_t* badge = splash_mini_canvas(header_creature);
+    bool live = (current_screen != SCREEN_SPLASH) && (view_state == 2) && badge;
+
+    if (logo_img) {
+        if (current_screen == SCREEN_SPLASH || live) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        else                                         lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (badge) {
+        if (live) lv_obj_clear_flag(badge, LV_OBJ_FLAG_HIDDEN);
+        else      lv_obj_add_flag(badge, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 static void global_click_cb(lv_event_t* e) {
     (void)e;
     if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
@@ -763,14 +802,10 @@ void ui_show_screen(screen_t screen) {
     default: break;
     }
 
-    if (logo_img) {
-        if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-    }
-
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
     current_screen = screen;
     apply_battery_visibility();
+    apply_corner_badge();
 }
 
 void ui_toggle_splash(void) {
