@@ -174,6 +174,9 @@ static void check_serial_cmd() {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
             else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
+            // Visual counterpart to `buzz`: fires the reset celebration without
+            // waiting five hours for a real window refill.
+            else if (strcmp(cmd_buf, "party") == 0) splash_celebrate();
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -375,12 +378,21 @@ void loop() {
             int g_before = usage_rate_group();
             bool session_reset = usage_rate_sample(usage.session_pct);
             int g_after = usage_rate_group();
-            // 5-hour session limit refilled → chime so the user knows they can
-            // use Claude again (no-op on boards without a buzzer). Gated on the
-            // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
-            if (session_reset && usage.chime) {
-                Serial.println("session reset detected — chime");
-                sound_hal_play_reset();
+            // 5-hour session limit refilled. Two responses, deliberately on
+            // different terms: the chime is gated on the daemon's opt-in
+            // `chime` config (the `buzz` serial cmd ignores it), while the
+            // celebration is unconditional — it's silent, so there's nothing
+            // to opt out of.
+            //
+            // The celebration also fixes the moment reading backwards. A reset
+            // clears the rate ring, so usage_rate_group() drops to idle and the
+            // creature falls asleep exactly when the quota comes back; pinning
+            // the party animation for 30s covers that gap and hands over once
+            // there's real rate data again.
+            if (session_reset) {
+                Serial.println("session reset detected");
+                if (usage.chime) sound_hal_play_reset();
+                splash_celebrate();
             }
             if (g_after != g_before) {
                 Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",

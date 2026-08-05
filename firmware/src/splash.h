@@ -21,6 +21,18 @@ void splash_hide(void);
 // trigger a re-pick when the rate group changes mid-display.
 void splash_pick_for_current_rate(void);
 
+// Override the rate-driven pick with a celebration for SPLASH_CELEBRATE_MS,
+// then hand back to the rate logic. Applies to the full-screen splash AND to
+// every rate-following mini creature, so the corner badge joins in.
+//
+// Fired when the 5-hour window refills. Without it that moment reads backwards:
+// a reset clears the rate ring, which drops the group to idle, so the instant
+// your quota returns he goes to sleep.
+void splash_celebrate(void);
+
+// True while a celebration is running.
+bool splash_celebrating(void);
+
 // True when splash is currently rendering (used to gate re-picks).
 bool splash_is_active(void);
 
