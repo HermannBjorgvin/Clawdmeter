@@ -35,6 +35,7 @@ static uint16_t cur_frame = 0;
 static uint32_t frame_started_ms = 0;
 static uint32_t last_pick_ms = 0;
 static bool active = false;
+static bool cur_is_celebration = false;   // what the last pick resolved to
 
 // While splash is showing, auto-cycle to the next animation in the current
 // rate-driven group every this many ms.
@@ -82,13 +83,44 @@ static void resolve_group_lists(void) {
     }
 }
 
-// Pick the next animation from the group matching the current usage rate.
+// ---- Celebration: a short override that outranks the rate groups. ----
+#define SPLASH_CELEBRATE_MS   30000
+#define SPLASH_CELEBRATE_ANIM "dance djmix"
+
+static uint32_t celebrate_until_ms = 0;
+
+bool splash_celebrating(void) {
+    // Signed compare so the window closes correctly across a millis() wrap.
+    return celebrate_until_ms != 0 && (int32_t)(millis() - celebrate_until_ms) < 0;
+}
+
+static const splash_anim_def_t* find_anim(const char *name) {
+    for (int i = 0; i < SPLASH_ANIM_COUNT; i++) {
+        if (strcmp(splash_anims[i].name, name) == 0) return &splash_anims[i];
+    }
+    return NULL;
+}
+
+void splash_celebrate(void) {
+    if (!find_anim(SPLASH_CELEBRATE_ANIM)) return;   // nothing to celebrate with
+    celebrate_until_ms = millis() + SPLASH_CELEBRATE_MS;
+    if (celebrate_until_ms == 0) celebrate_until_ms = 1;   // 0 means "not celebrating"
+    Serial.printf("splash: celebrating for %d ms\n", SPLASH_CELEBRATE_MS);
+    if (active) splash_pick_for_current_rate();
+}
+
+// Pick the next animation from the group matching the current usage rate — or
+// the celebration animation, which outranks the groups while it runs. The
+// rotation cursor is deliberately NOT advanced for a celebration: it's an
+// interruption, and the group should resume where it left off afterwards.
+//
 // `rot` is the caller's per-group slot cursor (each consumer keeps its own, so
 // the corner badge and the full-screen splash don't shuffle each other along).
 // Resolves the group lists on first use — the idle screen builds its creature
 // before splash_init() runs.
 static const splash_anim_def_t* pick_rate_anim(uint8_t rot[GROUP_COUNT]) {
     if (!groups_resolved) resolve_group_lists();
+    if (splash_celebrating()) return find_anim(SPLASH_CELEBRATE_ANIM);
     int g = usage_rate_group();
     if (g < 0 || g >= GROUP_COUNT) g = 0;
     if (group_size[g] == 0) return NULL;
@@ -210,6 +242,7 @@ struct splash_mini {
     uint32_t  started_ms;               // when the current frame began
     bool      follow_rate;              // created with anim_name == NULL
     uint32_t  last_pick_ms;             // follow_rate: when we last re-picked
+    bool      is_celebration;           // follow_rate: what the last pick resolved to
     uint8_t   rotation[GROUP_COUNT];    // follow_rate: own per-group slot cursor
 };
 
@@ -246,6 +279,7 @@ splash_mini_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int p
 
     m->follow_rate = (anim_name == NULL);
     m->anim = named ? named : pick_rate_anim(m->rotation);
+    m->is_celebration = m->follow_rate && splash_celebrating();
     if (!m->anim) { free(m); return NULL; }
 
     m->cell = px / GRID;
@@ -275,16 +309,23 @@ lv_obj_t* splash_mini_canvas(splash_mini_t *m) {
 void splash_mini_tick(splash_mini_t *m) {
     if (!m || !m->buf || !m->anim || m->anim->frame_count == 0) return;
 
-    // Rate-following instances swap animation on the same cadence as the splash.
-    if (m->follow_rate && millis() - m->last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
-        m->last_pick_ms = millis();
-        const splash_anim_def_t *next = pick_rate_anim(m->rotation);
-        if (next && next != m->anim) {
-            m->anim = next;
-            m->frame = 0;
-            m->started_ms = m->last_pick_ms;
-            mini_render(m);
-            return;
+    // Rate-following instances swap on the same cadence as the splash, and join
+    // the celebration on the same terms: it plays through without rotation, and
+    // entering or leaving it re-picks immediately rather than up to 20s later.
+    if (m->follow_rate) {
+        bool party = splash_celebrating();
+        if (party != m->is_celebration ||
+            (!party && millis() - m->last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS)) {
+            m->last_pick_ms = millis();
+            const splash_anim_def_t *next = pick_rate_anim(m->rotation);
+            m->is_celebration = party;
+            if (next && next != m->anim) {
+                m->anim = next;
+                m->frame = 0;
+                m->started_ms = m->last_pick_ms;
+                mini_render(m);
+                return;
+            }
         }
     }
 
@@ -403,8 +444,12 @@ void splash_tick(void) {
     }
 #endif
 
-    // Auto-rotate to the next animation in the current group.
-    if (millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
+    // Auto-rotate within the current group. A celebration plays through
+    // uninterrupted — no rotation while it runs — and both its start and its
+    // end force an immediate re-pick so the switch isn't held up to 20s.
+    bool party = splash_celebrating();
+    if (party != cur_is_celebration ||
+        (!party && millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS)) {
         splash_pick_for_current_rate();
     }
 
@@ -435,6 +480,7 @@ void splash_pick_for_current_rate(void) {
     const splash_anim_def_t *next = pick_rate_anim(group_rotation);
     if (!next) return;
 
+    cur_is_celebration = splash_celebrating();
     cur_anim = (uint16_t)(next - splash_anims);
     cur_frame = 0;
     frame_started_ms = millis();
