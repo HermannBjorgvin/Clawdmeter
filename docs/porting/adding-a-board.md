@@ -10,14 +10,25 @@ gap in the HAL — open an issue.
 
 At minimum:
 
-- An **ESP32-S3** (other ESP32 family members may work; this is what the
-  upstream firmware is tested on). OPI PSRAM is **required** — partial
-  flush buffers and the splash canvas are allocated from PSRAM.
-- A QSPI **AMOLED panel** with a driver supported by
-  [GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX)
-  (CO5300, SH8601, NV3041A, etc.). Other interfaces aren't supported yet.
-- A **touch controller** over I2C. The HAL just needs init + read; you
-  can use any driver you can compile.
+- An **ESP32**. The upstream firmware runs on the S3 (most ports), the
+  C6 (RISC-V, no PSRAM), and the original ESP32 classic (M5Stack FIRE) —
+  so any family member the pioarduino Arduino 3.x core supports is fair
+  game. **PSRAM strongly recommended**: partial flush buffers and the
+  splash canvas allocate from it by default. Boards without PSRAM must
+  build without `-DBOARD_HAS_PSRAM` (shared code then shrinks the buffers
+  into internal SRAM and disables the `screenshot` command — see the C6
+  envs).
+- A **panel** with a driver in
+  [GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX).
+  QSPI AMOLEDs (CO5300, SH8601, NV3041A) and plain 4-wire SPI TFTs
+  (ST7789 on the LCD-1.54, ILI9342C on the M5Stack FIRE) both work — the
+  bus is abstracted behind the driver, so the display HAL surface is the
+  same either way.
+- **Either** a touch controller over I2C **or** enough physical buttons
+  to navigate. Touch is optional: the M5Stack FIRE has none, and its
+  `touch.cpp` is a permanent no-op (`read` always reports "not pressed")
+  while the three front buttons carry all input. A touch driver, if you
+  have one, just needs init + read.
 - A **primary button** (typically the BOOT/GPIO 0 push button).
 
 Optional:
