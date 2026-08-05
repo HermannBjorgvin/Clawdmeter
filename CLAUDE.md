@@ -174,6 +174,24 @@ be **light** (the panel background is black, so a dark prop is invisible), and
 a 3×3 heart is **not legible** — its two top humps read as antennae, so the
 heart is 5×3 and beats via brightness rather than by resizing.
 
+`tools/grid_image_to_anim.js` takes hand-drawn frames instead: one image per
+frame, a 20×20 grid with cells coloured in, however it was drawn (spreadsheet,
+pixel editor, screenshot, photo).
+
+```bash
+node tools/grid_image_to_anim.js --name "my anim" --holds 300,120,300,120 frames/*.png
+```
+
+Each cell is sampled from the middle of its area, so gridlines and cell borders
+are ignored, and the grid area is auto-detected (uniform borders are trimmed;
+`--crop x0,y0,x1,y1` overrides). Images whose dimensions are an exact multiple
+of 20 are treated as already-cropped, since trimming a pixel-editor export
+would shift every cell — its empty background *is* content. It always prints
+the grid it read as text: check that against the drawing, because a half-cell
+offset yields a plausible-looking grid that's wrong everywhere. Round-trips
+exactly (0/400 cells differing) on both a 20×20 export and a 514×514 grid with
+gridlines and a page margin.
+
 Animations reach the screen through the rate groups in `splash.cpp`
 (`GROUP_NAMES`), matched by literal name — adding a JSON is not enough, the
 name has to be listed in a group or nothing will ever pick it.
