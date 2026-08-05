@@ -4,7 +4,7 @@
 Scoped weekly percents (today only Fable; historically Opus/Sonnet had their
 own buckets) come from the OAuth usage endpoint's limits[] array (kind
 "weekly_scoped" with a model scope), NOT from the /v1/messages rate-limit
-headers — see fetch_scoped_weekly's docstring. The contract under test is the
+headers — see fetch_weekly_limits's docstring. The contract under test is the
 omit-when-absent gate and the labeled-array shape:
 
   - scoped limits present -> payload carries "ws":[{"n":<label>,"p":<0-100>},...]
@@ -202,7 +202,7 @@ def test_usage_endpoint_failure_omits_ws_but_keeps_payload(daemon, failure):
 
 
 # ---------------------------------------------------------------------------
-# fetch_scoped_weekly unit cases
+# fetch_weekly_limits unit cases
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("daemon", DAEMONS)
@@ -212,7 +212,7 @@ def test_zero_percent_is_a_legitimate_value(daemon):
     body = _usage_json(scoped=({"name": "Fable", "percent": 0},))
     client = _mock_client(get_resp=_mock_response(json_data=body))
     with patch.object(daemon.httpx, "AsyncClient", return_value=client):
-        assert _run(daemon.fetch_scoped_weekly("fake-token")) == [{"n": "Fable", "p": 0}]
+        assert _run(daemon.fetch_weekly_limits("fake-token"))["scoped"] == [{"n": "Fable", "p": 0}]
 
 
 @pytest.mark.parametrize("daemon", DAEMONS)
@@ -220,7 +220,7 @@ def test_percent_clamps_to_0_100(daemon):
     body = _usage_json(scoped=({"name": "Fable", "percent": 140},))
     client = _mock_client(get_resp=_mock_response(json_data=body))
     with patch.object(daemon.httpx, "AsyncClient", return_value=client):
-        assert _run(daemon.fetch_scoped_weekly("fake-token")) == [{"n": "Fable", "p": 100}]
+        assert _run(daemon.fetch_weekly_limits("fake-token"))["scoped"] == [{"n": "Fable", "p": 100}]
 
 
 @pytest.mark.parametrize("daemon", DAEMONS)
@@ -231,7 +231,7 @@ def test_requires_model_scope(daemon):
                         "scope": {"model": None, "surface": "cowork"}}]}
     client = _mock_client(get_resp=_mock_response(json_data=body))
     with patch.object(daemon.httpx, "AsyncClient", return_value=client):
-        assert _run(daemon.fetch_scoped_weekly("fake-token")) is None
+        assert _run(daemon.fetch_weekly_limits("fake-token"))["scoped"] == []
 
 
 @pytest.mark.parametrize("daemon", DAEMONS)
@@ -246,7 +246,7 @@ def test_label_falls_back_to_model_id(daemon):
     ]}
     client = _mock_client(get_resp=_mock_response(json_data=body))
     with patch.object(daemon.httpx, "AsyncClient", return_value=client):
-        assert _run(daemon.fetch_scoped_weekly("fake-token")) == [
+        assert _run(daemon.fetch_weekly_limits("fake-token"))["scoped"] == [
             {"n": "claude-sonnet-5", "p": 40}
         ]
 
@@ -256,7 +256,8 @@ def test_malformed_body_returns_none(daemon):
     for body in (None, [], {}, {"limits": None}, {"limits": ["nope"]}):
         client = _mock_client(get_resp=_mock_response(json_data=body))
         with patch.object(daemon.httpx, "AsyncClient", return_value=client):
-            assert _run(daemon.fetch_scoped_weekly("fake-token")) is None, f"body={body!r}"
+            got = _run(daemon.fetch_weekly_limits("fake-token"))
+            assert got is None or got["scoped"] == [], f"body={body!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -280,3 +281,64 @@ def test_wire_shape_with_scoped_limits(daemon):
     wire = json.dumps(payload, separators=(",", ":"))
     assert '"ws":[{"n":"Fable","p":71},{"n":"Sonnet","p":40}]' in wire
     assert len(wire.encode()) < 512  # firmware BLE_BUF_SIZE
+
+
+# ---------------------------------------------------------------------------
+# Single-source rule: both weekly numbers share the endpoint's rounding
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("daemon", DAEMONS)
+def test_weekly_all_rebased_on_endpoint_when_scoped_present(daemon):
+    """The header quantizes to 2 decimals ("0.12") and the endpoint to a
+    rounded integer, so a true 12.6/12.4 pair reads as 12/12 from the header
+    but 13/12 from the endpoint. With a scoped limit on screen beside it, "w"
+    must come from the endpoint too — otherwise the two faces of one card are
+    quantized differently and can disagree with the settings UI."""
+    now = time.time()
+    headers = dict(_pro_headers(now))
+    headers["anthropic-ratelimit-unified-7d-utilization"] = "0.12"  # -> 12 via the header
+    body = _usage_json(scoped=({"name": "Fable", "percent": 12},))
+    body["limits"][1]["percent"] = 13                               # weekly_all -> 13
+    client = _mock_client(
+        post_resp=_mock_response(headers=headers),
+        get_resp=_mock_response(json_data=body),
+    )
+    with patch.object(daemon.httpx, "AsyncClient", return_value=client):
+        payload = _run(daemon.poll_api("fake-token"))
+    assert payload["w"] == 13, "all-models % must come from the endpoint, not the header"
+    assert payload["ws"] == [{"n": "Fable", "p": 12}]
+
+
+@pytest.mark.parametrize("daemon", DAEMONS)
+def test_weekly_all_keeps_header_value_without_scoped_limits(daemon):
+    """No scoped limit -> nothing to be inconsistent with, so the long-standing
+    header-derived "w" is left exactly as it was (no behavior change for plans
+    without a Fable allowance)."""
+    now = time.time()
+    headers = dict(_pro_headers(now))
+    headers["anthropic-ratelimit-unified-7d-utilization"] = "0.12"
+    body = _usage_json(scoped=())
+    body["limits"][1]["percent"] = 13
+    client = _mock_client(
+        post_resp=_mock_response(headers=headers),
+        get_resp=_mock_response(json_data=body),
+    )
+    with patch.object(daemon.httpx, "AsyncClient", return_value=client):
+        payload = _run(daemon.poll_api("fake-token"))
+    assert payload["w"] == 12
+    assert "ws" not in payload
+
+
+@pytest.mark.parametrize("daemon", DAEMONS)
+def test_weekly_all_falls_back_to_header_when_endpoint_fails(daemon):
+    now = time.time()
+    headers = dict(_pro_headers(now))
+    headers["anthropic-ratelimit-unified-7d-utilization"] = "0.12"
+    client = _mock_client(
+        post_resp=_mock_response(headers=headers),
+        get_exc=httpx.ConnectError("Connection refused"),
+    )
+    with patch.object(daemon.httpx, "AsyncClient", return_value=client):
+        payload = _run(daemon.poll_api("fake-token"))
+    assert payload["w"] == 12
+    assert "ws" not in payload

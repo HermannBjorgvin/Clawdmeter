@@ -348,7 +348,7 @@ build_payload_for_token() {
         # API's own display name so future scoped models ride along. Accounts
         # without scoped limits -> "ws" omitted -> firmware keeps today's
         # layout.
-        local fable_fragment="" usage_json scoped_entries="" m p n
+        local fable_fragment="" usage_json scoped_entries="" weekly_all="" m p n
         usage_json=$(curl -s "https://api.anthropic.com/api/oauth/usage" \
             -H "Authorization: Bearer $token" \
             -H "anthropic-beta: oauth-2025-04-20" \
@@ -359,7 +359,18 @@ build_payload_for_token() {
             n=$(echo "$m" | grep -o '"display_name":"[^"]*"' | head -1 | cut -d'"' -f4)
             [ -n "$p" ] && [ -n "$n" ] && scoped_entries="$scoped_entries,{\"n\":\"$n\",\"p\":$p}"
         done < <(echo "$usage_json" | grep -o '"kind":"weekly_scoped"[^{]*{"model":{[^}]*}')
-        [ -n "$scoped_entries" ] && fable_fragment=",\"ws\":[${scoped_entries#,}]"
+        if [ -n "$scoped_entries" ]; then
+            fable_fragment=",\"ws\":[${scoped_entries#,}]"
+            # Re-base the all-models % on the same source as the scoped ones.
+            # The header is a 2-decimal fraction and this endpoint a rounded
+            # integer, so mixing them can render a real 12.2/11.7 pair as
+            # 12/12 (and disagree with the settings UI). Header stays the
+            # fallback when this value is missing.
+            weekly_all=$(echo "$usage_json" \
+                | grep -o '"kind":"weekly_all"[^}]*"percent":[0-9]*' | head -1 \
+                | grep -o '[0-9]*$')
+            [ -n "$weekly_all" ] && s7d_util=$(awk -v p="$weekly_all" 'BEGIN { printf "%.4f", p / 100 }')
+        fi
 
         payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$s5h_status" -v now="$now" -v fbl="$fable_fragment" -v clk="$clock_fragment" -v chm="$chime_fragment" \
             'BEGIN {

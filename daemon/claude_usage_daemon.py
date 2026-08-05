@@ -402,9 +402,18 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
-async def fetch_scoped_weekly(token: str) -> list[dict] | None:
-    """Every weekly scoped-model limit as [{"n": <label>, "p": <0-100>}, ...],
-    or None when the account has none (or the lookup failed).
+async def fetch_weekly_limits(token: str) -> dict | None:
+    """The weekly window as the usage endpoint reports it, or None on failure:
+
+        {"all": <0-100>|None, "scoped": [{"n": <label>, "p": <0-100>}, ...]}
+
+    Both numbers come from this ONE source on purpose. The rate-limit headers
+    quantize differently (a 2-decimal fraction, e.g. "0.12") than this
+    endpoint (a rounded integer), so taking all-models from the header and
+    scoped from here can show the same underlying pair as 12/12 when it is
+    really 12.2/11.7 — or disagree with the settings UI, which renders these
+    same integers. poll_api therefore prefers "all" over the header value and
+    only falls back to the header when this lookup fails.
 
     These numbers are NOT in the /v1/messages rate-limit headers the poll
     reads: the scoped headers (anthropic-ratelimit-unified-7d_oi-*) only
@@ -435,13 +444,22 @@ async def fetch_scoped_weekly(token: str) -> list[dict] | None:
     limits = data.get("limits") if isinstance(data, dict) else None
     if not isinstance(limits, list):
         return None
+
+    def _pct(value):
+        try:
+            return max(0, min(100, int(round(float(value)))))
+        except (TypeError, ValueError):
+            return None
+
+    weekly_all = None
     scoped = []
     for lim in limits:
-        if not (
-            isinstance(lim, dict)
-            and lim.get("kind") == "weekly_scoped"
-            and isinstance(lim.get("scope"), dict)
-        ):
+        if not isinstance(lim, dict):
+            continue
+        if lim.get("kind") == "weekly_all" and lim.get("scope") is None:
+            weekly_all = _pct(lim.get("percent"))
+            continue
+        if lim.get("kind") != "weekly_scoped" or not isinstance(lim.get("scope"), dict):
             continue
         model = lim["scope"].get("model")
         if not isinstance(model, dict):
@@ -449,22 +467,31 @@ async def fetch_scoped_weekly(token: str) -> list[dict] | None:
         name = model.get("display_name") or model.get("id")
         if not isinstance(name, str) or not name:
             continue
-        try:
-            pct = max(0, min(100, int(round(float(lim.get("percent"))))))
-        except (TypeError, ValueError):
+        pct = _pct(lim.get("percent"))
+        if pct is None:
             continue
         scoped.append({"n": name, "p": pct})
-    return scoped or None
+    return {"all": weekly_all, "scoped": scoped}
 
 
-async def add_scoped_weekly_field(payload: dict, token: str) -> None:
-    """Add "ws":[{"n","p"},...] to a Pro/Max payload when the account has
-    weekly scoped-model limits. Omitted entirely otherwise — the firmware
-    treats an absent key as "no scoped limits" and renders the classic
-    layout."""
-    scoped = await fetch_scoped_weekly(token)
-    if scoped:
-        payload["ws"] = scoped
+async def apply_weekly_limits(payload: dict, token: str) -> None:
+    """Fold the usage endpoint's weekly window into a Pro/Max payload.
+
+    Adds "ws":[{"n","p"},...] when the account has weekly scoped-model limits
+    (omitted entirely otherwise — the firmware treats an absent key as "no
+    scoped limits" and renders the classic layout), and overrides "w" with the
+    endpoint's all-models percent so both weekly numbers share one source and
+    one rounding. A failed lookup leaves the header-derived "w" in place.
+    """
+    limits = await fetch_weekly_limits(token)
+    if not limits:
+        return
+    if limits["scoped"]:
+        payload["ws"] = limits["scoped"]
+        # Only worth re-basing "w" when a scoped number sits beside it; on
+        # plans without one the header value is already self-consistent.
+        if limits["all"] is not None:
+            payload["w"] = limits["all"]
 
 
 async def poll_api(token: str) -> dict | None:
@@ -514,7 +541,7 @@ async def poll_api(token: str) -> dict | None:
             "acct": "pro",
             "ok": True,
         }
-        await add_scoped_weekly_field(payload, token)   # adds "ws" iff scoped weekly limits exist
+        await apply_weekly_limits(payload, token)   # adds "ws" iff scoped weekly limits exist
     else:
         reset_ts = hdr("anthropic-ratelimit-unified-overage-reset")
         payload = {
