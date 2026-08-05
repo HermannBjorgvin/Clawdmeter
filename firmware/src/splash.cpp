@@ -7,6 +7,7 @@
 #include "hal/display_hal.h"
 #include <Arduino.h>
 #include <string.h>
+#include <stdlib.h>
 #include <esp_heap_caps.h>
 
 // 20×20 grid. CELL sized so the canvas fits the smaller display dimension —
@@ -58,7 +59,10 @@ static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
     { "dance bounce dj", "dance sway dj", "dance djmix", NULL },
 };
 
+static bool groups_resolved = false;
+
 static void resolve_group_lists(void) {
+    groups_resolved = true;
     for (int g = 0; g < GROUP_COUNT; g++) {
         group_size[g] = 0;
         for (int s = 0; s < GROUP_MAX; s++) {
@@ -73,6 +77,22 @@ static void resolve_group_lists(void) {
             }
         }
     }
+}
+
+// Pick the next animation from the group matching the current usage rate.
+// `rot` is the caller's per-group slot cursor (each consumer keeps its own, so
+// the corner badge and the full-screen splash don't shuffle each other along).
+// Resolves the group lists on first use — the idle screen builds its creature
+// before splash_init() runs.
+static const splash_anim_def_t* pick_rate_anim(uint8_t rot[GROUP_COUNT]) {
+    if (!groups_resolved) resolve_group_lists();
+    int g = usage_rate_group();
+    if (g < 0 || g >= GROUP_COUNT) g = 0;
+    if (group_size[g] == 0) return NULL;
+
+    uint8_t slot = rot[g]++ % group_size[g];
+    int8_t idx = group_lists[g][slot];
+    return idx < 0 ? NULL : &splash_anims[idx];
 }
 
 static uint16_t *row_buf = NULL;   // scratch row, sized to canvas_w (PSRAM path)
@@ -174,63 +194,101 @@ static void render_frame(const uint8_t *cells, const uint16_t *palette) {
 #endif
 
 // ---- Mini creature: a small animated creature for embedding in other screens
-//      (e.g. the idle "sleeping" indicator). Self-contained — its own canvas and
-//      buffer, independent of the full-screen splash above. ----
-static lv_obj_t  *mini_canvas = NULL;
-static uint16_t  *mini_buf = NULL;
-static int        mini_cell = 0;
-static int        mini_w = 0;
-static const splash_anim_def_t *mini_anim = NULL;
-static uint16_t   mini_frame = 0;
-static uint32_t   mini_started = 0;
+//      (the idle "sleeping" indicator, the corner badge on the usage screen).
+//      Each instance is self-contained — its own canvas, buffer and frame clock,
+//      independent of the full-screen splash above and of every other instance. ----
+struct splash_mini {
+    lv_obj_t *canvas;
+    uint16_t *buf;
+    int       cell;                     // on-screen px per grid cell
+    int       w;                        // canvas edge = GRID * cell
+    const splash_anim_def_t *anim;
+    uint16_t  frame;
+    uint32_t  started_ms;               // when the current frame began
+    bool      follow_rate;              // created with anim_name == NULL
+    uint32_t  last_pick_ms;             // follow_rate: when we last re-picked
+    uint8_t   rotation[GROUP_COUNT];    // follow_rate: own per-group slot cursor
+};
 
-static void mini_render(void) {
-    if (!mini_buf || !mini_anim) return;
-    const uint8_t *cells = mini_anim->frames[mini_frame];
-    const uint16_t *pal = mini_anim->palette;
+static void mini_render(splash_mini_t *m) {
+    if (!m->buf || !m->anim) return;
+    const uint8_t *cells = m->anim->frames[m->frame];
+    const uint16_t *pal = m->anim->palette;
     for (int gy = 0; gy < GRID; gy++) {
         for (int gx = 0; gx < GRID; gx++) {
             uint8_t code = cells[gy * GRID + gx];
             uint16_t color = (pal && code < SPLASH_PALETTE_SIZE) ? pal[code] : COL_EMPTY;
-            for (int dy = 0; dy < mini_cell; dy++) {
-                uint16_t *dst = &mini_buf[(gy * mini_cell + dy) * mini_w + gx * mini_cell];
-                for (int dx = 0; dx < mini_cell; dx++) dst[dx] = color;
+            for (int dy = 0; dy < m->cell; dy++) {
+                uint16_t *dst = &m->buf[(gy * m->cell + dy) * m->w + gx * m->cell];
+                for (int dx = 0; dx < m->cell; dx++) dst[dx] = color;
             }
         }
     }
-    if (mini_canvas) lv_obj_invalidate(mini_canvas);
+    if (m->canvas) lv_obj_invalidate(m->canvas);
 }
 
-lv_obj_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px) {
-    mini_anim = NULL;
-    for (int i = 0; i < SPLASH_ANIM_COUNT; i++) {
-        if (strcmp(splash_anims[i].name, anim_name) == 0) { mini_anim = &splash_anims[i]; break; }
+splash_mini_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px) {
+    if (SPLASH_ANIM_COUNT == 0) return NULL;
+
+    const splash_anim_def_t *named = NULL;
+    if (anim_name) {
+        for (int i = 0; i < SPLASH_ANIM_COUNT; i++) {
+            if (strcmp(splash_anims[i].name, anim_name) == 0) { named = &splash_anims[i]; break; }
+        }
+        if (!named) return NULL;
     }
-    if (!mini_anim) return NULL;
-    mini_cell = px / GRID;
-    if (mini_cell < 1) mini_cell = 1;
-    mini_w = GRID * mini_cell;
+
+    splash_mini_t *m = (splash_mini_t*)calloc(1, sizeof(splash_mini_t));
+    if (!m) return NULL;
+
+    m->follow_rate = (anim_name == NULL);
+    m->anim = named ? named : pick_rate_anim(m->rotation);
+    if (!m->anim) { free(m); return NULL; }
+
+    m->cell = px / GRID;
+    if (m->cell < 1) m->cell = 1;
+    m->w = GRID * m->cell;
 #ifdef BOARD_HAS_PSRAM
     const uint32_t caps = MALLOC_CAP_SPIRAM;
 #else
     const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 #endif
-    mini_buf = (uint16_t*)heap_caps_malloc(mini_w * mini_w * 2, caps);
-    if (!mini_buf) return NULL;
-    mini_canvas = lv_canvas_create(parent);
-    lv_canvas_set_buffer(mini_canvas, mini_buf, mini_w, mini_w, LV_COLOR_FORMAT_RGB565);
-    mini_frame = 0;
-    mini_started = millis();
-    mini_render();
-    return mini_canvas;
+    m->buf = (uint16_t*)heap_caps_malloc(m->w * m->w * 2, caps);
+    if (!m->buf) { free(m); return NULL; }
+
+    m->canvas = lv_canvas_create(parent);
+    lv_canvas_set_buffer(m->canvas, m->buf, m->w, m->w, LV_COLOR_FORMAT_RGB565);
+    m->frame = 0;
+    m->started_ms = millis();
+    m->last_pick_ms = m->started_ms;
+    mini_render(m);
+    return m;
 }
 
-void splash_mini_tick(void) {
-    if (!mini_buf || !mini_anim || mini_anim->frame_count == 0) return;
-    if (millis() - mini_started < mini_anim->holds[mini_frame]) return;
-    mini_started = millis();
-    mini_frame = (mini_frame + 1) % mini_anim->frame_count;
-    mini_render();
+lv_obj_t* splash_mini_canvas(splash_mini_t *m) {
+    return m ? m->canvas : NULL;
+}
+
+void splash_mini_tick(splash_mini_t *m) {
+    if (!m || !m->buf || !m->anim || m->anim->frame_count == 0) return;
+
+    // Rate-following instances swap animation on the same cadence as the splash.
+    if (m->follow_rate && millis() - m->last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
+        m->last_pick_ms = millis();
+        const splash_anim_def_t *next = pick_rate_anim(m->rotation);
+        if (next && next != m->anim) {
+            m->anim = next;
+            m->frame = 0;
+            m->started_ms = m->last_pick_ms;
+            mini_render(m);
+            return;
+        }
+    }
+
+    if (millis() - m->started_ms < m->anim->holds[m->frame]) return;
+    m->started_ms = millis();
+    m->frame = (m->frame + 1) % m->anim->frame_count;
+    mini_render(m);
 }
 
 static void show_placeholder() {
@@ -371,16 +429,10 @@ void splash_next(void) {
 
 void splash_pick_for_current_rate(void) {
     if (SPLASH_ANIM_COUNT == 0) return;
-    int g = usage_rate_group();
-    if (g < 0 || g >= GROUP_COUNT) g = 0;
-    if (group_size[g] == 0) return;
+    const splash_anim_def_t *next = pick_rate_anim(group_rotation);
+    if (!next) return;
 
-    uint8_t slot = group_rotation[g] % group_size[g];
-    group_rotation[g]++;
-    int8_t idx = group_lists[g][slot];
-    if (idx < 0) return;
-
-    cur_anim = (uint16_t)idx;
+    cur_anim = (uint16_t)(next - splash_anims);
     cur_frame = 0;
     frame_started_ms = millis();
     last_pick_ms = frame_started_ms;
