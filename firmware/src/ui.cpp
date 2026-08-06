@@ -116,7 +116,7 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_28;
         L.bt_credit_1_font = &font_styrene_24;
         L.bt_credit_2_font = &font_styrene_20;
-    } else if (c.height >= 300) {
+    } else if (c.height > 320) {
         // Compact layout — tuned for 368x448 (AMOLED-1.8).
         L.content_y = 85;
         L.usage_panel_h = 130;
