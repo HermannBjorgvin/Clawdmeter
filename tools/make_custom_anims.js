@@ -144,26 +144,32 @@ function buildFmListening() {
 // with a gap between them and the thing reads as a pair of antennae. So the
 // heart gets the full 5x4 form, which needs the clear band above his head.
 //
-//   3x3 blossom     5x3 heart
-//     .P.            .H.H.
-//     PCP            HHHHH
-//     .P.            .HHH.
+//   3x3 blossom     6x4 heart
+//     .P.            .H..H.
+//     PCP            HHHHHH
+//     .P.            .HHHH.
+//                    ..HH..
 //
-// The heart is three rows, not four: his head starts at row 4, and a four-row
-// heart fills the clear band exactly, leaving no gap — it then reads as a bow
-// sitting on his head rather than something floating above it. Dropping the
-// bottom point buys the row of black that sells the float.
+// The heart shape is Nova's, drawn in makebead. An earlier 5x3 version dropped
+// the bottom point to buy a row of gap, and without the taper it read as a
+// pink blob. Keeping the point and moving him further down the grid is the
+// better trade — the shape is what makes it legible, not the size.
 //
-// It also never changes size. A 3x3 heart was tried as the pulsed-out state
-// and it isn't legible: the two top humps sit on separate pixels with a gap
-// between them, so it reads as a pair of antennae. The beat is carried by
-// brightness instead, which keeps the silhouette readable in every frame.
+// It never changes size. A 3x3 heart was tried as a pulsed-out state and isn't
+// legible either: its two top humps sit on separate pixels with a gap between
+// them and read as a pair of antennae. The beat is carried by brightness
+// instead, which keeps the silhouette readable in every frame.
 function drawBlossom(g, r, c) {
   for (const [dr, dc] of [[0, 1], [1, 0], [1, 2], [2, 1]]) put(g, r + dr, c + dc, MARK);
   put(g, r + 1, c + 1, MARK_CENTER);
 }
-const HEART_BIG = [[0, 1], [0, 3], [1, 0], [1, 1], [1, 2], [1, 3], [1, 4],
-                   [2, 1], [2, 2], [2, 3]];
+const HEART_BIG = [
+  [0, 1], [0, 4],
+  [1, 0], [1, 1], [1, 2], [1, 3], [1, 4], [1, 5],
+  [2, 1], [2, 2], [2, 3], [2, 4],
+  [3, 2], [3, 3],
+];
+const HEART_W = 6, HEART_H = 4;
 function drawHeart(g, r, c, color) {
   for (const [dr, dc] of HEART_BIG) put(g, r + dr, c + dc, color);
 }
@@ -193,12 +199,12 @@ function driftBlossoms(g, i, n) {
 
 // One heart beating over his head. The beat is carried by brightness: lit for
 // the first third of each beat, resting shade otherwise. Column 7 centers the
-// 5-wide form on his head, which spans columns 5-15.
+// 6-wide form over his head, which spans columns 5-15.
 //
 // Vertically it hangs off the head row rather than sitting at a fixed height,
 // so it rises and falls with him as he breathes instead of floating while he
-// moves underneath it. -4 puts its three rows directly above him with one row
-// of black between, which is what sells it as floating rather than worn.
+// moves underneath it. Its own height plus one row of black is what sells it
+// as floating rather than worn.
 //
 // Two beats per loop whatever the base's frame count — a fixed period would
 // leave a stutter at the wrap on any base whose length it doesn't divide
@@ -206,7 +212,7 @@ function driftBlossoms(g, i, n) {
 function beatHeart(g, i, n) {
   const period = Math.max(4, Math.round(n / 2));
   const lit = (i % period) < Math.ceil(period / 3);
-  drawHeart(g, headTopRow(g) - 4, 7, lit ? MARK_BRIGHT : MARK);
+  drawHeart(g, headTopRow(g) - (HEART_H + 1), 7, lit ? MARK_BRIGHT : MARK);
 }
 
 // `base` picks whose body we decorate. expression_sleep has his eyes CLOSED —
@@ -314,12 +320,12 @@ const anims = [
   // glance. The Zzz-stripping in buildDecoratedVariant stays because it's what
   // makes an expression_sleep base possible at all, should one be wanted again.
   buildDecoratedVariant({
-    name: 'idle hearts', base: 'idle_breathe', shiftDown: 1,
+    name: 'idle hearts', base: 'idle_breathe', shiftDown: 2,
     description: 'Awake and pleased about it, heart beating overhead in time with his breathing.',
     palette: PALETTE_HEARTS, decorate: beatHeart,
   }),
   buildDecoratedVariant({
-    name: 'idle blossom', base: 'idle_breathe', shiftDown: 1,
+    name: 'idle blossom', base: 'idle_breathe', shiftDown: 2,
     description: 'Awake, breathing easy, blossoms drifting up both sides.',
     palette: PALETTE_BLOSSOM, decorate: driftBlossoms,
   }),
