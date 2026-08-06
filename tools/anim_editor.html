@@ -31,8 +31,19 @@
   #grid { image-rendering: pixelated; cursor: crosshair; touch-action: none;
           border: 1px solid var(--line); background: #000; display: block; }
   .swatches { display: flex; flex-wrap: wrap; gap: 4px; }
-  .sw { width: 26px; height: 26px; border: 2px solid transparent; cursor: pointer; padding: 0; }
+  .sw { width: 26px; height: 26px; border: 2px solid transparent; cursor: pointer; padding: 0;
+        position: relative; }
   .sw.on { border-color: #fff; }
+  .sw .x { position: absolute; top: -5px; right: -5px; width: 13px; height: 13px;
+           line-height: 11px; font-size: 10px; text-align: center; border-radius: 50%;
+           background: var(--panel); border: 1px solid var(--line); color: var(--dim); }
+  .sw .x:hover { color: #ff8080; border-color: #ff8080; }
+  .picker { display: grid; grid-template-columns: repeat(16, 1fr); gap: 1px;
+            max-height: 300px; overflow-y: auto; }
+  .picker button { width: 100%; aspect-ratio: 1; padding: 0; border: 1px solid transparent;
+                   cursor: pointer; }
+  .picker button:hover { border-color: #fff; }
+  .picker button.have { border-color: var(--accent); }
   .sw.empty { background:
     repeating-conic-gradient(#333 0% 25%, #1a1a1a 0% 50%) 50%/10px 10px; }
   .frames { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; }
@@ -103,19 +114,29 @@
 
   <div>
     <div class="panel">
-      <h2>調色盤 <span id="palcount" class="dim"></span></h2>
+      <h2>這支動畫的顏色 <span id="palcount" class="dim"></span></h2>
       <div class="swatches" id="swatches"></div>
+      <div id="darkwarn"></div>
+    </div>
+
+    <div class="panel">
+      <h2>選色</h2>
+      <p class="sub" style="margin:0 0 6px;font-size:11px">
+        點一下就加進上面並選取。已經在用的會直接選取。</p>
+      <div class="swatches" id="projcols" style="margin-bottom:8px"></div>
+      <div class="picker" id="picker"></div>
       <div class="row" style="margin-top:8px">
         <input type="color" id="newcol" value="#FFC2D1" style="width:34px;padding:1px">
         <input type="text" id="newhex" value="#FFC2D1" size="8">
-        <button id="addcol">新增顏色</button>
+        <button id="addcol">加入</button>
       </div>
-      <div id="darkwarn"></div>
     </div>
 
     <div class="panel">
       <h2>影格</h2>
       <div class="frames" id="frames"></div>
+      <p class="sub" style="margin:0 0 6px;font-size:11px">
+        沒有選取範圍時，← → 可以快速切換影格</p>
       <div class="row" style="margin-top:8px">
         <button id="f-add">+ 新增</button>
         <button id="f-dup">複製本格</button>
@@ -423,6 +444,61 @@ function paintPreview(canvas, cell, frameIdx) {
 }
 
 // ── palette ──────────────────────────────────────────────────────────────────
+// ── colour picking ───────────────────────────────────────────────────────────
+// Two layers, because they are two different things. The top strip is the
+// animation's own palette — capped at 10 by the firmware, so it can't just be
+// "all the colours". The picker below is where colours come FROM: click one and
+// it joins the palette and becomes current. That replaces reaching for the
+// eyedropper, which only ever worked for colours already on the canvas.
+//
+// 256 swatches: 16 greys, then 24 hues at two saturations and five lightnesses
+// each. Same structure as the makebead palette Nova is used to, generated from
+// HSL rather than copied, so the exact values differ slightly.
+function hsl(h, s, l) {
+  const f = n => {
+    const k = (n + h / 30) % 12, a = s * Math.min(l, 1 - l);
+    const v = l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+    return Math.round(v * 255).toString(16).padStart(2, '0');
+  };
+  return ('#' + f(0) + f(8) + f(4)).toUpperCase();
+}
+
+const PICKER = (() => {
+  const out = [];
+  for (let i = 0; i < 16; i++) { const v = (i * 17).toString(16).padStart(2,'0'); out.push(('#'+v+v+v).toUpperCase()); }
+  for (let hue = 0; hue < 360; hue += 15)
+    for (const sat of [0.45, 1.0])
+      for (const light of [0.20, 0.35, 0.50, 0.65, 0.80])
+        out.push(hsl(hue, sat, light));
+  return out;
+})();
+
+// The colours already in use across the catalog. These are the ones you reach
+// for: his body, the eye black that reads as a hole, the marks on the existing
+// animations. Having them a click away stops a new animation drifting off-model.
+const PROJECT_COLOURS = [
+  ['#D97757', '身體（品牌赭紅）'], ['#0F0F0F', '眼睛（與背景同色，讀起來是洞）'],
+  ['#FFC2D1', '亮愛心'], ['#E8788F', '暗愛心'], ['#F3B6C8', '花瓣'], ['#FFD98A', '花心'],
+  ['#C0D8E4', '耳罩'], ['#FFFFFF', '頭帶'], ['#E1DBDD', '打呼泡泡'], ['#E8E0D0', '音符'],
+];
+
+function useColour(hex) {
+  hex = hex.toUpperCase();
+  const at = palette.indexOf(hex);
+  if (at >= 0) { colour = at; renderPalette(); return; }
+  if (palette.length >= PALETTE_MAX) {
+    alert(`最多 ${PALETTE_MAX} 色（含空白）。先移除一個沒在用的顏色。`);
+    return;
+  }
+  pushUndo(); palette.push(hex); colour = palette.length - 1; renderPalette();
+}
+
+// Only unused colours can be removed — dropping one that cells still reference
+// would silently repaint them as whatever slid into its index.
+function colourUsed(i) {
+  return frames.some(f => f.grid.some(r => r.includes(i)));
+}
+
 function renderPalette() {
   const box = $('swatches'); box.innerHTML = '';
   palette.forEach((hex, i) => {
@@ -431,21 +507,54 @@ function renderPalette() {
     if (i) b.style.background = hex;
     b.title = i === 0 ? '空白（背景）' : hex;
     b.onclick = () => { colour = i; tool = 'pen'; setTool(); renderPalette(); };
+    if (i && !colourUsed(i)) {
+      const x = document.createElement('span');
+      x.className = 'x'; x.textContent = '×'; x.title = '移除（沒有格子在用）';
+      x.onclick = e => {
+        e.stopPropagation(); pushUndo();
+        palette.splice(i, 1);
+        // Indices above the removed slot shift down by one.
+        for (const f of frames) for (const r of f.grid)
+          for (let c = 0; c < N; c++) if (r[c] > i) r[c]--;
+        colour = Math.min(colour, palette.length - 1);
+        renderAll();
+      };
+      b.appendChild(x);
+    }
     box.appendChild(b);
   });
   $('palcount').textContent = `${palette.length}/${PALETTE_MAX}`;
+
   const dark = palette.filter((h,i) => i && isDark(h) && h.toUpperCase() !== '#0F0F0F');
   $('darkwarn').innerHTML = dark.length
     ? `<p class="warn">⚠ ${dark.join(' ')} 在黑色面板上幾乎看不見。`
       + `（#0F0F0F 例外 —— 那是眼睛用的，刻意跟背景同色。）</p>` : '';
+
+  for (const b of $('picker').children)
+    b.classList.toggle('have', palette.includes(b.dataset.hex));
 }
+
+(function buildPickers() {
+  const proj = $('projcols');
+  for (const [hex, label] of PROJECT_COLOURS) {
+    const b = document.createElement('button');
+    b.className = 'sw'; b.style.background = hex; b.title = `${hex} — ${label}`;
+    b.onclick = () => useColour(hex);
+    proj.appendChild(b);
+  }
+  const pick = $('picker');
+  for (const hex of PICKER) {
+    const b = document.createElement('button');
+    b.style.background = hex; b.title = hex; b.dataset.hex = hex;
+    b.onclick = () => useColour(hex);
+    pick.appendChild(b);
+  }
+})();
 
 $('addcol').onclick = () => {
   const hex = $('newhex').value.trim().toUpperCase();
   if (!/^#[0-9A-F]{6}$/.test(hex)) return alert('請用 #RRGGBB 格式');
-  if (palette.length >= PALETTE_MAX) return alert(`最多 ${PALETTE_MAX} 色（含空白）`);
-  if (palette.includes(hex)) { colour = palette.indexOf(hex); renderPalette(); return; }
-  pushUndo(); palette.push(hex); colour = palette.length - 1; renderPalette();
+  useColour(hex);
 };
 $('newcol').oninput = e => $('newhex').value = e.target.value.toUpperCase();
 
@@ -584,8 +693,16 @@ addEventListener('keydown', e => {
     e.preventDefault(); tool = 'select'; setTool(); $('s-all').click(); return;
   }
 
+  // Arrows mean two things depending on what's in hand. With a selection they
+  // nudge it a cell; with nothing selected, left/right step through frames —
+  // which is how you check a motion, by flicking back and forth between two.
   const NUDGE = { ArrowUp: [-1,0], ArrowDown: [1,0], ArrowLeft: [0,-1], ArrowRight: [0,1] };
   if (sel && NUDGE[e.key]) { e.preventDefault(); selNudge(...NUDGE[e.key]); return; }
+  if (!sel && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    e.preventDefault();
+    cur = (cur + (e.key === 'ArrowRight' ? 1 : frames.length - 1)) % frames.length;
+    renderAll(); return;
+  }
   if (sel && e.key === 'Escape') { selCommit(); renderAll(); return; }
   if (sel && (e.key === 'Backspace' || e.key === 'Delete')) {
     e.preventDefault(); $('s-del').click(); return;
