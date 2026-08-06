@@ -18,7 +18,7 @@ const opt = (k, def) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1]
 // Comma-separated so hand-composed animations live in their own directory:
 // the scraper owns claudepix_data/ outright and is free to wipe it, while
 // custom_anims/ (built by make_custom_anims.js) survives a re-scrape.
-const IN_DIRS = opt('--in', ['claudepix_data', 'custom_anims'].join(','))
+const IN_DIRS = opt('--in', ['claudepix_data', 'custom_anims', 'drawn_anims'].join(','))
   .split(',').map(d => path.resolve(__dirname, d.trim()));
 const OUT_FILE = path.resolve(opt('--out',
   path.join(__dirname, '..', 'firmware', 'src', 'splash_animations.h')));
@@ -56,23 +56,71 @@ function paletteToRgb565(palette) {
   return out;
 }
 
+// The contract every source has to meet. Worth failing loudly on: the firmware
+// reads these arrays with fixed strides and no bounds checks, so a 19-row grid
+// or an out-of-range cell doesn't produce a wrong picture, it produces a device
+// reading past the end of an array.
+function validate(data, where) {
+  const die = msg => { console.error(`${where}: ${msg}`); process.exit(1); };
+
+  if (!data.name) die('missing "name"');
+  if (!Array.isArray(data.palette) || data.palette.length === 0) die('missing "palette"');
+  if (data.palette.length > PALETTE_SIZE)
+    die(`palette has ${data.palette.length} entries, max is ${PALETTE_SIZE}`);
+  if (!Array.isArray(data.frames) || data.frames.length === 0) die('no frames');
+
+  data.frames.forEach((f, i) => {
+    if (typeof f.hold !== 'number' || f.hold <= 0) die(`frame ${i}: "hold" must be a positive number of ms`);
+    if (!Array.isArray(f.grid) || f.grid.length !== 20) die(`frame ${i}: grid must have 20 rows, has ${f.grid?.length}`);
+    f.grid.forEach((row, r) => {
+      if (!Array.isArray(row) || row.length !== 20) die(`frame ${i} row ${r}: must have 20 cells, has ${row?.length}`);
+      row.forEach((v, c) => {
+        if (!Number.isInteger(v) || v < 0 || v >= data.palette.length)
+          die(`frame ${i} cell ${r},${c}: ${v} is not a valid index into a ${data.palette.length}-entry palette`);
+      });
+    });
+  });
+}
+
 function main() {
   // Collect (dir, meta) pairs across every source directory. A missing
   // custom_anims/ is fine — only the first directory is required, since without
   // it there's nothing to build at all.
   const index = [];
   IN_DIRS.forEach((dir, i) => {
-    const indexPath = path.join(dir, '_index.json');
-    if (!fs.existsSync(indexPath)) {
+    if (!fs.existsSync(dir)) {
       if (i === 0) {
-        console.error(`No animation index at ${indexPath}. Run scrape_claudepix.js first.`);
+        console.error(`No animation source at ${dir}. Run scrape_claudepix.js first.`);
         process.exit(1);
       }
       return;
     }
-    const metas = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+
+    // A generator that owns its directory writes an _index.json declaring what
+    // it produced. A directory without one is a drop-in: every .json in it is
+    // an animation, discovered by globbing. That's what lets an external
+    // editor export straight into a source dir without also having to
+    // maintain an index it knows nothing about.
+    const indexPath = path.join(dir, '_index.json');
+    let metas;
+    if (fs.existsSync(indexPath)) {
+      metas = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    } else {
+      metas = fs.readdirSync(dir)
+        .filter(f => f.endsWith('.json') && !f.startsWith('_'))
+        .sort()
+        .map(f => {
+          const data = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+          return { filename: f, name: data.name, category: data.category };
+        });
+    }
+
+    if (i === 0 && metas.length === 0) {
+      console.error(`No animations found in ${dir}. Run scrape_claudepix.js first.`);
+      process.exit(1);
+    }
     for (const meta of metas) index.push({ dir, meta });
-    console.log(`  ${path.basename(dir)}: ${metas.length}`);
+    if (metas.length) console.log(`  ${path.basename(dir)}: ${metas.length}`);
   });
   console.log(`Converting ${index.length} animations`);
 
@@ -104,9 +152,11 @@ function main() {
   const entries = [];
 
   for (const { dir, meta } of index) {
-    const ident = safeIdent(meta.filename.replace(/\.html?$/, ''));
-    const dataPath = path.join(dir, meta.filename.replace(/\.html?$/, '.json'));
+    const stem = meta.filename.replace(/\.(html?|json)$/i, '');
+    const ident = safeIdent(stem);
+    const dataPath = path.join(dir, `${stem}.json`);
     const data = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
+    validate(data, dataPath);
 
     const pal565 = paletteToRgb565(data.palette);
     out += `static const uint16_t splash_${ident}_palette[${PALETTE_SIZE}] = {`;
