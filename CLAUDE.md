@@ -201,6 +201,15 @@ white can vanish on the panel and a shape that reads at 24px can turn to mush
 at 4px, so previewing at both scales is the point. Selection lifts on first
 move — arrow-key a selection a cell at a time and that's one frame of motion.
 
+Two things exist because of the coffee mug in `work think`. The onion skin is
+drawn *under* the current frame, so anywhere the two overlap it's hidden — and a
+prop held against the body is exactly the case that gets covered, leaving no
+reference for the thing you're positioning. Cells that changed and are covered
+get a dot on top in the previous frame's colour. And the clipboard (複製 in the
+selection bar / Cmd-C, then 貼上 / Cmd-V) survives a frame change, so a prop is
+drawn once and pasted-then-nudged down the timeline instead of hand-redrawn 30
+times, slightly different each time.
+
 Every animation in the catalog is embedded as a loadable sample, so an existing
 one can be opened and fixed rather than rebuilt; load → export round-trips
 byte-identically. Re-run `node tools/build_editor_samples.js` after changing

@@ -86,16 +86,18 @@
         <span style="width:12px"></span>
         <button id="undo">復原</button>
         <button id="onion" class="on">洋蔥皮</button>
+        <button id="paste" style="display:none">貼上</button>
         <button id="play">▶ 播放</button>
       </div>
       <div class="row" id="selbar" style="display:none">
         <span class="dim" style="color:var(--dim)">選取中 ·</span>
+        <button id="s-copy">複製</button>
         <button id="s-flip-h">左右翻</button>
         <button id="s-flip-v">上下翻</button>
         <button id="s-del">清除</button>
         <button id="s-all">全選</button>
         <button id="s-done">取消選取</button>
-        <span style="color:var(--dim);font-size:11px">方向鍵推一格 · Esc 放下</span>
+        <span style="color:var(--dim);font-size:11px">方向鍵推一格 · Esc 放下 · 複製後可貼到別的影格</span>
       </div>
     </div>
     <canvas id="grid" width="480" height="480"></canvas>
@@ -295,6 +297,42 @@ function selNudge(dr, dc) {
   selLift(); sel.r += dr; sel.c += dc; renderAll();
 }
 
+// A selection only exists inside one frame, so carrying a prop forward used to
+// mean redrawing it in every frame — and a hand-redrawn prop lands slightly
+// different each time. The clipboard survives a frame change: copy once, step
+// forward, paste, nudge it a cell, put it down. Paste lands at the coordinates
+// it was copied from, because a cell or two of drift is the whole edit.
+let clip = null;       // {r, c, h, w, data}
+
+function selCopy() {
+  if (!sel) return;
+  const g = frames[cur].grid;
+  const data = [];
+  for (let r = 0; r < sel.h; r++) {
+    const row = [];
+    for (let c = 0; c < sel.w; c++) {
+      const y = sel.r + r, x = sel.c + c;
+      // A lifted selection is floating, already cut out of the grid below it.
+      row.push(sel.data ? sel.data[r][c]
+             : (y >= 0 && y < N && x >= 0 && x < N ? g[y][x] : 0));
+    }
+    data.push(row);
+  }
+  clip = { r: sel.r, c: sel.c, h: sel.h, w: sel.w, data };
+  $('paste').style.display = '';
+}
+
+function selPaste() {
+  if (!clip) return;
+  selCommit();
+  pushUndo();
+  tool = 'select'; setTool();
+  // Floating, not written down: arrows nudge it into place, Esc commits.
+  sel = { r: clip.r, c: clip.c, h: clip.h, w: clip.w,
+          data: clip.data.map(row => [...row]) };
+  renderAll();
+}
+
 const $ = id => document.getElementById(id);
 const rgb = h => h === 'transparent' ? [0,0,0]
   : [1,3,5].map(i => parseInt(h.slice(i, i+2), 16));
@@ -326,6 +364,26 @@ function paintGrid() {
     if (!g[r][c]) continue;
     gx.fillStyle = palette[g[r][c]];
     gx.fillRect(c*CELL, r*CELL, CELL, CELL);
+  }
+
+  // The ghost above only shows where this frame is empty — anywhere the two
+  // overlap, the opaque current frame hides it. That's the case you most need
+  // it for: something held against the body (a mug, a prop) sits on top of him,
+  // so its previous position is exactly what gets covered. Those cells get a
+  // dot instead, drawn over the top in the ghost's colour.
+  //
+  // Only where the two actually differ. A cell that didn't change needs no
+  // mark, and marking it would speckle the whole creature.
+  if (onion && frames.length > 1) {
+    const prev = frames[(cur - 1 + frames.length) % frames.length].grid;
+    const D = 9, o = (CELL - D) / 2;
+    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+      if (!prev[r][c] || !g[r][c] || prev[r][c] === g[r][c]) continue;
+      gx.fillStyle = 'rgba(0,0,0,.55)';       // ring, so it reads on any colour
+      gx.fillRect(c*CELL+o-1, r*CELL+o-1, D+2, D+2);
+      gx.fillStyle = palette[prev[r][c]];
+      gx.fillRect(c*CELL+o, r*CELL+o, D, D);
+    }
   }
 
   // Floating selection sits above the grid it was lifted out of.
@@ -673,6 +731,8 @@ for (const t of TOOLS) $('tool-'+t).onclick = () => {
   tool = t; setTool(); renderAll();
 };
 
+$('s-copy').onclick  = () => { selCopy(); };
+$('paste').onclick   = () => { selPaste(); };
 $('s-flip-h').onclick = () => { selLift(); sel.data.forEach(r => r.reverse()); renderAll(); };
 $('s-flip-v').onclick = () => { selLift(); sel.data.reverse(); renderAll(); };
 $('s-del').onclick   = () => { selLift(); sel.data = sel.data.map(r => r.map(() => 0)); renderAll(); };
@@ -692,6 +752,8 @@ addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
     e.preventDefault(); tool = 'select'; setTool(); $('s-all').click(); return;
   }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'c') { e.preventDefault(); selCopy(); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'v') { e.preventDefault(); selPaste(); return; }
 
   // Arrows mean two things depending on what's in hand. With a selection they
   // nudge it a cell; with nothing selected, left/right step through frames —
