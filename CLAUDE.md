@@ -64,36 +64,15 @@ ESP32-C6 sibling of the S3 1.8: same 368×448 SH8601 panel + FocalTech touch, di
 - Flash: 32 MB. Uses `default_32MB.csv` partition table.
 
 ### LCD-1.47 (landscape strip) — `waveshare_lcd_147`
-Non-AMOLED kit: a 172×320 **JD9853** IPS panel on plain 4-wire SPI, run rotated so
-the UI gets a **320×172 landscape** canvas (the only landscape port). Pin map taken
-from the official schematic, not the wiki — Waveshare's own ESP-IDF BSP header has
-TP_RST/TP_INT swapped relative to the board.
-- Display: JD9853 via SPI (CS=21, SCLK=38, MOSI=39, DC=45, RST=40, BL=46). Driven by
-  Arduino_GFX's `Arduino_ST7789` (the JD9853 shares the ST7789 command set for
-  CASET/RASET/RAMWR/MADCTL) **plus the vendor register sequence** in
-  `jd9853_reg_init()`, pushed after `gfx->begin()`. Without that sequence the panel
-  stays dark. Constructed portrait (172×320) with `col_offset1 = 34` — the visible
-  area starts at column 34 of the controller's 240-wide GRAM — then `setRotation(1)`;
-  `Arduino_TFT::setRotation` maps that offset onto the correct axis. `ips=false`
-  because the vendor sequence issues its own `INVON` (0x21).
+Non-AMOLED kit: a 172×320 **JD9853** IPS panel on plain 4-wire SPI, run rotated so the UI gets a **320×172 landscape** canvas (the only landscape port). Pin map taken from the official schematic, not the wiki — Waveshare's own ESP-IDF BSP header has TP_RST/TP_INT swapped relative to the board.
+- Display: JD9853 via SPI (CS=21, SCLK=38, MOSI=39, DC=45, RST=40, BL=46). Driven by Arduino_GFX's `Arduino_ST7789` (the JD9853 shares the ST7789 command set for CASET/RASET/RAMWR/MADCTL) **plus the vendor register sequence** in `jd9853_reg_init()`, pushed after `gfx->begin()`. Without that sequence the panel stays dark. Constructed portrait (172×320) with `col_offset1 = 34` — the visible area starts at column 34 of the controller's 240-wide GRAM — then `setRotation(1)`; `Arduino_TFT::setRotation` maps that offset onto the correct axis. `ips=false` because the vendor sequence issues its own `INVON` (0x21).
 - Brightness: LEDC PWM on the backlight GPIO (no panel brightness command), like the 1.54.
-- Touch: **AXS5106L** @ I2C 0x63 (SDA=42, SCL=41, INT=48, RST=47), vendored inline
-  reader — 14-byte burst from reg 0x01, finger count in byte 1. Needs a long reset
-  pulse (200 ms low / 300 ms settle). Landscape maps raw portrait coords by swapping
-  axes with no mirroring.
-- Battery: VBAT → 3.0× divider → GPIO12 (**ADC2**_CH1). No PMU, so charging/VBUS state
-  is unknowable and reports false. ADC2 is only contended by Wi-Fi, which this
-  firmware never starts.
-- Buttons: **BOOT (GPIO 0) is the only readable key** and it takes the PWR role
-  (screens / brightness / hold-3s-release pairing) — without it the device could never
-  be paired. So `BoardCaps.button_count == 0` and the HID Space / Shift+Tab paths never
-  fire on this board. Screen switching also works by tapping the touchscreen.
-- **No hold-to-power-off** (unlike the 1.54): there is no power-hold latch to drop, and
-  GPIO 0 is the S3's boot strapping pin — an ext0 LOW-level wake would sample it while
-  still held and drop the chip into USB download mode.
+- Touch: **AXS5106L** @ I2C 0x63 (SDA=42, SCL=41, INT=48, RST=47), vendored inline reader — 14-byte burst from reg 0x01, finger count in byte 1. Needs a long reset pulse (200 ms low / 300 ms settle). Landscape maps raw portrait coords by swapping axes with no mirroring.
+- Battery: VBAT → 3.0× divider → GPIO12 (**ADC2**_CH1). No PMU, so charging/VBUS state is unknowable and reports false. ADC2 is only contended by Wi-Fi, which this firmware never starts.
+- Buttons: **BOOT (GPIO 0) is the only readable key** and it takes the PWR role (screens / brightness / hold-3s-release pairing) — without it the device could never be paired. So `BoardCaps.button_count == 0` and the HID Space / Shift+Tab paths never fire on this board. Screen switching also works by tapping the touchscreen.
+- **No hold-to-power-off** (unlike the 1.54): there is no power-hold latch to drop, and GPIO 0 is the S3's boot strapping pin — an ext0 LOW-level wake would sample it while still held and drop the chip into USB download mode.
 - No IO expander, no IMU, no codec/buzzer. 16 MB flash + 8 MB octal PSRAM (ESP32-S3R8).
-- UI: `compute_layout()` has a dedicated landscape branch (`width > height && height < 200`)
-  that puts the two usage panels **side by side** instead of stacked.
+- UI: `compute_layout()` has a dedicated landscape branch (`width > height && height < 200`) that puts the two usage panels **side by side** instead of stacked.
 
 ## Architecture
 
