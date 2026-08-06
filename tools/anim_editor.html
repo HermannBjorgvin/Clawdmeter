@@ -64,10 +64,20 @@
         <button id="tool-erase">橡皮擦</button>
         <button id="tool-fill">填滿</button>
         <button id="tool-pick">滴管</button>
+        <button id="tool-select">選取</button>
         <span style="width:12px"></span>
         <button id="undo">復原</button>
         <button id="onion" class="on">洋蔥皮</button>
         <button id="play">▶ 播放</button>
+      </div>
+      <div class="row" id="selbar" style="display:none">
+        <span class="dim" style="color:var(--dim)">選取中 ·</span>
+        <button id="s-flip-h">左右翻</button>
+        <button id="s-flip-v">上下翻</button>
+        <button id="s-del">清除</button>
+        <button id="s-all">全選</button>
+        <button id="s-done">取消選取</button>
+        <span style="color:var(--dim);font-size:11px">方向鍵推一格 · Esc 放下</span>
       </div>
     </div>
     <canvas id="grid" width="480" height="480"></canvas>
@@ -177,6 +187,52 @@ let frames = [{ hold: 300, grid: blank() }];
 let cur = 0, colour = 1, tool = 'pen', onion = true, playing = false;
 let undoStack = [];
 
+// ── selection ────────────────────────────────────────────────────────────────
+// A selection is a rectangle that, once moved, LIFTS: its cells leave the grid
+// and float until committed. Without lifting, dragging would smear a copy of
+// him along the path. Committing writes back only the non-empty cells, so
+// moving him across something else doesn't punch a rectangular hole in it.
+//
+// This is the main way to animate. Duplicate a frame, select him, tap an arrow
+// key: that's one frame of motion, and it can't accidentally redraw him
+// slightly differently the way tracing by hand would.
+let sel = null;        // {r, c, h, w, data}  — data null until lifted
+let selDrag = null;
+
+function selLift() {
+  if (!sel || sel.data) return;
+  pushUndo();                          // once per lift, not once per nudge
+  const g = frames[cur].grid;
+  sel.data = [];
+  for (let r = 0; r < sel.h; r++) {
+    const row = [];
+    for (let c = 0; c < sel.w; c++) {
+      const y = sel.r + r, x = sel.c + c;
+      const inside = y >= 0 && y < N && x >= 0 && x < N;
+      row.push(inside ? g[y][x] : 0);
+      if (inside) g[y][x] = 0;
+    }
+    sel.data.push(row);
+  }
+}
+
+function selCommit() {
+  if (sel && sel.data) {
+    const g = frames[cur].grid;
+    for (let r = 0; r < sel.h; r++) for (let c = 0; c < sel.w; c++) {
+      const v = sel.data[r][c]; if (!v) continue;
+      const y = sel.r + r, x = sel.c + c;
+      if (y >= 0 && y < N && x >= 0 && x < N) g[y][x] = v;
+    }
+  }
+  sel = null;
+}
+
+function selNudge(dr, dc) {
+  if (!sel) return;
+  selLift(); sel.r += dr; sel.c += dc; renderAll();
+}
+
 const $ = id => document.getElementById(id);
 const rgb = h => h === 'transparent' ? [0,0,0]
   : [1,3,5].map(i => parseInt(h.slice(i, i+2), 16));
@@ -210,11 +266,30 @@ function paintGrid() {
     gx.fillRect(c*CELL, r*CELL, CELL, CELL);
   }
 
+  // Floating selection sits above the grid it was lifted out of.
+  if (sel && sel.data) {
+    for (let r = 0; r < sel.h; r++) for (let c = 0; c < sel.w; c++) {
+      const v = sel.data[r][c]; if (!v) continue;
+      gx.fillStyle = palette[v];
+      gx.fillRect((sel.c+c)*CELL, (sel.r+r)*CELL, CELL, CELL);
+    }
+  }
+
   gx.strokeStyle = 'rgba(255,255,255,.07)'; gx.lineWidth = 1;
   for (let i = 0; i <= N; i++) {
     gx.beginPath(); gx.moveTo(i*CELL+.5, 0); gx.lineTo(i*CELL+.5, 480); gx.stroke();
     gx.beginPath(); gx.moveTo(0, i*CELL+.5); gx.lineTo(480, i*CELL+.5); gx.stroke();
   }
+
+  if (sel) {
+    gx.setLineDash([6, 4]); gx.lineWidth = 2;
+    gx.strokeStyle = '#fff';
+    gx.strokeRect(sel.c*CELL+1, sel.r*CELL+1, sel.w*CELL-2, sel.h*CELL-2);
+    gx.strokeStyle = '#000'; gx.lineDashOffset = 6;
+    gx.strokeRect(sel.c*CELL+1, sel.r*CELL+1, sel.w*CELL-2, sel.h*CELL-2);
+    gx.setLineDash([]); gx.lineDashOffset = 0;
+  }
+  $('selbar').style.display = sel ? 'flex' : 'none';
 }
 
 function cellAt(e) {
@@ -250,10 +325,46 @@ function apply(e) {
   renderAll();
 }
 grid.addEventListener('pointerdown', e => {
-  pushUndo(); drawing = true; grid.setPointerCapture(e.pointerId); apply(e);
+  const at = cellAt(e); if (!at) return;
+  grid.setPointerCapture(e.pointerId);
+
+  if (tool === 'select') {
+    const [r, c] = at;
+    const inside = sel && r >= sel.r && r < sel.r + sel.h
+                       && c >= sel.c && c < sel.c + sel.w;
+    if (inside) {
+      // Grabbing inside an existing selection moves it; that's the gesture
+      // people expect, and it's why a fresh marquee has to start outside.
+      selLift();
+      selDrag = { mode: 'move', r0: r, c0: c, sr: sel.r, sc: sel.c };
+    } else {
+      selCommit();
+      sel = { r, c, h: 1, w: 1, data: null };
+      selDrag = { mode: 'marquee', r0: r, c0: c };
+    }
+    renderAll(); return;
+  }
+
+  pushUndo(); drawing = true; apply(e);
 });
-grid.addEventListener('pointermove', e => { if (drawing) apply(e); });
-grid.addEventListener('pointerup', () => drawing = false);
+
+grid.addEventListener('pointermove', e => {
+  if (selDrag) {
+    const at = cellAt(e); if (!at) return;
+    const [r, c] = at;
+    if (selDrag.mode === 'move') {
+      sel.r = selDrag.sr + (r - selDrag.r0);
+      sel.c = selDrag.sc + (c - selDrag.c0);
+    } else {
+      sel.r = Math.min(selDrag.r0, r); sel.c = Math.min(selDrag.c0, c);
+      sel.h = Math.abs(r - selDrag.r0) + 1;
+      sel.w = Math.abs(c - selDrag.c0) + 1;
+    }
+    renderAll(); return;
+  }
+  if (drawing) apply(e);
+});
+grid.addEventListener('pointerup', () => { drawing = false; selDrag = null; });
 
 // ── previews ─────────────────────────────────────────────────────────────────
 // Both device scales, on black, because that's the only way to see what the
@@ -311,25 +422,25 @@ function renderFrames() {
     inp.onchange = () => { f.hold = Math.max(20, +inp.value || 200); };
     inp.onclick = e => e.stopPropagation();
     d.appendChild(inp);
-    d.onclick = () => { cur = i; renderAll(); };
+    d.onclick = () => { selCommit(); cur = i; renderAll(); };
     box.appendChild(d);
     paintPreview(cv, 2, i);
   });
 }
-$('f-add').onclick = () => { pushUndo(); frames.splice(cur+1, 0, {hold:200, grid:blank()}); cur++; renderAll(); };
+$('f-add').onclick = () => { selCommit(); pushUndo(); frames.splice(cur+1, 0, {hold:200, grid:blank()}); cur++; renderAll(); };
 $('f-dup').onclick = () => {
-  pushUndo();
+  selCommit(); pushUndo();
   frames.splice(cur+1, 0, { hold: frames[cur].hold,
     grid: frames[cur].grid.map(r => [...r]) });
   cur++; renderAll();
 };
 $('f-del').onclick = () => {
   if (frames.length === 1) return;
-  pushUndo(); frames.splice(cur, 1); cur = Math.max(0, cur-1); renderAll();
+  selCommit(); pushUndo(); frames.splice(cur, 1); cur = Math.max(0, cur-1); renderAll();
 };
-$('f-left').onclick = () => { if (cur === 0) return; pushUndo();
+$('f-left').onclick = () => { selCommit(); if (cur === 0) return; pushUndo();
   [frames[cur-1], frames[cur]] = [frames[cur], frames[cur-1]]; cur--; renderAll(); };
-$('f-right').onclick = () => { if (cur === frames.length-1) return; pushUndo();
+$('f-right').onclick = () => { selCommit(); if (cur === frames.length-1) return; pushUndo();
   [frames[cur+1], frames[cur]] = [frames[cur], frames[cur+1]]; cur++; renderAll(); };
 
 // ── playback ─────────────────────────────────────────────────────────────────
@@ -345,6 +456,7 @@ function step() {
   playTimer = setTimeout(step, hold);
 }
 $('play').onclick = () => {
+  selCommit();
   playing = !playing;
   $('play').classList.toggle('on', playing);
   $('play').textContent = playing ? '■ 停止' : '▶ 播放';
@@ -353,12 +465,20 @@ $('play').onclick = () => {
 };
 
 // ── tools ────────────────────────────────────────────────────────────────────
+const TOOLS = ['pen','erase','fill','pick','select'];
 function setTool() {
-  for (const t of ['pen','erase','fill','pick'])
-    $('tool-'+t).classList.toggle('on', tool === t);
+  for (const t of TOOLS) $('tool-'+t).classList.toggle('on', tool === t);
 }
-for (const t of ['pen','erase','fill','pick'])
-  $('tool-'+t).onclick = () => { tool = t; setTool(); };
+for (const t of TOOLS) $('tool-'+t).onclick = () => {
+  if (t !== 'select') { selCommit(); }   // leaving select puts him down
+  tool = t; setTool(); renderAll();
+};
+
+$('s-flip-h').onclick = () => { selLift(); sel.data.forEach(r => r.reverse()); renderAll(); };
+$('s-flip-v').onclick = () => { selLift(); sel.data.reverse(); renderAll(); };
+$('s-del').onclick   = () => { selLift(); sel.data = sel.data.map(r => r.map(() => 0)); renderAll(); };
+$('s-all').onclick   = () => { selCommit(); sel = {r:0, c:0, h:N, w:N, data:null}; renderAll(); };
+$('s-done').onclick  = () => { selCommit(); renderAll(); };
 $('onion').onclick = () => { onion = !onion; $('onion').classList.toggle('on', onion); paintGrid(); };
 $('undo').onclick = () => {
   if (!undoStack.length) return;
@@ -367,24 +487,39 @@ $('undo').onclick = () => {
   cur = Math.min(cur, frames.length-1); renderAll();
 };
 addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && e.key === 'z') { e.preventDefault(); $('undo').click(); }
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+
+  if ((e.metaKey || e.ctrlKey) && e.key === 'z') { e.preventDefault(); $('undo').click(); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
+    e.preventDefault(); tool = 'select'; setTool(); $('s-all').click(); return;
+  }
+
+  const NUDGE = { ArrowUp: [-1,0], ArrowDown: [1,0], ArrowLeft: [0,-1], ArrowRight: [0,1] };
+  if (sel && NUDGE[e.key]) { e.preventDefault(); selNudge(...NUDGE[e.key]); return; }
+  if (sel && e.key === 'Escape') { selCommit(); renderAll(); return; }
+  if (sel && (e.key === 'Backspace' || e.key === 'Delete')) {
+    e.preventDefault(); $('s-del').click(); return;
+  }
+
   if (e.key === 'p') { tool='pen'; setTool(); }
   if (e.key === 'e') { tool='erase'; setTool(); }
   if (e.key === 'f') { tool='fill'; setTool(); }
+  if (e.key === 's') { tool='select'; setTool(); }
 });
 
 // ── load / import ────────────────────────────────────────────────────────────
 $('load-template').onclick = () => {
-  pushUndo();
+  sel = null; pushUndo();
   frames = [{ hold: 300, grid: TEMPLATE.map(row =>
     [...row].map(ch => ch === '.' ? 0 : +ch)) }];
   cur = 0; renderAll();
 };
-$('clear').onclick = () => { pushUndo(); frames = [{hold:300, grid:blank()}]; cur = 0; renderAll(); };
+$('clear').onclick = () => { sel = null; pushUndo(); frames = [{hold:300, grid:blank()}]; cur = 0; renderAll(); };
 
 $('import').onclick = () => {
   const msg = $('importmsg');
   let d;
+  sel = null;
   try { d = JSON.parse($('importbox').value); }
   catch { msg.innerHTML = '<span class="warn">不是有效的 JSON</span>'; return; }
 
@@ -421,6 +556,7 @@ $('import').onclick = () => {
 
 // ── export ───────────────────────────────────────────────────────────────────
 function buildDoc() {
+  selCommit();          // a floating selection is part of the frame
   return {
     name: $('name').value.trim() || 'untitled',
     category: $('category').value,
