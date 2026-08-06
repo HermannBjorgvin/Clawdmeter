@@ -33,6 +33,15 @@ POLL_INTERVAL = 60
 TICK = 5
 CONNECT_TIMEOUT = 20.0
 
+# Opt-in token self-heal (see nudge_token_refresh). The interval is deliberately
+# far longer than POLL_INTERVAL: if a nudge doesn't fix things, the refresh token
+# itself is dead and only `claude login` will help — retrying faster just burns
+# quota against a wall.
+NUDGE_MIN_INTERVAL = 900     # seconds between nudge attempts
+NUDGE_TIMEOUT = 120          # hard cap on one nudge subprocess
+NUDGE_MODEL = "claude-haiku-4-5-20251001"
+_last_nudge_ms: float | None = None
+
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
 KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -312,6 +321,129 @@ async def discover_target(skip_addr: str | None = None):
     return address
 
 
+def read_config_value(key: str, allowed: tuple[str, ...] | None = None,
+                      default: str = "") -> str:
+    """Read one lowercase-keyed option from the config file, or ``default``.
+
+    ``allowed`` restricts the value to a known set (lowercased); anything else
+    falls back to ``default``. Pass None to accept any value verbatim (e.g. a
+    filesystem path, where case matters).
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                k, val = line.split("=", 1)
+                if k.strip().lower() != key:
+                    continue
+                val = val.strip()
+                if allowed is None:
+                    return val or default
+                if val.lower() in allowed:
+                    return val.lower()
+    except OSError:
+        pass
+    return default
+
+
+def read_token_refresh_setting() -> str:
+    """Read the `token_refresh` option. One of: off|on.
+
+    Defaults to "off" — the daemon spends none of your quota unless you ask it
+    to. See :func:`nudge_token_refresh` for what "on" actually does.
+    """
+    return read_config_value("token_refresh", ("off", "on"), "off")
+
+
+def find_claude_cli() -> str | None:
+    """Absolute path to the Claude Code CLI, or None if it can't be found.
+
+    PATH is unreliable here: launchd/systemd give the daemon a minimal PATH that
+    usually omits ~/.local/bin, which is exactly where the official installer
+    puts `claude`. So check the explicit config override first, then PATH, then
+    the known install locations.
+    """
+    override = read_config_value("claude_cli")
+    if override:
+        p = Path(override).expanduser()
+        return str(p) if p.is_file() and os.access(p, os.X_OK) else None
+    found = shutil.which("claude")
+    if found:
+        return found
+    for cand in (
+        Path.home() / ".local" / "bin" / "claude",
+        Path.home() / ".claude" / "local" / "claude",
+        Path("/opt/homebrew/bin/claude"),
+        Path("/usr/local/bin/claude"),
+    ):
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
+
+
+async def nudge_token_refresh() -> bool:
+    """Ask Claude Code to refresh its own OAuth token. Opt-in; returns True if
+    the nudge ran to completion.
+
+    The daemon is a pure free-ride: it never mints or refreshes tokens itself
+    (that would race Claude Code's own rotation and hammer the OAuth endpoint).
+    But when EVERY configured config dir is 401ing, the device is stuck showing
+    "No data" until something runs Claude Code — which, if you aren't at the
+    keyboard, may be hours. This runs one deliberately tiny headless call so the
+    CLI that owns the token refreshes it as a side effect; the next poll then
+    finds a live token.
+
+    Guard rails, because this spends your quota:
+      * off by default — set `token_refresh = on` in the config to enable
+      * only fires when no config dir has a usable token at all
+      * rate-limited to one attempt per NUDGE_MIN_INTERVAL
+      * pinned to the cheapest model with max output, so the cost is negligible
+      * hard timeout, and never raises into the poll loop
+    """
+    global _last_nudge_ms
+    if read_token_refresh_setting() != "on":
+        return False
+    now_ms = time.monotonic()
+    if _last_nudge_ms is not None and now_ms - _last_nudge_ms < NUDGE_MIN_INTERVAL:
+        return False
+    _last_nudge_ms = now_ms   # stamp before running: a failure must not retry-spam
+
+    cli = find_claude_cli()
+    if not cli:
+        log("token_refresh=on but the `claude` CLI wasn't found — set "
+            "`claude_cli = /path/to/claude` in the config")
+        return False
+
+    log("No live token in any config dir — nudging Claude Code to refresh it")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            cli, "-p", "ok", "--model", NUDGE_MODEL, "--output-format", "text",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            cwd=str(Path.home()),
+        )
+    except OSError as e:
+        log(f"Token refresh nudge could not start: {e}")
+        return False
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=NUDGE_TIMEOUT)
+    except asyncio.TimeoutError:
+        log(f"Token refresh nudge exceeded {NUDGE_TIMEOUT}s; killing it")
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return False
+    if proc.returncode == 0:
+        log("Nudge finished; the next poll should find a fresh token")
+        return True
+    log(f"Token refresh nudge exited {proc.returncode} — the refresh token may "
+        "also be expired; run `claude login` once to re-seed it")
+    return False
+
+
 def read_chime_setting() -> str:
     """Read the `chime` option from the config file. One of: off|on.
 
@@ -549,6 +681,8 @@ async def poll_active(selector: PlanSelector = _SELECTOR) -> tuple[dict | None, 
 
     Pure free-ride: a 401 (TokenExpired) means that dir's token has expired and
     only Claude Code (its owner) can re-seed it — we never refresh it ourselves.
+    When every dir is dead we may *nudge* Claude Code to do its own refresh, but
+    only if the user opted in (see :func:`nudge_token_refresh`).
     """
     dirs = read_config_dirs()
     payloads: dict[Path, dict] = {}
@@ -571,7 +705,12 @@ async def poll_active(selector: PlanSelector = _SELECTOR) -> tuple[dict | None, 
             payloads[d] = payload
             sessions[d] = int(payload.get("s", 0) or 0)
     if not payloads:
-        return None, not any_live
+        all_dead = not any_live
+        if all_dead:
+            # Opt-in, rate-limited, and never fatal — a failed nudge just leaves
+            # the device on "No data", exactly as before.
+            await nudge_token_refresh()
+        return None, all_dead
     active = selector.choose(sessions)
     if len(dirs) > 1:
         log(f"Active plan: {active} (s={sessions[active]})")

@@ -30,3 +30,26 @@ chime = off
 #   12   = show the clock, forced 12-hour  (e.g. 6:28 PM)
 #   24   = show the clock, forced 24-hour  (e.g. 18:28)
 clock = off
+
+# Let the daemon recover on its own when your Claude Code OAuth token expires.
+#
+# The daemon never mints or refreshes tokens itself — Claude Code owns them.
+# But when no configured config dir has a live token, the device sits on the
+# "No data" screen until something runs Claude Code, which can be hours if
+# you're away. With this on, the daemon runs ONE tiny headless Claude Code call
+# (`claude -p ok`, cheapest model, 1 output token) so the CLI refreshes its own
+# token as a side effect; the next poll then finds it alive.
+#
+# This spends a negligible but non-zero amount of your quota, so it's opt-in.
+# It fires only when every config dir is dead, at most once every 15 minutes,
+# and is bounded by a 120s timeout — a failure just leaves the device idle,
+# exactly as before.
+#   off = never (default)
+#   on  = nudge Claude Code to refresh when all tokens are dead
+token_refresh = off
+
+# Where the Claude Code CLI lives, if token_refresh can't find it. Service
+# managers (launchd/systemd) hand the daemon a minimal PATH that often omits
+# ~/.local/bin, where the official installer puts `claude`. Only needed if the
+# log says the CLI wasn't found.
+# claude_cli = ~/.local/bin/claude

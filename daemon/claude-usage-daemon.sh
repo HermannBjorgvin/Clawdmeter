@@ -14,6 +14,10 @@ TICK=5
 SAVED_MAC_FILE="$HOME/.config/claude-usage-monitor/ble-address"
 CONFIG_FILE="$HOME/.config/claude-usage-monitor/config"
 REFRESH_FLAG="/tmp/claude-usage-refresh-$$"
+NUDGE_MIN_INTERVAL=900   # seconds between token-refresh nudges (see nudge_token_refresh)
+NUDGE_TIMEOUT=120        # hard cap on one nudge
+NUDGE_MODEL="claude-haiku-4-5-20251001"
+LAST_NUDGE=0
 DBUS_DEST="org.bluez"
 NOTIFY_PID=""
 
@@ -70,6 +74,70 @@ read_token_for() {
 
 # Read the `chime` option from the config file. Echoes one of: off|on.
 # Defaults to "off" so the device stays silent until the user opts in.
+# Read the `token_refresh` option. Echoes one of: off|on. Defaults to "off" —
+# the daemon spends none of your quota unless you ask it to.
+read_token_refresh_setting() {
+    local val=""
+    if [ -f "$CONFIG_FILE" ]; then
+        val=$(grep -E '^[[:space:]]*token_refresh[[:space:]]*=' "$CONFIG_FILE" | tail -1 \
+            | tr -d '\r' \
+            | sed -E 's/^[[:space:]]*token_refresh[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//' \
+            | tr '[:upper:]' '[:lower:]')
+    fi
+    case "$val" in
+        on) echo "on" ;;
+        *)  echo "off" ;;
+    esac
+}
+
+# Absolute path to the Claude Code CLI, or empty. systemd hands the daemon a
+# minimal PATH that usually omits ~/.local/bin — exactly where the official
+# installer puts `claude` — so check the config override, then PATH, then the
+# known install locations.
+find_claude_cli() {
+    local override
+    override=$(grep -E '^[[:space:]]*claude_cli[[:space:]]*=' "$CONFIG_FILE" 2>/dev/null | tail -1 \
+        | tr -d '\r' \
+        | sed -E 's/^[[:space:]]*claude_cli[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//')
+    if [ -n "$override" ]; then
+        [ -x "${override/#\~/$HOME}" ] && echo "${override/#\~/$HOME}"
+        return
+    fi
+    local c
+    c=$(command -v claude 2>/dev/null) && { echo "$c"; return; }
+    for c in "$HOME/.local/bin/claude" "$HOME/.claude/local/claude" /usr/local/bin/claude; do
+        [ -x "$c" ] && { echo "$c"; return; }
+    done
+}
+
+# Ask Claude Code to refresh its own OAuth token. Opt-in; see the Python
+# daemons' nudge_token_refresh docstring for the full rationale.
+#
+# The daemon is a pure free-ride: it never mints or refreshes tokens itself.
+# But when every config dir is 401ing, the device sits on "No data" until
+# something runs Claude Code. This runs one deliberately tiny headless call so
+# the CLI that owns the token refreshes it as a side effect. Off by default,
+# rate-limited, timeout-bounded, and never fatal.
+nudge_token_refresh() {
+    [ "$(read_token_refresh_setting)" = "on" ] || return 0
+    local now cli
+    now=$(date +%s)
+    (( now - LAST_NUDGE < NUDGE_MIN_INTERVAL )) && return 0
+    LAST_NUDGE=$now   # stamp before running: a failure must not retry-spam
+    cli=$(find_claude_cli)
+    if [ -z "$cli" ]; then
+        log "token_refresh=on but the \`claude\` CLI wasn't found — set \`claude_cli = /path/to/claude\` in the config"
+        return 0
+    fi
+    log "No live token in any config dir — nudging Claude Code to refresh it"
+    if timeout "$NUDGE_TIMEOUT" "$cli" -p ok --model "$NUDGE_MODEL" --output-format text >/dev/null 2>&1; then
+        log "Nudge finished; the next poll should find a fresh token"
+    else
+        log "Token refresh nudge failed — the refresh token may also be expired; run \`claude login\` once"
+    fi
+    return 0
+}
+
 read_chime_setting() {
     local val=""
     if [ -f "$CONFIG_FILE" ]; then
@@ -420,6 +488,8 @@ poll() {
 
     if [ ${#cycle_payload[@]} -eq 0 ]; then
         log "No usable config dir this cycle"
+        # Opt-in, rate-limited, never fatal (see nudge_token_refresh).
+        nudge_token_refresh
         return 1
     fi
 
