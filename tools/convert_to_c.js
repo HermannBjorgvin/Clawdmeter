@@ -122,6 +122,28 @@ function main() {
     for (const meta of metas) index.push({ dir, meta });
     if (metas.length) console.log(`  ${path.basename(dir)}: ${metas.length}`);
   });
+
+  // Later directories override earlier ones by animation name. That's what
+  // "I edited the existing animation" means: a hand-drawn file in drawn_anims/
+  // replaces the generated or scraped one it shares a name with, rather than
+  // being emitted alongside it.
+  //
+  // Without this the duplicate isn't a soft problem — two animations with the
+  // same name produce the same C identifiers and the firmware fails to compile
+  // on a redefinition, which reads as a toolchain fault rather than "you have
+  // two copies of the same animation".
+  const byName = new Map();
+  for (const entry of index) {
+    const name = entry.meta.name;
+    if (byName.has(name)) {
+      const prev = byName.get(name);
+      console.log(`  ${name}: ${path.basename(entry.dir)} overrides `
+                + `${path.basename(prev.dir)}`);
+    }
+    byName.set(name, entry);
+  }
+  index.length = 0;
+  index.push(...byName.values());
   console.log(`Converting ${index.length} animations`);
 
   let out = '';

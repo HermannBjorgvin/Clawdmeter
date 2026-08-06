@@ -27,7 +27,11 @@ const BEGIN = '/*BEGIN-SAMPLES*/', END = '/*END-SAMPLES*/';
 // source colour instead would preview a body colour the panel never shows.
 const TINT = { '#CD7F6A': '#D97757' };
 
-const anims = [];
+// Keyed by name, later directories winning — the same override rule
+// convert_to_c.js applies. Without it the editor would offer two entries with
+// the same name and no way to tell which one is the one actually on the device.
+const byName = new Map();
+
 for (const dir of SRC_DIRS) {
   if (!fs.existsSync(dir)) continue;
   for (const file of fs.readdirSync(dir).sort()) {
@@ -35,7 +39,7 @@ for (const dir of SRC_DIRS) {
     const a = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
     if (!a.frames || !a.palette) continue;
 
-    anims.push({
+    byName.set(a.name, {
       n: a.name,
       c: a.category || 'Idle',
       p: a.palette.map(h => h === 'transparent' ? 'transparent'
@@ -51,6 +55,7 @@ for (const dir of SRC_DIRS) {
   }
 }
 
+const anims = [...byName.values()];
 anims.sort((x, y) => x.c.localeCompare(y.c) || x.n.localeCompare(y.n));
 
 const html = fs.readFileSync(EDITOR, 'utf8');
