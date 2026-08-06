@@ -37,10 +37,17 @@
     repeating-conic-gradient(#333 0% 25%, #1a1a1a 0% 50%) 50%/10px 10px; }
   .frames { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; }
   .fr { flex: none; text-align: center; }
+  /* touch-action:none is load-bearing. The strip scrolls horizontally, so
+     without it the browser claims a sideways drag as a pan gesture and
+     cancels the pointer stream — reordering silently never fires. */
   .fr canvas { image-rendering: pixelated; background: #000; border: 2px solid var(--line);
-               display: block; cursor: pointer; }
+               display: block; cursor: grab; touch-action: none; }
+  .fr canvas:active { cursor: grabbing; }
   .fr.on canvas { border-color: var(--accent); }
+  .fr.drop canvas { border-color: #fff; border-style: dashed; }
   .fr input { width: 54px; margin-top: 3px; padding: 1px 3px; font-size: 11px; text-align: center; }
+  .fnum { font-size: 10px; color: var(--dim); line-height: 1.2; }
+  .fr.on .fnum { color: var(--accent); }
   .previews { display: flex; gap: 16px; align-items: flex-end; }
   .previews canvas { image-rendering: pixelated; background: #000; border: 1px solid var(--line); }
   .cap { color: var(--dim); font-size: 11px; text-align: center; margin-top: 4px; }
@@ -409,20 +416,69 @@ $('addcol').onclick = () => {
 $('newcol').oninput = e => $('newhex').value = e.target.value.toUpperCase();
 
 // ── frames ───────────────────────────────────────────────────────────────────
+// Reordering is pointer events, not HTML5 drag-and-drop. DnD ignores synthetic
+// events, which makes it untestable, and it's unreliable under touch — pointer
+// events are neither.
+//
+// The drag handle is the thumbnail rather than the whole tile, because the
+// hold field lives in the tile too and a drag handler over it would swallow
+// the click-and-drag needed to edit a number.
+let dragFrom = null, dragMoved = false, suppressClick = false;
+
+function frameIndexAt(x, y) {
+  const el = document.elementFromPoint(x, y);
+  const fr = el && el.closest('.fr');
+  return fr ? [...$('frames').children].indexOf(fr) : null;
+}
+
 function renderFrames() {
   const box = $('frames'); box.innerHTML = '';
   frames.forEach((f, i) => {
     const d = document.createElement('div');
     d.className = 'fr' + (i === cur ? ' on' : '');
+
+    const num = document.createElement('div');
+    num.className = 'fnum'; num.textContent = i + 1;
+    d.appendChild(num);
+
     const cv = document.createElement('canvas');
     cv.width = cv.height = 40; cv.style.width = cv.style.height = '40px';
+    cv.onpointerdown = e => {
+      dragFrom = i; dragMoved = false; cv.setPointerCapture(e.pointerId);
+    };
+    cv.onpointermove = e => {
+      if (dragFrom === null) return;
+      dragMoved = true;
+      const t = frameIndexAt(e.clientX, e.clientY);
+      [...$('frames').children].forEach((el, k) =>
+        el.classList.toggle('drop', t !== null && k === t && k !== dragFrom));
+    };
+    cv.onpointerup = e => {
+      if (dragFrom === null) return;
+      const from = dragFrom, to = frameIndexAt(e.clientX, e.clientY);
+      dragFrom = null;
+      [...$('frames').children].forEach(el => el.classList.remove('drop'));
+      if (!dragMoved || to === null || to === from) return;
+      // A completed drag must not also register as a click on the source tile,
+      // which would snap the selection back to where the frame came from.
+      suppressClick = true;
+      selCommit(); pushUndo();
+      const [moved] = frames.splice(from, 1);
+      frames.splice(to, 0, moved);
+      cur = to; renderAll();
+    };
     d.appendChild(cv);
+
     const inp = document.createElement('input');
     inp.type = 'number'; inp.value = f.hold; inp.min = 20; inp.step = 20; inp.title = '停留 ms';
     inp.onchange = () => { f.hold = Math.max(20, +inp.value || 200); };
     inp.onclick = e => e.stopPropagation();
     d.appendChild(inp);
-    d.onclick = () => { selCommit(); cur = i; renderAll(); };
+
+    d.onclick = () => {
+      if (suppressClick) { suppressClick = false; return; }
+      selCommit(); cur = i; renderAll();
+    };
     box.appendChild(d);
     paintPreview(cv, 2, i);
   });
