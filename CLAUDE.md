@@ -192,6 +192,23 @@ offset yields a plausible-looking grid that's wrong everywhere. Round-trips
 exactly (0/400 cells differing) on both a 20×20 export and a 514×514 grid with
 gridlines and a page margin.
 
+`tools/anim_editor.html` is the drawing surface — open it straight off disk, no
+server. It carries what the firmware cares about rather than what a general
+pixel editor offers: 20×20 and the 10-colour cap enforced, per-frame hold
+times, onion skin, playback at the real holds, and both device previews on
+black (24px/cell splash, 4px/cell corner badge). A colour that looks fine on
+white can vanish on the panel and a shape that reads at 24px can turn to mush
+at 4px, so previewing at both scales is the point. Selection lifts on first
+move — arrow-key a selection a cell at a time and that's one frame of motion.
+
+Every animation in the catalog is embedded as a loadable sample, so an existing
+one can be opened and fixed rather than rebuilt; load → export round-trips
+byte-identically. Re-run `node tools/build_editor_samples.js` after changing
+any animation — it rewrites only the region between the `BEGIN-SAMPLES` /
+`END-SAMPLES` markers, and the rest of the editor is hand-written. The data is
+inlined rather than fetched because the editor runs from `file://`, where
+fetching a sibling file is blocked.
+
 Animations reach the screen through the rate groups in `splash.cpp`
 (`GROUP_NAMES`), matched by literal name — adding a JSON is not enough, the
 name has to be listed in a group or nothing will ever pick it.
