@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>Clawdmeter 動畫編輯器</title>
+<style>
+  :root {
+    --bg: #14120f; --panel: #1e1b17; --line: #3a352e;
+    --text: #ece7df; --dim: #8f8779; --accent: #D97757;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  .sub { color: var(--dim); margin: 0 0 16px; }
+  .wrap { display: grid; grid-template-columns: auto 300px; gap: 20px; align-items: start; }
+  .panel { background: var(--panel); border: 1px solid var(--line); padding: 12px; margin-bottom: 12px; }
+  .panel h2 { font-size: 12px; margin: 0 0 8px; color: var(--dim); font-weight: normal;
+              text-transform: uppercase; letter-spacing: .08em; }
+  button, select, input {
+    font: inherit; background: #2a2620; color: var(--text);
+    border: 1px solid var(--line); padding: 4px 9px; cursor: pointer;
+  }
+  button:hover { background: #343029; }
+  button.on { background: var(--accent); color: #14120f; border-color: var(--accent); }
+  input[type=number], input[type=text] { cursor: text; width: 78px; }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .row + .row { margin-top: 8px; }
+  #grid { image-rendering: pixelated; cursor: crosshair; touch-action: none;
+          border: 1px solid var(--line); background: #000; display: block; }
+  .swatches { display: flex; flex-wrap: wrap; gap: 4px; }
+  .sw { width: 26px; height: 26px; border: 2px solid transparent; cursor: pointer; padding: 0; }
+  .sw.on { border-color: #fff; }
+  .sw.empty { background:
+    repeating-conic-gradient(#333 0% 25%, #1a1a1a 0% 50%) 50%/10px 10px; }
+  .frames { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; }
+  .fr { flex: none; text-align: center; }
+  .fr canvas { image-rendering: pixelated; background: #000; border: 2px solid var(--line);
+               display: block; cursor: pointer; }
+  .fr.on canvas { border-color: var(--accent); }
+  .fr input { width: 54px; margin-top: 3px; padding: 1px 3px; font-size: 11px; text-align: center; }
+  .previews { display: flex; gap: 16px; align-items: flex-end; }
+  .previews canvas { image-rendering: pixelated; background: #000; border: 1px solid var(--line); }
+  .cap { color: var(--dim); font-size: 11px; text-align: center; margin-top: 4px; }
+  textarea { width: 100%; height: 90px; background: #14120f; color: var(--text);
+             border: 1px solid var(--line); font: 11px/1.4 ui-monospace, monospace; padding: 6px; }
+  .warn { color: #ffb454; font-size: 11px; margin-top: 6px; }
+  .ok { color: #7ac07a; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<h1>Clawdmeter 動畫編輯器</h1>
+<p class="sub">20×20 · 最多 10 色 · 每格獨立停留時間 · 匯出可直接丟進 <code>tools/drawn_anims/</code></p>
+
+<div class="wrap">
+  <div>
+    <div class="panel">
+      <div class="row">
+        <button id="tool-pen" class="on">畫筆</button>
+        <button id="tool-erase">橡皮擦</button>
+        <button id="tool-fill">填滿</button>
+        <button id="tool-pick">滴管</button>
+        <span style="width:12px"></span>
+        <button id="undo">復原</button>
+        <button id="onion" class="on">洋蔥皮</button>
+        <button id="play">▶ 播放</button>
+      </div>
+    </div>
+    <canvas id="grid" width="480" height="480"></canvas>
+    <div class="panel" style="margin-top:12px">
+      <h2>實機預覽（黑底，裝置實際尺寸）</h2>
+      <div class="previews">
+        <div><canvas id="pv-splash" width="480" height="480"
+             style="width:240px;height:240px"></canvas>
+             <div class="cap">全螢幕 splash · 每格 24px</div></div>
+        <div><canvas id="pv-badge" width="80" height="80"
+             style="width:80px;height:80px"></canvas>
+             <div class="cap">角落徽章 · 每格 4px</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h2>調色盤 <span id="palcount" class="dim"></span></h2>
+      <div class="swatches" id="swatches"></div>
+      <div class="row" style="margin-top:8px">
+        <input type="color" id="newcol" value="#FFC2D1" style="width:34px;padding:1px">
+        <input type="text" id="newhex" value="#FFC2D1" size="8">
+        <button id="addcol">新增顏色</button>
+      </div>
+      <div id="darkwarn"></div>
+    </div>
+
+    <div class="panel">
+      <h2>影格</h2>
+      <div class="frames" id="frames"></div>
+      <div class="row" style="margin-top:8px">
+        <button id="f-add">+ 新增</button>
+        <button id="f-dup">複製本格</button>
+        <button id="f-del">刪除</button>
+      </div>
+      <div class="row">
+        <button id="f-left">← 前移</button>
+        <button id="f-right">後移 →</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>動畫資訊</h2>
+      <div class="row"><span style="width:44px">名稱</span>
+        <input type="text" id="name" value="my anim" style="width:180px"></div>
+      <div class="row"><span style="width:44px">分類</span>
+        <select id="category">
+          <option>Idle</option><option>Work</option>
+          <option>Dance</option><option>Expressions</option>
+        </select></div>
+    </div>
+
+    <div class="panel">
+      <h2>載入</h2>
+      <div class="row">
+        <button id="load-template">載入小傢伙底稿</button>
+        <button id="clear">清空</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <textarea id="importbox" placeholder="貼上 claudepix 或 makebead 的 JSON，然後按下面的匯入"></textarea>
+      </div>
+      <div class="row"><button id="import">匯入 JSON</button><span id="importmsg"></span></div>
+    </div>
+
+    <div class="panel">
+      <h2>匯出</h2>
+      <div class="row">
+        <button id="download">下載 .json</button>
+        <button id="copy">複製到剪貼簿</button>
+      </div>
+      <p class="sub" style="margin:8px 0 0;font-size:11px">
+        存到 <code>tools/drawn_anims/</code>，執行 <code>node tools/convert_to_c.js</code>，
+        再把名稱加進 <code>splash.cpp</code> 的分組清單。
+      </p>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── model ────────────────────────────────────────────────────────────────────
+// Slot 0 is always empty and renders as the panel background. Everything else
+// is a hex string, capped at PALETTE_MAX total to match the firmware's
+// SPLASH_PALETTE_SIZE — a bigger palette can't be represented on the device.
+const N = 20, PALETTE_MAX = 10;
+
+// The project's existing colours, so a new animation sits with the other 18
+// rather than beside them. Terracotta is the body; #0F0F0F is how the eyes
+// work — it matches the background, so it reads as a hole rather than a colour.
+const START_PALETTE = ['transparent', '#D97757', '#0F0F0F', '#FFC2D1', '#F3B6C8', '#C0D8E4'];
+
+// The canonical creature pose, from claudepix idle_breathe. Proportions here
+// carry meaning: eyes at columns 7 and 12, body 10 rows, and three empty rows
+// underneath that the bob animations move into. Worth tracing rather than
+// guessing.
+const TEMPLATE = [
+  '....................','....................','....................','....................',
+  '.....11111111111....','.....11111111111....','.....11211111211....','...111121111121111..',
+  '...111111111111111..','...111111111111111..','...1.11111111111.1..','.....11111111111....',
+  '.....11111111111....','.....11111111111....','.....1..1...1..1....','.....1..1...1..1....',
+  '.....1..1...1..1....','....................','....................','....................',
+];
+
+const blank = () => Array.from({length: N}, () => new Array(N).fill(0));
+let palette = [...START_PALETTE];
+let frames = [{ hold: 300, grid: blank() }];
+let cur = 0, colour = 1, tool = 'pen', onion = true, playing = false;
+let undoStack = [];
+
+const $ = id => document.getElementById(id);
+const rgb = h => h === 'transparent' ? [0,0,0]
+  : [1,3,5].map(i => parseInt(h.slice(i, i+2), 16));
+const isDark = h => h !== 'transparent' &&
+  (([r,g,b]) => 0.299*r + 0.587*g + 0.114*b < 60)(rgb(h));
+
+// ── drawing surface ──────────────────────────────────────────────────────────
+const grid = $('grid'), gx = grid.getContext('2d');
+const CELL = 24;
+
+function paintGrid() {
+  gx.fillStyle = '#000'; gx.fillRect(0, 0, 480, 480);
+
+  // Onion skin: the previous frame at low alpha. Motion at this resolution is
+  // one or two cells, and without a ghost to line up against it's guesswork.
+  if (onion && frames.length > 1) {
+    const prev = frames[(cur - 1 + frames.length) % frames.length].grid;
+    gx.globalAlpha = 0.28;
+    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+      if (!prev[r][c]) continue;
+      gx.fillStyle = palette[prev[r][c]];
+      gx.fillRect(c*CELL, r*CELL, CELL, CELL);
+    }
+    gx.globalAlpha = 1;
+  }
+
+  const g = frames[cur].grid;
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    if (!g[r][c]) continue;
+    gx.fillStyle = palette[g[r][c]];
+    gx.fillRect(c*CELL, r*CELL, CELL, CELL);
+  }
+
+  gx.strokeStyle = 'rgba(255,255,255,.07)'; gx.lineWidth = 1;
+  for (let i = 0; i <= N; i++) {
+    gx.beginPath(); gx.moveTo(i*CELL+.5, 0); gx.lineTo(i*CELL+.5, 480); gx.stroke();
+    gx.beginPath(); gx.moveTo(0, i*CELL+.5); gx.lineTo(480, i*CELL+.5); gx.stroke();
+  }
+}
+
+function cellAt(e) {
+  const b = grid.getBoundingClientRect();
+  const c = Math.floor((e.clientX - b.left) / b.width * N);
+  const r = Math.floor((e.clientY - b.top) / b.height * N);
+  return (r >= 0 && r < N && c >= 0 && c < N) ? [r, c] : null;
+}
+
+function pushUndo() {
+  undoStack.push(JSON.stringify({ frames, palette }));
+  if (undoStack.length > 60) undoStack.shift();
+}
+
+function flood(g, r, c, from, to) {
+  if (from === to) return;
+  const stack = [[r, c]];
+  while (stack.length) {
+    const [y, x] = stack.pop();
+    if (y < 0 || y >= N || x < 0 || x >= N || g[y][x] !== from) continue;
+    g[y][x] = to;
+    stack.push([y+1,x], [y-1,x], [y,x+1], [y,x-1]);
+  }
+}
+
+let drawing = false;
+function apply(e) {
+  const at = cellAt(e); if (!at) return;
+  const [r, c] = at, g = frames[cur].grid;
+  if (tool === 'pick') { if (g[r][c]) { colour = g[r][c]; renderPalette(); } return; }
+  if (tool === 'fill') { flood(g, r, c, g[r][c], colour); }
+  else g[r][c] = (tool === 'erase') ? 0 : colour;
+  renderAll();
+}
+grid.addEventListener('pointerdown', e => {
+  pushUndo(); drawing = true; grid.setPointerCapture(e.pointerId); apply(e);
+});
+grid.addEventListener('pointermove', e => { if (drawing) apply(e); });
+grid.addEventListener('pointerup', () => drawing = false);
+
+// ── previews ─────────────────────────────────────────────────────────────────
+// Both device scales, on black, because that's the only way to see what the
+// panel will actually show. A colour that looks fine on white can vanish here,
+// and a shape that reads at 24px can turn to mush at 4px.
+function paintPreview(canvas, cell, frameIdx) {
+  const cx = canvas.getContext('2d');
+  cx.fillStyle = '#000'; cx.fillRect(0, 0, canvas.width, canvas.height);
+  const g = frames[frameIdx].grid;
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    if (!g[r][c]) continue;
+    cx.fillStyle = palette[g[r][c]];
+    cx.fillRect(c*cell, r*cell, cell, cell);
+  }
+}
+
+// ── palette ──────────────────────────────────────────────────────────────────
+function renderPalette() {
+  const box = $('swatches'); box.innerHTML = '';
+  palette.forEach((hex, i) => {
+    const b = document.createElement('button');
+    b.className = 'sw' + (i === colour ? ' on' : '') + (i === 0 ? ' empty' : '');
+    if (i) b.style.background = hex;
+    b.title = i === 0 ? '空白（背景）' : hex;
+    b.onclick = () => { colour = i; tool = 'pen'; setTool(); renderPalette(); };
+    box.appendChild(b);
+  });
+  $('palcount').textContent = `${palette.length}/${PALETTE_MAX}`;
+  const dark = palette.filter((h,i) => i && isDark(h) && h.toUpperCase() !== '#0F0F0F');
+  $('darkwarn').innerHTML = dark.length
+    ? `<p class="warn">⚠ ${dark.join(' ')} 在黑色面板上幾乎看不見。`
+      + `（#0F0F0F 例外 —— 那是眼睛用的，刻意跟背景同色。）</p>` : '';
+}
+
+$('addcol').onclick = () => {
+  const hex = $('newhex').value.trim().toUpperCase();
+  if (!/^#[0-9A-F]{6}$/.test(hex)) return alert('請用 #RRGGBB 格式');
+  if (palette.length >= PALETTE_MAX) return alert(`最多 ${PALETTE_MAX} 色（含空白）`);
+  if (palette.includes(hex)) { colour = palette.indexOf(hex); renderPalette(); return; }
+  pushUndo(); palette.push(hex); colour = palette.length - 1; renderPalette();
+};
+$('newcol').oninput = e => $('newhex').value = e.target.value.toUpperCase();
+
+// ── frames ───────────────────────────────────────────────────────────────────
+function renderFrames() {
+  const box = $('frames'); box.innerHTML = '';
+  frames.forEach((f, i) => {
+    const d = document.createElement('div');
+    d.className = 'fr' + (i === cur ? ' on' : '');
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 40; cv.style.width = cv.style.height = '40px';
+    d.appendChild(cv);
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.value = f.hold; inp.min = 20; inp.step = 20; inp.title = '停留 ms';
+    inp.onchange = () => { f.hold = Math.max(20, +inp.value || 200); };
+    inp.onclick = e => e.stopPropagation();
+    d.appendChild(inp);
+    d.onclick = () => { cur = i; renderAll(); };
+    box.appendChild(d);
+    paintPreview(cv, 2, i);
+  });
+}
+$('f-add').onclick = () => { pushUndo(); frames.splice(cur+1, 0, {hold:200, grid:blank()}); cur++; renderAll(); };
+$('f-dup').onclick = () => {
+  pushUndo();
+  frames.splice(cur+1, 0, { hold: frames[cur].hold,
+    grid: frames[cur].grid.map(r => [...r]) });
+  cur++; renderAll();
+};
+$('f-del').onclick = () => {
+  if (frames.length === 1) return;
+  pushUndo(); frames.splice(cur, 1); cur = Math.max(0, cur-1); renderAll();
+};
+$('f-left').onclick = () => { if (cur === 0) return; pushUndo();
+  [frames[cur-1], frames[cur]] = [frames[cur], frames[cur-1]]; cur--; renderAll(); };
+$('f-right').onclick = () => { if (cur === frames.length-1) return; pushUndo();
+  [frames[cur+1], frames[cur]] = [frames[cur], frames[cur+1]]; cur++; renderAll(); };
+
+// ── playback ─────────────────────────────────────────────────────────────────
+// Runs the real per-frame holds, not a uniform frame rate. The variation is
+// what makes these read as alive — a long hold on a rest pose, a short one on
+// a blink — so a preview at constant speed would be lying about the result.
+let playTimer = null, playIdx = 0;
+function step() {
+  paintPreview($('pv-splash'), 24, playIdx);
+  paintPreview($('pv-badge'), 4, playIdx);
+  const hold = frames[playIdx].hold;
+  playIdx = (playIdx + 1) % frames.length;
+  playTimer = setTimeout(step, hold);
+}
+$('play').onclick = () => {
+  playing = !playing;
+  $('play').classList.toggle('on', playing);
+  $('play').textContent = playing ? '■ 停止' : '▶ 播放';
+  if (playing) { playIdx = 0; step(); }
+  else { clearTimeout(playTimer); renderAll(); }
+};
+
+// ── tools ────────────────────────────────────────────────────────────────────
+function setTool() {
+  for (const t of ['pen','erase','fill','pick'])
+    $('tool-'+t).classList.toggle('on', tool === t);
+}
+for (const t of ['pen','erase','fill','pick'])
+  $('tool-'+t).onclick = () => { tool = t; setTool(); };
+$('onion').onclick = () => { onion = !onion; $('onion').classList.toggle('on', onion); paintGrid(); };
+$('undo').onclick = () => {
+  if (!undoStack.length) return;
+  const s = JSON.parse(undoStack.pop());
+  frames = s.frames; palette = s.palette;
+  cur = Math.min(cur, frames.length-1); renderAll();
+};
+addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'z') { e.preventDefault(); $('undo').click(); }
+  if (e.key === 'p') { tool='pen'; setTool(); }
+  if (e.key === 'e') { tool='erase'; setTool(); }
+  if (e.key === 'f') { tool='fill'; setTool(); }
+});
+
+// ── load / import ────────────────────────────────────────────────────────────
+$('load-template').onclick = () => {
+  pushUndo();
+  frames = [{ hold: 300, grid: TEMPLATE.map(row =>
+    [...row].map(ch => ch === '.' ? 0 : +ch)) }];
+  cur = 0; renderAll();
+};
+$('clear').onclick = () => { pushUndo(); frames = [{hold:300, grid:blank()}]; cur = 0; renderAll(); };
+
+$('import').onclick = () => {
+  const msg = $('importmsg');
+  let d;
+  try { d = JSON.parse($('importbox').value); }
+  catch { msg.innerHTML = '<span class="warn">不是有效的 JSON</span>'; return; }
+
+  try {
+    if (Array.isArray(d.cells) && d.dict) {
+      // makebead: one frame, dict + flat cells with nulls
+      if (d.size && (d.size[0] !== N || d.size[1] !== N))
+        throw new Error(`畫布是 ${d.size[0]}×${d.size[1]}，需要 ${N}×${N}`);
+      const map = new Map(); palette = ['transparent'];
+      const g = blank();
+      for (let i = 0; i < N*N; i++) {
+        const v = d.cells[i];
+        if (v === null || v === undefined) continue;
+        const hex = d.dict[v].hex.toUpperCase();
+        if (!map.has(hex)) { map.set(hex, palette.length); palette.push(hex); }
+        g[(i/N)|0][i%N] = map.get(hex);
+      }
+      frames = [{ hold: 200, grid: g }];
+    } else if (Array.isArray(d.frames) && Array.isArray(d.palette)) {
+      // claudepix schema
+      palette = [...d.palette];
+      frames = d.frames.map(f => ({ hold: f.hold || 200, grid: f.grid.map(r => [...r]) }));
+      if (d.name) $('name').value = d.name;
+      if (d.category) $('category').value = d.category;
+    } else throw new Error('認不出這個格式');
+
+    cur = 0; colour = Math.min(1, palette.length-1);
+    msg.innerHTML = `<span class="ok">已匯入 ${frames.length} 格</span>`;
+    renderAll();
+  } catch (err) {
+    msg.innerHTML = `<span class="warn">${err.message}</span>`;
+  }
+};
+
+// ── export ───────────────────────────────────────────────────────────────────
+function buildDoc() {
+  return {
+    name: $('name').value.trim() || 'untitled',
+    category: $('category').value,
+    description: `Drawn in the Clawdmeter editor: ${frames.length} frames.`,
+    palette,
+    frames: frames.map(f => ({ hold: f.hold, grid: f.grid.map(r => [...r]) })),
+  };
+}
+$('download').onclick = () => {
+  const doc = buildDoc();
+  const blob = new Blob([JSON.stringify(doc, null, 1)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = doc.name.replace(/ /g, '_') + '.json';
+  a.click();
+};
+$('copy').onclick = async () => {
+  await navigator.clipboard.writeText(JSON.stringify(buildDoc()));
+  $('copy').textContent = '已複製 ✓';
+  setTimeout(() => $('copy').textContent = '複製到剪貼簿', 1200);
+};
+
+// ── go ───────────────────────────────────────────────────────────────────────
+function renderAll() {
+  paintGrid(); renderFrames(); renderPalette();
+  if (!playing) { paintPreview($('pv-splash'), 24, cur); paintPreview($('pv-badge'), 4, cur); }
+}
+$('load-template').click();
+undoStack = [];
+</script>
+</body>
+</html>
