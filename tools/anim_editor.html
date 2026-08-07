@@ -556,21 +556,36 @@ function paintGrid() {
   // The ghost above only shows where this frame is empty — anywhere the two
   // overlap, the opaque current frame hides it. That's the case you most need
   // it for: something held against the body (a mug, a prop) sits on top of him,
-  // so its previous position is exactly what gets covered. Those cells get a
-  // dot instead, drawn over the top in the ghost's colour.
+  // so its previous position is exactly what gets covered.
   //
-  // Only where the two actually differ. A cell that didn't change needs no
-  // mark, and marking it would speckle the whole creature.
+  // Those cells get an outline rather than a fill. Anything solid sits on the
+  // drawing and competes with it — you stop being able to read the shape you
+  // came here to judge. Tracing only the silhouette's edges leaves the middle
+  // of every cell clear, so it reads as where he just was rather than as
+  // something in the picture.
+  //
+  // Only where the two actually differ; outlining unchanged cells would draw a
+  // box around the whole creature every frame.
   if (onion && frames.length > 1) {
     const prev = frames[(cur - 1 + frames.length) % frames.length].grid;
-    const D = 9, o = (CELL - D) / 2;
+    const hidden = (r, c) => r >= 0 && r < N && c >= 0 && c < N
+                          && prev[r][c] && g[r][c] && prev[r][c] !== g[r][c];
+    gx.lineWidth = 1.5;
+    gx.globalAlpha = 0.6;
     for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
-      if (!prev[r][c] || !g[r][c] || prev[r][c] === g[r][c]) continue;
-      gx.fillStyle = 'rgba(0,0,0,.55)';       // ring, so it reads on any colour
-      gx.fillRect(c*CELL+o-1, r*CELL+o-1, D+2, D+2);
-      gx.fillStyle = palette[prev[r][c]];
-      gx.fillRect(c*CELL+o, r*CELL+o, D, D);
+      if (!hidden(r, c)) continue;
+      const x = c * CELL, y = r * CELL;
+      gx.strokeStyle = palette[prev[r][c]];
+      gx.beginPath();
+      // Only edges facing outward — a shared edge between two ghost cells is
+      // interior, and drawing it would fill the region in with a grid.
+      if (!hidden(r-1, c)) { gx.moveTo(x, y);          gx.lineTo(x+CELL, y); }
+      if (!hidden(r+1, c)) { gx.moveTo(x, y+CELL);     gx.lineTo(x+CELL, y+CELL); }
+      if (!hidden(r, c-1)) { gx.moveTo(x, y);          gx.lineTo(x, y+CELL); }
+      if (!hidden(r, c+1)) { gx.moveTo(x+CELL, y);     gx.lineTo(x+CELL, y+CELL); }
+      gx.stroke();
     }
+    gx.globalAlpha = 1;
   }
 
   // Floating selection sits above the grid it was lifted out of.
