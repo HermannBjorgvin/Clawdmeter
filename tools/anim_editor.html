@@ -175,7 +175,7 @@
       </div>
       <p class="sub" style="margin:6px 0 0;font-size:11px" id="sampleinfo"></p>
       <div class="row" style="margin-top:8px">
-        <button id="load-template" data-i18n="loadPose">只載入姿勢</button>
+        <button id="load-template" data-i18n="loadPose">載入 Clawd 樣板</button>
         <button id="clear" data-i18n="clearAll">清空</button>
       </div>
       <!-- Whoever opens this sees 18 animations and no indication of whose they
@@ -189,7 +189,7 @@
         角色 Clawd 是 Anthropic 的資產。改作前請先確認自己的用途沒問題。
       </p>
       <div class="row" style="margin-top:8px">
-        <textarea id="importbox" data-i18n-ph="importPh" placeholder="貼上 claudepix 或 makebead 的 JSON，然後按下面的匯入"></textarea>
+        <textarea id="importbox" data-i18n-ph="importPh" placeholder="貼上動畫 JSON，然後按下面的匯入"></textarea>
       </div>
       <div class="row"><button id="import" data-i18n="importBtn">匯入 JSON</button><span id="importmsg"></span></div>
     </div>
@@ -241,11 +241,11 @@ const I18N = {
   frameAdd: '+ 新增', frameDup: '複製本格', frameDel: '刪除',
   frameLeft: '← 前移', frameRight: '後移 →',
   infoH: '動畫資訊', labelName: '名稱', labelCat: '分類',
-  loadH: '載入現有動畫', loadBtn: '載入', loadPose: '只載入姿勢', clearAll: '清空',
+  loadH: '載入現有動畫', loadBtn: '載入', loadPose: '載入 Clawd 樣板', clearAll: '清空',
   credit: '大部分的動畫來自 <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a>，'
         + '作者 <a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a>。'
         + '角色 Clawd 是 Anthropic 的資產。改作前請先確認自己的用途沒問題。',
-  importPh: '貼上 claudepix 或 makebead 的 JSON，然後按下面的匯入',
+  importPh: '貼上動畫 JSON，然後按下面的匯入（格式自動判斷）',
   importBtn: '匯入 JSON',
   exportH: '匯出', download: '下載 .json', copyClip: '複製到剪貼簿', copied: '已複製 ✓',
   exportHint: '存到 <code>tools/drawn_anims/</code>，執行 <code>node tools/convert_to_c.js</code>，'
@@ -279,11 +279,11 @@ const I18N = {
   frameAdd: '+ Add', frameDup: 'Duplicate', frameDel: 'Delete',
   frameLeft: '← Move left', frameRight: 'Move right →',
   infoH: 'Animation', labelName: 'Name', labelCat: 'Category',
-  loadH: 'Load an existing animation', loadBtn: 'Load', loadPose: 'Pose only', clearAll: 'Clear',
+  loadH: 'Load an existing animation', loadBtn: 'Load', loadPose: 'Load Clawd template', clearAll: 'Clear',
   credit: 'Most of these animations are from <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a> '
         + 'by <a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a>. '
         + 'The character Clawd belongs to Anthropic. Check that your own use is appropriate before redistributing.',
-  importPh: 'Paste claudepix or makebead JSON, then press Import below',
+  importPh: 'Paste animation JSON, then press Import below (format is detected)',
   importBtn: 'Import JSON',
   exportH: 'Export', download: 'Download .json', copyClip: 'Copy to clipboard', copied: 'Copied ✓',
   exportHint: 'Save into <code>tools/drawn_anims/</code>, run <code>node tools/convert_to_c.js</code>, '
@@ -317,11 +317,11 @@ const I18N = {
   frameAdd: '+ 追加', frameDup: 'このコマを複製', frameDel: '削除',
   frameLeft: '← 前へ', frameRight: '後ろへ →',
   infoH: 'アニメーション情報', labelName: '名前', labelCat: '分類',
-  loadH: '既存のアニメーションを読み込む', loadBtn: '読み込む', loadPose: 'ポーズのみ', clearAll: 'クリア',
+  loadH: '既存のアニメーションを読み込む', loadBtn: '読み込む', loadPose: 'Clawd テンプレート', clearAll: 'クリア',
   credit: 'アニメーションの多くは <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a>'
         + '（<a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a> 作）のものです。'
         + 'キャラクター Clawd は Anthropic に帰属します。再配布の前に用途をご確認ください。',
-  importPh: 'claudepix または makebead の JSON を貼り付けて、下のインポートを押してください',
+  importPh: 'アニメーションの JSON を貼り付けて、下のインポートを押してください（形式は自動判別）',
   importBtn: 'JSON をインポート',
   exportH: '書き出し', download: '.json をダウンロード', copyClip: 'クリップボードにコピー', copied: 'コピーしました ✓',
   exportHint: '<code>tools/drawn_anims/</code> に保存して <code>node tools/convert_to_c.js</code> を実行し、'
@@ -355,11 +355,11 @@ const I18N = {
   frameAdd: '+ 新增', frameDup: '复制本帧', frameDel: '删除',
   frameLeft: '← 前移', frameRight: '后移 →',
   infoH: '动画信息', labelName: '名称', labelCat: '分类',
-  loadH: '载入现有动画', loadBtn: '载入', loadPose: '只载入姿势', clearAll: '清空',
+  loadH: '载入现有动画', loadBtn: '载入', loadPose: '载入 Clawd 模板', clearAll: '清空',
   credit: '大部分的动画来自 <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a>，'
         + '作者 <a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a>。'
         + '角色 Clawd 是 Anthropic 的资产。改作前请先确认自己的用途没问题。',
-  importPh: '粘贴 claudepix 或 makebead 的 JSON，然后按下面的导入',
+  importPh: '粘贴动画 JSON，然后按下面的导入（格式自动判断）',
   importBtn: '导入 JSON',
   exportH: '导出', download: '下载 .json', copyClip: '复制到剪贴板', copied: '已复制 ✓',
   exportHint: '存到 <code>tools/drawn_anims/</code>，运行 <code>node tools/convert_to_c.js</code>，'

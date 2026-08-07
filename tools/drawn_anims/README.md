@@ -44,6 +44,8 @@ too.
 these arrays with fixed strides and no bounds checks, so a 19-row grid doesn't
 produce a wrong picture, it produces a device reading past the end of an array.
 
-`_template_creature.json` is the base pose, if you'd rather start from the
-creature than from an empty grid. Files beginning with `_` are ignored by the
-converter.
+Files beginning with `_` are ignored by the converter, so an index or a note
+can live in here without being mistaken for an animation.
+
+If you'd rather start from the creature than from an empty grid, the editor's
+"Load Clawd template" button gives you his base pose as a single frame.
