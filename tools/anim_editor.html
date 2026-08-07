@@ -530,11 +530,6 @@ const isDark = h => h !== 'transparent' &&
 const grid = $('grid'), gx = grid.getContext('2d');
 const CELL = 24;
 
-// Scratch layer for the onion haze. Held once rather than allocated per
-// repaint — paintGrid runs on every pointer move while you're drawing.
-const hazeCanvas = document.createElement('canvas');
-hazeCanvas.width = hazeCanvas.height = N * CELL;
-
 function paintGrid() {
   gx.fillStyle = '#000'; gx.fillRect(0, 0, 480, 480);
 
@@ -563,34 +558,19 @@ function paintGrid() {
   // it for: something held against the body (a mug, a prop) sits on top of him,
   // so its previous position is exactly what gets covered.
   //
-  // Those cells get a blurred wash rather than any drawn mark. A dot or an
-  // outline has edges, and an edge is a shape — it joins the picture and
-  // competes with the thing you opened the frame to look at. Blurring past the
-  // cell grid removes every edge, so what's left is a haze with no geometry:
-  // you see that something was there and roughly where, and nothing asks to be
-  // read as part of the drawing.
+  // Nothing is drawn over the current frame. Where the two overlap you see
+  // only what's there now, and the ghost stops at his edge.
   //
-  // Only where the two actually differ; hazing unchanged cells would fog the
-  // whole creature every frame.
-  if (onion && frames.length > 1) {
-    const prev = frames[(cur - 1 + frames.length) % frames.length].grid;
-    const hx = hazeCanvas.getContext('2d');
-    hx.clearRect(0, 0, N * CELL, N * CELL);
-    let any = false;
-    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
-      if (!prev[r][c] || !g[r][c] || prev[r][c] === g[r][c]) continue;
-      hx.fillStyle = palette[prev[r][c]];
-      hx.fillRect(c*CELL, r*CELL, CELL, CELL);
-      any = true;
-    }
-    if (any) {
-      gx.save();
-      gx.filter = `blur(${Math.round(CELL / 3)}px)`;
-      gx.globalAlpha = 0.75;
-      gx.drawImage(hazeCanvas, 0, 0);
-      gx.restore();
-    }
-  }
+  // Three attempts at showing the covered part — dots, an outline, a blurred
+  // haze — all failed the same way, and the failure is worth writing down so
+  // it isn't tried a fourth time. Anything you add on top is something to look
+  // at, and the frame is 20 cells wide: there is no spare visual room. Being
+  // fainter doesn't help, because a faint mark in the middle of the drawing
+  // still has to be looked past.
+  //
+  // A prop held against the body genuinely can't be positioned against a ghost
+  // this way. The tools that solve it solve it with layers, not with a cleverer
+  // overlay — see the note in tools/README.md.
 
   // Floating selection sits above the grid it was lifted out of.
   if (sel && sel.data) {

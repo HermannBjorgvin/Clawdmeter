@@ -55,7 +55,31 @@ only the region between the `BEGIN-SAMPLES` / `END-SAMPLES` markers; the rest of
 the editor is hand-written. The data is inlined rather than fetched because the
 editor runs from `file://`, where fetching a sibling file is blocked.
 
-The UI is in Chinese.
+### On the onion skin
+
+It draws the previous frame underneath the current one, so it only shows where
+the current frame is empty. Anywhere the two overlap, the current frame hides
+it — which means a prop held against the body (a mug, a pair of headphones)
+has its previous position covered by exactly the thing you're positioning it
+against.
+
+Dots, an outline and a blurred haze were all tried on top and all rejected for
+the same reason: the frame is 20 cells wide, there is no spare visual room, and
+anything added over the drawing has to be looked past to read the drawing.
+Being fainter doesn't fix it.
+
+The tools that solve this solve it with **layers**, not with a better overlay —
+put the prop on its own layer and its previous position isn't covered by the
+body, because the body isn't on that layer. Aseprite and Krita also tint past
+and future frames different colours so a ghost never reads as current art. The
+other half of the answer is older than any of them: animators judge motion by
+**flipping** between two frames rather than by studying a static ghost, which
+is what the arrow keys do here when nothing is selected.
+
+This editor has no layers. It writes one 20x20 grid of palette indices per
+frame because that is what the firmware reads, and adding layers means an
+editor-side model that flattens on export — worth doing if animating props
+becomes common, not worth faking with an overlay.
 
 ## 3. Convert to C
 
