@@ -89,5 +89,19 @@
     "category": "Dance",
     "frame_count": 16,
     "palette_size": 10
+  },
+  {
+    "filename": "dance_bob.html",
+    "name": "dance bob",
+    "category": "Dance",
+    "frame_count": 4,
+    "palette_size": 3
+  },
+  {
+    "filename": "work_type.html",
+    "name": "work type",
+    "category": "Work",
+    "frame_count": 4,
+    "palette_size": 3
   }
 ]

@@ -1,0 +1,1141 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>Clawdmeter 動畫編輯器</title>
+<style>
+  :root {
+    --bg: #14120f; --panel: #1e1b17; --line: #3a352e;
+    --text: #ece7df; --dim: #8f8779; --accent: #D97757;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  .sub { color: var(--dim); margin: 0 0 16px; }
+  .wrap { display: grid; grid-template-columns: auto 300px; gap: 20px; align-items: start; }
+  .panel { background: var(--panel); border: 1px solid var(--line); padding: 12px; margin-bottom: 12px; }
+  .panel h2 { font-size: 12px; margin: 0 0 8px; color: var(--dim); font-weight: normal;
+              text-transform: uppercase; letter-spacing: .08em; }
+  button, select, input {
+    font: inherit; background: #2a2620; color: var(--text);
+    border: 1px solid var(--line); padding: 4px 9px; cursor: pointer;
+  }
+  button:hover { background: #343029; }
+  button.on { background: var(--accent); color: #14120f; border-color: var(--accent); }
+  input[type=number], input[type=text] { cursor: text; width: 78px; }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .row + .row { margin-top: 8px; }
+  #grid { image-rendering: pixelated; cursor: crosshair; touch-action: none;
+          border: 1px solid var(--line); background: #000; display: block; }
+  .swatches { display: flex; flex-wrap: wrap; gap: 4px; }
+  .sw { width: 26px; height: 26px; border: 2px solid transparent; cursor: pointer; padding: 0;
+        position: relative; }
+  .sw.on { border-color: #fff; }
+  .sw .x { position: absolute; top: -5px; right: -5px; width: 13px; height: 13px;
+           line-height: 11px; font-size: 10px; text-align: center; border-radius: 50%;
+           background: var(--panel); border: 1px solid var(--line); color: var(--dim); }
+  .sw .x:hover { color: #ff8080; border-color: #ff8080; }
+  .picker { display: grid; grid-template-columns: repeat(16, 1fr); gap: 1px;
+            max-height: 300px; overflow-y: auto; }
+  .picker button { width: 100%; aspect-ratio: 1; padding: 0; border: 1px solid transparent;
+                   cursor: pointer; }
+  .picker button:hover { border-color: #fff; }
+  .picker button.have { border-color: var(--accent); }
+  .sw.empty { background:
+    repeating-conic-gradient(#333 0% 25%, #1a1a1a 0% 50%) 50%/10px 10px; }
+  .frames { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; }
+  .fr { flex: none; text-align: center; }
+  /* touch-action:none is load-bearing. The strip scrolls horizontally, so
+     without it the browser claims a sideways drag as a pan gesture and
+     cancels the pointer stream — reordering silently never fires. */
+  .fr canvas { image-rendering: pixelated; background: #000; border: 2px solid var(--line);
+               display: block; cursor: grab; touch-action: none; }
+  .fr canvas:active { cursor: grabbing; }
+  .fr.on canvas { border-color: var(--accent); }
+  .fr.drop canvas { border-color: #fff; border-style: dashed; }
+  .fr input { width: 54px; margin-top: 3px; padding: 1px 3px; font-size: 11px; text-align: center; }
+  .fnum { font-size: 10px; color: var(--dim); line-height: 1.2; }
+  .fr.on .fnum { color: var(--accent); }
+  .previews { display: flex; gap: 16px; align-items: flex-end; }
+  .previews canvas { image-rendering: pixelated; background: #000; border: 1px solid var(--line); }
+  .cap { color: var(--dim); font-size: 11px; text-align: center; margin-top: 4px; }
+  textarea { width: 100%; height: 90px; background: #14120f; color: var(--text);
+             border: 1px solid var(--line); font: 11px/1.4 ui-monospace, monospace; padding: 6px; }
+  .warn { color: #ffb454; font-size: 11px; margin-top: 6px; }
+  .ok { color: #7ac07a; }
+  a { color: var(--accent); }
+  .titlebar { display: flex; align-items: baseline; gap: 12px; }
+  .titlebar h1 { margin: 0; }
+  #lang { font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div class="titlebar">
+  <h1 data-i18n="title">Clawdmeter 動畫編輯器</h1>
+  <select id="lang" aria-label="Language"></select>
+</div>
+<p class="sub" data-i18n-html="sub">20×20 · 最多 10 色 · 每格獨立停留時間 · 匯出可直接丟進 <code>tools/drawn_anims/</code></p>
+
+<div class="wrap">
+  <div>
+    <div class="panel">
+      <div class="row">
+        <button id="tool-pen" class="on" data-i18n="pen">畫筆</button>
+        <button id="tool-erase" data-i18n="erase">橡皮擦</button>
+        <button id="tool-fill" data-i18n="fill">填滿</button>
+        <button id="tool-pick" data-i18n="pick">滴管</button>
+        <button id="tool-select" data-i18n="select">選取</button>
+        <span style="width:12px"></span>
+        <button id="undo" data-i18n="undo">復原</button>
+        <button id="onion" class="on" data-i18n="onion">洋蔥皮</button>
+        <button id="paste" style="display:none" data-i18n="paste">貼上</button>
+        <button id="play">▶ 播放</button>
+      </div>
+      <div class="row" id="selbar" style="display:none">
+        <span class="dim" style="color:var(--dim)" data-i18n="selecting">選取中 ·</span>
+        <button id="s-copy" data-i18n="copy">複製</button>
+        <button id="s-flip-h" data-i18n="flipH">左右翻</button>
+        <button id="s-flip-v" data-i18n="flipV">上下翻</button>
+        <button id="s-del" data-i18n="clearSel">清除</button>
+        <button id="s-all" data-i18n="selectAll">全選</button>
+        <button id="s-done" data-i18n="deselect">取消選取</button>
+        <span style="color:var(--dim);font-size:11px" data-i18n="selHint">方向鍵推一格 · Esc 放下 · 複製後可貼到別的影格</span>
+      </div>
+    </div>
+    <canvas id="grid" width="480" height="480"></canvas>
+    <div class="panel" style="margin-top:12px">
+      <h2 data-i18n="previewH">實機預覽（黑底，裝置實際尺寸）</h2>
+      <div class="previews">
+        <div><canvas id="pv-splash" width="480" height="480"
+             style="width:240px;height:240px"></canvas>
+             <div class="cap" data-i18n="capSplash">全螢幕 splash · 每格 24px</div></div>
+        <div><canvas id="pv-badge" width="80" height="80"
+             style="width:80px;height:80px"></canvas>
+             <div class="cap" data-i18n="capBadge">角落徽章 · 每格 4px</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h2><span data-i18n="palH">這支動畫的顏色</span> <span id="palcount" class="dim"></span></h2>
+      <div class="swatches" id="swatches"></div>
+      <div id="darkwarn"></div>
+    </div>
+
+    <div class="panel">
+      <h2 data-i18n="pickH">選色</h2>
+      <p class="sub" style="margin:0 0 6px;font-size:11px" data-i18n="pickHint">
+        點一下就加進上面並選取。已經在用的會直接選取。</p>
+      <div class="swatches" id="projcols" style="margin-bottom:8px"></div>
+      <div class="picker" id="picker"></div>
+      <div class="row" style="margin-top:8px">
+        <input type="color" id="newcol" value="#FFC2D1" style="width:34px;padding:1px">
+        <input type="text" id="newhex" value="#FFC2D1" size="8">
+        <button id="addcol" data-i18n="addColour">加入</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2 data-i18n="framesH">影格</h2>
+      <div class="frames" id="frames"></div>
+      <p class="sub" style="margin:0 0 6px;font-size:11px" data-i18n="frameHint">
+        沒有選取範圍時，← → 可以快速切換影格</p>
+      <div class="row" style="margin-top:8px">
+        <button id="f-add" data-i18n="frameAdd">+ 新增</button>
+        <button id="f-dup" data-i18n="frameDup">複製本格</button>
+        <button id="f-del" data-i18n="frameDel">刪除</button>
+      </div>
+      <div class="row">
+        <button id="f-left" data-i18n="frameLeft">← 前移</button>
+        <button id="f-right" data-i18n="frameRight">後移 →</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2 data-i18n="infoH">動畫資訊</h2>
+      <div class="row"><span style="width:44px" data-i18n="labelName">名稱</span>
+        <input type="text" id="name" value="my anim" style="width:180px"></div>
+      <div class="row"><span style="width:44px" data-i18n="labelCat">分類</span>
+        <select id="category">
+          <option>Idle</option><option>Work</option>
+          <option>Dance</option><option>Expressions</option>
+        </select></div>
+    </div>
+
+    <div class="panel">
+      <h2 data-i18n="loadH">載入現有動畫</h2>
+      <div class="row">
+        <select id="sample" style="width:186px"></select>
+        <button id="load-sample" data-i18n="loadBtn">載入</button>
+      </div>
+      <p class="sub" style="margin:6px 0 0;font-size:11px" id="sampleinfo"></p>
+      <div class="row" style="margin-top:8px">
+        <button id="load-template" data-i18n="loadPose">只載入姿勢</button>
+        <button id="clear" data-i18n="clearAll">清空</button>
+      </div>
+      <!-- Whoever opens this sees 18 animations and no indication of whose they
+           are. Most of the catalogue is someone else's work, and the editor is
+           the one place in the repo where you meet it without the README. -->
+      <p class="sub" style="margin:10px 0 0;font-size:11px;line-height:1.5"
+         data-i18n-html="credit">
+        大部分的動畫來自
+        <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a>，
+        作者 <a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a>。
+        角色 Clawd 是 Anthropic 的資產。改作前請先確認自己的用途沒問題。
+      </p>
+      <div class="row" style="margin-top:8px">
+        <textarea id="importbox" data-i18n-ph="importPh" placeholder="貼上 claudepix 或 makebead 的 JSON，然後按下面的匯入"></textarea>
+      </div>
+      <div class="row"><button id="import" data-i18n="importBtn">匯入 JSON</button><span id="importmsg"></span></div>
+    </div>
+
+    <div class="panel">
+      <h2 data-i18n="exportH">匯出</h2>
+      <div class="row">
+        <button id="download" data-i18n="download">下載 .json</button>
+        <button id="copy">複製到剪貼簿</button>
+      </div>
+      <p class="sub" style="margin:8px 0 0;font-size:11px" data-i18n-html="exportHint">
+        存到 <code>tools/drawn_anims/</code>，執行 <code>node tools/convert_to_c.js</code>，
+        再把名稱加進 <code>splash.cpp</code> 的分組清單。
+      </p>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── model ────────────────────────────────────────────────────────────────────
+// Slot 0 is always empty and renders as the panel background. Everything else
+// is a hex string, capped at PALETTE_MAX total to match the firmware's
+// SPLASH_PALETTE_SIZE — a bigger palette can't be represented on the device.
+const N = 20, PALETTE_MAX = 10;
+
+// ── language ─────────────────────────────────────────────────────────────────
+// The four the device software speaks. Markup keeps its zh-TW text inline as
+// the fallback, so the page is still readable if this never runs.
+//
+// A missing key falls back to English rather than rendering blank — a half-
+// translated UI with holes in it is worse than one with two languages in it,
+// because a blank button doesn't tell you what it does.
+const LANGS = { 'zh-TW': '繁體中文', 'en': 'English', 'ja': '日本語', 'zh-CN': '简体中文' };
+
+const I18N = {
+'zh-TW': {
+  title: 'Clawdmeter 動畫編輯器',
+  sub: '20×20 · 最多 10 色 · 每格獨立停留時間 · 匯出可直接丟進 <code>tools/drawn_anims/</code>',
+  pen: '畫筆', erase: '橡皮擦', fill: '填滿', pick: '滴管', select: '選取',
+  undo: '復原', onion: '洋蔥皮', paste: '貼上', play: '▶ 播放', stop: '■ 停止',
+  selecting: '選取中 ·', copy: '複製', flipH: '左右翻', flipV: '上下翻',
+  clearSel: '清除', selectAll: '全選', deselect: '取消選取',
+  selHint: '方向鍵推一格 · Esc 放下 · 複製後可貼到別的影格',
+  previewH: '實機預覽（黑底，裝置實際尺寸）',
+  capSplash: '全螢幕 splash · 每格 24px', capBadge: '角落徽章 · 每格 4px',
+  palH: '這支動畫的顏色', pickH: '選色',
+  pickHint: '點一下就加進上面並選取。已經在用的會直接選取。', addColour: '加入',
+  framesH: '影格', frameHint: '沒有選取範圍時，← → 可以快速切換影格',
+  frameAdd: '+ 新增', frameDup: '複製本格', frameDel: '刪除',
+  frameLeft: '← 前移', frameRight: '後移 →',
+  infoH: '動畫資訊', labelName: '名稱', labelCat: '分類',
+  loadH: '載入現有動畫', loadBtn: '載入', loadPose: '只載入姿勢', clearAll: '清空',
+  credit: '大部分的動畫來自 <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a>，'
+        + '作者 <a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a>。'
+        + '角色 Clawd 是 Anthropic 的資產。改作前請先確認自己的用途沒問題。',
+  importPh: '貼上 claudepix 或 makebead 的 JSON，然後按下面的匯入',
+  importBtn: '匯入 JSON',
+  exportH: '匯出', download: '下載 .json', copyClip: '複製到剪貼簿', copied: '已複製 ✓',
+  exportHint: '存到 <code>tools/drawn_anims/</code>，執行 <code>node tools/convert_to_c.js</code>，'
+            + '再把名稱加進 <code>splash.cpp</code> 的分組清單。',
+  palFull: '最多 {n} 色（含空白）。先移除一個沒在用的顏色。',
+  swEmpty: '空白（背景）', swRemove: '移除（沒有格子在用）',
+  darkWarn: '⚠ {list} 在黑色面板上幾乎看不見。'
+          + '（#0F0F0F 例外 —— 那是眼睛用的，刻意跟背景同色。）',
+  hexFormat: '請用 #RRGGBB 格式', holdTitle: '停留 ms',
+  sampleInfo: '{n} 格 · {c} 色 · 總長 {ms} ms',
+  noSamples: '（尚未產生樣本 — 執行 node tools/build_editor_samples.js）',
+  badJson: '不是有效的 JSON', canvasSize: '畫布是 {w}×{h}，需要 {n}×{n}',
+  unknownFormat: '認不出這個格式', imported: '已匯入 {n} 格',
+  cBody: '身體（品牌赭紅）', cEye: '眼睛（與背景同色，讀起來是洞）',
+  cHeart: '亮愛心', cHeartDark: '暗愛心', cPetal: '花瓣', cPistil: '花心',
+  cEarcup: '耳罩', cHeadband: '頭帶', cSnore: '打呼泡泡', cNote: '音符',
+},
+'en': {
+  title: 'Clawdmeter animation editor',
+  sub: '20×20 · 10 colours max · per-frame hold times · export straight into <code>tools/drawn_anims/</code>',
+  pen: 'Pen', erase: 'Eraser', fill: 'Fill', pick: 'Eyedropper', select: 'Select',
+  undo: 'Undo', onion: 'Onion skin', paste: 'Paste', play: '▶ Play', stop: '■ Stop',
+  selecting: 'Selected ·', copy: 'Copy', flipH: 'Flip H', flipV: 'Flip V',
+  clearSel: 'Clear', selectAll: 'Select all', deselect: 'Deselect',
+  selHint: 'Arrows nudge a cell · Esc puts it down · copy to paste into another frame',
+  previewH: 'On-device preview (black, actual size)',
+  capSplash: 'Full splash · 24px per cell', capBadge: 'Corner badge · 4px per cell',
+  palH: "This animation's colours", pickH: 'Colours',
+  pickHint: 'Click to add and select. Already in use selects directly.', addColour: 'Add',
+  framesH: 'Frames', frameHint: 'With nothing selected, ← → step through frames',
+  frameAdd: '+ Add', frameDup: 'Duplicate', frameDel: 'Delete',
+  frameLeft: '← Move left', frameRight: 'Move right →',
+  infoH: 'Animation', labelName: 'Name', labelCat: 'Category',
+  loadH: 'Load an existing animation', loadBtn: 'Load', loadPose: 'Pose only', clearAll: 'Clear',
+  credit: 'Most of these animations are from <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a> '
+        + 'by <a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a>. '
+        + 'The character Clawd belongs to Anthropic. Check that your own use is appropriate before redistributing.',
+  importPh: 'Paste claudepix or makebead JSON, then press Import below',
+  importBtn: 'Import JSON',
+  exportH: 'Export', download: 'Download .json', copyClip: 'Copy to clipboard', copied: 'Copied ✓',
+  exportHint: 'Save into <code>tools/drawn_anims/</code>, run <code>node tools/convert_to_c.js</code>, '
+            + 'then add the name to a group list in <code>splash.cpp</code>.',
+  palFull: '{n} colours max, empty included. Remove an unused one first.',
+  swEmpty: 'Empty (background)', swRemove: 'Remove (no cell uses it)',
+  darkWarn: '⚠ {list} will be nearly invisible on a black panel. '
+          + '(#0F0F0F is the exception — that is the eye colour, deliberately the same as the background.)',
+  hexFormat: 'Use #RRGGBB format', holdTitle: 'hold, ms',
+  sampleInfo: '{n} frames · {c} colours · {ms} ms total',
+  noSamples: '(no samples built yet — run node tools/build_editor_samples.js)',
+  badJson: 'Not valid JSON', canvasSize: 'Canvas is {w}×{h}, needs to be {n}×{n}',
+  unknownFormat: 'Unrecognised format', imported: 'Imported {n} frames',
+  cBody: 'Body (brand terracotta)', cEye: 'Eye (same as background, reads as a hole)',
+  cHeart: 'Heart, light', cHeartDark: 'Heart, dark', cPetal: 'Petal', cPistil: 'Flower centre',
+  cEarcup: 'Ear cup', cHeadband: 'Headband', cSnore: 'Snore bubble', cNote: 'Music note',
+},
+'ja': {
+  title: 'Clawdmeter アニメーションエディタ',
+  sub: '20×20 · 最大10色 · コマごとの表示時間 · 書き出しはそのまま <code>tools/drawn_anims/</code> へ',
+  pen: 'ペン', erase: '消しゴム', fill: '塗りつぶし', pick: 'スポイト', select: '選択',
+  undo: '元に戻す', onion: 'オニオンスキン', paste: '貼り付け', play: '▶ 再生', stop: '■ 停止',
+  selecting: '選択中 ·', copy: 'コピー', flipH: '左右反転', flipV: '上下反転',
+  clearSel: '消去', selectAll: 'すべて選択', deselect: '選択解除',
+  selHint: '矢印キーで1マス移動 · Escで確定 · コピーすれば他のコマにも貼れます',
+  previewH: '実機プレビュー（黒背景・実寸）',
+  capSplash: '全画面スプラッシュ · 1マス24px', capBadge: '隅のバッジ · 1マス4px',
+  palH: 'このアニメーションの色', pickH: '色を選ぶ',
+  pickHint: 'クリックで上に追加して選択。使用中の色はそのまま選択されます。', addColour: '追加',
+  framesH: 'コマ', frameHint: '選択範囲がないときは ← → でコマを切り替えられます',
+  frameAdd: '+ 追加', frameDup: 'このコマを複製', frameDel: '削除',
+  frameLeft: '← 前へ', frameRight: '後ろへ →',
+  infoH: 'アニメーション情報', labelName: '名前', labelCat: '分類',
+  loadH: '既存のアニメーションを読み込む', loadBtn: '読み込む', loadPose: 'ポーズのみ', clearAll: 'クリア',
+  credit: 'アニメーションの多くは <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a>'
+        + '（<a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a> 作）のものです。'
+        + 'キャラクター Clawd は Anthropic に帰属します。再配布の前に用途をご確認ください。',
+  importPh: 'claudepix または makebead の JSON を貼り付けて、下のインポートを押してください',
+  importBtn: 'JSON をインポート',
+  exportH: '書き出し', download: '.json をダウンロード', copyClip: 'クリップボードにコピー', copied: 'コピーしました ✓',
+  exportHint: '<code>tools/drawn_anims/</code> に保存して <code>node tools/convert_to_c.js</code> を実行し、'
+            + '名前を <code>splash.cpp</code> のグループ一覧に追加してください。',
+  palFull: '空きを含めて最大 {n} 色です。使っていない色を先に削除してください。',
+  swEmpty: '空き（背景）', swRemove: '削除（どのマスも使っていません）',
+  darkWarn: '⚠ {list} は黒いパネルではほとんど見えません。'
+          + '（#0F0F0F は例外 —— 目の色で、意図的に背景と同じにしています。）',
+  hexFormat: '#RRGGBB の形式で入力してください', holdTitle: '表示時間 ms',
+  sampleInfo: '{n} コマ · {c} 色 · 合計 {ms} ms',
+  noSamples: '（サンプル未生成 — node tools/build_editor_samples.js を実行してください）',
+  badJson: '有効な JSON ではありません', canvasSize: 'キャンバスが {w}×{h} です。{n}×{n} である必要があります',
+  unknownFormat: '形式を判別できません', imported: '{n} コマを読み込みました',
+  cBody: '体（ブランドのテラコッタ）', cEye: '目（背景と同色。穴のように見えます）',
+  cHeart: 'ハート・明', cHeartDark: 'ハート・暗', cPetal: '花びら', cPistil: '花の中心',
+  cEarcup: 'イヤーカップ', cHeadband: 'ヘッドバンド', cSnore: 'いびきの泡', cNote: '音符',
+},
+'zh-CN': {
+  title: 'Clawdmeter 动画编辑器',
+  sub: '20×20 · 最多 10 色 · 每格独立停留时间 · 导出可直接丢进 <code>tools/drawn_anims/</code>',
+  pen: '画笔', erase: '橡皮擦', fill: '填充', pick: '吸管', select: '选取',
+  undo: '撤销', onion: '洋葱皮', paste: '粘贴', play: '▶ 播放', stop: '■ 停止',
+  selecting: '选取中 ·', copy: '复制', flipH: '左右翻', flipV: '上下翻',
+  clearSel: '清除', selectAll: '全选', deselect: '取消选取',
+  selHint: '方向键推一格 · Esc 放下 · 复制后可粘贴到别的帧',
+  previewH: '真机预览（黑底，设备实际尺寸）',
+  capSplash: '全屏 splash · 每格 24px', capBadge: '角落徽章 · 每格 4px',
+  palH: '这支动画的颜色', pickH: '选色',
+  pickHint: '点一下就加进上面并选取。已经在用的会直接选取。', addColour: '加入',
+  framesH: '帧', frameHint: '没有选取范围时，← → 可以快速切换帧',
+  frameAdd: '+ 新增', frameDup: '复制本帧', frameDel: '删除',
+  frameLeft: '← 前移', frameRight: '后移 →',
+  infoH: '动画信息', labelName: '名称', labelCat: '分类',
+  loadH: '载入现有动画', loadBtn: '载入', loadPose: '只载入姿势', clearAll: '清空',
+  credit: '大部分的动画来自 <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a>，'
+        + '作者 <a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a>。'
+        + '角色 Clawd 是 Anthropic 的资产。改作前请先确认自己的用途没问题。',
+  importPh: '粘贴 claudepix 或 makebead 的 JSON，然后按下面的导入',
+  importBtn: '导入 JSON',
+  exportH: '导出', download: '下载 .json', copyClip: '复制到剪贴板', copied: '已复制 ✓',
+  exportHint: '存到 <code>tools/drawn_anims/</code>，运行 <code>node tools/convert_to_c.js</code>，'
+            + '再把名称加进 <code>splash.cpp</code> 的分组清单。',
+  palFull: '最多 {n} 色（含空白）。先移除一个没在用的颜色。',
+  swEmpty: '空白（背景）', swRemove: '移除（没有格子在用）',
+  darkWarn: '⚠ {list} 在黑色面板上几乎看不见。'
+          + '（#0F0F0F 例外 —— 那是眼睛用的，刻意跟背景同色。）',
+  hexFormat: '请用 #RRGGBB 格式', holdTitle: '停留 ms',
+  sampleInfo: '{n} 帧 · {c} 色 · 总长 {ms} ms',
+  noSamples: '（尚未生成样本 — 运行 node tools/build_editor_samples.js）',
+  badJson: '不是有效的 JSON', canvasSize: '画布是 {w}×{h}，需要 {n}×{n}',
+  unknownFormat: '认不出这个格式', imported: '已导入 {n} 帧',
+  cBody: '身体（品牌赭红）', cEye: '眼睛（与背景同色，读起来是洞）',
+  cHeart: '亮爱心', cHeartDark: '暗爱心', cPetal: '花瓣', cPistil: '花心',
+  cEarcup: '耳罩', cHeadband: '头带', cSnore: '打呼泡泡', cNote: '音符',
+},
+};
+
+let lang = 'zh-TW';
+
+function t(key, vars) {
+  let s = (I18N[lang] && I18N[lang][key]) ?? I18N.en[key] ?? key;
+  if (vars) for (const k in vars) s = s.split('{' + k + '}').join(vars[k]);
+  return s;
+}
+
+
+// The project's existing colours, so a new animation sits with the other 18
+// rather than beside them. Terracotta is the body; #0F0F0F is how the eyes
+// work — it matches the background, so it reads as a hole rather than a colour.
+const START_PALETTE = ['transparent', '#D97757', '#0F0F0F', '#FFC2D1', '#F3B6C8', '#C0D8E4'];
+
+// The canonical creature pose, from claudepix idle_breathe. Proportions here
+// carry meaning: eyes at columns 7 and 12, body 10 rows, and three empty rows
+// underneath that the bob animations move into. Worth tracing rather than
+// guessing.
+const TEMPLATE = [
+  '....................','....................','....................','....................',
+  '.....11111111111....','.....11111111111....','.....11211111211....','...111121111121111..',
+  '...111111111111111..','...111111111111111..','...1.11111111111.1..','.....11111111111....',
+  '.....11111111111....','.....11111111111....','.....1..1...1..1....','.....1..1...1..1....',
+  '.....1..1...1..1....','....................','....................','....................',
+];
+
+// Every animation currently in the catalog, so an existing one can be opened
+// and fixed rather than rebuilt. Colours are the ones the DEVICE shows: the
+// converter remaps claudepix's pinker body to brand terracotta on its way to
+// C, so loading the raw source here would preview a colour the panel never
+// displays.
+//
+// Generated by tools/build_editor_samples.js — re-run it after changing any
+// animation. Everything outside the markers is hand-written.
+const SAMPLES = /*BEGIN-SAMPLES*/[
+{n:"dance bob",c:"Dance",p:["transparent","#D97757","#0F0F0F"],f:[{h:280,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:280,g:".................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:280,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:280,g:".................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."}]},
+{n:"dance bounce",c:"Dance",p:["transparent","#D97757","#0F0F0F"],f:[{h:100,g:".........................................................................................................11111111111.........11111111111.........11211111211.......111121111121111....11111111111111111...11111111111111111....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1............................................"},{h:80,g:".................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:140,g:".............................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111...1.1111111111111111..111.11111111111.111.....11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1........................................................................................................"},{h:100,g:".................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:60,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1........11.........11..........................................."},{h:80,g:".........................................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1.......111.........111......................"},{h:120,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1............................1...........1......................."},{h:80,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:100,g:".........................................................................................................11111111111.........11111111111.........11211111211.......111121111121111....11111111111111111...11111111111111111....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1............................................"},{h:80,g:".................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:160,g:".............................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111...1.1111111111111111..111.11111111111.111.....11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1........................................................................................................"},{h:80,g:".................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:60,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1........11.........11..........................................."},{h:80,g:".........................................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1.......111.........111......................"},{h:120,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1............................1...........1......................."},{h:100,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"}]},
+{n:"dance bounce dj",c:"Dance",p:["transparent","#D97757","#111111","#C0D8E4","#2D2D2D","#5588CC","#555555","#FFFFFF","#EAF6FC","#7AAABB"],f:[{h:90,g:".77..............77..7....88888888....7......89......98.........891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111.....11.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:80,g:".....89......98.........891111111198........891121112198........891111111198..........11111111.........11111111111111....7.11111111111111...7..1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1........................................................................................................"},{h:140,g:".77.891111111198.77..7..891121112198..7.....891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.7.11..11111111111..17.1...11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1............................................................................................................................"},{h:80,g:".....89......98..77.....891111111198..7.....891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1........................................................................................................"},{h:60,g:".77...88888888.......7...89......98.........891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1.......77..........77..............................................................."},{h:80,g:"..........................88888888...........89......98.........891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1....1..11111111111.1.......11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1......77............77......7..........7........................"},{h:80,g:".77...88888888...77..7...89......98...7.....891111111198..77....891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:100,g:".77...88888888...77..7...89......98...7.....891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:90,g:".77..............77..7....88888888....7......89......98.........891111111198........891121112198........891111111198.....7....11111111......7..11111111111111......11111111111111.....11.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:80,g:".....89......98..77.....891111111198..7.....891121112198........891111111198..........11111111.........11111111111111......11111111111111..7...1.11111111111.1.7.....11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1........................................................................................................"},{h:160,g:".77.891111111198.77..7..891121112198..7.....891111111198..........11111111.........11111111111111......11111111111111....7.1.11111111111.1.7711..11111111111..17.1...11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1............................................................................................................................"},{h:80,g:".77..89......98......7..891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1........................................................................................................"},{h:60,g:"......88888888...........89......98.........891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1.......77..........77......7............7.......7..........7........................"},{h:80,g:"..........................88888888...........89......98.........891111111198........891121112198........891111111198..........11111111.....7...11111111111111..7...11111111111111......1.11111111111.1....1..11111111111.1.......11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1......77............77......7..........7........................"},{h:80,g:".77...88888888...77..7...89......98...7..77.891111111198........891121112198........891111111198..........11111111.........11111111111111..7...11111111111111..7...1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:100,g:".77...88888888...77..7...89......98...7.....891111111198........891121112198........891111111198..........11111111.......7.11111111111111..77..11111111111111..7...1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."}]},
+{n:"dance djmix",c:"Dance",p:["transparent","#D97757","#111111","#C0D8E4","#282828","#5599DD","#606060","#FFFFFF","#EAF6FC","#7AAABB"],f:[{h:200,g:"77....88888888....7777...89......98...77....891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111......4444444444444444....4565656565656564....4565656565656564....4444444444444444....4..............4....4..............4.................................................................................."},{h:100,g:"77...89......98...7777..891111111198..77....891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.....1111111111111..........................4444444444444444....4262626265656564....4262626265656564....4444444444444444....4..............4....4..............4.................................................................................."},{h:80,g:"77...89......98.....77..891111111198....77..891121112198........891111111198..........11111111.........11111111111111......11111111111111..7...1.11111111111.1.7.....11111111111...7......................4444444444444444....4565656565656564....4565656565656564....4444444444444444....4..............4....4..............4...7....................77........................................................"},{h:100,g:"77...89......98.....77..891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111..7...1.11111111111.1.7.....1111111111111.7......................4444444444444444....4565656262626264....4565656262626264....4444444444444444....4..............4....4..............4...7....................77........................................................"},{h:80,g:".....89......98...77....891111111198..77....891121112198........891111111198..........11111111.........11111111111111...7..11111111111111...7..1.11111111111.1..7....11111111111..........................4444444444444444....4565656565656564....4565656565656564....4444444444444444....4..............4....4..............4....................7.................77.........................................."},{h:100,g:".....89......98...77....891111111198..77....891121112198........891111111198..........11111111.........11111111111111...7..11111111111111...7..1.11111111111.1..7..1111111111111..........................4444444444444444....4262626265656564....4262626265656564....4444444444444444....4..............4....4..............4....................7.................77.........................................."},{h:80,g:"7....89......98...7777..891111111198..77....891121112198........891111111198..........11111111.........11111111111111...7..11111111111111...7..1.11111111111.1..7....11111111111..........................4444444444444444....4565656565656564....4565656565656564....4444444444444444....4..............4....4..............4....................7.................77.........................................."},{h:100,g:"77...89......98...7777..891111111198..77....891121112198........891111111198..........11111111.........11111111111111...7..11111111111111..77..1.11111111111.1.77....11111111111...7......................4444444444444444....4265626562656264....4265626562656264....4444444444444444....4..............4....4..............4.................................................................................."},{h:80,g:"77...89......98...7777..891111111198..77....891121112198........891111111198..........11111111.........11111111111111...7..11111111111111..77..1.11111111111.1.77....11111111111...7......................4444444444444444....4565656565656564....4565656565656564....4444444444444444....4..............4....4..............4.................................................................................."},{h:100,g:"77...89......98...7777..891111111198..77....891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......1111111111111........................4444444444444444....4565656262626264....4565656262626264....4444444444444444....4..............4....4..............4....................7.................77.........................................."},{h:80,g:"77....88888888......77...89......98.....77..891111111198........891121112198........891111111198..........11111111.........11111111111111..7...11111111111111..7...1.11111111111.1.7.....11111111111......4444444444444444....4565656565656564....4565656565656564....4444444444444444....4..............4....4..............4...7....................77........................................................"},{h:160,g:"77....88888888....7777...89......98...77....891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111......4444444444444444....4565656565656564....4565656565656564....4444444444444444....4..............4....4..............4....................7.................77.........................................."},{h:100,g:"77...89......98.....77..891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111..7...1.11111111111.1.7...1111111111111...7......................4444444444444444....4262626265656564....4262626265656564....4444444444444444....4..............4....4..............4...7....................77........................................................"},{h:80,g:"77...89......98...7777..891111111198..77....891121112198........891111111198..........11111111.........11111111111111......11111111111111..7...1.11111111111.1.7.....11111111111...7......................4444444444444444....4565656565656564....4565656565656564....4444444444444444....4..............4....4..............4.................................................................................."},{h:100,g:".....89......98...77....891111111198..77....891121112198........891111111198..........11111111.........11111111111111...7..11111111111111...7..1.11111111111.1..7....1111111111111........................4444444444444444....4565656262626264....4565656262626264....4444444444444444....4..............4....4..............4....................7.................77.........................................."},{h:100,g:"77....88888888....7777...89......98...77....891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111......4444444444444444....4565656565656564....4565656565656564....4444444444444444....4..............4....4..............4.................................................................................."}]},
+{n:"dance sway",c:"Dance",p:["transparent","#D97757","#0F0F0F"],f:[{h:240,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:180,g:".....................................1...................11..........................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:200,g:"................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1....................................................................................."},{h:240,g:"...................................1...................11..........................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1.................................................................."},{h:200,g:"....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................."},{h:160,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:180,g:"...............1...................11.1...................11.........................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:200,g:"..................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1..................................................................................."},{h:240,g:".....................................1...................11............................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1.............................................................."},{h:200,g:"......................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1..............................................................."},{h:200,g:"..............11...................1.................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:180,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"}]},
+{n:"dance sway dj",c:"Dance",p:["transparent","#D97757","#111111","#C0D8E4","#2D2D2D","#5588CC","#555","#FFFFFF","#EAF6FC","#7AAABB"],f:[{h:220,g:"77....88888888....777....89......98....7....891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:160,g:"77....88888888....777....89......98...77....891111111198..77....891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:200,g:"....89......98....77...891111111198....7...891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1........................................................................................................."},{h:220,g:"77..88888888....7.777..89......98...77.7..891111111198........891121112198........891111111198..........11111111.........11111111111111.....711111111111111.....71.11111111111.1....7..11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1......................................................................................"},{h:200,g:"77...88888888.......7...89......98.........891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1....................................................................................."},{h:160,g:"77....88888888....7777...89......98....7.77.891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111..7...1.11111111111.1.7.....11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:160,g:"77....88888888....777....89......98....7....891111111198........891121112198........891111111198..........11111111.........11111111111111...7..11111111111111..77..1.11111111111.1.7.....11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:200,g:"77....89......98....7....891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1......................................................................................................."},{h:220,g:"777.....88888888..777.77...89......98..7......891111111198........891121112198........891111111198..........11111111.........11111111111111......111111111111117.....1.11111111111.7.......11111111111.7.......11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1.................................................................................."},{h:200,g:".......88888888...77......89......98...7.....891111111198........891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1..................................................................................."},{h:200,g:"77....88888888....777....89......98...77....891111111198..77....891121112198........891111111198..........11111111.........11111111111111......11111111111111......1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:180,g:"77....88888888....777....89......98....7....891111111198........891121112198........891111111198..........11111111.........11111111111111...7..11111111111111...7..1.11111111111.1.......11111111111.........11111111111.........11111111111.............................1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."}]},
+{n:"expression sleep",c:"Expressions",p:["transparent","#D97757","#0F0F0F"],f:[{h:600,g:".....................................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:400,g:".........................................................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1............................................"},{h:300,g:".....................................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:"...........................................................................11........111111111111........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:"...............................................................................................11........11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1............................................"},{h:300,g:"...........................................................................11........111111111111........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:"........................................................11..................11.......11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:"........................................................11.......111111111111........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:300,g:".....................................11..................11.................1........11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:".........................................................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1............................................"},{h:300,g:"..................1...................1..................1...........................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:".....................................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:"..................11.................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:400,g:".................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:700,g:".....................................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:400,g:".........................................................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1............................................"},{h:500,g:".....................................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:"...........................................................................11........111111111111........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:"........................................................11..................11.......11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:".................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:300,g:".....................................11..................11.................1........11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:"..................1...................1..................1...........................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:"..................11.................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:400,g:".....................................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"}]},
+{n:"expression surprise",c:"Expressions",p:["transparent","#D97757","#0F0F0F"],f:[{h:900,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:120,g:".....................................................................................11111111111.........11111111111.........11111111111.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:60,g:".....................................................................................11111111111.........11111111111.........12221112221.......111222111222111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:80,g:".................................................................11111111111.........11111111111.........12221112221.......111222111222111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:100,g:"............................................1.....1....1......1..11111111111.1.......11111111111.........12221112221.......111222111222111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:100,g:".......................1......1.....1....1................1......11111111111....1....11111111111...1.....12221112221.......111222111222111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:100,g:".....1........1.........................1..................1.....11111111111.........11111111111.........12221112221.......111222111222111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:500,g:".................................................................11111111111.........11111111111.........12221112221.......111222111222111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:180,g:".....................................................................................11111111111.........11111111111.........12221112221.......111222111222111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:180,g:".....................................................................................11111111111.........11111111111.........12211111221.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:600,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"}]},
+{n:"expression wink",c:"Expressions",p:["transparent","#D97757","#0F0F0F"],f:[{h:1200,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:100,g:".....................................................................................11111111111.........11111111111.........11211111111.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:120,g:".....................................................................................11111111111.........11111111111.........11211111111.......111121111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:150,g:"......................................................................................11111111111.........11111111111.........11211111111.......111121111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1..............................................................."},{h:120,g:"......................................................................................111111111111........11111111111.1.......11211111111.......111121111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1..............................................................."},{h:100,g:"..............................................................................1.......11111111111.........111111111111........11211111111.......111121111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1..............................................................."},{h:100,g:"......................................................................................11111111111.1.......11111111111.........11211111111.......111121111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1..............................................................."},{h:400,g:"......................................................................................11111111111.........11111111111.........11211111111.......111121111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1..............................................................."},{h:100,g:"......................................................................................11111111111.........11111111111.........11211111111.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1..............................................................."},{h:100,g:".....................................................................................11111111111.........11111111111.........11211111111.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:80,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:800,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"}]},
+{n:"idle blink",c:"Idle",p:["transparent","#D97757","#0F0F0F"],f:[{h:2400,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:60,g:".....................................................................................11111111111.........11111111111.........11111111111.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:100,g:".....................................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:60,g:".....................................................................................11111111111.........11111111111.........11111111111.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:80,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:220,g:".....................................................................................11111111111.........11111111111.........11111111111.......111121111121111.....111121111121111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:1600,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:60,g:".....................................................................................11111111111.........11111111111.........11111111111.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:90,g:".....................................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:60,g:".....................................................................................11111111111.........11111111111.........11111111111.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:70,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:60,g:".....................................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:100,g:".....................................................................................11111111111.........11111111111.........11111111111.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:70,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:200,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:900,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"}]},
+{n:"idle breathe",c:"Idle",p:["transparent","#D97757","#0F0F0F"],f:[{h:500,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:200,g:".........................................1...........................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:280,g:".................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:80,g:".................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:360,g:".................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:200,g:"......................1..............................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:320,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:80,g:".....................................................................................11111111111.........11111111111.........11111111111.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:700,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:200,g:"..............................................................................1......11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:".................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:500,g:".................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:200,g:".........................................................1...........................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:80,g:".....................................................................................11111111111.........11111111111.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:80,g:".....................................................................................11111111111.........11111111111.........11111111111.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:340,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"}]},
+{n:"idle look around",c:"Idle",p:["transparent","#D97757","#0F0F0F"],f:[{h:800,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:200,g:".....................................................................................11111111111.........11111111111.........12111112111.......111211111211111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:500,g:"....................................................................................11111111111.........11111111111.........12111112111.......111211111211111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................."},{h:300,g:".....................................................................................11111111111.........11111111111.........12111112111.......111211111211111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:200,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:400,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:400,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:200,g:".....................................................................................11111111111.........11111111111.........11121111121.......111112111112111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:500,g:"......................................................................................11111111111.........11111111111.........11121111121.......111112111112111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1..............................................................."},{h:300,g:".....................................................................................11111111111.........11111111111.........11121111121.......111112111112111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:200,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:500,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:200,g:".....................................................................................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:400,g:".................................................................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1...................................................................................."},{h:300,g:".....................................................................................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:200,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:700,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"}]},
+{n:"work coding",c:"Work",p:["transparent","#D97757","#111111","#D4DDE2","#8A9199","#6E7278","#3A3C40","#B8BCC0","#2A2C30","#1C1E21"],f:[{h:180,g:"..........................33333333...........34......43.........341111111143........341211112143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......116666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:180,g:"..........................33333333...........34......43.........341111111143........341211112143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......166666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:180,g:"..........................33333333...........34......43.........341111111143........341211112143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......116666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:180,g:"..........................33333333...........34......43.........341111111143........341211112143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......166666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:140,g:"..........................33333333...........34......43.........341111111143........341211112143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......116666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:180,g:"..........................33333333...........34......43.........341111111143........341211112143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......116666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:180,g:"..........................33333333...........34......43.........341111111143........341211112143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......166666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:180,g:"..............................................33333333...........34......43.........341111111143........341211112143........341111111143........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......116666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:180,g:"..............................................33333333...........34......43.........341111111143........341211112143........341111111143........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......166666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:180,g:"..........................33333333...........34......43.........341111111143........341211112143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......116666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:180,g:"..........................33333333...........34......43.........341111111143........341211112143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......166666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:90,g:"..........................33333333...........34......43.........341111111143........341111111143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......166666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:90,g:"..........................33333333...........34......43.........341111111143........341211112143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......166666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:400,g:"..........................33333333...........34......43.........341211112143........341111111143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......166666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:300,g:"..........................33333333...........34......43.........341211112143........341111111143........341111111143..........11111111..........111111111111.......11155555555111......11155555557111......11155577555111......11155577555111.......166666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:280,g:"..........................33333333...........34......43.........341211112143........341111111143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......166666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:300,g:"..........................33333333...........34......43.........341211112143........341111111143........341111111143..........11111111..........111111111111.......11155555555111......11155555557111......11155577555111......11155577555111.......166666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:200,g:"..........................33333333...........34......43.........341211112143........341111111143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......166666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:180,g:"..........................33333333...........34......43.........341111111143........341211112143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......116666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:180,g:"..........................33333333...........34......43.........341111111143........341211112143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......166666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:180,g:"..........................33333333...........34......43.........341111111143........341211112143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......116666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:180,g:"..........................33333333...........34......43.........341111111143........341211112143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......116666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"},{h:180,g:"..........................33333333...........34......43.........341111111143........341211112143........341111111143..........11111111..........111111111111.......11155555555111......11155555555111......11155577555111......11155577555111.......166666666661.....888888888888888888...99............99....99............99....99............99....99............99....99............99......................"}]},
+{n:"work think",c:"Work",p:["transparent","#D97757","#0F0F0F"],f:[{h:400,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:".....................................................................................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:".....................................................................................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:200,g:".....................................................................................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:350,g:".....................................................................................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:350,g:"............................................................................1........11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:350,g:".........................................................1..................1........11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:350,g:".....................................1...................1..................1........11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:350,g:"......................................1..................1...........................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:350,g:"..................1...................1..............................................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:600,g:".....................................................................................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:200,g:".....................................................................................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:400,g:".....................................................................................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:"............................................................................1........11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:".........................................................1..................1........11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:".....................................1...................1..................1........11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:80,g:".................1..................1.1................1.1...........................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:100,g:"...............1111...............1...1..................1...........................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:80,g:"...............1111...............1...1..................1...........................11111111111.........12221112221.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:120,g:".................1..................1.1................1.1...........................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:150,g:"................1....................1...............................................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:".....................................................................................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111....1111111111111111.....1111111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:300,g:".....................................................................................11111111111.........11211111211.........11111111111.......111111111111111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:400,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.1.......11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"}]},
+{n:"work type",c:"Work",p:["transparent","#D97757","#0F0F0F"],f:[{h:160,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.......11111111111.1.....1.11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:160,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.........11111111111.1.......11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:160,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.......11111111111.1.....1.11111111111.........11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"},{h:160,g:".....................................................................................11111111111.........11111111111.........11211111211.......111121111121111.....111111111111111.....111111111111111.....1.11111111111.........11111111111.1.......11111111111.........11111111111.........1..1...1..1.........1..1...1..1.........1..1...1..1................................................................"}]}
+]/*END-SAMPLES*/;
+
+const blank = () => Array.from({length: N}, () => new Array(N).fill(0));
+let palette = [...START_PALETTE];
+let frames = [{ hold: 300, grid: blank() }];
+let cur = 0, colour = 1, tool = 'pen', onion = true, playing = false;
+let undoStack = [];
+
+// ── selection ────────────────────────────────────────────────────────────────
+// A selection is a rectangle that, once moved, LIFTS: its cells leave the grid
+// and float until committed. Without lifting, dragging would smear a copy of
+// him along the path. Committing writes back only the non-empty cells, so
+// moving him across something else doesn't punch a rectangular hole in it.
+//
+// This is the main way to animate. Duplicate a frame, select him, tap an arrow
+// key: that's one frame of motion, and it can't accidentally redraw him
+// slightly differently the way tracing by hand would.
+let sel = null;        // {r, c, h, w, data}  — data null until lifted
+let selDrag = null;
+
+function selLift() {
+  if (!sel || sel.data) return;
+  pushUndo();                          // once per lift, not once per nudge
+  const g = frames[cur].grid;
+  sel.data = [];
+  for (let r = 0; r < sel.h; r++) {
+    const row = [];
+    for (let c = 0; c < sel.w; c++) {
+      const y = sel.r + r, x = sel.c + c;
+      const inside = y >= 0 && y < N && x >= 0 && x < N;
+      row.push(inside ? g[y][x] : 0);
+      if (inside) g[y][x] = 0;
+    }
+    sel.data.push(row);
+  }
+}
+
+function selCommit() {
+  if (sel && sel.data) {
+    const g = frames[cur].grid;
+    for (let r = 0; r < sel.h; r++) for (let c = 0; c < sel.w; c++) {
+      const v = sel.data[r][c]; if (!v) continue;
+      const y = sel.r + r, x = sel.c + c;
+      if (y >= 0 && y < N && x >= 0 && x < N) g[y][x] = v;
+    }
+  }
+  sel = null;
+}
+
+function selNudge(dr, dc) {
+  if (!sel) return;
+  selLift(); sel.r += dr; sel.c += dc; renderAll();
+}
+
+// A selection only exists inside one frame, so carrying a prop forward used to
+// mean redrawing it in every frame — and a hand-redrawn prop lands slightly
+// different each time. The clipboard survives a frame change: copy once, step
+// forward, paste, nudge it a cell, put it down. Paste lands at the coordinates
+// it was copied from, because a cell or two of drift is the whole edit.
+let clip = null;       // {r, c, h, w, data}
+
+function selCopy() {
+  if (!sel) return;
+  const g = frames[cur].grid;
+  const data = [];
+  for (let r = 0; r < sel.h; r++) {
+    const row = [];
+    for (let c = 0; c < sel.w; c++) {
+      const y = sel.r + r, x = sel.c + c;
+      // A lifted selection is floating, already cut out of the grid below it.
+      row.push(sel.data ? sel.data[r][c]
+             : (y >= 0 && y < N && x >= 0 && x < N ? g[y][x] : 0));
+    }
+    data.push(row);
+  }
+  clip = { r: sel.r, c: sel.c, h: sel.h, w: sel.w, data };
+  $('paste').style.display = '';
+}
+
+function selPaste() {
+  if (!clip) return;
+  selCommit();
+  pushUndo();
+  tool = 'select'; setTool();
+  // Floating, not written down: arrows nudge it into place, Esc commits.
+  sel = { r: clip.r, c: clip.c, h: clip.h, w: clip.w,
+          data: clip.data.map(row => [...row]) };
+  renderAll();
+}
+
+const $ = id => document.getElementById(id);
+const rgb = h => h === 'transparent' ? [0,0,0]
+  : [1,3,5].map(i => parseInt(h.slice(i, i+2), 16));
+const isDark = h => h !== 'transparent' &&
+  (([r,g,b]) => 0.299*r + 0.587*g + 0.114*b < 60)(rgb(h));
+
+// ── drawing surface ──────────────────────────────────────────────────────────
+const grid = $('grid'), gx = grid.getContext('2d');
+const CELL = 24;
+
+function paintGrid() {
+  gx.fillStyle = '#000'; gx.fillRect(0, 0, 480, 480);
+
+  // Onion skin: the previous frame at low alpha. Motion at this resolution is
+  // one or two cells, and without a ghost to line up against it's guesswork.
+  if (onion && frames.length > 1) {
+    const prev = frames[(cur - 1 + frames.length) % frames.length].grid;
+    gx.globalAlpha = 0.28;
+    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+      if (!prev[r][c]) continue;
+      gx.fillStyle = palette[prev[r][c]];
+      gx.fillRect(c*CELL, r*CELL, CELL, CELL);
+    }
+    gx.globalAlpha = 1;
+  }
+
+  const g = frames[cur].grid;
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    if (!g[r][c]) continue;
+    gx.fillStyle = palette[g[r][c]];
+    gx.fillRect(c*CELL, r*CELL, CELL, CELL);
+  }
+
+  // The ghost above only shows where this frame is empty — anywhere the two
+  // overlap, the opaque current frame hides it. That's the case you most need
+  // it for: something held against the body (a mug, a prop) sits on top of him,
+  // so its previous position is exactly what gets covered. Those cells get a
+  // dot instead, drawn over the top in the ghost's colour.
+  //
+  // Only where the two actually differ. A cell that didn't change needs no
+  // mark, and marking it would speckle the whole creature.
+  if (onion && frames.length > 1) {
+    const prev = frames[(cur - 1 + frames.length) % frames.length].grid;
+    const D = 9, o = (CELL - D) / 2;
+    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+      if (!prev[r][c] || !g[r][c] || prev[r][c] === g[r][c]) continue;
+      gx.fillStyle = 'rgba(0,0,0,.55)';       // ring, so it reads on any colour
+      gx.fillRect(c*CELL+o-1, r*CELL+o-1, D+2, D+2);
+      gx.fillStyle = palette[prev[r][c]];
+      gx.fillRect(c*CELL+o, r*CELL+o, D, D);
+    }
+  }
+
+  // Floating selection sits above the grid it was lifted out of.
+  if (sel && sel.data) {
+    for (let r = 0; r < sel.h; r++) for (let c = 0; c < sel.w; c++) {
+      const v = sel.data[r][c]; if (!v) continue;
+      gx.fillStyle = palette[v];
+      gx.fillRect((sel.c+c)*CELL, (sel.r+r)*CELL, CELL, CELL);
+    }
+  }
+
+  gx.strokeStyle = 'rgba(255,255,255,.07)'; gx.lineWidth = 1;
+  for (let i = 0; i <= N; i++) {
+    gx.beginPath(); gx.moveTo(i*CELL+.5, 0); gx.lineTo(i*CELL+.5, 480); gx.stroke();
+    gx.beginPath(); gx.moveTo(0, i*CELL+.5); gx.lineTo(480, i*CELL+.5); gx.stroke();
+  }
+
+  if (sel) {
+    gx.setLineDash([6, 4]); gx.lineWidth = 2;
+    gx.strokeStyle = '#fff';
+    gx.strokeRect(sel.c*CELL+1, sel.r*CELL+1, sel.w*CELL-2, sel.h*CELL-2);
+    gx.strokeStyle = '#000'; gx.lineDashOffset = 6;
+    gx.strokeRect(sel.c*CELL+1, sel.r*CELL+1, sel.w*CELL-2, sel.h*CELL-2);
+    gx.setLineDash([]); gx.lineDashOffset = 0;
+  }
+  $('selbar').style.display = sel ? 'flex' : 'none';
+}
+
+function cellAt(e) {
+  const b = grid.getBoundingClientRect();
+  const c = Math.floor((e.clientX - b.left) / b.width * N);
+  const r = Math.floor((e.clientY - b.top) / b.height * N);
+  return (r >= 0 && r < N && c >= 0 && c < N) ? [r, c] : null;
+}
+
+function pushUndo() {
+  undoStack.push(JSON.stringify({ frames, palette }));
+  if (undoStack.length > 60) undoStack.shift();
+}
+
+function flood(g, r, c, from, to) {
+  if (from === to) return;
+  const stack = [[r, c]];
+  while (stack.length) {
+    const [y, x] = stack.pop();
+    if (y < 0 || y >= N || x < 0 || x >= N || g[y][x] !== from) continue;
+    g[y][x] = to;
+    stack.push([y+1,x], [y-1,x], [y,x+1], [y,x-1]);
+  }
+}
+
+let drawing = false;
+function apply(e) {
+  const at = cellAt(e); if (!at) return;
+  const [r, c] = at, g = frames[cur].grid;
+  if (tool === 'pick') { if (g[r][c]) { colour = g[r][c]; renderPalette(); } return; }
+  if (tool === 'fill') { flood(g, r, c, g[r][c], colour); }
+  else g[r][c] = (tool === 'erase') ? 0 : colour;
+  renderAll();
+}
+grid.addEventListener('pointerdown', e => {
+  const at = cellAt(e); if (!at) return;
+  grid.setPointerCapture(e.pointerId);
+
+  if (tool === 'select') {
+    const [r, c] = at;
+    const inside = sel && r >= sel.r && r < sel.r + sel.h
+                       && c >= sel.c && c < sel.c + sel.w;
+    if (inside) {
+      // Grabbing inside an existing selection moves it; that's the gesture
+      // people expect, and it's why a fresh marquee has to start outside.
+      selLift();
+      selDrag = { mode: 'move', r0: r, c0: c, sr: sel.r, sc: sel.c };
+    } else {
+      selCommit();
+      sel = { r, c, h: 1, w: 1, data: null };
+      selDrag = { mode: 'marquee', r0: r, c0: c };
+    }
+    renderAll(); return;
+  }
+
+  pushUndo(); drawing = true; apply(e);
+});
+
+grid.addEventListener('pointermove', e => {
+  if (selDrag) {
+    const at = cellAt(e); if (!at) return;
+    const [r, c] = at;
+    if (selDrag.mode === 'move') {
+      sel.r = selDrag.sr + (r - selDrag.r0);
+      sel.c = selDrag.sc + (c - selDrag.c0);
+    } else {
+      sel.r = Math.min(selDrag.r0, r); sel.c = Math.min(selDrag.c0, c);
+      sel.h = Math.abs(r - selDrag.r0) + 1;
+      sel.w = Math.abs(c - selDrag.c0) + 1;
+    }
+    renderAll(); return;
+  }
+  if (drawing) apply(e);
+});
+grid.addEventListener('pointerup', () => { drawing = false; selDrag = null; });
+
+// ── previews ─────────────────────────────────────────────────────────────────
+// Both device scales, on black, because that's the only way to see what the
+// panel will actually show. A colour that looks fine on white can vanish here,
+// and a shape that reads at 24px can turn to mush at 4px.
+function paintPreview(canvas, cell, frameIdx) {
+  const cx = canvas.getContext('2d');
+  cx.fillStyle = '#000'; cx.fillRect(0, 0, canvas.width, canvas.height);
+  const g = frames[frameIdx].grid;
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    if (!g[r][c]) continue;
+    cx.fillStyle = palette[g[r][c]];
+    cx.fillRect(c*cell, r*cell, cell, cell);
+  }
+}
+
+// ── palette ──────────────────────────────────────────────────────────────────
+// ── colour picking ───────────────────────────────────────────────────────────
+// Two layers, because they are two different things. The top strip is the
+// animation's own palette — capped at 10 by the firmware, so it can't just be
+// "all the colours". The picker below is where colours come FROM: click one and
+// it joins the palette and becomes current. That replaces reaching for the
+// eyedropper, which only ever worked for colours already on the canvas.
+//
+// 256 swatches: 16 greys, then 24 hues at two saturations and five lightnesses
+// each. Same structure as the makebead palette Nova is used to, generated from
+// HSL rather than copied, so the exact values differ slightly.
+function hsl(h, s, l) {
+  const f = n => {
+    const k = (n + h / 30) % 12, a = s * Math.min(l, 1 - l);
+    const v = l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+    return Math.round(v * 255).toString(16).padStart(2, '0');
+  };
+  return ('#' + f(0) + f(8) + f(4)).toUpperCase();
+}
+
+const PICKER = (() => {
+  const out = [];
+  for (let i = 0; i < 16; i++) { const v = (i * 17).toString(16).padStart(2,'0'); out.push(('#'+v+v+v).toUpperCase()); }
+  for (let hue = 0; hue < 360; hue += 15)
+    for (const sat of [0.45, 1.0])
+      for (const light of [0.20, 0.35, 0.50, 0.65, 0.80])
+        out.push(hsl(hue, sat, light));
+  return out;
+})();
+
+// The colours already in use across the catalog. These are the ones you reach
+// for: his body, the eye black that reads as a hole, the marks on the existing
+// animations. Having them a click away stops a new animation drifting off-model.
+const PROJECT_COLOURS = [
+  ['#D97757', 'cBody'], ['#0F0F0F', 'cEye'],
+  ['#FFC2D1', 'cHeart'], ['#E8788F', 'cHeartDark'], ['#F3B6C8', 'cPetal'], ['#FFD98A', 'cPistil'],
+  ['#C0D8E4', 'cEarcup'], ['#FFFFFF', 'cHeadband'], ['#E1DBDD', 'cSnore'], ['#E8E0D0', 'cNote'],
+];
+
+function useColour(hex) {
+  hex = hex.toUpperCase();
+  const at = palette.indexOf(hex);
+  if (at >= 0) { colour = at; renderPalette(); return; }
+  if (palette.length >= PALETTE_MAX) {
+    alert(t('palFull', {n: PALETTE_MAX}));
+    return;
+  }
+  pushUndo(); palette.push(hex); colour = palette.length - 1; renderPalette();
+}
+
+// Only unused colours can be removed — dropping one that cells still reference
+// would silently repaint them as whatever slid into its index.
+function colourUsed(i) {
+  return frames.some(f => f.grid.some(r => r.includes(i)));
+}
+
+function renderPalette() {
+  const box = $('swatches'); box.innerHTML = '';
+  palette.forEach((hex, i) => {
+    const b = document.createElement('button');
+    b.className = 'sw' + (i === colour ? ' on' : '') + (i === 0 ? ' empty' : '');
+    if (i) b.style.background = hex;
+    b.title = i === 0 ? t('swEmpty') : hex;
+    b.onclick = () => { colour = i; tool = 'pen'; setTool(); renderPalette(); };
+    if (i && !colourUsed(i)) {
+      const x = document.createElement('span');
+      x.className = 'x'; x.textContent = '×'; x.title = t('swRemove');
+      x.onclick = e => {
+        e.stopPropagation(); pushUndo();
+        palette.splice(i, 1);
+        // Indices above the removed slot shift down by one.
+        for (const f of frames) for (const r of f.grid)
+          for (let c = 0; c < N; c++) if (r[c] > i) r[c]--;
+        colour = Math.min(colour, palette.length - 1);
+        renderAll();
+      };
+      b.appendChild(x);
+    }
+    box.appendChild(b);
+  });
+  $('palcount').textContent = `${palette.length}/${PALETTE_MAX}`;
+
+  const dark = palette.filter((h,i) => i && isDark(h) && h.toUpperCase() !== '#0F0F0F');
+  $('darkwarn').innerHTML = dark.length
+    ? `<p class="warn">${t('darkWarn', {list: dark.join(' ')})}</p>` : '';
+
+  for (const b of $('picker').children)
+    b.classList.toggle('have', palette.includes(b.dataset.hex));
+}
+
+(function buildPickers() {
+  const proj = $('projcols');
+  for (const [hex, label] of PROJECT_COLOURS) {
+    const b = document.createElement('button');
+    b.className = 'sw'; b.dataset.i18nTitle = label; b.dataset.hexLabel = hex;
+    b.style.background = hex; b.title = `${hex} — ${t(label)}`;
+    b.onclick = () => useColour(hex);
+    proj.appendChild(b);
+  }
+  const pick = $('picker');
+  for (const hex of PICKER) {
+    const b = document.createElement('button');
+    b.style.background = hex; b.title = hex; b.dataset.hex = hex;
+    b.onclick = () => useColour(hex);
+    pick.appendChild(b);
+  }
+})();
+
+$('addcol').onclick = () => {
+  const hex = $('newhex').value.trim().toUpperCase();
+  if (!/^#[0-9A-F]{6}$/.test(hex)) return alert(t('hexFormat'));
+  useColour(hex);
+};
+$('newcol').oninput = e => $('newhex').value = e.target.value.toUpperCase();
+
+// ── frames ───────────────────────────────────────────────────────────────────
+// Reordering is pointer events, not HTML5 drag-and-drop. DnD ignores synthetic
+// events, which makes it untestable, and it's unreliable under touch — pointer
+// events are neither.
+//
+// The drag handle is the thumbnail rather than the whole tile, because the
+// hold field lives in the tile too and a drag handler over it would swallow
+// the click-and-drag needed to edit a number.
+let dragFrom = null, dragMoved = false, suppressClick = false;
+
+function frameIndexAt(x, y) {
+  const el = document.elementFromPoint(x, y);
+  const fr = el && el.closest('.fr');
+  return fr ? [...$('frames').children].indexOf(fr) : null;
+}
+
+function renderFrames() {
+  const box = $('frames'); box.innerHTML = '';
+  frames.forEach((f, i) => {
+    const d = document.createElement('div');
+    d.className = 'fr' + (i === cur ? ' on' : '');
+
+    const num = document.createElement('div');
+    num.className = 'fnum'; num.textContent = i + 1;
+    d.appendChild(num);
+
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 40; cv.style.width = cv.style.height = '40px';
+    cv.onpointerdown = e => {
+      dragFrom = i; dragMoved = false; cv.setPointerCapture(e.pointerId);
+    };
+    cv.onpointermove = e => {
+      if (dragFrom === null) return;
+      dragMoved = true;
+      const t = frameIndexAt(e.clientX, e.clientY);
+      [...$('frames').children].forEach((el, k) =>
+        el.classList.toggle('drop', t !== null && k === t && k !== dragFrom));
+    };
+    cv.onpointerup = e => {
+      if (dragFrom === null) return;
+      const from = dragFrom, to = frameIndexAt(e.clientX, e.clientY);
+      dragFrom = null;
+      [...$('frames').children].forEach(el => el.classList.remove('drop'));
+      if (!dragMoved || to === null || to === from) return;
+      // A completed drag must not also register as a click on the source tile,
+      // which would snap the selection back to where the frame came from.
+      suppressClick = true;
+      selCommit(); pushUndo();
+      const [moved] = frames.splice(from, 1);
+      frames.splice(to, 0, moved);
+      cur = to; renderAll();
+    };
+    d.appendChild(cv);
+
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.value = f.hold; inp.min = 20; inp.step = 20; inp.title = t('holdTitle');
+    inp.onchange = () => { f.hold = Math.max(20, +inp.value || 200); };
+    inp.onclick = e => e.stopPropagation();
+    d.appendChild(inp);
+
+    d.onclick = () => {
+      if (suppressClick) { suppressClick = false; return; }
+      selCommit(); cur = i; renderAll();
+    };
+    box.appendChild(d);
+    paintPreview(cv, 2, i);
+  });
+}
+$('f-add').onclick = () => { selCommit(); pushUndo(); frames.splice(cur+1, 0, {hold:200, grid:blank()}); cur++; renderAll(); };
+$('f-dup').onclick = () => {
+  selCommit(); pushUndo();
+  frames.splice(cur+1, 0, { hold: frames[cur].hold,
+    grid: frames[cur].grid.map(r => [...r]) });
+  cur++; renderAll();
+};
+$('f-del').onclick = () => {
+  if (frames.length === 1) return;
+  selCommit(); pushUndo(); frames.splice(cur, 1); cur = Math.max(0, cur-1); renderAll();
+};
+$('f-left').onclick = () => { selCommit(); if (cur === 0) return; pushUndo();
+  [frames[cur-1], frames[cur]] = [frames[cur], frames[cur-1]]; cur--; renderAll(); };
+$('f-right').onclick = () => { selCommit(); if (cur === frames.length-1) return; pushUndo();
+  [frames[cur+1], frames[cur]] = [frames[cur], frames[cur+1]]; cur++; renderAll(); };
+
+// ── playback ─────────────────────────────────────────────────────────────────
+// Runs the real per-frame holds, not a uniform frame rate. The variation is
+// what makes these read as alive — a long hold on a rest pose, a short one on
+// a blink — so a preview at constant speed would be lying about the result.
+let playTimer = null, playIdx = 0;
+function step() {
+  paintPreview($('pv-splash'), 24, playIdx);
+  paintPreview($('pv-badge'), 4, playIdx);
+  const hold = frames[playIdx].hold;
+  playIdx = (playIdx + 1) % frames.length;
+  playTimer = setTimeout(step, hold);
+}
+$('play').onclick = () => {
+  selCommit();
+  playing = !playing;
+  $('play').classList.toggle('on', playing);
+  $('play').textContent = playing ? t('stop') : t('play');
+  if (playing) { playIdx = 0; step(); }
+  else { clearTimeout(playTimer); renderAll(); }
+};
+
+// ── tools ────────────────────────────────────────────────────────────────────
+const TOOLS = ['pen','erase','fill','pick','select'];
+function setTool() {
+  for (const t of TOOLS) $('tool-'+t).classList.toggle('on', tool === t);
+}
+for (const t of TOOLS) $('tool-'+t).onclick = () => {
+  if (t !== 'select') { selCommit(); }   // leaving select puts him down
+  tool = t; setTool(); renderAll();
+};
+
+$('s-copy').onclick  = () => { selCopy(); };
+$('paste').onclick   = () => { selPaste(); };
+$('s-flip-h').onclick = () => { selLift(); sel.data.forEach(r => r.reverse()); renderAll(); };
+$('s-flip-v').onclick = () => { selLift(); sel.data.reverse(); renderAll(); };
+$('s-del').onclick   = () => { selLift(); sel.data = sel.data.map(r => r.map(() => 0)); renderAll(); };
+$('s-all').onclick   = () => { selCommit(); sel = {r:0, c:0, h:N, w:N, data:null}; renderAll(); };
+$('s-done').onclick  = () => { selCommit(); renderAll(); };
+$('onion').onclick = () => { onion = !onion; $('onion').classList.toggle('on', onion); paintGrid(); };
+$('undo').onclick = () => {
+  if (!undoStack.length) return;
+  const s = JSON.parse(undoStack.pop());
+  frames = s.frames; palette = s.palette;
+  cur = Math.min(cur, frames.length-1); renderAll();
+};
+addEventListener('keydown', e => {
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+
+  if ((e.metaKey || e.ctrlKey) && e.key === 'z') { e.preventDefault(); $('undo').click(); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
+    e.preventDefault(); tool = 'select'; setTool(); $('s-all').click(); return;
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'c') { e.preventDefault(); selCopy(); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'v') { e.preventDefault(); selPaste(); return; }
+
+  // Arrows mean two things depending on what's in hand. With a selection they
+  // nudge it a cell; with nothing selected, left/right step through frames —
+  // which is how you check a motion, by flicking back and forth between two.
+  const NUDGE = { ArrowUp: [-1,0], ArrowDown: [1,0], ArrowLeft: [0,-1], ArrowRight: [0,1] };
+  if (sel && NUDGE[e.key]) { e.preventDefault(); selNudge(...NUDGE[e.key]); return; }
+  if (!sel && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    e.preventDefault();
+    cur = (cur + (e.key === 'ArrowRight' ? 1 : frames.length - 1)) % frames.length;
+    renderAll(); return;
+  }
+  if (sel && e.key === 'Escape') { selCommit(); renderAll(); return; }
+  if (sel && (e.key === 'Backspace' || e.key === 'Delete')) {
+    e.preventDefault(); $('s-del').click(); return;
+  }
+
+  if (e.key === 'p') { tool='pen'; setTool(); }
+  if (e.key === 'e') { tool='erase'; setTool(); }
+  if (e.key === 'f') { tool='fill'; setTool(); }
+  if (e.key === 's') { tool='select'; setTool(); }
+});
+
+// ── load / import ────────────────────────────────────────────────────────────
+// Samples are grouped by category in the picker; that's the axis you'd browse
+// by when looking for "the one where he's asleep".
+(function fillSamples() {
+  const s = $('sample');
+  const byCat = {};
+  SAMPLES.forEach((a, i) => (byCat[a.c] ||= []).push([a.n, i]));
+  for (const [cat, list] of Object.entries(byCat)) {
+    const g = document.createElement('optgroup'); g.label = cat;
+    for (const [n, i] of list) {
+      const o = document.createElement('option'); o.value = i; o.textContent = n;
+      g.appendChild(o);
+    }
+    s.appendChild(g);
+  }
+  s.onchange = describeSample;
+  describeSample();
+})();
+
+function describeSample() {
+  const a = SAMPLES[+$('sample').value];
+  $('sampleinfo').textContent = a
+    ? t('sampleInfo', {n: a.f.length, c: a.p.length,
+                       ms: a.f.reduce((s,f)=>s+f.h,0)})
+    : t('noSamples');
+}
+
+$('load-sample').onclick = () => {
+  const a = SAMPLES[+$('sample').value]; if (!a) return;
+  sel = null; pushUndo();
+  palette = [...a.p];
+  frames = a.f.map(f => ({
+    hold: f.h,
+    grid: Array.from({length: N}, (_, r) =>
+      [...f.g.slice(r*N, (r+1)*N)].map(ch => ch === '.' ? 0 : +ch)),
+  }));
+  $('name').value = a.n; $('category').value = a.c;
+  cur = 0; colour = Math.min(1, palette.length - 1); renderAll();
+};
+
+$('load-template').onclick = () => {
+  sel = null; pushUndo();
+  frames = [{ hold: 300, grid: TEMPLATE.map(row =>
+    [...row].map(ch => ch === '.' ? 0 : +ch)) }];
+  cur = 0; renderAll();
+};
+$('clear').onclick = () => { sel = null; pushUndo(); frames = [{hold:300, grid:blank()}]; cur = 0; renderAll(); };
+
+$('import').onclick = () => {
+  const msg = $('importmsg');
+  let d;
+  sel = null;
+  try { d = JSON.parse($('importbox').value); }
+  catch { msg.innerHTML = `<span class="warn">${t('badJson')}</span>`; return; }
+
+  try {
+    if (Array.isArray(d.cells) && d.dict) {
+      // makebead: one frame, dict + flat cells with nulls
+      if (d.size && (d.size[0] !== N || d.size[1] !== N))
+        throw new Error(t('canvasSize', {w: d.size[0], h: d.size[1], n: N}));
+      const map = new Map(); palette = ['transparent'];
+      const g = blank();
+      for (let i = 0; i < N*N; i++) {
+        const v = d.cells[i];
+        if (v === null || v === undefined) continue;
+        const hex = d.dict[v].hex.toUpperCase();
+        if (!map.has(hex)) { map.set(hex, palette.length); palette.push(hex); }
+        g[(i/N)|0][i%N] = map.get(hex);
+      }
+      frames = [{ hold: 200, grid: g }];
+    } else if (Array.isArray(d.frames) && Array.isArray(d.palette)) {
+      // claudepix schema
+      palette = [...d.palette];
+      frames = d.frames.map(f => ({ hold: f.hold || 200, grid: f.grid.map(r => [...r]) }));
+      if (d.name) $('name').value = d.name;
+      if (d.category) $('category').value = d.category;
+    } else throw new Error(t('unknownFormat'));
+
+    cur = 0; colour = Math.min(1, palette.length-1);
+    msg.innerHTML = `<span class="ok">${t('imported', {n: frames.length})}</span>`;
+    renderAll();
+  } catch (err) {
+    msg.innerHTML = `<span class="warn">${err.message}</span>`;
+  }
+};
+
+// ── export ───────────────────────────────────────────────────────────────────
+function buildDoc() {
+  selCommit();          // a floating selection is part of the frame
+  return {
+    name: $('name').value.trim() || 'untitled',
+    category: $('category').value,
+    description: `Drawn in the Clawdmeter editor: ${frames.length} frames.`,
+    palette,
+    frames: frames.map(f => ({ hold: f.hold, grid: f.grid.map(r => [...r]) })),
+  };
+}
+$('download').onclick = () => {
+  const doc = buildDoc();
+  const blob = new Blob([JSON.stringify(doc, null, 1)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = doc.name.replace(/ /g, '_') + '.json';
+  a.click();
+};
+$('copy').onclick = async () => {
+  await navigator.clipboard.writeText(JSON.stringify(buildDoc()));
+  $('copy').textContent = t('copied');
+  setTimeout(() => $('copy').textContent = t('copyClip'), 1200);
+};
+
+// ── go ───────────────────────────────────────────────────────────────────────
+function renderAll() {
+  paintGrid(); renderFrames(); renderPalette();
+  if (!playing) { paintPreview($('pv-splash'), 24, cur); paintPreview($('pv-badge'), 4, cur); }
+}
+// ── language switching ───────────────────────────────────────────────────────
+// Applied to the DOM rather than baked in, so switching costs one pass over
+// ~80 nodes instead of a reload. Dynamic text (play/stop, the sample summary,
+// swatch tooltips) isn't in the DOM as a key, so it gets re-derived here.
+function applyLang(next) {
+  lang = I18N[next] ? next : 'en';
+  document.documentElement.lang = lang;
+  document.title = t('title');
+
+  for (const el of document.querySelectorAll('[data-i18n]'))
+    el.textContent = t(el.dataset.i18n);
+  for (const el of document.querySelectorAll('[data-i18n-html]'))
+    el.innerHTML = t(el.dataset.i18nHtml);
+  for (const el of document.querySelectorAll('[data-i18n-ph]'))
+    el.placeholder = t(el.dataset.i18nPh);
+  for (const el of document.querySelectorAll('[data-i18n-title]'))
+    el.title = el.dataset.hexLabel ? `${el.dataset.hexLabel} — ${t(el.dataset.i18nTitle)}`
+                                   : t(el.dataset.i18nTitle);
+
+  $('play').textContent = playing ? t('stop') : t('play');
+  $('copy').textContent = t('copyClip');
+  $('lang').value = lang;
+  describeSample();
+  renderAll();
+
+  try { localStorage.setItem('clawdmeter-lang', lang); } catch {}
+}
+
+(function initLang() {
+  const sel = $('lang');
+  for (const [code, label] of Object.entries(LANGS)) {
+    const o = document.createElement('option');
+    o.value = code; o.textContent = label;
+    sel.appendChild(o);
+  }
+  sel.onchange = () => applyLang(sel.value);
+
+  // localStorage throws on file:// in some browsers, which is the main way
+  // this editor gets opened — so a failure there falls through to the
+  // browser's own language rather than breaking startup.
+  let saved = null;
+  try { saved = localStorage.getItem('clawdmeter-lang'); } catch {}
+  const guess = (navigator.languages || [navigator.language || 'en'])
+    .map(l => {
+      const s = l.toLowerCase();
+      if (s === 'zh-tw' || s === 'zh-hant' || s.startsWith('zh-hant')
+          || s === 'zh-hk' || s === 'zh-mo') return 'zh-TW';
+      if (s.startsWith('zh')) return 'zh-CN';
+      if (s.startsWith('ja')) return 'ja';
+      if (s.startsWith('en')) return 'en';
+      return null;
+    })
+    .find(Boolean);
+  applyLang(saved || guess || 'en');
+})();
+
+$('load-template').click();
+undoStack = [];
+</script>
+</body>
+</html>
