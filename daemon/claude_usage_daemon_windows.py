@@ -539,13 +539,26 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
     # Rebuild a fresh BleakClient each attempt (locked D-05 recipe).
     client = None
     for attempt in range(CONNECT_RETRIES):
-        # D-05: pass BLEDevice (not address string), address_type="random" (NimBLE
-        # static-random), use_cached_services=False (DIY firmware — WinRT GATT cache
-        # may be stale after firmware reflash).
+        # D-05: pass BLEDevice (not an address string), and disable the WinRT GATT
+        # cache — this is DIY firmware whose attribute table changes between
+        # builds, and a cached table made a freshly flashed board look like it was
+        # missing a newly added characteristic.
+        #
+        # MUST be nested under winrt=. bleak 3.x moved these off the top level and
+        # the WinRT backend reads them only via winrt.get(...), so a top-level
+        # kwarg is swallowed by **kwargs and silently does nothing. Plain dict
+        # rather than WinRTClientArgs, which is a typing-only TypedDict.
+        #
+        # address_type is deliberately NOT set. It used to be passed as
+        # "random" alongside these, but as a dead top-level kwarg it never took
+        # effect — so the working configuration has always been "let the OS
+        # decide". Actually honouring "random" breaks the connect: this board's
+        # address is the factory-burned MAC (the USB serial +1), i.e. PUBLIC, and
+        # forcing random makes WinRT's address lookup return nothing, reported as
+        # BleakDeviceNotFoundError.
         client = BleakClient(
             device,
-            address_type="random",
-            use_cached_services=False,
+            winrt={"use_cached_services": False},
         )
         try:
             await client.connect()

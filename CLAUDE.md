@@ -114,9 +114,19 @@ pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0
 # not ESP32-S3") means you picked an S3 env — use a *_c6 env for C6 hardware.
 ```
 
-If `pio` isn't on PATH: try `~/.platformio/penv/bin/pio` (Linux/macOS pio install) or `brew install platformio` on macOS.
+If `pio` isn't on PATH: try `~/.platformio/penv/bin/pio` (Linux/macOS pio install), `~/.platformio/penv/Scripts/pio.exe` on Windows, or `brew install platformio` on macOS.
 
-Device path differs by OS: `/dev/cu.usbmodem*` on macOS, `/dev/ttyACM0` on Linux. Both expose the ESP32-S3 native USB-JTAG (no boot-mode dance needed).
+Device path differs by OS: `/dev/cu.usbmodem*` on macOS, `/dev/ttyACM0` on Linux, `COM<n>` on Windows. All expose the ESP32-S3 native USB-JTAG (no boot-mode dance needed). To find the port on Windows, `py screenshot.py --list` marks the board by USB VID `0x303A` — handy when another COM port (e.g. Intel AMT SOL) is also present.
+
+### Building on Windows
+
+Two hard blockers, both of which look like firmware problems and are not:
+
+1. **`MAX_PATH`.** `esp32-arduino-libs` ships the ESP-Matter/connectedhomeip header tree, whose deepest paths land at *exactly* 260 characters under the default core dir. Extraction dies with `FileNotFoundError` on a header. Fix by shortening the core dir: `PLATFORMIO_CORE_DIR=C:\pio`, which buys ~27 characters. Set it permanently (`[Environment]::SetEnvironmentVariable('PLATFORMIO_CORE_DIR','C:\pio','User')`) or every later invocation reverts. Do **not** put `core_dir` in `platformio.ini` — that would redirect macOS/Linux contributors away from their existing caches for a Windows-only problem.
+
+2. **Do not build from Git Bash / MSYS.** The pioarduino platform runs ESP-IDF's `idf_tools.py`, which hard-refuses with `ERROR: MSys/Mingw is not supported` and then never downloads the compiler. The build proceeds and dies on a *framework* file (`SPI.cpp`) with `'xtensa-esp32s3-elf-g++' is not recognized`, and the toolchain package on disk contains only `package.json`/`tools.json` with an empty `bin/`. Spawning PowerShell from Git Bash is not enough — MSYS environment markers are inherited and the check still fires. Build from a real PowerShell session.
+
+Also beware passing Windows paths through MSYS: `PLATFORMIO_CORE_DIR=C:\pio` gets mangled into a drive-relative `C:pio` and resolves against the project dir, producing a *longer* prefix than the default. Use forward slashes (`C:/pio`) if you must set it from bash.
 
 ## QA your own UI changes — don't ask the user
 
@@ -136,6 +146,8 @@ The boot screen is `SCREEN_SPLASH` and only advances on a physical button press,
 8. **LVGL RGB565A8 is planar.** `w*h` RGB565 pixels followed by `w*h` alpha bytes; `data_size = w*h*3`, `stride = w*2`. Use `init_icon_dsc_rgb565a8()` for icons that overlap non-uniform backgrounds (e.g. battery over splash). Lucide source PNGs are black-on-transparent — converter must tint to white or icons render invisible. See `tools/png_to_lvgl.js`.
 9. **Per-board pre-init is `board_init()`.** Each board's `board_init.cpp` brings up `Wire` and any reset-gating IO expander BEFORE `display_hal_init()`. Skipping the IO expander release on AMOLED-1.8 leaves SH8601 + FT3168 in reset and they silently fail to probe.
 10. **No `#ifdef BOARD_*` in shared code.** The whole point of the refactor — if you're about to add one, you probably want a `BoardCaps` field or a per-board file instead. See `docs/porting/capability-flags.md`.
+11. **bleak's WinRT options must be nested under `winrt=`.** bleak 3.x moved `use_cached_services` and `address_type` off the top level; the WinRT backend reads them only via `winrt.get(...)`, so a top-level kwarg is swallowed by `**kwargs` and does nothing — no warning, no error. The Windows daemon passed them top-level for a long time, which meant **Windows was serving its cached GATT table**: add a characteristic to the firmware, reflash, and the daemon reports it as "not found" while the binary demonstrably contains it. Symptom looks like a firmware bug; cause is host caching. Guarded by `daemon/tests/test_windows_gatt_cache.py`. Corollary: reviving a long-dead argument is a behaviour change — nesting them also activated `address_type="random"`, which broke connect outright (this board's address is the factory-burned MAC, i.e. public), surfacing as `BleakDeviceNotFoundError`. Leave `address_type` unset.
+12. **A bond mismatch reports as `ERROR_BAD_COMMAND`.** `PermissionError: [WinError -2147024874] The device does not recognize the command` during connect means Windows and the device disagree on their pairing keys. Fix by clearing both sides, device first or Windows re-bonds against the old keys: hold PWR and release between **3–6 s** (`ble_clear_bonds()` drops bonds *and* the owner lock, then re-advertises), then remove the device in Windows Bluetooth settings and re-pair. Unlike the macOS daemon, which has `_is_encryption_error()` / `unpair_macos()`, the Windows path cannot self-heal from this.
 
 ## Icons
 
