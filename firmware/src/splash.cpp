@@ -42,14 +42,17 @@ static bool active = false;
 // Usage-rate animation groups: 4 groups × up to 4 animations each.
 // Filled at init by matching literal names from splash_anims[].
 #define GROUP_COUNT 4
-#define GROUP_MAX   4
+#define GROUP_MAX   6
 static int8_t  group_lists[GROUP_COUNT][GROUP_MAX];
 static uint8_t group_size[GROUP_COUNT] = {0};
 static uint8_t group_rotation[GROUP_COUNT] = {0};
 
 static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
-    // Group 0 — idle / sleepy
-    { "expression sleep", "idle breathe", "idle blink", "expression wink" },
+    // Group 0 — idle / sleepy. The state the device sits in most of the day,
+    // so it carries the widest rotation: a bored creature is the one you
+    // actually end up looking at.
+    { "expression sleep", "idle breathe", "idle blink", "expression wink",
+      "idle hearts", "idle blossom" },
     // Group 1 — normal pace
     { "idle look around", "work think", "work coding", "work type" },
     // Group 2 — active

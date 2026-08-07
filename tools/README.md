@@ -103,5 +103,16 @@ converter overwrites the header. Rebuild firmware after running both.
 
 ## License note
 
-The scraper hits a public site without a stated license. Confirm reuse is
-appropriate for your case before redistributing the output.
+Two parties hold rights in what's in here, and this project holds neither.
+
+The animations are adapted from [claudepix](https://claudepix.vercel.app) by
+[@amaanbuilds](https://x.com/amaanbuilds), a site that states no license. The
+character Clawd belongs to Anthropic. Several animations in
+`tools/drawn_anims/` are hand-edited versions of the claudepix originals, so
+they are derivative of both.
+
+This is a non-commercial community project. It is **licensed by neither party
+and licenses nothing to anyone** — publishing a derivative work under an open
+license would be asserting a right this project doesn't have, so it doesn't.
+Confirm your own use is appropriate before redistributing, and don't ship any
+of it in a paid product.

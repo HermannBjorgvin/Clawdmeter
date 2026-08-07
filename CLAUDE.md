@@ -143,9 +143,11 @@ The boot screen is `SCREEN_SPLASH` and only advances on a physical button press,
 
 ## Splash animations
 
-15 × 20×20 pixel-art creature animations sourced from
+17 × 20×20 pixel-art creature animations. 15 come from
 [claudepix.vercel.app](https://claudepix.vercel.app) — the 13 the site lists,
-plus 2 the manifest carries but the page never shows. Pipeline:
+plus 2 the manifest carries but the page never shows — of which 6 ship
+hand-corrected (see `tools/drawn_anims/README.md` for what was wrong with
+each). 2 more are new. Pipeline:
 
 ```bash
 node tools/scrape_claudepix.js       # → tools/claudepix_data/*.json (wiped and rewritten)

@@ -1,8 +1,25 @@
-# Your own animations
+# Hand-edited animations
 
 Drop-in directory. Anything you export from `tools/anim_editor.html` goes here,
 and `convert_to_c.js` picks it up on the next run — no index to maintain, no
 list to edit.
+
+What's already here are corrections to the claudepix originals, not variants of
+them, which is why they carry the same names and override rather than sit
+alongside:
+
+| | |
+|---|---|
+| `expression sleep` | the snore bubble was drawn in the body colour — an orange snore |
+| `work think` | same defect one animation over: the thought marks were body-coloured too |
+| `dance bounce dj` | his head sat on row 0, so the headphone band arced outside the grid and was cropped away entirely, leaving two ear cups with nothing joining them |
+| `work coding`, `expression wink`, `expression surprise` | redrawn for legibility at 4px/cell |
+
+`idle hearts` and `idle blossom` are new rather than corrections.
+
+They remain derivative of [claudepix](https://claudepix.vercel.app) by
+[@amaanbuilds](https://x.com/amaanbuilds) and of Anthropic's character — see
+the license note in `tools/README.md`.
 
 ```bash
 open tools/anim_editor.html      # draw, then "下載 .json" / Download .json
