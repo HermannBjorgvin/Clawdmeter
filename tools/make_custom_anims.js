@@ -100,12 +100,16 @@ function addNote(grid, r, c) {
 // Base: dance_bounce (he already moves to a beat). Add headphones + two notes
 // drifting up the sides on offset phases, so the loop never looks metronomic.
 //
-// Played at a third of the base tempo. dance_bounce runs ~96 ms/frame, which
-// is right for dancing and wrong for this — the rest of the idle group sits at
-// 276-383 ms/frame, and dropped in at dance speed he's the one thing in the
-// rotation visibly working. Stretched, the same frames read as a slow head-bob
-// with the notes drifting rather than shooting up the sides.
-const FM_SLOWDOWN = 3;
+// Played at half the base tempo. dance_bounce runs ~96 ms/frame, which is
+// right for dancing and wrong for this — dropped into the idle rotation at
+// dance speed he's the one thing visibly working. Stretched, the same frames
+// read as a head-bob with the notes drifting rather than shooting up the sides.
+//
+// 2x rather than 3x: at a third he was slower than everything he sits next to
+// and it stopped reading as listening to something. ~193 ms/frame leaves him
+// the liveliest in the idle group, which is the point — he's enjoying himself,
+// not asleep.
+const FM_SLOWDOWN = 2;
 
 function buildFmListening() {
   const base = JSON.parse(fs.readFileSync(path.join(SRC_DIR, 'dance_bounce.json'), 'utf8'));
