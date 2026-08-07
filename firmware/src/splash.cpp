@@ -55,8 +55,12 @@ static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
     // Group 0 — idle / sleepy
     { "expression sleep", "idle breathe", "idle blink", "expression wink",
       "idle hearts", "idle blossom", "fm listening" },
-    // Group 1 — normal pace
-    { "idle look around", "work think", "work coding", "work type" },
+    // Group 1 — normal pace. "work type" is deliberately absent: it exists in
+    // splash_anims[] but nothing picks it. Four frames, four pixels of arm
+    // twitch, no keyboard and no surface — there is nothing in it to read as
+    // typing. It's one of the two animations the claudepix site never lists,
+    // which is probably the same judgement. "work out" takes its slot.
+    { "idle look around", "work think", "work coding", "work out" },
     // Group 2 — active
     { "dance sway", "expression surprise", "dance bounce", "dance bob" },
     // Group 3 — heavy

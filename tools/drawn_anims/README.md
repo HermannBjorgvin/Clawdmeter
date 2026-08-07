@@ -15,7 +15,9 @@ alongside:
 | `dance bounce dj` | his head sat on row 0, so the headphone band arced outside the grid and was cropped away entirely, leaving two ear cups with nothing joining them |
 | `work coding`, `expression wink`, `expression surprise` | redrawn for legibility at 4px/cell |
 
-`idle hearts` and `idle blossom` are new rather than corrections.
+`idle hearts`, `idle blossom` and `work out` are new rather than corrections —
+`work out` has him doing alternating dumbbell curls, two frames per rep, holding
+the top of each one twice as long as the lift.
 
 They remain derivative of [claudepix](https://claudepix.vercel.app) by
 [@amaanbuilds](https://x.com/amaanbuilds) and of Anthropic's character — see
