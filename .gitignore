@@ -18,3 +18,6 @@ daemon/.venv/
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# Screenshot captures (screenshot.py output). Root only — screenshots/ is tracked.
+/*.png
