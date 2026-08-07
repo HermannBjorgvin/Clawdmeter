@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Clawdmeter 動畫編輯器</title>
+<link id="favicon" rel="icon" href="data:,">
 <style>
   :root {
     --bg: #14120f; --panel: #1e1b17; --line: #3a352e;
@@ -1078,6 +1079,49 @@ function renderAll() {
   paintGrid(); renderFrames(); renderPalette();
   if (!playing) { paintPreview($('pv-splash'), 24, cur); paintPreview($('pv-badge'), 4, cur); }
 }
+// ── tab icon ─────────────────────────────────────────────────────────────────
+// Drawn from TEMPLATE at load rather than shipped as a file, so the editor
+// stays one self-contained document that works off file://.
+//
+// Two things a 20×20 grid needs before it survives being shown at 16px. It's
+// cropped to the creature — the grid has three empty rows under him for
+// bobbing room, and keeping them would shrink him by a third for nothing. And
+// it's drawn on an opaque dark square instead of transparency, because his
+// eyes are #0F0F0F: on the device they read as holes only because the panel
+// behind them is black. Left transparent, they'd vanish into a dark tab bar
+// and he'd be a featureless blob.
+function buildFavicon() {
+  const g = TEMPLATE.map(row => [...row].map(ch => ch === '.' ? 0 : +ch));
+  let r0 = N, c0 = N, r1 = -1, c1 = -1;
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    if (!g[r][c]) continue;
+    if (r < r0) r0 = r; if (r > r1) r1 = r;
+    if (c < c0) c0 = c; if (c > c1) c1 = c;
+  }
+  if (r1 < 0) return;
+
+  const cells = Math.max(r1 - r0, c1 - c0) + 1;
+  const PAD = 1, span = cells + PAD * 2;          // one cell of margin all round
+  const px = Math.max(2, Math.floor(64 / span));  // whole pixels: no seams
+  const size = span * px;
+
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = size;
+  const x = cv.getContext('2d');
+  x.fillStyle = '#0F0F0F';
+  x.fillRect(0, 0, size, size);
+
+  // Centre the crop inside the square when he isn't as tall as he is wide.
+  const offR = PAD + Math.floor((cells - (r1 - r0 + 1)) / 2);
+  const offC = PAD + Math.floor((cells - (c1 - c0 + 1)) / 2);
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+    const v = g[r][c]; if (!v) continue;
+    x.fillStyle = START_PALETTE[v] || '#D97757';
+    x.fillRect((offC + c - c0) * px, (offR + r - r0) * px, px, px);
+  }
+  $('favicon').href = cv.toDataURL('image/png');
+}
+
 // ── language switching ───────────────────────────────────────────────────────
 // Applied to the DOM rather than baked in, so switching costs one pass over
 // ~80 nodes instead of a reload. Dynamic text (play/stop, the sample summary,
@@ -1134,6 +1178,7 @@ function applyLang(next) {
   applyLang(saved || guess || 'en');
 })();
 
+buildFavicon();
 $('load-template').click();
 undoStack = [];
 </script>
