@@ -13,9 +13,13 @@ At minimum:
 - An **ESP32-S3** (other ESP32 family members may work; this is what the
   upstream firmware is tested on). OPI PSRAM is **required** — partial
   flush buffers and the splash canvas are allocated from PSRAM.
-- A QSPI **AMOLED panel** with a driver supported by
-  [GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX)
-  (CO5300, SH8601, NV3041A, etc.). Other interfaces aren't supported yet.
+- A **panel** with a driver supported by
+  [GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX).
+  QSPI AMOLEDs (CO5300, SH8601, NV3041A, …) and plain 4-wire SPI TFTs
+  (JD9853 on the LCD-1.47) are both in tree; the HAL only needs
+  `display_hal_draw_bitmap`, so the bus type never leaks into shared code. Panels that can't rotate in hardware can still be run
+  rotated — the LCD-1.47 port drives its 172×320 panel as a 320×172
+  landscape canvas via `setRotation()`.
 - A **touch controller** over I2C. The HAL just needs init + read; you
   can use any driver you can compile.
 - A **primary button** (typically the BOOT/GPIO 0 push button).
@@ -89,7 +93,9 @@ Optional:
    (see [hal-contract.md](hal-contract.md) for breakpoint details);
    most ports will look acceptable out of the box. If your screen size
    doesn't match an existing breakpoint, you may want to add one to
-   `compute_layout()` in `firmware/src/ui.cpp`.
+   `compute_layout()` in `firmware/src/ui.cpp` — that's where the
+   landscape branch lives too (`usage_panels_row` puts the two usage
+   panels side by side on screens too short to stack them).
 
 ## Common pitfalls
 
