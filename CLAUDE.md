@@ -1,12 +1,12 @@
 # Project context
 
-ESP32-S3 / ESP32-C6 firmware for a desk-side Claude Code usage monitor. Each
+ESP32-S3 / ESP32-C6 / ESP32-classic firmware for a desk-side Claude Code usage monitor. Each
 supported board lives in its own `firmware/src/boards/<name>/` folder and is
 selected via PlatformIO's `build_src_filter`. Adding a board means dropping in
 a new folder + a new `[env:...]` block — `main.cpp`, `ui.cpp`, and `splash.cpp`
 never see board-specific code. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md).
 
-Six ports today (two SoC families, four panel sizes):
+Seven ports today (three SoC families, five panel sizes):
 
 - `boards/waveshare_amoled_216/` — original Waveshare ESP32-S3-Touch-AMOLED-2.16 (CO5300, 480×480 square, CST9220 touch, IMU rotation). Build env: `waveshare_amoled_216`.
 - `boards/waveshare_amoled_18/` — Waveshare ESP32-S3-Touch-AMOLED-1.8 (368×448 portrait, XCA9554 IO expander). Build env: `waveshare_amoled_18`. **Two panel revisions are auto-detected at boot** (`board_rev()` in `board_init.cpp`, enum in `board_rev.h`): original = SH8601 display + FT3168 touch (0x38); later = CO5300 display + CST816 touch (0x15). One binary drives both.
@@ -14,6 +14,7 @@ Six ports today (two SoC families, four panel sizes):
 - `boards/waveshare_amoled_18_c6/` — Waveshare ESP32-C6-Touch-AMOLED-1.8 (368×448 portrait, SH8601, FT3168 touch, TCA9554 expander). Build env: `waveshare_amoled_18_c6`. Same panel as the S3 1.8 but on the C6 SoC. All subsystems (display, touch, BOOT + PWR buttons, battery, BLE) verified on hardware.
 - `boards/waveshare_amoled_206/` — Waveshare ESP32-S3-Touch-AMOLED-2.06 (CO5300, 410×502 watch form factor, FT3168 touch, no IO expander, 32 MB flash, PCF85063 RTC, ES8311 codec). Build env: `waveshare_amoled_206`. Display, touch, battery, IMU init, and BLE verified on hardware; the ES8311 chime path is not wired up (`sound.cpp` no-ops).
 - `boards/waveshare_lcd_154/` — Waveshare ESP32-S3-Touch-LCD-1.54 (ST7789, 240×240 square, CST816T touch @ 0x15). Build env: `waveshare_lcd_154`. **The first non-AMOLED port**: a plain 4-wire SPI TFT, not QSPI, and the panel has no brightness command — backlight is LEDC PWM on `LCD_BL`. **No PMU**: battery is an ADC divider on GPIO1 and `BAT_EN` (GPIO2) is a power-hold line that must be driven HIGH early in `board_init()` or the board browns out on battery. Three buttons (BOOT + GPIO5 + a PWR-role GPIO4); ES8311 chime wired up; QMI8658 populated but unused (fixed orientation, no rotation).
+- `boards/m5stack_fire/` — M5Stack FIRE (ILI9342C, 320×240 landscape SPI TFT, **no touch**, IP5306 PMU, MPU6886 unused). Build env: `m5stack_fire`. **The first ESP32-classic port and the first touch-less board**: navigation is the three front buttons (A=GPIO39 left→Space, C=GPIO37 right→Shift+Tab, B=GPIO38 middle→PWR-role: cycle screens/brightness + hold-to-pair). Battery/charging come from the **IP5306** power-bank IC over I2C (coarse 25/50/75/100 % gauge, feeds the four-state icon); hardware power on/off is the IP5306's own red side button, so no software power-off. Speaker is a DAC path, not the I2S/ES8311 chime engine, so `sound.cpp` no-ops. Classic ESP32 has **no native USB** — Serial (and the `screenshot` command) run over UART0 through the on-board CH9102 bridge, which appears as `/dev/cu.usbserial-*` (macOS) / `/dev/ttyUSB*` (Linux), *not* `usbmodem*`. The `m5stack-fire` board JSON supplies PSRAM (+ the rev1 cache workaround), 16 MB flash and the 16 MB partitions, so the env stays minimal. 240px-tall → lands on the existing "small" (240×240) UI breakpoint; the extra 80px of width is unused headroom a future landscape breakpoint could claim.
 
 **C6 ports have no PSRAM** — shared code gates on `BOARD_HAS_PSRAM` (absent on C6) to use `MALLOC_CAP_INTERNAL` for LVGL/splash buffers, and the `screenshot` serial command is disabled (`LV_USE_SNAPSHOT=0`), so UI changes on a C6 board must be eyeballed on hardware, not auto-captured.
 
@@ -80,6 +81,7 @@ firmware/src/
     waveshare_amoled_18_c6/ — C6: SH8601 + FT3168 + AXP PKEY + TCA9554 (gates power), no PSRAM
     waveshare_amoled_206/   — CO5300 + FT3168 + AXP PKEY, no IO expander, 32 MB, no rotation
     waveshare_lcd_154/      — ST7789 SPI TFT + CST816T + ADC battery (no PMU), PWM backlight
+    m5stack_fire/           — ESP32 classic: ILI9342C SPI TFT, no touch, 3 buttons, IP5306 PMU, PWM backlight
     template/               — copy this to bootstrap a new port
   main.cpp                  — setup() + loop(): HAL calls only, zero #ifdef BOARD_*
   ui.{h,cpp}                — 3-screen UI (splash, usage, bluetooth). compute_layout() picks fonts/positions from board_caps() (responsive — current breakpoint: H >= 460 → large, else compact)
@@ -108,15 +110,21 @@ pio run -d firmware -e waveshare_amoled_216_c6                                  
 pio run -d firmware -e waveshare_amoled_18_c6                                   # build 1.8 (C6)
 pio run -d firmware -e waveshare_amoled_206                                     # build 2.06 (S3, watch)
 pio run -d firmware -e waveshare_lcd_154                                        # build 1.54 (S3, SPI TFT)
+pio run -d firmware -e m5stack_fire                                             # build M5Stack FIRE (ESP32 classic)
 pio run -d firmware -e waveshare_amoled_18 -t upload --upload-port /dev/cu.usbmodem101   # flash 1.8 on macOS
 pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0         # flash 2.16 on Linux
+pio run -d firmware -e m5stack_fire -t upload --upload-port /dev/cu.usbserial-XXXX        # flash M5Stack (UART bridge)
 # C6 boards: same native USB-JTAG flashing; flag a chip mismatch ("This chip is ESP32-C6,
 # not ESP32-S3") means you picked an S3 env — use a *_c6 env for C6 hardware.
+# M5Stack FIRE is ESP32 classic over a CH9102 UART bridge, so it enumerates as
+# /dev/cu.usbserial-* (macOS) / /dev/ttyUSB* (Linux), NOT usbmodem*/ttyACM*. A
+# chip mismatch ("This chip is ESP32, not ESP32-S3") means an S3 env was aimed at
+# M5Stack hardware — use the m5stack_fire env.
 ```
 
 If `pio` isn't on PATH: try `~/.platformio/penv/bin/pio` (Linux/macOS pio install) or `brew install platformio` on macOS.
 
-Device path differs by OS: `/dev/cu.usbmodem*` on macOS, `/dev/ttyACM0` on Linux. Both expose the ESP32-S3 native USB-JTAG (no boot-mode dance needed).
+Device path differs by OS and SoC: S3/C6 boards expose a native USB-JTAG at `/dev/cu.usbmodem*` (macOS) / `/dev/ttyACM0` (Linux), no boot-mode dance. The M5Stack FIRE (ESP32 classic) has no native USB — it's a CH9102 UART bridge at `/dev/cu.usbserial-*` / `/dev/ttyUSB*`.
 
 ## QA your own UI changes — don't ask the user
 
@@ -127,7 +135,7 @@ The boot screen is `SCREEN_SPLASH` and only advances on a physical button press,
 ## Critical gotchas
 
 1. **CO5300 cannot rotate.** Its MADCTL only supports axis flips, not column/row exchange. Rotation is done by **CPU pixel remapping inside `display_hal_draw_bitmap`** in `boards/waveshare_amoled_216/display.cpp`. We use **PARTIAL render mode with strip rotation** (small 480×40 strips, fast). On rotation change → AMOLED brightness flash → force redraw (handled inside `display_hal_tick`).
-2. **OPI PSRAM** required: `board_build.arduino.memory_type = qio_opi` in platformio.ini. Without this, `MALLOC_CAP_SPIRAM` returns NULL and the screen is black.
+2. **PSRAM must be enabled or the screen is black** (`MALLOC_CAP_SPIRAM` returns NULL). On the S3 boards that means `board_build.arduino.memory_type = qio_opi` in platformio.ini. The M5Stack FIRE (ESP32 classic, WROVER) instead gets PSRAM + the rev1 cache workaround from its `m5stack-fire` board JSON — no memory_type line. C6 boards have no PSRAM at all and gate on `BOARD_HAS_PSRAM` (see #below).
 3. **pioarduino platform required.** GFX Library for Arduino needs Arduino Core 3.x (`esp32-hal-periman.h`), not the 2.x that standard `espressif32` ships. We pin `pioarduino/platform-espressif32` 55.03.38-1.
 4. **LVGL 9 font patching.** `lv_font_conv` outputs LVGL 8 format. Must remove `#if LVGL_VERSION_MAJOR >= 8` guards, drop `.cache` field, add `.release_glyph`, `.kerning`, `.static_bitmap`, `.fallback`, `.user_data`. Without patching, fonts render invisible.
 5. **Touch reading is centralized inside each board's `touch.cpp`.** The HAL `touch_hal_read()` is called once per loop from `my_touch_cb`; the board's implementation owns its latched `touch_pressed/x/y` state. Don't call the underlying controller from anywhere else — CST9220's `getPoint()` etc. do a full I2C transaction and concurrent callers consume each other's data.

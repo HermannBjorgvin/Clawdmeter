@@ -341,10 +341,20 @@ void loop() {
 
         if (power_hal_pwr_pressed()) {
             if (!idle_consume_wake_press()) {
-                // On splash: cycle animations. On the usage view: cycle
-                // screen brightness (single non-splash view, no more screens).
-                if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
-                else                                          brightness_cycle();
+                if (!board_caps().has_touch) {
+                    // Touchless boards (e.g. M5Stack FIRE) have no screen tap to
+                    // leave the splash, so the PWR button is the sole splash<->usage
+                    // toggle. Animations still auto-rotate (~20s) and follow the
+                    // usage-rate group, so manual splash cycling isn't lost here.
+                    ui_toggle_splash();
+                } else if (ui_get_current_screen() == SCREEN_SPLASH) {
+                    // On splash: cycle animations (a screen tap toggles the view).
+                    splash_next();
+                } else {
+                    // On the usage view: cycle screen brightness (single
+                    // non-splash view, no more screens).
+                    brightness_cycle();
+                }
             }
         }
 
