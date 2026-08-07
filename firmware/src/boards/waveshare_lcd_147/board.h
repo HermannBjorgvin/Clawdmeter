@@ -61,7 +61,7 @@
 // have simply don't exist here; input.cpp reports no buttons and
 // BoardCaps.button_count is 0. Screen switching is also available by tapping
 // the touchscreen.
-#define BTN_PWR_GPIO         0     // BOOT — PWR role; hold 8s = power off (see power.cpp)
+#define BTN_PWR_GPIO         0     // BOOT — PWR role (screens/brightness; hold ~3s + release to pair)
 
 // ---- Capability flags ----
 #define BOARD_HAS_SECONDARY_BUTTON 0
