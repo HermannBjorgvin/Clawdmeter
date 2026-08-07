@@ -64,7 +64,9 @@ static void sample_battery(void) {
     uint8_t r0 = 0, r1 = 0;
     bool ok0 = ip5306_read(0x70, &r0);
     bool ok1 = ip5306_read(0x71, &r1);
-    cached_charging = (ok0 && (r0 & 0x08)) || (ok1 && (r1 & 0x08));
+    if (ok0 || ok1) {
+        cached_charging = (ok0 && (r0 & 0x08)) || (ok1 && (r1 & 0x08));
+    }
 }
 
 void power_hal_init(void) {
