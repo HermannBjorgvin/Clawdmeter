@@ -2,8 +2,8 @@
 /**
  * Converts scraped JSON animation data to firmware/src/splash_animations.h.
  *
- * Per-animation palette (up to 10 entries) is converted to RGB565. Cells in
- * each frame are palette indices (0..9). Splash module looks up colors via
+ * Per-animation palette (up to PALETTE_SIZE entries) is converted to RGB565.
+ * Cells in each frame are palette indices. Splash module looks up colors via
  * palette[cell].
  *
  * Usage: node convert_to_c.js [--in DIR] [--out FILE]
@@ -23,7 +23,12 @@ const IN_DIRS = opt('--in', ['claudepix_data', 'custom_anims', 'drawn_anims'].jo
 const OUT_FILE = path.resolve(opt('--out',
   path.join(__dirname, '..', 'firmware', 'src', 'splash_animations.h')));
 
-const PALETTE_SIZE = 10;
+// Raised from 10 to 16. Nothing in the firmware hardcodes it — splash.cpp
+// bounds-checks against SPLASH_PALETTE_SIZE, which is emitted from here, and
+// cells are uint8_t. The cost is PALETTE_SIZE * 2 bytes per animation against
+// 400 bytes per frame, so it rounds to nothing. Files with fewer entries stay
+// valid; the rest of the array is zero-filled.
+const PALETTE_SIZE = 16;
 
 function safeIdent(s) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
@@ -156,8 +161,8 @@ function main() {
   out += '// built by tools/make_custom_anims.js by posing the same characters.\n';
   out += '// Do not edit by hand — re-run the scraper + converter to refresh.\n';
   out += '// ============================================================\n';
-  out += '// Each animation carries a 10-entry RGB565 palette.\n';
-  out += '// Cell values 0..9 index into palette.\n';
+  out += `// Each animation carries a ${PALETTE_SIZE}-entry RGB565 palette.\n`;
+  out += `// Cell values 0..${PALETTE_SIZE - 1} index into palette.\n`;
   out += '#pragma once\n#include <stdint.h>\n\n';
 
   out += `#define SPLASH_PALETTE_SIZE ${PALETTE_SIZE}\n\n`;

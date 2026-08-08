@@ -33,7 +33,7 @@ Override URL or output dir with `--base` and `--out`.
 file, no dependencies, no server, nothing fetched.
 
 It carries what the firmware cares about rather than what a general pixel editor
-offers: 20×20 and the 10-colour cap enforced, per-frame hold times, onion skin,
+offers: 20×20 and the 16-colour cap enforced, per-frame hold times, onion skin,
 playback at the real holds, and both device previews on black (24px/cell splash,
 4px/cell corner badge). A colour that looks fine on white can vanish on the
 panel and a shape that reads at 24px can turn to mush at 4px, so previewing at

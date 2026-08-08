@@ -55,9 +55,13 @@
   .row + .row { margin-top: 8px; }
   #grid { image-rendering: pixelated; cursor: crosshair; touch-action: none;
           border: 1px solid var(--line); background: #000; display: block; }
-  /* Exactly PALETTE_MAX columns, so a full ten-colour palette is one row
-     whatever the column is wide. Flex-wrapped fixed-size swatches dropped the
-     tenth onto a second row and cost 28px of the height budget. */
+  /* Ten columns, not PALETTE_MAX. The cap is 16, but sixteen swatches across a
+     300px column would be 14px each — smaller than the delete badge sitting on
+     them. Ten keeps the swatch at a clickable size and lets the grid flow onto
+     a second row only once a palette actually passes ten, so every animation
+     that fits in ten costs exactly the height it did before the cap moved.
+     Flex-wrapped fixed-size swatches were worse: they dropped the tenth onto
+     its own row and cost 28px of the height budget unconditionally. */
   .swatches { display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; }
   .sw { width: 100%; aspect-ratio: 1; border: 2px solid transparent; cursor: pointer;
         padding: 0; position: relative; }
@@ -116,7 +120,7 @@
 <div class="titlebar">
   <h1 data-i18n="title">Clawdmeter 動畫編輯器</h1>
   <select id="lang" aria-label="Language"></select>
-  <p class="sub" data-i18n-html="sub">20×20 · 最多 10 色 · 每格獨立停留時間 · 匯出可直接丟進 <code>tools/drawn_anims/</code></p>
+  <p class="sub" data-i18n-html="sub">20×20 · 最多 16 色 · 每格獨立停留時間 · 匯出可直接丟進 <code>tools/drawn_anims/</code></p>
 </div>
 
 <div class="wrap">
@@ -255,7 +259,14 @@
 // Slot 0 is always empty and renders as the panel background. Everything else
 // is a hex string, capped at PALETTE_MAX total to match the firmware's
 // SPLASH_PALETTE_SIZE — a bigger palette can't be represented on the device.
-const N = 20, PALETTE_MAX = 10;
+// Keep this in step with PALETTE_SIZE in tools/convert_to_c.js; the converter
+// rejects a file that exceeds it rather than silently dropping colours.
+const N = 20, PALETTE_MAX = 16;
+
+// Packed frame strings (the embedded samples and TEMPLATE) store one character
+// per cell: '.' for empty, otherwise the palette index in base-36. Digits mean
+// the same thing they did when the cap was 10, so older strings still decode.
+const cell = ch => ch === '.' ? 0 : parseInt(ch, 36);
 
 // ── language ─────────────────────────────────────────────────────────────────
 // The four the device software speaks. Markup keeps its zh-TW text inline as
@@ -269,7 +280,7 @@ const LANGS = { 'zh-TW': '繁體中文', 'en': 'English', 'ja': '日本語', 'zh
 const I18N = {
 'zh-TW': {
   title: 'Clawdmeter 動畫編輯器',
-  sub: '20×20 · 最多 10 色 · 每格獨立停留時間 · 匯出可直接丟進 <code>tools/drawn_anims/</code>',
+  sub: '20×20 · 最多 {max} 色 · 每格獨立停留時間 · 匯出可直接丟進 <code>tools/drawn_anims/</code>',
   pen: '畫筆', erase: '橡皮擦', fill: '填滿', pick: '滴管', select: '選取',
   undo: '復原', onion: '洋蔥皮', paste: '貼上', play: '▶ 播放', stop: '■ 停止',
   selecting: '選取中 ·', copy: '複製', flipH: '左右翻', flipV: '上下翻',
@@ -308,7 +319,7 @@ const I18N = {
 },
 'en': {
   title: 'Clawdmeter animation editor',
-  sub: '20×20 · 10 colours max · per-frame hold times · export straight into <code>tools/drawn_anims/</code>',
+  sub: '20×20 · {max} colours max · per-frame hold times · export straight into <code>tools/drawn_anims/</code>',
   pen: 'Pen', erase: 'Eraser', fill: 'Fill', pick: 'Eyedropper', select: 'Select',
   undo: 'Undo', onion: 'Onion skin', paste: 'Paste', play: '▶ Play', stop: '■ Stop',
   selecting: 'Selected ·', copy: 'Copy', flipH: 'Flip H', flipV: 'Flip V',
@@ -347,7 +358,7 @@ const I18N = {
 },
 'ja': {
   title: 'Clawdmeter アニメーションエディタ',
-  sub: '20×20 · 最大10色 · コマごとの表示時間 · 書き出しはそのまま <code>tools/drawn_anims/</code> へ',
+  sub: '20×20 · 最大{max}色 · コマごとの表示時間 · 書き出しはそのまま <code>tools/drawn_anims/</code> へ',
   pen: 'ペン', erase: '消しゴム', fill: '塗りつぶし', pick: 'スポイト', select: '選択',
   undo: '元に戻す', onion: 'オニオンスキン', paste: '貼り付け', play: '▶ 再生', stop: '■ 停止',
   selecting: '選択中 ·', copy: 'コピー', flipH: '左右反転', flipV: '上下反転',
@@ -386,7 +397,7 @@ const I18N = {
 },
 'zh-CN': {
   title: 'Clawdmeter 动画编辑器',
-  sub: '20×20 · 最多 10 色 · 每格独立停留时间 · 导出可直接丢进 <code>tools/drawn_anims/</code>',
+  sub: '20×20 · 最多 {max} 色 · 每格独立停留时间 · 导出可直接丢进 <code>tools/drawn_anims/</code>',
   pen: '画笔', erase: '橡皮擦', fill: '填充', pick: '吸管', select: '选取',
   undo: '撤销', onion: '洋葱皮', paste: '粘贴', play: '▶ 播放', stop: '■ 停止',
   selecting: '选取中 ·', copy: '复制', flipH: '左右翻', flipV: '上下翻',
@@ -429,6 +440,10 @@ let lang = 'zh-TW';
 
 function t(key, vars) {
   let s = (I18N[lang] && I18N[lang][key]) ?? I18N.en[key] ?? key;
+  // {max} is the palette cap. Substituted for every string rather than passed
+  // in at each call site, so moving PALETTE_MAX can't leave a stale number
+  // behind in one of the four languages.
+  s = s.split('{max}').join(PALETTE_MAX);
   if (vars) for (const k in vars) s = s.split('{' + k + '}').join(vars[k]);
   return s;
 }
@@ -1048,7 +1063,7 @@ $('load-sample').onclick = () => {
   frames = a.f.map(f => ({
     hold: f.h,
     grid: Array.from({length: N}, (_, r) =>
-      [...f.g.slice(r*N, (r+1)*N)].map(ch => ch === '.' ? 0 : +ch)),
+      [...f.g.slice(r*N, (r+1)*N)].map(cell)),
   }));
   $('name').value = a.n; $('category').value = a.c;
   cur = 0; colour = Math.min(1, palette.length - 1); renderAll();
@@ -1057,7 +1072,7 @@ $('load-sample').onclick = () => {
 $('load-template').onclick = () => {
   sel = null; pushUndo();
   frames = [{ hold: 300, grid: TEMPLATE.map(row =>
-    [...row].map(ch => ch === '.' ? 0 : +ch)) }];
+    [...row].map(cell)) }];
   cur = 0; renderAll();
 };
 $('clear').onclick = () => { sel = null; pushUndo(); frames = [{hold:300, grid:blank()}]; cur = 0; renderAll(); };
@@ -1142,7 +1157,7 @@ function renderAll() {
 // behind them is black. Left transparent, they'd vanish into a dark tab bar
 // and he'd be a featureless blob.
 function buildFavicon() {
-  const g = TEMPLATE.map(row => [...row].map(ch => ch === '.' ? 0 : +ch));
+  const g = TEMPLATE.map(row => [...row].map(cell));
   let r0 = N, c0 = N, r1 = -1, c1 = -1;
   for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
     if (!g[r][c]) continue;

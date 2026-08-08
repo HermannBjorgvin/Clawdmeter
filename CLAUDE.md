@@ -155,7 +155,13 @@ node tools/make_custom_anims.js  # → tools/custom_anims/*.json     (composed; 
 node tools/convert_to_c.js       # both dirs → firmware/src/splash_animations.h
 ```
 
-Each animation has a per-animation 10-color RGB565 palette. Cell values 0..9 index it. Default boot screen.
+Each animation has a per-animation 16-color RGB565 palette. Cell values 0..15
+index it. Default boot screen. The cap lives in one constant per side —
+`PALETTE_SIZE` in `convert_to_c.js` (which emits the firmware's
+`SPLASH_PALETTE_SIZE`) and `PALETTE_MAX` in `anim_editor.html`; nothing in
+`splash.cpp` hardcodes it. It was 10 until 2026-08-08. Raising it again means
+checking the packed sample strings in `build_editor_samples.js`: they store one
+base-36 character per cell, so the ceiling there is 36.
 
 **The two source dirs are separate on purpose** — the scraper owns
 `claudepix_data/` and is free to wipe it, so anything hand-made there would be
@@ -194,7 +200,7 @@ gridlines and a page margin.
 
 `tools/anim_editor.html` is the drawing surface — open it straight off disk, no
 server. It carries what the firmware cares about rather than what a general
-pixel editor offers: 20×20 and the 10-colour cap enforced, per-frame hold
+pixel editor offers: 20×20 and the 16-colour cap enforced, per-frame hold
 times, onion skin, playback at the real holds, and both device previews on
 black (24px/cell splash, 4px/cell corner badge). A colour that looks fine on
 white can vanish on the panel and a shape that reads at 24px can turn to mush

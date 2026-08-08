@@ -44,12 +44,14 @@ for (const dir of SRC_DIRS) {
       c: a.category || 'Idle',
       p: a.palette.map(h => h === 'transparent' ? 'transparent'
                                                 : (TINT[h.toUpperCase()] || h.toUpperCase())),
-      // One string per frame: 400 chars, '.' for empty. Indices are 0-9
-      // because the palette can't exceed 10 entries, so a digit per cell is
-      // lossless and roughly a third the size of a nested JSON array.
+      // One string per frame: 400 chars, '.' for empty. Indices are base-36
+      // (0-9 then a-z), so one character per cell stays lossless up to a
+      // 36-entry palette and costs roughly a third of a nested JSON array.
+      // Plain digits when the palette is small, so files written before the
+      // cap moved from 10 to 16 decode identically.
       f: a.frames.map(fr => ({
         h: fr.hold,
-        g: fr.grid.map(row => row.map(v => v === 0 ? '.' : v).join('')).join(''),
+        g: fr.grid.map(row => row.map(v => v === 0 ? '.' : v.toString(36)).join('')).join(''),
       })),
     });
   }
