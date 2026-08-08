@@ -400,6 +400,12 @@ async def poll_api(token: str) -> dict | None:
         return int(round(mins)) if mins > 0 else 0
 
     def pct(util: str) -> int:
+        # int is not a loss of precision here. The header arrives as two
+        # decimals of a fraction — "0.02", "0.21" — so a whole percent is
+        # everything there is. Observed directly; don't re-derive it. The
+        # firmware's rate window is sized around that granularity
+        # (firmware/src/usage_rate.cpp), so sending decimals would only add
+        # digits that are always zero.
         try:
             return int(round(float(util) * 100))
         except ValueError:
