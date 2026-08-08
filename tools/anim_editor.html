@@ -16,26 +16,32 @@
   }
   h1 { font-size: 15px; margin: 0 0 4px; }
   .sub { color: var(--dim); margin: 0 0 16px; }
-  /* Three columns: the file panels on the left, the drawing in the middle,
-     the things you touch while drawing on the right. Colours and frames stay
-     next to the canvas because you reach for them on every stroke; load and
-     export are once-per-session, so they can be the furthest away. */
+  /* Four columns, ordered by how often you touch them. Colours and frames sit
+     right against the canvas because you reach for them on every stroke; the
+     previews sit left of it, stacked, where they're in view without being in
+     the way; load and export go furthest out, being once-a-session.
+     The point of the arrangement is height, not width — nothing should need
+     scrolling to reach while you're drawing. */
   .wrap { display: grid; gap: 20px; align-items: start; justify-content: start;
-          grid-template-columns: 300px 480px 300px;
-          grid-template-areas: "io art side"; }
-  .col-io { grid-area: io; } .col-art { grid-area: art; } .col-side { grid-area: side; }
-  /* Below ~1200px the three don't fit beside a 480px canvas. Drop the io
-     column under the other two rather than squeezing the canvas, which is
-     fixed-size and can't give any width back. */
-  @media (max-width: 1200px) {
+          grid-template-columns: 300px 264px 480px 300px;
+          grid-template-areas: "io pv art side"; }
+  .col-io { grid-area: io; } .col-pv { grid-area: pv; }
+  .col-art { grid-area: art; } .col-side { grid-area: side; }
+  /* The canvas is a fixed 480px and can't give width back, so narrower
+     viewports move whole columns down rather than squeezing anything. */
+  @media (max-width: 1450px) {
+    .wrap { grid-template-columns: 264px 480px 300px;
+            grid-template-areas: "pv art side" "io io io"; }
+  }
+  @media (max-width: 1120px) {
     .wrap { grid-template-columns: 480px 300px;
-            grid-template-areas: "art side" "io io"; }
+            grid-template-areas: "art side" "pv io"; }
   }
   @media (max-width: 840px) {
     .wrap { grid-template-columns: minmax(0, 1fr);
-            grid-template-areas: "art" "side" "io"; }
+            grid-template-areas: "art" "side" "pv" "io"; }
   }
-  .panel { background: var(--panel); border: 1px solid var(--line); padding: 12px; margin-bottom: 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); padding: 12px; margin-bottom: 10px; }
   .panel h2 { font-size: 12px; margin: 0 0 8px; color: var(--dim); font-weight: normal;
               text-transform: uppercase; letter-spacing: .08em; }
   button, select, input {
@@ -49,9 +55,12 @@
   .row + .row { margin-top: 8px; }
   #grid { image-rendering: pixelated; cursor: crosshair; touch-action: none;
           border: 1px solid var(--line); background: #000; display: block; }
-  .swatches { display: flex; flex-wrap: wrap; gap: 4px; }
-  .sw { width: 26px; height: 26px; border: 2px solid transparent; cursor: pointer; padding: 0;
-        position: relative; }
+  /* Exactly PALETTE_MAX columns, so a full ten-colour palette is one row
+     whatever the column is wide. Flex-wrapped fixed-size swatches dropped the
+     tenth onto a second row and cost 28px of the height budget. */
+  .swatches { display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; }
+  .sw { width: 100%; aspect-ratio: 1; border: 2px solid transparent; cursor: pointer;
+        padding: 0; position: relative; }
   .sw.on { border-color: #fff; }
   .sw .x { position: absolute; top: -5px; right: -5px; width: 13px; height: 13px;
            line-height: 11px; font-size: 10px; text-align: center; border-radius: 50%;
@@ -78,7 +87,7 @@
   .fr input { width: 54px; margin-top: 3px; padding: 1px 3px; font-size: 11px; text-align: center; }
   .fnum { font-size: 10px; color: var(--dim); line-height: 1.2; }
   .fr.on .fnum { color: var(--accent); }
-  .previews { display: flex; gap: 16px; align-items: flex-end; }
+  .previews { display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
   .previews canvas { image-rendering: pixelated; background: #000; border: 1px solid var(--line); }
   .cap { color: var(--dim); font-size: 11px; text-align: center; margin-top: 4px; }
   textarea { width: 100%; height: 90px; background: #14120f; color: var(--text);
@@ -86,8 +95,15 @@
   .warn { color: #ffb454; font-size: 11px; margin-top: 6px; }
   .ok { color: #7ac07a; }
   a { color: var(--accent); }
-  .titlebar { display: flex; align-items: baseline; gap: 12px; }
+  .titlebar { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+              margin-bottom: 10px; }
   .titlebar h1 { margin: 0; }
+  .titlebar .sub { margin: 0; }
+  /* Panel headings that carry their explanation in a tooltip rather than in a
+     line of prose underneath. Two of those lines were 46px of the height that
+     stopped the editor fitting on one screen, and they're read once. */
+  h2[title] { border-bottom: 1px dotted var(--line); cursor: help;
+              display: inline-block; }
   #lang { font-size: 12px; }
 </style>
 </head>
@@ -96,8 +112,8 @@
 <div class="titlebar">
   <h1 data-i18n="title">Clawdmeter 動畫編輯器</h1>
   <select id="lang" aria-label="Language"></select>
+  <p class="sub" data-i18n-html="sub">20×20 · 最多 10 色 · 每格獨立停留時間 · 匯出可直接丟進 <code>tools/drawn_anims/</code></p>
 </div>
-<p class="sub" data-i18n-html="sub">20×20 · 最多 10 色 · 每格獨立停留時間 · 匯出可直接丟進 <code>tools/drawn_anims/</code></p>
 
 <div class="wrap">
   <div class="col-io">
@@ -178,20 +194,23 @@
           </div>
         </div>
     <canvas id="grid" width="480" height="480"></canvas>
-    <div class="panel" style="margin-top:12px">
-          <h2 data-i18n="previewH">實機預覽（黑底，裝置實際尺寸）</h2>
-          <div class="previews">
-            <div><canvas id="pv-splash" width="480" height="480"
-                 style="width:240px;height:240px"></canvas>
-                 <div class="cap" data-i18n="capSplash">全螢幕 splash · 每格 24px</div></div>
-            <div><canvas id="pv-badge" width="80" height="80"
-                 style="width:80px;height:80px"></canvas>
-                 <div class="cap" data-i18n="capBadge">角落徽章 · 每格 4px</div></div>
-          </div>
-        </div>
   </div>
 
-  <div class="col-side">
+  <div class="col-pv">
+  <div class="panel">
+            <h2 data-i18n="previewH">實機預覽（黑底，裝置實際尺寸）</h2>
+            <div class="previews">
+              <div><canvas id="pv-splash" width="480" height="480"
+                   style="width:240px;height:240px"></canvas>
+                   <div class="cap" data-i18n="capSplash">全螢幕 splash · 每格 24px</div></div>
+              <div><canvas id="pv-badge" width="80" height="80"
+                   style="width:80px;height:80px"></canvas>
+                   <div class="cap" data-i18n="capBadge">角落徽章 · 每格 4px</div></div>
+            </div>
+          </div>
+  </div>
+
+<div class="col-side">
     <div class="panel">
           <h2><span data-i18n="palH">這支動畫的顏色</span> <span id="palcount" class="dim"></span></h2>
           <div class="swatches" id="swatches"></div>
@@ -199,11 +218,8 @@
         </div>
 
     <div class="panel">
-          <h2 data-i18n="pickH">選色</h2>
-          <p class="sub" style="margin:0 0 6px;font-size:11px" data-i18n="pickHint">
-            點一下就加進上面並選取。已經在用的會直接選取。</p>
-          <div class="swatches" id="projcols" style="margin-bottom:8px"></div>
-          <div class="picker" id="picker"></div>
+          <h2 data-i18n="pickH" data-i18n-title="pickHint">選色</h2>
+            <div class="picker" id="picker"></div>
           <div class="row" style="margin-top:8px">
             <input type="color" id="newcol" value="#FFC2D1" style="width:34px;padding:1px">
             <input type="text" id="newhex" value="#FFC2D1" size="8">
@@ -212,10 +228,8 @@
         </div>
 
     <div class="panel">
-          <h2 data-i18n="framesH">影格</h2>
+          <h2 data-i18n="framesH" data-i18n-title="frameHint">影格</h2>
           <div class="frames" id="frames"></div>
-          <p class="sub" style="margin:0 0 6px;font-size:11px" data-i18n="frameHint">
-            沒有選取範圍時，← → 可以快速切換影格</p>
           <div class="row" style="margin-top:8px">
             <button id="f-add" data-i18n="frameAdd">+ 新增</button>
             <button id="f-dup" data-i18n="frameDup">複製本格</button>
@@ -745,9 +759,12 @@ const PICKER = (() => {
   return out;
 })();
 
-// The colours already in use across the catalog. These are the ones you reach
-// for: his body, the eye black that reads as a hole, the marks on the existing
-// animations. Having them a click away stops a new animation drifting off-model.
+// The colours already in use across the catalog. Not shown at the moment — the
+// row of them above the picker cost about 56px of height, and fitting the whole
+// editor on one screen was worth more. Kept, with its translations, because
+// nine of these ten are NOT in the generated 256 picker (it's HSL steps, these
+// aren't), so bringing the row back is the only way to click them rather than
+// type them. Rendering it again is a div and a loop.
 const PROJECT_COLOURS = [
   ['#D97757', 'cBody'], ['#0F0F0F', 'cEye'],
   ['#FFC2D1', 'cHeart'], ['#E8788F', 'cHeartDark'], ['#F3B6C8', 'cPetal'], ['#FFD98A', 'cPistil'],
@@ -806,14 +823,6 @@ function renderPalette() {
 }
 
 (function buildPickers() {
-  const proj = $('projcols');
-  for (const [hex, label] of PROJECT_COLOURS) {
-    const b = document.createElement('button');
-    b.className = 'sw'; b.dataset.i18nTitle = label; b.dataset.hexLabel = hex;
-    b.style.background = hex; b.title = `${hex} — ${t(label)}`;
-    b.onclick = () => useColour(hex);
-    proj.appendChild(b);
-  }
   const pick = $('picker');
   for (const hex of PICKER) {
     const b = document.createElement('button');
