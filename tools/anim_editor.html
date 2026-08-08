@@ -219,6 +219,7 @@
 
     <div class="panel">
           <h2 data-i18n="pickH" data-i18n-title="pickHint">選色</h2>
+          <div class="swatches" id="projcols" style="margin-bottom:8px"></div>
             <div class="picker" id="picker"></div>
           <div class="row" style="margin-top:8px">
             <input type="color" id="newcol" value="#FFC2D1" style="width:34px;padding:1px">
@@ -760,12 +761,11 @@ const PICKER = (() => {
   return out;
 })();
 
-// The colours already in use across the catalog. Not shown at the moment — the
-// row of them above the picker cost about 56px of height, and fitting the whole
-// editor on one screen was worth more. Kept, with its translations, because
-// nine of these ten are NOT in the generated 256 picker (it's HSL steps, these
-// aren't), so bringing the row back is the only way to click them rather than
-// type them. Rendering it again is a div and a loop.
+// The colours already in use across the catalog: his body, the eye black that
+// reads as a hole, the marks on the existing animations. Nine of these ten are
+// NOT in the generated 256 picker below — that's HSL steps and these aren't —
+// so this row is the only way to click them instead of typing the hex. There
+// are exactly ten, which is one row in the same grid the palette uses.
 const PROJECT_COLOURS = [
   ['#D97757', 'cBody'], ['#0F0F0F', 'cEye'],
   ['#FFC2D1', 'cHeart'], ['#E8788F', 'cHeartDark'], ['#F3B6C8', 'cPetal'], ['#FFD98A', 'cPistil'],
@@ -824,6 +824,14 @@ function renderPalette() {
 }
 
 (function buildPickers() {
+  const proj = $('projcols');
+  for (const [hex, label] of PROJECT_COLOURS) {
+    const b = document.createElement('button');
+    b.className = 'sw'; b.dataset.i18nTitle = label; b.dataset.hexLabel = hex;
+    b.style.background = hex; b.title = `${hex} — ${t(label)}`;
+    b.onclick = () => useColour(hex);
+    proj.appendChild(b);
+  }
   const pick = $('picker');
   for (const hex of PICKER) {
     const b = document.createElement('button');
