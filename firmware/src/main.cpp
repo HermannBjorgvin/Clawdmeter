@@ -372,20 +372,30 @@ void loop() {
 
     if (ble_has_data()) {
         if (parse_json(ble_get_data(), &usage)) {
-            int g_before = usage_rate_group();
-            bool session_reset = usage_rate_sample(usage.session_pct);
-            int g_after = usage_rate_group();
-            // 5-hour session limit refilled → chime so the user knows they can
-            // use Claude again (no-op on boards without a buzzer). Gated on the
-            // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
-            if (session_reset && usage.chime) {
-                Serial.println("session reset detected — chime");
-                sound_hal_play_reset();
-            }
-            if (g_after != g_before) {
-                Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
-                if (splash_is_active()) splash_pick_for_current_rate();
+            // A {"ok":false} beat is the daemon saying "no fresh data" — it
+            // writes that key and nothing else, so session_pct arrives as 0.0
+            // from the `| 0.0f` default rather than as a reading. That must not
+            // reach the rate ring: usage_rate_sample() treats a drop of more
+            // than five points as a 5-hour refill, so it would clear the
+            // history and report a reset, and a daemon that has merely lost its
+            // token would ring the chime. ui_update() guards on ok already; the
+            // sampler runs ahead of it and needs its own guard.
+            if (usage.ok) {
+                int g_before = usage_rate_group();
+                bool session_reset = usage_rate_sample(usage.session_pct);
+                int g_after = usage_rate_group();
+                // 5-hour session limit refilled → chime so the user knows they can
+                // use Claude again (no-op on boards without a buzzer). Gated on the
+                // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
+                if (session_reset && usage.chime) {
+                    Serial.println("session reset detected — chime");
+                    sound_hal_play_reset();
+                }
+                if (g_after != g_before) {
+                    Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
+                        g_before, g_after, usage.session_pct);
+                    if (splash_is_active()) splash_pick_for_current_rate();
+                }
             }
             ui_update(&usage);
             ble_send_ack();
