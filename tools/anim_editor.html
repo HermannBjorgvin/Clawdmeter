@@ -88,6 +88,10 @@
   .fnum { font-size: 10px; color: var(--dim); line-height: 1.2; }
   .fr.on .fnum { color: var(--accent); }
   .previews { display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
+  /* Play sits beside the badge rather than in the toolbar. It was the ninth
+     button in a 480px row and wrapped onto a line of its own; here it fills
+     the space the 80px badge leaves beside it, next to what it drives. */
+  .badgerow { display: flex; gap: 12px; align-items: center; }
   .previews canvas { image-rendering: pixelated; background: #000; border: 1px solid var(--line); }
   .cap { color: var(--dim); font-size: 11px; text-align: center; margin-top: 4px; }
   textarea { width: 100%; height: 90px; background: #14120f; color: var(--text);
@@ -180,7 +184,6 @@
             <button id="undo" data-i18n="undo">復原</button>
             <button id="onion" class="on" data-i18n="onion">洋蔥皮</button>
             <button id="paste" style="display:none" data-i18n="paste">貼上</button>
-            <button id="play">▶ 播放</button>
           </div>
           <div class="row" id="selbar" style="display:none">
             <span class="dim" style="color:var(--dim)" data-i18n="selecting">選取中 ·</span>
@@ -203,9 +206,12 @@
               <div><canvas id="pv-splash" width="480" height="480"
                    style="width:240px;height:240px"></canvas>
                    <div class="cap" data-i18n="capSplash">全螢幕 splash · 每格 24px</div></div>
-              <div><canvas id="pv-badge" width="80" height="80"
-                   style="width:80px;height:80px"></canvas>
-                   <div class="cap" data-i18n="capBadge">角落徽章 · 每格 4px</div></div>
+              <div class="badgerow">
+                <div><canvas id="pv-badge" width="80" height="80"
+                     style="width:80px;height:80px"></canvas>
+                     <div class="cap" data-i18n="capBadge">角落徽章 · 每格 4px</div></div>
+                <button id="play">▶ 播放</button>
+              </div>
             </div>
           </div>
   </div>
