@@ -375,29 +375,39 @@ void loop() {
 
     if (ble_has_data()) {
         if (parse_json(ble_get_data(), &usage)) {
-            int g_before = usage_rate_group();
-            bool session_reset = usage_rate_sample(usage.session_pct);
-            int g_after = usage_rate_group();
-            // 5-hour session limit refilled. Two responses, deliberately on
-            // different terms: the chime is gated on the daemon's opt-in
-            // `chime` config (the `buzz` serial cmd ignores it), while the
-            // celebration is unconditional — it's silent, so there's nothing
-            // to opt out of.
-            //
-            // The celebration also fixes the moment reading backwards. A reset
-            // clears the rate ring, so usage_rate_group() drops to idle and the
-            // creature falls asleep exactly when the quota comes back; pinning
-            // the party animation for 30s covers that gap and hands over once
-            // there's real rate data again.
-            if (session_reset) {
-                Serial.println("session reset detected");
-                if (usage.chime) sound_hal_play_reset();
-                splash_celebrate();
-            }
-            if (g_after != g_before) {
-                Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
-                if (splash_is_active()) splash_pick_for_current_rate();
+            // A {"ok":false} beat is the daemon saying "no fresh data" — it
+            // writes that key and nothing else, so session_pct parses as 0.0
+            // via the `| 0.0f` default. That must not reach the rate ring:
+            // usage_rate_sample() treats any drop of more than 5 points as a
+            // 5-hour refill, so it would wipe the history and return true, and
+            // a daemon that has merely lost its token would chime and play 30
+            // seconds of celebration. ui_update() guards on ok already; the
+            // sampler runs before it and needs its own guard.
+            if (usage.ok) {
+                int g_before = usage_rate_group();
+                bool session_reset = usage_rate_sample(usage.session_pct);
+                int g_after = usage_rate_group();
+                // 5-hour session limit refilled. Two responses, deliberately on
+                // different terms: the chime is gated on the daemon's opt-in
+                // `chime` config (the `buzz` serial cmd ignores it), while the
+                // celebration is unconditional — it's silent, so there's nothing
+                // to opt out of.
+                //
+                // The celebration also fixes the moment reading backwards. A
+                // reset clears the rate ring, so usage_rate_group() drops to
+                // idle and the creature falls asleep exactly when the quota
+                // comes back; pinning the party animation for 30s covers that
+                // gap and hands over once there's real rate data again.
+                if (session_reset) {
+                    Serial.println("session reset detected");
+                    if (usage.chime) sound_hal_play_reset();
+                    splash_celebrate();
+                }
+                if (g_after != g_before) {
+                    Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
+                        g_before, g_after, usage.session_pct);
+                    if (splash_is_active()) splash_pick_for_current_rate();
+                }
             }
             ui_update(&usage);
             ble_send_ack();
