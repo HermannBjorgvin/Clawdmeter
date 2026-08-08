@@ -30,6 +30,15 @@ const OUT_FILE = path.resolve(opt('--out',
 // valid; the rest of the array is zero-filled.
 const PALETTE_SIZE = 16;
 
+// Grid sides the pipeline accepts, smallest first. Square only: splash.cpp
+// centres a square canvas on the panel by design, so a non-square animation
+// would have to letterbox or distort, and it would stop being portable across
+// the six boards. Keep this list short — every entry is a size the firmware has
+// to render and somebody has to look at on hardware. 40 earns its place by
+// being exactly 2x: a 20x20 animation upscales into it with each cell becoming
+// a 2x2 block, so it looks identical on screen and can then be refined.
+const GRID_SIZES = [20, 40];
+
 function safeIdent(s) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
@@ -74,17 +83,28 @@ function validate(data, where) {
     die(`palette has ${data.palette.length} entries, max is ${PALETTE_SIZE}`);
   if (!Array.isArray(data.frames) || data.frames.length === 0) die('no frames');
 
+  // The grid side is read from frame 0 rather than declared, because that is
+  // the one place it can't disagree with the data. Every later frame must match
+  // it: a set of frames at mixed sizes would be indexed at one stride.
+  if (!Array.isArray(data.frames[0]?.grid)) die('frame 0: missing "grid"');
+  const side = data.frames[0].grid.length;
+  if (!GRID_SIZES.includes(side))
+    die(`grid is ${side}x${side}; supported sides are ${GRID_SIZES.join(', ')}`);
+
   data.frames.forEach((f, i) => {
     if (typeof f.hold !== 'number' || f.hold <= 0) die(`frame ${i}: "hold" must be a positive number of ms`);
-    if (!Array.isArray(f.grid) || f.grid.length !== 20) die(`frame ${i}: grid must have 20 rows, has ${f.grid?.length}`);
+    if (!Array.isArray(f.grid) || f.grid.length !== side)
+      die(`frame ${i}: grid must have ${side} rows to match frame 0, has ${f.grid?.length}`);
     f.grid.forEach((row, r) => {
-      if (!Array.isArray(row) || row.length !== 20) die(`frame ${i} row ${r}: must have 20 cells, has ${row?.length}`);
+      if (!Array.isArray(row) || row.length !== side)
+        die(`frame ${i} row ${r}: must have ${side} cells, has ${row?.length}`);
       row.forEach((v, c) => {
         if (!Number.isInteger(v) || v < 0 || v >= data.palette.length)
           die(`frame ${i} cell ${r},${c}: ${v} is not a valid index into a ${data.palette.length}-entry palette`);
       });
     });
   });
+  return side;
 }
 
 function main() {
@@ -171,10 +191,18 @@ function main() {
   out += '    const char *name;\n';
   out += '    const char *category;\n';
   out += '    uint16_t frame_count;\n';
+  out += '    uint8_t  grid;              // cells per side; a frame is grid*grid bytes\n';
   out += '    const uint16_t *palette;\n';
-  out += '    const uint8_t (*frames)[400];\n';
+  out += '    const uint8_t *frames;      // frame_count frames, row-major, back to back\n';
   out += '    const uint16_t *holds;\n';
   out += '} splash_anim_def_t;\n\n';
+  // The stride used to live in the array type (`frames[N][400]`), which forced
+  // every animation in a build to the same size. It's a field now, so the
+  // renderers read it per animation. Anything indexing frames must go through
+  // this: the old `a->frames[i]` was a typed row step and is now a byte step.
+  out += 'static inline const uint8_t *splash_frame(const splash_anim_def_t *a, uint16_t i) {\n';
+  out += '    return &a->frames[(uint32_t)i * a->grid * a->grid];\n';
+  out += '}\n\n';
 
   const entries = [];
 
@@ -183,20 +211,22 @@ function main() {
     const ident = safeIdent(stem);
     const dataPath = path.join(dir, `${stem}.json`);
     const data = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
-    validate(data, dataPath);
+    const side = validate(data, dataPath);
 
     const pal565 = paletteToRgb565(data.palette);
     out += `static const uint16_t splash_${ident}_palette[${PALETTE_SIZE}] = {`;
     out += pal565.map(c => `0x${c.toString(16).toUpperCase().padStart(4, '0')}`).join(',');
     out += '};\n';
 
-    out += `static const uint8_t splash_${ident}_frames[${data.frames.length}][400] = {\n`;
+    // Flat, one source line per frame. The bytes and their order are exactly
+    // what the old [N][400] form emitted — only the array type changed.
+    out += `static const uint8_t splash_${ident}_frames[${data.frames.length} * ${side} * ${side}] = {\n`;
     for (const f of data.frames) {
       const flat = [];
-      for (let r = 0; r < 20; r++)
-        for (let c = 0; c < 20; c++)
+      for (let r = 0; r < side; r++)
+        for (let c = 0; c < side; c++)
           flat.push(f.grid[r][c]);
-      out += '    {' + flat.join(',') + '},\n';
+      out += '    ' + flat.join(',') + ',\n';
     }
     out += '};\n';
 
@@ -204,13 +234,18 @@ function main() {
     out += data.frames.map(f => f.hold).join(',');
     out += '};\n\n';
 
-    entries.push({ ident, name: data.name, category: data.category, count: data.frames.length });
+    entries.push({ ident, name: data.name, category: data.category,
+                   count: data.frames.length, grid: side });
   }
 
   out += `#define SPLASH_ANIM_COUNT ${entries.length}\n`;
+  // Widest grid actually shipped in this build. Renderers size their scratch
+  // buffers from it, so a build with nothing but 20x20 animations allocates
+  // exactly what it always did.
+  out += `#define SPLASH_GRID_MAX ${Math.max(...entries.map(e => e.grid))}\n`;
   out += 'static const splash_anim_def_t splash_anims[SPLASH_ANIM_COUNT] = {\n';
   for (const e of entries) {
-    out += `    {"${e.name}", "${e.category}", ${e.count}, splash_${e.ident}_palette, splash_${e.ident}_frames, splash_${e.ident}_holds},\n`;
+    out += `    {"${e.name}", "${e.category}", ${e.count}, ${e.grid}, splash_${e.ident}_palette, splash_${e.ident}_frames, splash_${e.ident}_holds},\n`;
   }
   out += '};\n';
 
