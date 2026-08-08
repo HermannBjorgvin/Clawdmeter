@@ -1,0 +1,19 @@
+# Dependencies for running the daemon test suite (daemon/tests/).
+#
+#     python3 -m venv .venv
+#     .venv/bin/pip install -r daemon/requirements-dev.txt
+#     .venv/bin/python -m pytest daemon/tests
+#
+# Runtime deps are declared per platform and stay that way: install-mac.sh
+# installs bleak/httpx into daemon/.venv, requirements-windows.txt covers the
+# Windows tray build. The tests import both daemons and the icon renderer
+# whatever the host is, so they need the union of those plus pytest.
+#
+# pystray is deliberately absent. tray_windows.py imports it inside main(), and
+# test_windows_tray.py says so in its own docstring — the tests exercise the
+# handlers without ever importing the top-level module, which would want a GUI
+# toolkit on Linux. Adding it here would make every contributor pay for that.
+pytest
+bleak
+httpx
+Pillow

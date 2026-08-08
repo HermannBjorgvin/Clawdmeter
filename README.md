@@ -227,6 +227,22 @@ JSON payload format (written to RX):
 
 Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
 
+## Running the daemon tests
+
+The Python daemons have a test suite under `daemon/tests/`. Runtime dependencies
+are installed per platform by the installers, so the test extras live in their
+own manifest:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r daemon/requirements-dev.txt
+.venv/bin/python -m pytest daemon/tests
+```
+
+Two tests are marked Linux/WSL-only and skip elsewhere: on macOS, spawning the
+Windows daemon initialises CoreBluetooth and trips the Bluetooth privacy gate,
+which aborts the child rather than producing the scan-loop hang they assert on.
+
 ## Recompiling fonts
 
 The `firmware/src/font_*.c` files are pre-compiled LVGL bitmap fonts.
