@@ -143,15 +143,54 @@ The boot screen is `SCREEN_SPLASH` and only advances on a physical button press,
 
 ## Splash animations
 
-13 × 20×20 pixel-art creature animations sourced from
-[claudepix.vercel.app](https://claudepix.vercel.app). Pipeline:
+17 × 20×20 pixel-art creature animations. 15 come from
+[claudepix.vercel.app](https://claudepix.vercel.app) — the 13 the site lists,
+plus 2 the manifest carries but the page never shows — of which 6 ship
+hand-corrected (see `tools/drawn_anims/README.md` for what was wrong with
+each). 2 more are new. Pipeline:
 
 ```bash
-node tools/scrape_claudepix.js  # → tools/claudepix_data/*.json
-node tools/convert_to_c.js      # → firmware/src/splash_animations.h
+node tools/scrape_claudepix.js       # → tools/claudepix_data/*.json (wiped and rewritten)
+node tools/convert_to_c.js           # both source dirs → firmware/src/splash_animations.h
 ```
 
 Each animation has a per-animation 10-color RGB565 palette. Cell values 0..9 index it. Default boot screen.
+
+`tools/drawn_anims/` is the second source dir, and it's separate on purpose —
+the scraper owns `claudepix_data/` and is free to wipe it, so anything
+hand-edited there would be lost on the next re-scrape. Later dirs win by name,
+which is how "I fixed the existing animation" works. Without that rule the
+duplicate isn't a soft problem: two animations with the same name produce the
+same C identifiers and the firmware fails to compile on a redefinition.
+
+`tools/anim_editor.html` is the drawing surface — open it straight off disk, no
+server, no dependencies. It carries what the firmware cares about rather than
+what a general pixel editor offers: 20×20 and the 10-colour cap enforced,
+per-frame hold times, onion skin, playback at the real holds, and both device
+previews on black (24px/cell splash, 4px/cell corner badge). A colour that looks
+fine on white can vanish on the panel and a shape that reads at 24px can turn to
+mush at 4px, so previewing at both scales is the point. Selection lifts on first
+move — arrow-key a selection a cell at a time and that's one frame of motion —
+and the clipboard survives a frame change, so a prop is drawn once and
+pasted-then-nudged down the timeline instead of hand-redrawn every frame.
+
+Every animation in the catalog is embedded as a loadable sample, so an existing
+one can be opened and fixed rather than rebuilt. Grids and holds round-trip
+exactly; the **palette does not**. Hex is uppercased, and the claudepix body
+colour `#CD7F6A` comes back as the brand terracotta `#D97757` — the editor is
+shown the colour the device displays, not the colour in the source file. The
+device output is unaffected either way, since `convert_to_c.js` applies the same
+remap on the way to C. It matters if you hand an export back to claudepix as if
+it were their original: it isn't, the creature has been recoloured. Re-run
+`node tools/build_editor_samples.js` after changing any
+animation — it rewrites only the region between the `BEGIN-SAMPLES` /
+`END-SAMPLES` markers, and the rest of the editor is hand-written. The data is
+inlined rather than fetched because the editor runs from `file://`, where
+fetching a sibling file is blocked.
+
+Animations reach the screen through the rate groups in `splash.cpp`
+(`GROUP_NAMES`), matched by literal name — adding a JSON is not enough, the
+name has to be listed in a group or nothing will ever pick it.
 
 ## User profile / preferences
 

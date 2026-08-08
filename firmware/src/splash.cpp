@@ -42,18 +42,33 @@ static bool active = false;
 // Usage-rate animation groups: 4 groups × up to 4 animations each.
 // Filled at init by matching literal names from splash_anims[].
 #define GROUP_COUNT 4
-#define GROUP_MAX   4
+#define GROUP_MAX   7
 static int8_t  group_lists[GROUP_COUNT][GROUP_MAX];
 static uint8_t group_size[GROUP_COUNT] = {0};
 static uint8_t group_rotation[GROUP_COUNT] = {0};
 
 static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
-    // Group 0 — idle / sleepy
-    { "expression sleep", "idle breathe", "idle blink", "expression wink" },
-    // Group 1 — normal pace
-    { "idle look around", "work think", "work coding", NULL },
-    // Group 2 — active
-    { "dance sway", "expression surprise", "dance bounce", NULL },
+    // Group 0 — idle / sleepy. The state the device sits in most of the day,
+    // so it carries the widest rotation: a bored creature is the one you
+    // actually end up looking at.
+    //
+    // Order is playback order — pick_rate_anim() walks the list one entry
+    // every SPLASH_ROTATE_INTERVAL_MS — so slot 0 is also what you meet at
+    // boot. Runs most expressive down to quietest, and since the list wraps,
+    // going to sleep is what leads back round to the hearts.
+    { "idle hearts", "swim summer", "idle blossom",
+      "expression wink", "idle breathe", "idle blink", "expression sleep" },
+    // Group 1 — normal pace. "work type" is deliberately absent: it exists in
+    // splash_anims[] but nothing picks it. Four frames, four pixels of arm
+    // twitch, no keyboard and no surface — there is nothing in it to read as
+    // typing. It's one of the two animations the claudepix site never lists,
+    // which is probably the same judgement. "work out" takes its slot.
+    { "idle look around", "work think", "work coding", "work out" },
+    // Group 2 — active. "dance bob" is absent for the same reason work type is:
+    // four frames, the other of the two the claudepix site never lists. It's
+    // been redrawn past recognition as "swim summer", which sits in the idle
+    // group instead — floating in a rubber ring is not an active state.
+    { "dance sway", "expression surprise", "dance bounce" },
     // Group 3 — heavy
     { "dance bounce dj", "dance sway dj", "dance djmix", NULL },
 };
