@@ -16,7 +16,25 @@
   }
   h1 { font-size: 15px; margin: 0 0 4px; }
   .sub { color: var(--dim); margin: 0 0 16px; }
-  .wrap { display: grid; grid-template-columns: auto 300px; gap: 20px; align-items: start; }
+  /* Three columns: the file panels on the left, the drawing in the middle,
+     the things you touch while drawing on the right. Colours and frames stay
+     next to the canvas because you reach for them on every stroke; load and
+     export are once-per-session, so they can be the furthest away. */
+  .wrap { display: grid; gap: 20px; align-items: start; justify-content: start;
+          grid-template-columns: 300px 480px 300px;
+          grid-template-areas: "io art side"; }
+  .col-io { grid-area: io; } .col-art { grid-area: art; } .col-side { grid-area: side; }
+  /* Below ~1200px the three don't fit beside a 480px canvas. Drop the io
+     column under the other two rather than squeezing the canvas, which is
+     fixed-size and can't give any width back. */
+  @media (max-width: 1200px) {
+    .wrap { grid-template-columns: 480px 300px;
+            grid-template-areas: "art side" "io io"; }
+  }
+  @media (max-width: 840px) {
+    .wrap { grid-template-columns: minmax(0, 1fr);
+            grid-template-areas: "art" "side" "io"; }
+  }
   .panel { background: var(--panel); border: 1px solid var(--line); padding: 12px; margin-bottom: 12px; }
   .panel h2 { font-size: 12px; margin: 0 0 8px; color: var(--dim); font-weight: normal;
               text-transform: uppercase; letter-spacing: .08em; }
@@ -82,130 +100,132 @@
 <p class="sub" data-i18n-html="sub">20×20 · 最多 10 色 · 每格獨立停留時間 · 匯出可直接丟進 <code>tools/drawn_anims/</code></p>
 
 <div class="wrap">
-  <div>
+  <div class="col-io">
     <div class="panel">
-      <div class="row">
-        <button id="tool-pen" class="on" data-i18n="pen">畫筆</button>
-        <button id="tool-erase" data-i18n="erase">橡皮擦</button>
-        <button id="tool-fill" data-i18n="fill">填滿</button>
-        <button id="tool-pick" data-i18n="pick">滴管</button>
-        <button id="tool-select" data-i18n="select">選取</button>
-        <span style="width:12px"></span>
-        <button id="undo" data-i18n="undo">復原</button>
-        <button id="onion" class="on" data-i18n="onion">洋蔥皮</button>
-        <button id="paste" style="display:none" data-i18n="paste">貼上</button>
-        <button id="play">▶ 播放</button>
-      </div>
-      <div class="row" id="selbar" style="display:none">
-        <span class="dim" style="color:var(--dim)" data-i18n="selecting">選取中 ·</span>
-        <button id="s-copy" data-i18n="copy">複製</button>
-        <button id="s-flip-h" data-i18n="flipH">左右翻</button>
-        <button id="s-flip-v" data-i18n="flipV">上下翻</button>
-        <button id="s-del" data-i18n="clearSel">清除</button>
-        <button id="s-all" data-i18n="selectAll">全選</button>
-        <button id="s-done" data-i18n="deselect">取消選取</button>
-        <span style="color:var(--dim);font-size:11px" data-i18n="selHint">方向鍵推一格 · Esc 放下 · 複製後可貼到別的影格</span>
-      </div>
-    </div>
-    <canvas id="grid" width="480" height="480"></canvas>
-    <div class="panel" style="margin-top:12px">
-      <h2 data-i18n="previewH">實機預覽（黑底，裝置實際尺寸）</h2>
-      <div class="previews">
-        <div><canvas id="pv-splash" width="480" height="480"
-             style="width:240px;height:240px"></canvas>
-             <div class="cap" data-i18n="capSplash">全螢幕 splash · 每格 24px</div></div>
-        <div><canvas id="pv-badge" width="80" height="80"
-             style="width:80px;height:80px"></canvas>
-             <div class="cap" data-i18n="capBadge">角落徽章 · 每格 4px</div></div>
-      </div>
-    </div>
+          <h2 data-i18n="infoH">動畫資訊</h2>
+          <div class="row"><span style="width:44px" data-i18n="labelName">名稱</span>
+            <input type="text" id="name" value="my anim" style="width:180px"></div>
+          <div class="row"><span style="width:44px" data-i18n="labelCat">分類</span>
+            <select id="category">
+              <option>Idle</option><option>Work</option>
+              <option>Dance</option><option>Expressions</option>
+            </select></div>
+        </div>
+
+    <div class="panel">
+          <h2 data-i18n="loadH">載入現有動畫</h2>
+          <div class="row">
+            <select id="sample" style="width:186px"></select>
+            <button id="load-sample" data-i18n="loadBtn">載入</button>
+          </div>
+          <p class="sub" style="margin:6px 0 0;font-size:11px" id="sampleinfo"></p>
+          <div class="row" style="margin-top:8px">
+            <button id="load-template" data-i18n="loadPose">載入 Clawd 樣板</button>
+            <button id="clear" data-i18n="clearAll">清空</button>
+          </div>
+          <!-- Whoever opens this sees 18 animations and no indication of whose they
+               are. Most of the catalogue is someone else's work, and the editor is
+               the one place in the repo where you meet it without the README. -->
+          <p class="sub" style="margin:10px 0 0;font-size:11px;line-height:1.5"
+             data-i18n-html="credit">
+            大部分的動畫來自
+            <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a>，
+            作者 <a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a>。
+            角色 Clawd 是 Anthropic 的資產。改作前請先確認自己的用途沒問題。
+          </p>
+          <div class="row" style="margin-top:8px">
+            <textarea id="importbox" data-i18n-ph="importPh" placeholder="貼上動畫 JSON，然後按下面的匯入"></textarea>
+          </div>
+          <div class="row"><button id="import" data-i18n="importBtn">匯入 JSON</button><span id="importmsg"></span></div>
+        </div>
+
+    <div class="panel">
+          <h2 data-i18n="exportH">匯出</h2>
+          <div class="row">
+            <button id="download" data-i18n="download">下載 .json</button>
+            <button id="copy">複製到剪貼簿</button>
+          </div>
+          <p class="sub" style="margin:8px 0 0;font-size:11px" data-i18n-html="exportHint">
+            存到 <code>tools/drawn_anims/</code>，執行 <code>node tools/convert_to_c.js</code>，
+            再把名稱加進 <code>splash.cpp</code> 的分組清單。
+          </p>
+        </div>
   </div>
 
-  <div>
+  <div class="col-art">
     <div class="panel">
-      <h2><span data-i18n="palH">這支動畫的顏色</span> <span id="palcount" class="dim"></span></h2>
-      <div class="swatches" id="swatches"></div>
-      <div id="darkwarn"></div>
-    </div>
+          <div class="row">
+            <button id="tool-pen" class="on" data-i18n="pen">畫筆</button>
+            <button id="tool-erase" data-i18n="erase">橡皮擦</button>
+            <button id="tool-fill" data-i18n="fill">填滿</button>
+            <button id="tool-pick" data-i18n="pick">滴管</button>
+            <button id="tool-select" data-i18n="select">選取</button>
+            <span style="width:12px"></span>
+            <button id="undo" data-i18n="undo">復原</button>
+            <button id="onion" class="on" data-i18n="onion">洋蔥皮</button>
+            <button id="paste" style="display:none" data-i18n="paste">貼上</button>
+            <button id="play">▶ 播放</button>
+          </div>
+          <div class="row" id="selbar" style="display:none">
+            <span class="dim" style="color:var(--dim)" data-i18n="selecting">選取中 ·</span>
+            <button id="s-copy" data-i18n="copy">複製</button>
+            <button id="s-flip-h" data-i18n="flipH">左右翻</button>
+            <button id="s-flip-v" data-i18n="flipV">上下翻</button>
+            <button id="s-del" data-i18n="clearSel">清除</button>
+            <button id="s-all" data-i18n="selectAll">全選</button>
+            <button id="s-done" data-i18n="deselect">取消選取</button>
+            <span style="color:var(--dim);font-size:11px" data-i18n="selHint">方向鍵推一格 · Esc 放下 · 複製後可貼到別的影格</span>
+          </div>
+        </div>
+    <canvas id="grid" width="480" height="480"></canvas>
+    <div class="panel" style="margin-top:12px">
+          <h2 data-i18n="previewH">實機預覽（黑底，裝置實際尺寸）</h2>
+          <div class="previews">
+            <div><canvas id="pv-splash" width="480" height="480"
+                 style="width:240px;height:240px"></canvas>
+                 <div class="cap" data-i18n="capSplash">全螢幕 splash · 每格 24px</div></div>
+            <div><canvas id="pv-badge" width="80" height="80"
+                 style="width:80px;height:80px"></canvas>
+                 <div class="cap" data-i18n="capBadge">角落徽章 · 每格 4px</div></div>
+          </div>
+        </div>
+  </div>
+
+  <div class="col-side">
+    <div class="panel">
+          <h2><span data-i18n="palH">這支動畫的顏色</span> <span id="palcount" class="dim"></span></h2>
+          <div class="swatches" id="swatches"></div>
+          <div id="darkwarn"></div>
+        </div>
 
     <div class="panel">
-      <h2 data-i18n="pickH">選色</h2>
-      <p class="sub" style="margin:0 0 6px;font-size:11px" data-i18n="pickHint">
-        點一下就加進上面並選取。已經在用的會直接選取。</p>
-      <div class="swatches" id="projcols" style="margin-bottom:8px"></div>
-      <div class="picker" id="picker"></div>
-      <div class="row" style="margin-top:8px">
-        <input type="color" id="newcol" value="#FFC2D1" style="width:34px;padding:1px">
-        <input type="text" id="newhex" value="#FFC2D1" size="8">
-        <button id="addcol" data-i18n="addColour">加入</button>
-      </div>
-    </div>
+          <h2 data-i18n="pickH">選色</h2>
+          <p class="sub" style="margin:0 0 6px;font-size:11px" data-i18n="pickHint">
+            點一下就加進上面並選取。已經在用的會直接選取。</p>
+          <div class="swatches" id="projcols" style="margin-bottom:8px"></div>
+          <div class="picker" id="picker"></div>
+          <div class="row" style="margin-top:8px">
+            <input type="color" id="newcol" value="#FFC2D1" style="width:34px;padding:1px">
+            <input type="text" id="newhex" value="#FFC2D1" size="8">
+            <button id="addcol" data-i18n="addColour">加入</button>
+          </div>
+        </div>
 
     <div class="panel">
-      <h2 data-i18n="framesH">影格</h2>
-      <div class="frames" id="frames"></div>
-      <p class="sub" style="margin:0 0 6px;font-size:11px" data-i18n="frameHint">
-        沒有選取範圍時，← → 可以快速切換影格</p>
-      <div class="row" style="margin-top:8px">
-        <button id="f-add" data-i18n="frameAdd">+ 新增</button>
-        <button id="f-dup" data-i18n="frameDup">複製本格</button>
-        <button id="f-del" data-i18n="frameDel">刪除</button>
-      </div>
-      <div class="row">
-        <button id="f-left" data-i18n="frameLeft">← 前移</button>
-        <button id="f-right" data-i18n="frameRight">後移 →</button>
-      </div>
-    </div>
-
-    <div class="panel">
-      <h2 data-i18n="infoH">動畫資訊</h2>
-      <div class="row"><span style="width:44px" data-i18n="labelName">名稱</span>
-        <input type="text" id="name" value="my anim" style="width:180px"></div>
-      <div class="row"><span style="width:44px" data-i18n="labelCat">分類</span>
-        <select id="category">
-          <option>Idle</option><option>Work</option>
-          <option>Dance</option><option>Expressions</option>
-        </select></div>
-    </div>
-
-    <div class="panel">
-      <h2 data-i18n="loadH">載入現有動畫</h2>
-      <div class="row">
-        <select id="sample" style="width:186px"></select>
-        <button id="load-sample" data-i18n="loadBtn">載入</button>
-      </div>
-      <p class="sub" style="margin:6px 0 0;font-size:11px" id="sampleinfo"></p>
-      <div class="row" style="margin-top:8px">
-        <button id="load-template" data-i18n="loadPose">載入 Clawd 樣板</button>
-        <button id="clear" data-i18n="clearAll">清空</button>
-      </div>
-      <!-- Whoever opens this sees 18 animations and no indication of whose they
-           are. Most of the catalogue is someone else's work, and the editor is
-           the one place in the repo where you meet it without the README. -->
-      <p class="sub" style="margin:10px 0 0;font-size:11px;line-height:1.5"
-         data-i18n-html="credit">
-        大部分的動畫來自
-        <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a>，
-        作者 <a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a>。
-        角色 Clawd 是 Anthropic 的資產。改作前請先確認自己的用途沒問題。
-      </p>
-      <div class="row" style="margin-top:8px">
-        <textarea id="importbox" data-i18n-ph="importPh" placeholder="貼上動畫 JSON，然後按下面的匯入"></textarea>
-      </div>
-      <div class="row"><button id="import" data-i18n="importBtn">匯入 JSON</button><span id="importmsg"></span></div>
-    </div>
-
-    <div class="panel">
-      <h2 data-i18n="exportH">匯出</h2>
-      <div class="row">
-        <button id="download" data-i18n="download">下載 .json</button>
-        <button id="copy">複製到剪貼簿</button>
-      </div>
-      <p class="sub" style="margin:8px 0 0;font-size:11px" data-i18n-html="exportHint">
-        存到 <code>tools/drawn_anims/</code>，執行 <code>node tools/convert_to_c.js</code>，
-        再把名稱加進 <code>splash.cpp</code> 的分組清單。
-      </p>
-    </div>
+          <h2 data-i18n="framesH">影格</h2>
+          <div class="frames" id="frames"></div>
+          <p class="sub" style="margin:0 0 6px;font-size:11px" data-i18n="frameHint">
+            沒有選取範圍時，← → 可以快速切換影格</p>
+          <div class="row" style="margin-top:8px">
+            <button id="f-add" data-i18n="frameAdd">+ 新增</button>
+            <button id="f-dup" data-i18n="frameDup">複製本格</button>
+            <button id="f-del" data-i18n="frameDel">刪除</button>
+          </div>
+          <div class="row">
+            <button id="f-left" data-i18n="frameLeft">← 前移</button>
+            <button id="f-right" data-i18n="frameRight">後移 →</button>
+          </div>
+        </div>
   </div>
 </div>
 
