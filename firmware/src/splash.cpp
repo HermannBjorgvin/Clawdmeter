@@ -52,9 +52,13 @@ static uint8_t group_size[GROUP_COUNT] = {0};
 static uint8_t group_rotation[GROUP_COUNT] = {0};
 
 static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
-    // Group 0 — idle / sleepy
-    { "expression sleep", "idle breathe", "idle blink", "expression wink",
-      "idle hearts", "idle blossom", "fm listening", "swim summer" },
+    // Group 0 — idle / sleepy. Order is playback order: pick_rate_anim() walks
+    // the list one entry every SPLASH_ROTATE_INTERVAL_MS, so slot 0 is also
+    // what you meet at boot. Nova's arrangement runs from the most expressive
+    // down to the quietest and ends on him asleep, which loops back round to
+    // the hearts.
+    { "idle hearts", "swim summer", "idle blossom", "fm listening",
+      "expression wink", "idle breathe", "idle blink", "expression sleep" },
     // Group 1 — normal pace. "work type" is deliberately absent: it exists in
     // splash_anims[] but nothing picks it. Four frames, four pixels of arm
     // twitch, no keyboard and no surface — there is nothing in it to read as
