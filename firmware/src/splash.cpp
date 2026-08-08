@@ -42,7 +42,7 @@ static bool active = false;
 // Usage-rate animation groups: 4 groups × up to 4 animations each.
 // Filled at init by matching literal names from splash_anims[].
 #define GROUP_COUNT 4
-#define GROUP_MAX   6
+#define GROUP_MAX   7
 static int8_t  group_lists[GROUP_COUNT][GROUP_MAX];
 static uint8_t group_size[GROUP_COUNT] = {0};
 static uint8_t group_rotation[GROUP_COUNT] = {0};
@@ -52,15 +52,18 @@ static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
     // so it carries the widest rotation: a bored creature is the one you
     // actually end up looking at.
     { "expression sleep", "idle breathe", "idle blink", "expression wink",
-      "idle hearts", "idle blossom" },
+      "idle hearts", "idle blossom", "swim summer" },
     // Group 1 — normal pace. "work type" is deliberately absent: it exists in
     // splash_anims[] but nothing picks it. Four frames, four pixels of arm
     // twitch, no keyboard and no surface — there is nothing in it to read as
     // typing. It's one of the two animations the claudepix site never lists,
     // which is probably the same judgement. "work out" takes its slot.
     { "idle look around", "work think", "work coding", "work out" },
-    // Group 2 — active
-    { "dance sway", "expression surprise", "dance bounce", "dance bob" },
+    // Group 2 — active. "dance bob" is absent for the same reason work type is:
+    // four frames, the other of the two the claudepix site never lists. It's
+    // been redrawn past recognition as "swim summer", which sits in the idle
+    // group instead — floating in a rubber ring is not an active state.
+    { "dance sway", "expression surprise", "dance bounce" },
     // Group 3 — heavy
     { "dance bounce dj", "dance sway dj", "dance djmix", NULL },
 };
