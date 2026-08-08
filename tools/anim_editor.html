@@ -145,13 +145,20 @@
           </div>
           <!-- Whoever opens this sees 18 animations and no indication of whose they
                are. Most of the catalogue is someone else's work, and the editor is
-               the one place in the repo where you meet it without the README. -->
+               the one place in the repo where you meet it without the README.
+               The second half says why they are bundled at all: an empty grid is
+               where a beginner gives up, so the samples are the ramp. Saying that
+               out loud is the difference between a teaching aid and a helping of
+               someone else's art served without asking. -->
           <p class="sub" style="margin:10px 0 0;font-size:11px;line-height:1.5"
              data-i18n-html="credit">
             大部分的動畫來自
             <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a>，
             作者 <a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a>。
             角色 Clawd 是 Anthropic 的資產。改作前請先確認自己的用途沒問題。
+            樣本之所以內嵌，是因為沒有 pixel art 經驗的人面對一格空白幾乎無從下手——
+            它們是拿來臨摹、拆解、改著玩的起點，不是被當成我們自己的作品重新發佈。
+            任一方若不希望它們留在這裡，開個 issue 說一聲就會移除。
           </p>
           <div class="row" style="margin-top:8px">
             <textarea id="importbox" data-i18n-ph="importPh" placeholder="貼上動畫 JSON，然後按下面的匯入"></textarea>
@@ -287,7 +294,10 @@ const I18N = {
   credit: '動畫改作自 <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a>'
         + '（作者 <a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a>），'
         + '角色 Clawd 為 Anthropic 所有。本專案為非商業性質的社群作品，'
-        + '未經任一方授權，亦不對外授權。使用前請自行確認你的用途。',
+        + '未經任一方授權，亦不對外授權。使用前請自行確認你的用途。'
+        + '樣本之所以內嵌，是因為沒有 pixel art 經驗的人面對一格空白幾乎無從下手——'
+        + '它們是拿來臨摹、拆解、改著玩的起點，不是被當成我們自己的作品重新發佈。'
+        + '任一方若不希望它們留在這裡，開個 issue 說一聲就會移除。',
   importPh: '貼上動畫 JSON，然後按下面的匯入（格式自動判斷）',
   importBtn: '匯入 JSON',
   exportH: '匯出', download: '下載 .json', copyClip: '複製到剪貼簿', copied: '已複製 ✓',
@@ -326,7 +336,10 @@ const I18N = {
   credit: 'Animations adapted from <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a> '
         + 'by <a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a>; '
         + 'the character Clawd belongs to Anthropic. This is a non-commercial community project, '
-        + 'licensed by neither party and licensed to no one. Check that your own use is appropriate.',
+        + 'licensed by neither party and licensed to no one. Check that your own use is appropriate. '
+        + 'They are bundled because an empty grid is where someone with no pixel-art experience gives up — '
+        + 'they are here to be copied, taken apart and altered, not republished as work of our own. '
+        + 'If either party would rather they were not here, open an issue and they will be removed.',
   importPh: 'Paste animation JSON, then press Import below (format is detected)',
   importBtn: 'Import JSON',
   exportH: 'Export', download: 'Download .json', copyClip: 'Copy to clipboard', copied: 'Copied ✓',
@@ -365,7 +378,10 @@ const I18N = {
   credit: 'アニメーションは <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a>'
         + '（<a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a> 作）を改変したものです。'
         + 'キャラクター Clawd は Anthropic に帰属します。本プロジェクトは非商用のコミュニティ作品であり、'
-        + 'いずれからも許諾を受けておらず、第三者への許諾も行いません。ご自身の用途をご確認ください。',
+        + 'いずれからも許諾を受けておらず、第三者への許諾も行いません。ご自身の用途をご確認ください。'
+        + 'サンプルを同梱しているのは、ピクセルアートの経験がないと真っ白なグリッドから描き始めるのが難しいためです。'
+        + '模写し、分解し、書き換えるための出発点として置いているもので、自分たちの作品として再配布しているわけではありません。'
+        + 'いずれかの権利者が掲載を望まれない場合は、issue でお知らせいただければ削除します。',
   importPh: 'アニメーションの JSON を貼り付けて、下のインポートを押してください（形式は自動判別）',
   importBtn: 'JSON をインポート',
   exportH: '書き出し', download: '.json をダウンロード', copyClip: 'クリップボードにコピー', copied: 'コピーしました ✓',
@@ -404,7 +420,10 @@ const I18N = {
   credit: '动画改作自 <a href="https://claudepix.vercel.app" target="_blank" rel="noopener">claudepix</a>'
         + '（作者 <a href="https://x.com/amaanbuilds" target="_blank" rel="noopener">@amaanbuilds</a>），'
         + '角色 Clawd 为 Anthropic 所有。本项目为非商业性质的社群作品，'
-        + '未经任一方授权，亦不对外授权。使用前请自行确认你的用途。',
+        + '未经任一方授权，亦不对外授权。使用前请自行确认你的用途。'
+        + '样本之所以内嵌，是因为没有 pixel art 经验的人面对一格空白几乎无从下手——'
+        + '它们是拿来临摹、拆解、改着玩的起点，不是被当成我们自己的作品重新发布。'
+        + '任一方若不希望它们留在这里，开个 issue 说一声就会移除。',
   importPh: '粘贴动画 JSON，然后按下面的导入（格式自动判断）',
   importBtn: '导入 JSON',
   exportH: '导出', download: '下载 .json', copyClip: '复制到剪贴板', copied: '已复制 ✓',
