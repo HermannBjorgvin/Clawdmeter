@@ -56,9 +56,9 @@ static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
     { "expression sleep", "idle breathe", "idle blink", "expression wink",
       "idle hearts", "idle blossom" },
     // Group 1 — normal pace
-    { "idle look around", "work think", "work coding", "fm listening" },
+    { "idle look around", "work think", "work coding", "fm listening", "work type" },
     // Group 2 — active
-    { "dance sway", "expression surprise", "dance bounce", NULL },
+    { "dance sway", "expression surprise", "dance bounce", "dance bob" },
     // Group 3 — heavy
     { "dance bounce dj", "dance sway dj", "dance djmix", NULL },
 };

@@ -20,6 +20,9 @@ const args = process.argv.slice(2);
 const opt = (k, def) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : def; };
 
 const BASE = opt('--base', 'https://claudepix.vercel.app');
+
+// Served but absent from the site's MANIFEST — see the note where they're merged in.
+const UNLISTED = ['dance_bob.html', 'work_type.html'];
 const OUT_DIR = path.resolve(opt('--out', path.join(__dirname, 'claudepix_data')));
 
 async function fetchText(url) {
@@ -76,7 +79,16 @@ async function main() {
   const manifestMatch = appJs.match(/const\s+MANIFEST\s*=\s*(\[[^\]]+\])/);
   if (!manifestMatch) throw new Error('MANIFEST not found in app.js');
   const manifest = eval(manifestMatch[1]);
-  console.log(`Found ${manifest.length} animations`);
+  console.log(`Found ${manifest.length} animations in the site manifest`);
+
+  // The site's MANIFEST doesn't list everything it serves. The source repo
+  // (github.com/amaancoderx/claudepix) carries these two as well, and both are
+  // live at /animations/<name>.html — they're just missing from the gallery
+  // index, so a manifest-only scrape silently skips them.
+  for (const extra of UNLISTED) {
+    if (!manifest.includes(extra)) manifest.push(extra);
+  }
+  console.log(`Scraping ${manifest.length} (incl. ${UNLISTED.length} unlisted)`);
 
   console.log(`Fetching engine`);
   const engineJs = await fetchText(`${BASE}/animations/creature-engine.js`);
@@ -120,7 +132,11 @@ async function main() {
         grid: f.frame ? f.frame : CREATURE,
       }));
       palette = ENGINE_PALETTE;
-      name = preset.name;
+      // Most presets carry a spaced display name, but the two unlisted ones
+      // fall back to their raw key ("dance_bob"). Normalize so every animation
+      // is addressable the same way — splash.cpp matches these by literal
+      // string, so an inconsistent name is a silently unreachable animation.
+      name = displayName(preset.name);
       category = preset.category;
       description = preset.description || '';
     } else if (sandbox.window.FRAMES) {

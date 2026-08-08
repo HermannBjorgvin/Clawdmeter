@@ -177,6 +177,50 @@ be **light** (the panel background is black, so a dark prop is invisible), and
 a 3×3 heart is **not legible** — its two top humps read as antennae, so the
 heart is 5×3 and beats via brightness rather than by resizing.
 
+`tools/grid_image_to_anim.js` takes hand-drawn frames instead: one image per
+frame, a 20×20 grid with cells coloured in, however it was drawn (spreadsheet,
+pixel editor, screenshot, photo).
+
+```bash
+node tools/grid_image_to_anim.js --name "my anim" --holds 300,120,300,120 frames/*.png
+```
+
+Each cell is sampled from the middle of its area, so gridlines and cell borders
+are ignored, and the grid area is auto-detected (uniform borders are trimmed;
+`--crop x0,y0,x1,y1` overrides). Images whose dimensions are an exact multiple
+of 20 are treated as already-cropped, since trimming a pixel-editor export
+would shift every cell — its empty background *is* content. It always prints
+the grid it read as text: check that against the drawing, because a half-cell
+offset yields a plausible-looking grid that's wrong everywhere. Round-trips
+exactly (0/400 cells differing) on both a 20×20 export and a 514×514 grid with
+gridlines and a page margin.
+
+`tools/anim_editor.html` is the drawing surface — open it straight off disk, no
+server. It carries what the firmware cares about rather than what a general
+pixel editor offers: 20×20 and the 10-colour cap enforced, per-frame hold
+times, onion skin, playback at the real holds, and both device previews on
+black (24px/cell splash, 4px/cell corner badge). A colour that looks fine on
+white can vanish on the panel and a shape that reads at 24px can turn to mush
+at 4px, so previewing at both scales is the point. Selection lifts on first
+move — arrow-key a selection a cell at a time and that's one frame of motion.
+
+Two things exist because of the coffee mug in `work think`. The onion skin is
+drawn *under* the current frame, so anywhere the two overlap it's hidden — and a
+prop held against the body is exactly the case that gets covered, leaving no
+reference for the thing you're positioning. Cells that changed and are covered
+get a dot on top in the previous frame's colour. And the clipboard (複製 in the
+selection bar / Cmd-C, then 貼上 / Cmd-V) survives a frame change, so a prop is
+drawn once and pasted-then-nudged down the timeline instead of hand-redrawn 30
+times, slightly different each time.
+
+Every animation in the catalog is embedded as a loadable sample, so an existing
+one can be opened and fixed rather than rebuilt; load → export round-trips
+byte-identically. Re-run `node tools/build_editor_samples.js` after changing
+any animation — it rewrites only the region between the `BEGIN-SAMPLES` /
+`END-SAMPLES` markers, and the rest of the editor is hand-written. The data is
+inlined rather than fetched because the editor runs from `file://`, where
+fetching a sibling file is blocked.
+
 Animations reach the screen through the rate groups in `splash.cpp`
 (`GROUP_NAMES`), matched by literal name — adding a JSON is not enough, the
 name has to be listed in a group or nothing will ever pick it.
