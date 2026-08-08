@@ -51,8 +51,13 @@ static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
     // Group 0 — idle / sleepy. The state the device sits in most of the day,
     // so it carries the widest rotation: a bored creature is the one you
     // actually end up looking at.
-    { "expression sleep", "idle breathe", "idle blink", "expression wink",
-      "idle hearts", "idle blossom", "swim summer" },
+    //
+    // Order is playback order — pick_rate_anim() walks the list one entry
+    // every SPLASH_ROTATE_INTERVAL_MS — so slot 0 is also what you meet at
+    // boot. Runs most expressive down to quietest, and since the list wraps,
+    // going to sleep is what leads back round to the hearts.
+    { "idle hearts", "swim summer", "idle blossom",
+      "expression wink", "idle breathe", "idle blink", "expression sleep" },
     // Group 1 — normal pace. "work type" is deliberately absent: it exists in
     // splash_anims[] but nothing picks it. Four frames, four pixels of arm
     // twitch, no keyboard and no surface — there is nothing in it to read as
