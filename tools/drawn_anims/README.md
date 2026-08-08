@@ -15,9 +15,18 @@ alongside:
 | `dance bounce dj` | his head sat on row 0, so the headphone band arced outside the grid and was cropped away entirely, leaving two ear cups with nothing joining them |
 | `work coding`, `expression wink`, `expression surprise` | redrawn for legibility at 4px/cell |
 
-`idle hearts`, `idle blossom` and `work out` are new rather than corrections —
-`work out` has him doing alternating dumbbell curls, two frames per rep, holding
-the top of each one twice as long as the lift.
+`idle hearts`, `idle blossom`, `work out` and `swim summer` are new rather than
+corrections. `work out` has him doing alternating dumbbell curls, two frames per
+rep, holding the top of each one twice as long as the lift. `swim summer` is
+`dance bob` redrawn past recognition — sunglasses, a rubber ring, water — and it
+carries the catalogue's only two-speed loop: eight frames at 70 ms for a glint
+sweeping across the lenses, then eight at 700-780 ms of drifting. Half a second
+of sparkle, six seconds of doing nothing.
+
+`dance bob` and `work type` are still in `claudepix_data/` but no longer listed
+in any group in `splash.cpp`, so nothing picks them. They are the two the
+claudepix site itself never lists, and both are four frames with almost nothing
+happening in them.
 
 They remain derivative of [claudepix](https://claudepix.vercel.app) by
 [@amaanbuilds](https://x.com/amaanbuilds) and of Anthropic's character — see
