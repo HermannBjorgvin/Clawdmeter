@@ -488,7 +488,12 @@ function main() {
       anim.palette.forEach((c, i) => { const d = dist2(c, rgb); if (d < bd) { bd = d; bi = i; } });
       return bd <= tol ? bi : -1;
     };
-    const addColor = (anim, rgb) => { anim.palette.push(rgb); return anim.palette.length - 1; };
+    const addColor = (anim, rgb) => {
+      if (anim.palette.length >= PALETTE_SIZE)
+        throw new Error(`palette full (${PALETTE_SIZE}) — cannot add recolor entry`);
+      anim.palette.push(rgb);
+      return anim.palette.length - 1;
+    };
     // Yields { cells, neighbors:Set<idx>, border:bool } per connected
     // component of `idx` cells in one frame.
     function* components(f, W, H, idx) {
@@ -551,6 +556,8 @@ function main() {
       `${String(anim.frames.length).padStart(3)} frames (${meta.kind === 'lottie' ? 'lottie' : 'gif'}, ` +
       `${anim.palette.length} colors, ${(cellBytes / 1024).toFixed(1)} KB)`);
 
+    if (anim.palette.length > PALETTE_SIZE)
+      throw new Error(`${meta.name}: ${anim.palette.length} palette entries exceed PALETTE_SIZE`);
     const pal565 = new Array(PALETTE_SIZE).fill(0);
     anim.palette.forEach((c, i) => { pal565[i] = rgb565(c[0], c[1], c[2]); });
     out += `static const uint16_t splash_${ident}_palette[${PALETTE_SIZE}] = {`;
