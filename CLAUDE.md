@@ -15,6 +15,8 @@ Six ports today (two SoC families, four panel sizes):
 - `boards/waveshare_amoled_206/` — Waveshare ESP32-S3-Touch-AMOLED-2.06 (CO5300, 410×502 watch form factor, FT3168 touch, no IO expander, 32 MB flash, PCF85063 RTC, ES8311 codec). Build env: `waveshare_amoled_206`. Display, touch, battery, IMU init, and BLE verified on hardware; the ES8311 chime path is not wired up (`sound.cpp` no-ops).
 - `boards/waveshare_lcd_154/` — Waveshare ESP32-S3-Touch-LCD-1.54 (ST7789, 240×240 square, CST816T touch @ 0x15). Build env: `waveshare_lcd_154`. **The first non-AMOLED port**: a plain 4-wire SPI TFT, not QSPI, and the panel has no brightness command — backlight is LEDC PWM on `LCD_BL`. **No PMU**: battery is an ADC divider on GPIO1 and `BAT_EN` (GPIO2) is a power-hold line that must be driven HIGH early in `board_init()` or the board browns out on battery. Three buttons (BOOT + GPIO5 + a PWR-role GPIO4); ES8311 chime wired up; QMI8658 populated but unused (fixed orientation, no rotation).
 
+Plus one non-hardware target: `boards/sim/` — **native desktop simulator** (SDL2 window, 480×480, `platform = native`). Build env: `sim`. See "Desktop simulator" below.
+
 **C6 ports have no PSRAM** — shared code gates on `BOARD_HAS_PSRAM` (absent on C6) to use `MALLOC_CAP_INTERNAL` for LVGL/splash buffers, and the `screenshot` serial command is disabled (`LV_USE_SNAPSHOT=0`), so UI changes on a C6 board must be eyeballed on hardware, not auto-captured.
 
 The shared code calls a small HAL (`firmware/src/hal/`) that each board implements: display, touch, input, power, IMU. Optional features are guarded by `BoardCaps` (runtime) and `BOARD_HAS_*` (compile-time) rather than `#ifdef BOARD_*`.
@@ -80,6 +82,7 @@ firmware/src/
     waveshare_amoled_18_c6/ — C6: SH8601 + FT3168 + AXP PKEY + TCA9554 (gates power), no PSRAM
     waveshare_amoled_206/   — CO5300 + FT3168 + AXP PKEY, no IO expander, 32 MB, no rotation
     waveshare_lcd_154/      — ST7789 SPI TFT + CST816T + ADC battery (no PMU), PWM backlight
+    sim/                    — native desktop simulator: SDL2 + Arduino shims + scenario playback
     template/               — copy this to bootstrap a new port
   main.cpp                  — setup() + loop(): HAL calls only, zero #ifdef BOARD_*
   ui.{h,cpp}                — 3-screen UI (splash, usage, bluetooth). compute_layout() picks fonts/positions from board_caps() (responsive — current breakpoint: H >= 460 → large, else compact)
@@ -118,6 +121,35 @@ If `pio` isn't on PATH: try `~/.platformio/penv/bin/pio` (Linux/macOS pio instal
 
 Device path differs by OS: `/dev/cu.usbmodem*` on macOS, `/dev/ttyACM0` on Linux. Both expose the ESP32-S3 native USB-JTAG (no boot-mode dance needed).
 
+## Desktop simulator (`-e sim`) — develop UI without hardware
+
+```bash
+sudo apt install libsdl2-dev   # once (macOS: brew install sdl2)
+pio run -d firmware -e sim && (cd firmware && .pio/build/sim/program)
+```
+
+An SDL2 window stands in for the 480×480 panel; the **full firmware loop runs
+unmodified** — `main.cpp`, `ui.cpp`, `splash.cpp`, idle fade, pair gesture,
+JSON parsing, usage-rate/chime logic. Only `ble.cpp`/`chime.cpp` are swapped
+for stubs. How it works: `boards/sim/` implements the HAL against SDL2, thin
+Arduino shims live in `boards/sim/shim/` (`millis`/`Serial`→stdio,
+`heap_caps`→malloc, in-memory `Preferences`), and `ble_sim.cpp` plays back
+daemon payloads from `firmware/sim/scenario.jsonl` (one JSON line per state +
+optional `name`/`hold_ms`; override with `SIM_SCENARIO=<path>`).
+
+Controls (full map in `boards/sim/board.h`): mouse = touch · space =
+play/pause scenario · ←/→ = step · 1-9 = jump · d = BLE link toggle ·
+b/n = BOOT/secondary buttons · p = PWR · c/-/= = charging/battery ·
+s = screenshot BMP · esc = quit.
+
+Headless screenshots (works in CI, no display):
+`SDL_VIDEODRIVER=dummy SIM_AUTOSHOT_MS=6000 .pio/build/sim/program` saves
+`sim-autoshot.bmp` (or `SIM_AUTOSHOT_PATH`) after 6 s and exits. Combine with
+the boot-screen swap trick below to capture any screen. **The sim renders with
+desktop LVGL and fake data — always do a final check on real hardware before
+merging panel-related changes** (col offsets, rotation, rounding live in the
+hardware boards, not shared code).
+
 ## QA your own UI changes — don't ask the user
 
 The firmware ships a `screenshot` serial command that dumps the LVGL framebuffer. `./screenshot.sh out.png [port]` captures a PNG sized to the active display (480×480 or 368×448). **Use this on every UI iteration** — Read the PNG with the Read tool, verify the change visually, iterate. Script auto-picks the macOS/Linux default port and falls back to pio's bundled Python if pyserial isn't on the system Python.
@@ -129,7 +161,7 @@ The boot screen is `SCREEN_SPLASH` and only advances on a physical button press,
 1. **CO5300 cannot rotate.** Its MADCTL only supports axis flips, not column/row exchange. Rotation is done by **CPU pixel remapping inside `display_hal_draw_bitmap`** in `boards/waveshare_amoled_216/display.cpp`. We use **PARTIAL render mode with strip rotation** (small 480×40 strips, fast). On rotation change → AMOLED brightness flash → force redraw (handled inside `display_hal_tick`).
 2. **OPI PSRAM** required: `board_build.arduino.memory_type = qio_opi` in platformio.ini. Without this, `MALLOC_CAP_SPIRAM` returns NULL and the screen is black.
 3. **pioarduino platform required.** GFX Library for Arduino needs Arduino Core 3.x (`esp32-hal-periman.h`), not the 2.x that standard `espressif32` ships. We pin `pioarduino/platform-espressif32` 55.03.38-1.
-4. **LVGL 9 font patching.** `lv_font_conv` outputs LVGL 8 format. Must remove `#if LVGL_VERSION_MAJOR >= 8` guards, drop `.cache` field, add `.release_glyph`, `.kerning`, `.static_bitmap`, `.fallback`, `.user_data`. Without patching, fonts render invisible.
+4. **LVGL 9 font patching.** `lv_font_conv` outputs LVGL 8 format. Must remove `#if LVGL_VERSION_MAJOR >= 8` guards, drop `.cache` field, add `.release_glyph`, `.kerning`, `.static_bitmap`, `.fallback`, `.user_data`. Without patching, fonts render invisible. Full regeneration recipe: `docs/fonts.md`.
 5. **Touch reading is centralized inside each board's `touch.cpp`.** The HAL `touch_hal_read()` is called once per loop from `my_touch_cb`; the board's implementation owns its latched `touch_pressed/x/y` state. Don't call the underlying controller from anywhere else — CST9220's `getPoint()` etc. do a full I2C transaction and concurrent callers consume each other's data.
 6. **Even-aligned flush regions.** `display_hal_round_area` (called from `rounder_cb`) is what each board uses to enforce this. Required on CO5300, harmless on SH8601.
 7. **Touch axis swap/mirror is per-board.** The 2.16's CST9220 needs `setSwapXY(true)` + `setMirrorXY(true, false)` — applied inside `boards/waveshare_amoled_216/touch.cpp::touch_hal_init()`. New ports apply their own.
@@ -143,15 +175,48 @@ The boot screen is `SCREEN_SPLASH` and only advances on a physical button press,
 
 ## Splash animations
 
-13 × 20×20 pixel-art creature animations sourced from
-[claudepix.vercel.app](https://claudepix.vercel.app). Pipeline:
+17 official Anthropic Clawd animations (core poses + persona scenes), archived
+with full provenance in `research/clawd-official/`. Pipeline:
 
 ```bash
-node tools/scrape_claudepix.js  # → tools/claudepix_data/*.json
-node tools/convert_to_c.js      # → firmware/src/splash_animations.h
+node tools/convert_official_clawd.js            # → firmware/src/splash_animations.h
+node tools/convert_official_clawd.js --verify DIR   # + per-animation PNGs for eyeballing
 ```
 
-Each animation has a per-animation 10-color RGB565 palette. Cell values 0..9 index it. Default boot screen.
+Requires ImageMagick; Laptop and Soccer convert from their Lottie exports
+(crisp) rather than GIFs. Frames are bounding-box crops on the official 55×37
+art stage (ox/oy = stage offset — every animation shares one idle-Clawd
+position, so transitions are seamless), one byte per cell into a per-animation
+≤16-color RGB565 palette (index 0 = background, true black), per-frame hold ms
+with duplicates collapsed (~400 KB total). The converter also: detects each
+animation's **loop region** (gait cycles, scene middles; sailing scene's is
+located by cross-matching the standalone sailing-loop asset, which is not
+emitted), synthesizes the **eyes** (transparent holes in the source GIFs) as
+`#141413` ink via border flood-fill, and applies two contrast recolors
+(trumpet notes → ivory, magnifier fedora → gray) via component analysis.
+
+The splash engine (`splash.cpp`) plays intro → loop → outro on a **60×60
+stage** (`SPLASH_GRID`, cell = min(W,H)/60 → 8 px on 480, 6 px on 368, 4 px on
+240): loops hold until released (walk arrival, scene timer, rotation), so
+switches always pass through the shared idle pose. Walkers translate with
+foot-locked per-frame schedules and mirror when heading left. Usage-rate
+groups pick animations by name; the same rate drives the **corner mascot** on
+the usage screen (`splash_mascot_*`, PSRAM boards; C6 falls back to the static
+`clawd_still.h` icon) — idle stills, rate-scaled acts, and walk-off/lurk/
+walk-back trips. Default boot screen.
+
+**Where the animations come from / finding new ones:** all assets are plain
+files under `https://claude.ai/images/clawd/{core,persona}/…` — static assets
+are not Cloudflare-gated, only HTML routes are. The asset server returns a
+real GIF for a valid filename and an HTML catch-all (both HTTP 200) otherwise,
+so **name probing works**: fetch `Clawd-<Name>.gif` and check the magic bytes.
+Seven current animations are referenced by no shipped bundle and were found
+exactly this way (Anthropic stages seasonal drops — Soccer appeared for the
+World Cup). To hunt for new ones: run `research/clawd-official/fetch.sh`
+(extend its probe list), and grep a fresh desktop .deb's `ion-dist/` bundles
+for `/images/` paths (`research/clawd-official/CLAUDE.md` documents the full
+methodology, including the Lottie sources and the assets-proxy).
+
 
 ## User profile / preferences
 
