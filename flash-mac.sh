@@ -20,9 +20,14 @@ if [ -z "$BOARD" ]; then
 fi
 
 if [ -z "$PORT" ]; then
-    PORT=$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)
+    # Native-USB boards (the Waveshare AMOLEDs) enumerate as cu.usbmodem*, but
+    # boards behind a USB-UART bridge do not: CH9102/CH340 come up as
+    # cu.wchusbserial*, CP210x as cu.SLAB_USBtoUART / cu.usbserial*.
+    PORT=$(ls /dev/cu.usbmodem* /dev/cu.wchusbserial* /dev/cu.usbserial* /dev/cu.SLAB_USBtoUART* 2>/dev/null | head -1)
     if [ -z "$PORT" ]; then
-        echo "Error: no /dev/cu.usbmodem* device found. Plug in via USB-C."
+        echo "Error: no USB serial device found (looked for /dev/cu.usbmodem*,"
+        echo "       cu.wchusbserial*, cu.usbserial*, cu.SLAB_USBtoUART*)."
+        echo "       Plug the board in, or pass the port explicitly."
         exit 1
     fi
 fi

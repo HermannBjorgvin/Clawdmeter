@@ -4,6 +4,7 @@
 #include <time.h>
 #include "logo.h"
 #include "clawd_still.h"
+#include "opencode_logo.h"
 #include "icons.h"
 #include "hal/board_caps.h"
 
@@ -34,6 +35,13 @@ struct Layout {
     // Usage screen
     int16_t usage_panel_h;
     int16_t usage_panel_gap;
+    // Panel placement. Stacked on every tall board (both panels at content_y /
+    // content_y+h+gap, full content width); a landscape strip too short to
+    // stack them puts the second one alongside the first instead, so these are
+    // explicit rather than derived. Defaults are filled in at the end of
+    // compute_layout for every branch that doesn't set them.
+    int16_t usage_panel_w;
+    int16_t usage_p2_x, usage_p2_y;
     int16_t usage_bar_y;
     int16_t usage_reset_y;
     int16_t bar_h;
@@ -77,6 +85,7 @@ static void compute_layout(const BoardCaps& c) {
     L.scr_h = c.height;
     L.margin = 20;
     L.title_y = 30;
+    L.usage_panel_w = 0;   // 0 = "stack them", resolved after the branches
 
     // Values shared by the two original breakpoints; the small branch below
     // overrides them wholesale.
@@ -131,7 +140,7 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_20;
         L.bt_credit_1_font = &font_styrene_16;
         L.bt_credit_2_font = &font_styrene_14;
-    } else {
+    } else if (c.height >= 200) {
         // Small layout — tuned for 240x240 (LCD-1.54 and similar square TFTs).
         // Everything shrinks: fonts two steps down, panels ~half height, and
         // the corner logo/battery switch to the 40px/24px small assets.
@@ -173,9 +182,66 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_14;
         L.bt_credit_1_font = &font_styrene_12;
         L.bt_credit_2_font = &font_styrene_12;
+    } else {
+        // Landscape strip — tuned for 240x135 (LilyGO T-Display).
+        //
+        // The one layout that can't just shrink: 135 px of height has no room
+        // for a title row plus two stacked panels plus the status line (the
+        // 240x240 branch above needs 230 for that). So the panels go side by
+        // side, which is what a 16:9 strip affords, and the vertical budget
+        // becomes: title 0..32, panels 34..108, status line 113..132.
+        L.margin = 4;
+        L.title_y = 3;
+        L.content_y = 34;
+        L.usage_panel_h = 74;
+        L.usage_panel_gap = 6;
+        L.usage_bar_y = 28;
+        L.usage_reset_y = 44;
+        L.bar_h = 10;
+        L.panel_pad_x = 6;
+        L.panel_pad_y = 5;
+        L.pill_pad_x = 4;
+        L.pill_pad_y = 1;
+        L.title_font   = &font_styrene_24;   // tiempos_34 would eat a quarter of the height
+        L.pct_font     = &font_styrene_20;
+        L.ent_pct_font = &font_styrene_24;
+        L.pill_font    = &font_styrene_12;
+        L.reset_font   = &font_styrene_14;
+        L.pace_font    = &font_styrene_12;
+        L.anim_font    = &font_mono_18;
+        L.anim_y = -3;
+        L.small_icons = true;
+        L.title_nudge = 8;
+        L.logo_y = 0;
+        L.batt_y = 4;
+        L.batt_w = ICON_BATTERY_SMALL_W;
+        L.pair_y1 = 4;
+        L.pair_y2 = 30;
+        L.pair_y3 = 48;
+        L.idle_px = 64;
+        L.bt_info_panel_h = 60;
+        L.bt_reset_zone_h = 40;
+        L.bt_title_font    = &font_styrene_24;
+        L.bt_status_font   = &font_styrene_20;
+        L.bt_device_font   = &font_styrene_14;
+        L.bt_credit_1_font = &font_styrene_12;
+        L.bt_credit_2_font = &font_styrene_12;
+
+        // Side by side: two half-width panels sharing one row.
+        L.usage_panel_w = (L.scr_w - 2 * L.margin - L.usage_panel_gap) / 2;
+        L.usage_p2_x = L.margin + L.usage_panel_w + L.usage_panel_gap;
+        L.usage_p2_y = L.content_y;
     }
 
     L.content_w = L.scr_w - 2 * L.margin;
+
+    // Every branch that didn't place the panels itself gets the stacked
+    // arrangement: full content width, second panel one panel-height below.
+    if (L.usage_panel_w == 0) {
+        L.usage_panel_w = L.content_w;
+        L.usage_p2_x = L.margin;
+        L.usage_p2_y = L.content_y + L.usage_panel_h + L.usage_panel_gap;
+    }
 }
 
 // Anthropic brand palette — design tokens live in theme.h
@@ -218,8 +284,25 @@ static lv_obj_t* lbl_spending_status = nullptr;   // "Under pace" / "On pace" / 
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
 
 // ---- Battery indicator (shared, on top) ----
+// OpenCode screen — spend on non-Anthropic providers, which have no rate-limit
+// window to draw a gauge against, so it's three numbers rather than bars.
+static lv_obj_t* opencode_container = nullptr;
+static lv_obj_t* oc_group = nullptr;      // the gauges — shown once the daemon reports
+static lv_obj_t* lbl_oc_empty = nullptr;  // "No data" hint — shown until then
+static lv_obj_t* bar_oc_rolling = nullptr;
+static lv_obj_t* lbl_oc_rolling_pct = nullptr;
+static lv_obj_t* lbl_oc_rolling_label = nullptr;
+static lv_obj_t* lbl_oc_rolling_reset = nullptr;
+static lv_obj_t* bar_oc_weekly = nullptr;
+static lv_obj_t* lbl_oc_weekly_pct = nullptr;
+static lv_obj_t* lbl_oc_weekly_label = nullptr;
+static lv_obj_t* lbl_oc_weekly_reset = nullptr;
+static lv_obj_t* lbl_oc_footer = nullptr;
+
 static lv_obj_t* battery_img;
 static lv_obj_t* logo_img;
+static lv_obj_t* oc_logo_img = nullptr;   // OpenCode's mark, corner slot, its screen only
+static lv_image_dsc_t oc_logo_dsc;
 static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 
 // ---- Live-data freshness → which usage sub-view to show ----
@@ -388,10 +471,10 @@ static void init_battery_icons(void) {
 
 // ======== Usage Screen ========
 
-static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
+static lv_obj_t* make_usage_panel(lv_obj_t* parent, int x, int y, const char* pill_text,
                                   lv_obj_t** out_pct, lv_obj_t** out_pill,
                                   lv_obj_t** out_bar, lv_obj_t** out_reset) {
-    lv_obj_t* panel = make_panel(parent, L.margin, y, L.content_w, L.usage_panel_h);
+    lv_obj_t* panel = make_panel(parent, x, y, L.usage_panel_w, L.usage_panel_h);
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "---%");
@@ -403,7 +486,7 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
     lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
 
     *out_bar = make_bar(panel, 0, L.usage_bar_y,
-                        L.content_w - 2 * L.panel_pad_x, L.bar_h);
+                        L.usage_panel_w - 2 * L.panel_pad_x, L.bar_h);
 
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
@@ -498,7 +581,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    panel_session = make_usage_panel(usage_group, L.content_y, "Current",
+    panel_session = make_usage_panel(usage_group, L.margin, L.content_y, "Current",
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
 
@@ -522,8 +605,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_pos(lbl_spending_status, 0, L.usage_reset_y + 20);
     lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
 
-    panel_weekly = make_usage_panel(usage_group,
-                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
+    panel_weekly = make_usage_panel(usage_group, L.usage_p2_x, L.usage_p2_y, "Weekly",
                      &lbl_weekly_pct, &lbl_weekly_label,
                      &bar_weekly, &lbl_weekly_reset);
     // Recolor enabled so enterprise period box can color pace and reset separately
@@ -538,6 +620,70 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_font(lbl_anim, L.anim_font, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
+}
+
+// Today's token count, for the OpenCode footer line. Dollars would be the
+// obvious choice but Go is a subscription — spend is fractions of a cent and
+// the windows above are what actually runs out.
+static void format_tokens(long n, char* buf, size_t len) {
+    if (n >= 1000000)   snprintf(buf, len, "%.1fM", n / 1000000.0);
+    else if (n >= 1000) snprintf(buf, len, "%ldk", n / 1000);
+    else                snprintf(buf, len, "%ld", n);
+}
+
+static void init_opencode_screen(lv_obj_t* scr) {
+    opencode_container = lv_obj_create(scr);
+    lv_obj_set_size(opencode_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(opencode_container, 0, 0);
+    lv_obj_set_style_bg_opa(opencode_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(opencode_container, 0, 0);
+    lv_obj_set_style_pad_all(opencode_container, 0, 0);
+    lv_obj_clear_flag(opencode_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(opencode_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* title = lv_label_create(opencode_container);
+    lv_label_set_text(title, "OpenCode");
+    lv_obj_set_style_text_font(title, L.bt_title_font, 0);
+    lv_obj_set_style_text_color(title, COL_TEXT, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, L.title_nudge, L.title_y);
+
+    // Same two-gauge arrangement as the Anthropic usage screen, from the same
+    // Layout slots — OpenCode Go reports rolling/weekly windows with a percent
+    // and a reset, so it earns identical panels rather than a bespoke look.
+    oc_group = lv_obj_create(opencode_container);
+    lv_obj_set_size(oc_group, L.scr_w, L.scr_h);
+    lv_obj_set_pos(oc_group, 0, 0);
+    lv_obj_set_style_bg_opa(oc_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(oc_group, 0, 0);
+    lv_obj_set_style_pad_all(oc_group, 0, 0);
+    lv_obj_clear_flag(oc_group, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(oc_group, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    make_usage_panel(oc_group, L.margin, L.content_y, "Rolling",
+                     &lbl_oc_rolling_pct, &lbl_oc_rolling_label,
+                     &bar_oc_rolling, &lbl_oc_rolling_reset);
+    make_usage_panel(oc_group, L.usage_p2_x, L.usage_p2_y, "Weekly",
+                     &lbl_oc_weekly_pct, &lbl_oc_weekly_label,
+                     &bar_oc_weekly, &lbl_oc_weekly_reset);
+
+    // Monthly has no panel of its own — it moves too slowly to earn one — so it
+    // shares the footer with today's token count.
+    lbl_oc_footer = lv_label_create(opencode_container);
+    lv_label_set_text(lbl_oc_footer, "");
+    lv_obj_set_style_text_font(lbl_oc_footer, L.anim_font, 0);
+    lv_obj_set_style_text_color(lbl_oc_footer, COL_DIM, 0);
+    lv_obj_align(lbl_oc_footer, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
+
+    // Until a daemon reports OpenCode data, showing $0.00 would read as "you
+    // spent nothing" rather than "nobody told me" — so the panel stays hidden.
+    lv_obj_add_flag(oc_group, LV_OBJ_FLAG_HIDDEN);
+    lbl_oc_empty = lv_label_create(opencode_container);
+    lv_label_set_text(lbl_oc_empty, "No data");
+    lv_obj_set_style_text_font(lbl_oc_empty, L.bt_status_font, 0);
+    lv_obj_set_style_text_color(lbl_oc_empty, COL_DIM, 0);
+    lv_obj_align(lbl_oc_empty, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_add_flag(opencode_container, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ======== Public API ========
@@ -557,6 +703,7 @@ void ui_init(void) {
     init_battery_icons();
 
     init_usage_screen(scr);
+    init_opencode_screen(scr);
     splash_init(scr);
 
     if (splash_get_root()) {
@@ -577,6 +724,16 @@ void ui_init(void) {
         lv_image_set_src(logo_img, &logo_dsc);
         lv_obj_set_pos(logo_img, L.margin, top);
 #endif
+
+        // OpenCode's own mark takes over the same corner slot on its screen, so
+        // the header reads as one brand. Same 72/48 footprint as the Clawd art,
+        // hence the shared `top`. ui_show_screen swaps which one is visible.
+        if (L.small_icons) init_icon_dsc_rgb565a8(&oc_logo_dsc, OPENCODE_LOGO_SMALL_W, OPENCODE_LOGO_SMALL_H, icon_opencode_small);
+        else               init_icon_dsc_rgb565a8(&oc_logo_dsc, OPENCODE_LOGO_W, OPENCODE_LOGO_H, icon_opencode);
+        oc_logo_img = lv_image_create(scr);
+        lv_image_set_src(oc_logo_img, &oc_logo_dsc);
+        lv_obj_set_pos(oc_logo_img, L.margin, top);
+        lv_obj_add_flag(oc_logo_img, LV_OBJ_FLAG_HIDDEN);
     }
 
     battery_img = lv_image_create(scr);
@@ -673,6 +830,32 @@ void ui_update(const UsageData* data) {
         format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
         lv_label_set_text(lbl_weekly_reset, buf);
     }
+
+    if (oc_group && data->oc_valid) {
+        lv_label_set_text_fmt(lbl_oc_rolling_pct, "%d%%", data->oc_rolling_pct);
+        lv_bar_set_value(bar_oc_rolling, data->oc_rolling_pct, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_oc_rolling, pct_color((float)data->oc_rolling_pct),
+                                  LV_PART_INDICATOR);
+        format_reset_time(data->oc_rolling_mins, buf, sizeof(buf));
+        lv_label_set_text(lbl_oc_rolling_reset, buf);
+
+        lv_label_set_text_fmt(lbl_oc_weekly_pct, "%d%%", data->oc_weekly_pct);
+        lv_bar_set_value(bar_oc_weekly, data->oc_weekly_pct, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_oc_weekly, pct_color((float)data->oc_weekly_pct),
+                                  LV_PART_INDICATOR);
+        format_reset_time(data->oc_weekly_mins, buf, sizeof(buf));
+        lv_label_set_text(lbl_oc_weekly_reset, buf);
+
+        char tok[16];
+        format_tokens(data->oc_tokens, tok, sizeof(tok));
+        // Kept terse deliberately: at anim_font this line has ~28 characters
+        // before it overruns a 480 px panel and clips at both ends.
+        snprintf(buf, sizeof(buf), "%d%% monthly - %s today", data->oc_monthly_pct, tok);
+        lv_label_set_text(lbl_oc_footer, buf);
+
+        lv_obj_clear_flag(oc_group, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_oc_empty, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 // Pick the usage-view sub-screen: pairing hint (BLE down), the idle "Zzz" screen
@@ -756,7 +939,12 @@ void ui_tick_anim(void) {
     lv_label_set_text(lbl_anim, buf);
 }
 
-static screen_t prev_non_splash_screen = SCREEN_USAGE;
+// Screens advance in enum order: splash → usage → opencode → splash. One
+// gesture drives it (tap on touch boards, PWR short press on touchless ones),
+// so a third screen means cycling rather than the old splash/usage toggle.
+static screen_t next_screen(void) {
+    return (screen_t)((current_screen + 1) % SCREEN_COUNT);
+}
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
     if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
@@ -765,34 +953,42 @@ static void apply_battery_visibility(void) {
 
 static void global_click_cb(lv_event_t* e) {
     (void)e;
-    if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
-    else                                  ui_show_screen(SCREEN_SPLASH);
+    ui_show_screen(next_screen());
 }
 
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+    if (opencode_container) lv_obj_add_flag(opencode_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
     case SCREEN_SPLASH:  splash_show(); break;
     case SCREEN_USAGE:   lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_OPENCODE:
+        if (opencode_container) lv_obj_clear_flag(opencode_container, LV_OBJ_FLAG_HIDDEN);
+        break;
     default: break;
     }
 
-    splash_mascot_set_visible(screen != SCREEN_SPLASH);
+    // Corner slot: Clawd everywhere except the OpenCode screen, which shows
+    // OpenCode's mark instead. Exactly one of the two is ever visible.
+    const bool on_opencode = (screen == SCREEN_OPENCODE);
+    splash_mascot_set_visible(screen != SCREEN_SPLASH && !on_opencode);
     if (logo_img) {
-        if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        if (screen == SCREEN_SPLASH || on_opencode) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        else                                        lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (oc_logo_img) {
+        if (on_opencode) lv_obj_clear_flag(oc_logo_img, LV_OBJ_FLAG_HIDDEN);
+        else             lv_obj_add_flag(oc_logo_img, LV_OBJ_FLAG_HIDDEN);
     }
 
-    if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
     current_screen = screen;
     apply_battery_visibility();
 }
 
 void ui_toggle_splash(void) {
-    if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
-    else                                  ui_show_screen(SCREEN_SPLASH);
+    ui_show_screen(next_screen());
 }
 
 screen_t ui_get_current_screen(void) {

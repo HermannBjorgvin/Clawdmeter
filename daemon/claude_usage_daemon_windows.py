@@ -21,6 +21,9 @@ import threading
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling import works as script *and* as daemon.* module
+from opencode_usage import add_opencode_fields
+
 import httpx
 from bleak import BleakClient
 from bleak.backends.device import BLEDevice
@@ -246,6 +249,9 @@ async def poll_api(token: str) -> dict | None:
         }
     add_chime_field(payload)   # adds "c":1 iff the config opts in
     add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
+    # Shells out to ccusage — off the event loop, or a slow npx fetch would
+    # stall the 5 s tick that notices BLE disconnects.
+    await asyncio.to_thread(add_opencode_fields, payload, log)
     return payload
 
 

@@ -12,12 +12,14 @@ Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
 
 ## Screens
 
-The device boots into the splash. Tap the screen anywhere to switch to the Usage view; tap again to flip back to the splash.
+The device boots into the splash. Tap the screen anywhere to cycle through the screens: Splash → Usage → OpenCode → Splash. On a board without a touchscreen the PWR button drives the same cycle.
 
-|              Splash               |              Usage              |
-| :-------------------------------: | :-----------------------------: |
-| ![Splash](screenshots/splash.gif) | ![Usage](screenshots/usage.png) |
-|   Splash; touch-toggle anytime    | Session and weekly utilization  |
+|              Splash               |              Usage              |            OpenCode            |
+| :-------------------------------: | :-----------------------------: | :----------------------------: |
+| ![Splash](screenshots/splash.gif) | ![Usage](screenshots/usage.png) |               —                |
+|   Splash; touch-toggle anytime    | Session and weekly utilization  | OpenCode Go rolling and weekly |
+
+The OpenCode screen is optional and only appears populated if you use [OpenCode](https://opencode.ai) on the same machine as the daemon; otherwise it reads "No data". See [OpenCode Go usage](#opencode-go-usage) below.
 
 While the splash is up, the middle (PWR) button cycles animations. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
 
@@ -196,6 +198,22 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
 6. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.
 7. The two side buttons are independent of all of this — they send Space and Shift+Tab as BLE HID keyboard input to the paired host directly.
 
+## OpenCode Go usage
+
+If you also code with [OpenCode](https://opencode.ai) on the **Go** plan, the daemon fills a third screen with the same two-gauge layout the Anthropic one uses. Nothing to configure — it reuses the credentials OpenCode already stored, and stays silent when they aren't there.
+
+Where the numbers come from:
+
+- **The gauges** — `GET https://opencode.ai/zen/go/v1/usage`, authenticated with the key OpenCode keeps in `~/.local/share/opencode/auth.json` (override with `OPENCODE_API_KEY`). It returns `rolling`, `weekly` and `monthly` windows, each with a percent and a reset timestamp — the same shape Anthropic exposes through headers, which is why the screen can look the same. The endpoint is undocumented; it may change without warning.
+- **The token count** in the footer — a read-only SQLite query against OpenCode's own `opencode.db`, summed over sessions touched today.
+
+Notes:
+
+- The numbers are **per machine**: they describe OpenCode usage on the host running the daemon, not your account across every computer.
+- Spend is deliberately not shown. Go is a subscription, so it comes out to fractions of a cent — the windows are what actually run out.
+- No OpenCode, no key, or an endpoint that stops answering → the fields are omitted and the screen reads "No data", never a fabricated 0%.
+- `ccusage` and similar tools will not help here: they parse the older `storage/message/*.json` layout that current OpenCode versions no longer write.
+
 ## Physical buttons
 
 The board has three side buttons. Left and right send HID keys; the middle (PWR) button cycles splash animations and, held for 3 seconds, triggers pairing mode.
@@ -226,6 +244,14 @@ JSON payload format (written to RX):
 ```
 
 Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
+
+Optional OpenCode fields, added only when the daemon finds OpenCode Go on the host. All are additive — a firmware build that doesn't know them ignores them, and a daemon that omits them leaves the screen on "No data":
+
+```json
+{ "ocs": 38, "ocsr": 275, "ocw": 12, "ocwr": 5819, "ocmo": 6, "ocst": "ok", "oct": 562461, "ocm": "deepseek-v4-flash" }
+```
+
+Fields: `ocs`/`ocsr` = rolling window % and reset (minutes), `ocw`/`ocwr` = weekly, `ocmo` = monthly %, `ocst` = status, `oct` = tokens used today, `ocm` = busiest model today.
 
 ## Development
 
