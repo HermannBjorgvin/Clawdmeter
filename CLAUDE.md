@@ -10,7 +10,7 @@ selected via PlatformIO's `build_src_filter`. Adding a board means dropping in
 a new folder + a new `[env:...]` block — `main.cpp`, `ui.cpp`, and `splash.cpp`
 never see board-specific code. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md).
 
-Six ports today (two SoC families, four panel sizes):
+Eight ports today (three SoC families, six panel sizes):
 
 - `boards/waveshare_amoled_216/` — original Waveshare ESP32-S3-Touch-AMOLED-2.16 (CO5300, 480×480 square, CST9220 touch, IMU rotation). Build env: `waveshare_amoled_216`.
 - `boards/waveshare_amoled_18/` — Waveshare ESP32-S3-Touch-AMOLED-1.8 (368×448 portrait, XCA9554 IO expander). Build env: `waveshare_amoled_18`. **Two panel revisions are auto-detected at boot** (`board_rev()` in `board_init.cpp`, enum in `board_rev.h`): original = SH8601 display + FT3168 touch (0x38); later = CO5300 display + CST816 touch (0x15). One binary drives both.
@@ -19,7 +19,9 @@ Six ports today (two SoC families, four panel sizes):
 - `boards/waveshare_amoled_206/` — Waveshare ESP32-S3-Touch-AMOLED-2.06 (CO5300, 410×502 watch form factor, FT3168 touch, no IO expander, 32 MB flash, PCF85063 RTC, ES8311 codec). Build env: `waveshare_amoled_206`. Display, touch, battery, IMU init, and BLE verified on hardware; the ES8311 chime path is not wired up (`sound.cpp` no-ops).
 - `boards/waveshare_lcd_154/` — Waveshare ESP32-S3-Touch-LCD-1.54 (ST7789, 240×240 square, CST816T touch @ 0x15). Build env: `waveshare_lcd_154`. **The first non-AMOLED port**: a plain 4-wire SPI TFT, not QSPI, and the panel has no brightness command — backlight is LEDC PWM on `LCD_BL`. **No PMU**: battery is an ADC divider on GPIO1 and `BAT_EN` (GPIO2) is a power-hold line that must be driven HIGH early in `board_init()` or the board browns out on battery. Three buttons (BOOT + GPIO5 + a PWR-role GPIO4); ES8311 chime wired up; QMI8658 populated but unused (fixed orientation, no rotation).
 
-- `boards/esp32_devkit_st7789/` — **DIY wiring, not a vendor kit**: classic ESP32 DevKit v1 (WROOM-32) + ST7789V2 240×280 over 4-wire SPI, display-only (no touch/PMU/battery/codec), BOOT + two wired buttons. Build env: `esp32_devkit_st7789`. **The only classic-ESP32 port** (Xtensa LX6, BLE 4.2, no PSRAM, no native USB) — so no `ARDUINO_USB_CDC_ON_BOOT` (Serial is UART0 through the CP2102/CH340) and `huge_app.csv` partitions, since the ~1.7 MB image doesn't fit a 4 MB board's stock 1.25 MB app slot. **Verified on hardware** (2026-08-11): boots, ST7789V2 240×280 renders the splash, BLE advertises, PWR (GPIO 26) toggles splash ↔ usage. **First touchless board**, so it sets `BOARD_HAS_TOUCH 0` → `caps.has_touch` false → the PWR short press takes over the tap-to-toggle gesture in `main.cpp` (without it the usage screen is unreachable and stays `HIDDEN` forever); animation/brightness cycling is given up here. BOOT/GPIO25 HID and the daemon link are still untested.
+- `boards/esp32_devkit_st7789/` — **DIY wiring, not a vendor kit**: classic ESP32 DevKit v1 (WROOM-32) + ST7789V2 240×280 over 4-wire SPI, display-only (no touch/PMU/battery/codec), BOOT + two wired buttons. Build env: `esp32_devkit_st7789`. **The only classic-ESP32 port** (Xtensa LX6, BLE 4.2, no PSRAM, no native USB) — so no `ARDUINO_USB_CDC_ON_BOOT` (Serial is UART0 through the CP2102/CH340) and `huge_app.csv` partitions, since the ~1.7 MB image doesn't fit a 4 MB board's stock 1.25 MB app slot. **Verified on hardware** (2026-08-11): boots, ST7789V2 240×280 renders the splash, BLE advertises, PWR (GPIO 26) cycles the screens. **First touchless board**, so it sets `BOARD_HAS_TOUCH 0` → `caps.has_touch` false → the PWR short press takes over the tap-to-toggle gesture in `main.cpp` (without it the usage screen is unreachable and stays `HIDDEN` forever); animation/brightness cycling is given up here. BOOT/GPIO25 HID and the daemon link are still untested.
+
+- `boards/lilygo_tdisplay/` — LilyGO TTGO T-Display (classic ESP32) + 1.14" ST7789 **135×240 panel, driven landscape as 240×135**. Build env: `lilygo_tdisplay`. A vendor board sharing the DIY DevKit port's shape (classic ESP32, no PSRAM, no native USB, PWM backlight on GPIO 4, `huge_app.csv`), but **the smallest display in the tree** — the splash stage is min(W,H)/60 = **2 px per cell**. Pin map probe-confirmed on the real board (ESP32-D0WDQ6 rev 1.0, 16 MB flash, 0 B PSRAM), matching Arduino_GFX's `LILYGO_T_DISPLAY` block. Two gotchas worth keeping straight: **`LCD_PANEL_W/H` (135×240 native, what the `Arduino_ST7789` constructor wants) is deliberately separate from `LCD_WIDTH/HEIGHT` (240×135, what LVGL and `caps.cpp` publish)** — mixing them draws into a 135-wide window on a 240-wide screen; and the GRAM offsets (52/40/53/40) are passed as-is because `Arduino_TFT::setRotation` picks the right pair per rotation. Unlike the CO5300 AMOLEDs, the ST7789 exchanges rows/columns in hardware, so rotation is one register write and `display_hal_tick` stays empty. **Touchless** (`BOARD_HAS_TOUCH 0`), so PWR = **GPIO 35** cycles screens; GPIO 35 is input-only with no internal pull-up, hence `BTN_PWR_INPUT_ONLY` and `INPUT` (not `INPUT_PULLUP`) in `power.cpp`. BOOT = GPIO 0; the third button is RST wired to EN and invisible to software, so there's no secondary/HID button. Battery is a 2:1 divider on GPIO 34 that reads ~4.2 V on USB with or without a cell — "no battery" and "full battery" are indistinguishable here.
 
 Plus one non-hardware target: `boards/sim/` — **native desktop simulator** (SDL2 window, 480×480, `platform = native`). Build env: `sim`. See "Desktop simulator" below.
 
@@ -88,6 +90,8 @@ firmware/src/
     waveshare_amoled_18_c6/ — C6: SH8601 + FT3168 + AXP PKEY + TCA9554 (gates power), no PSRAM
     waveshare_amoled_206/   — CO5300 + FT3168 + AXP PKEY, no IO expander, 32 MB, no rotation
     waveshare_lcd_154/      — ST7789 SPI TFT + CST816T + ADC battery (no PMU), PWM backlight
+    esp32_devkit_st7789/    — classic ESP32 DIY: ST7789V2 240x280, display-only, touchless
+    lilygo_tdisplay/        — classic ESP32 vendor: ST7789 240x135 landscape, touchless, ADC battery
     sim/                    — native desktop simulator: SDL2 + Arduino shims + scenario playback
     template/               — copy this to bootstrap a new port
   main.cpp                  — setup() + loop(): HAL calls only, zero #ifdef BOARD_*
@@ -125,6 +129,8 @@ pio run -d firmware -e waveshare_amoled_206                                     
 pio run -d firmware -e waveshare_lcd_154                                        # build 1.54 (S3, SPI TFT)
 pio run -d firmware -e esp32_devkit_st7789                                      # build DIY ESP32 DevKit v1 + ST7789V2 240x280
 pio run -d firmware -e esp32_devkit_st7789 -t upload --upload-port COM5         # flash it (USB-UART bridge, not native USB)
+pio run -d firmware -e lilygo_tdisplay                                          # build LilyGO TTGO T-Display (classic ESP32, 240x135)
+pio run -d firmware -e lilygo_tdisplay -t upload --upload-port /dev/cu.usbserial-*  # flash it on macOS (CP2104 bridge, not native USB)
 pio run -d firmware -e waveshare_amoled_18 -t upload --upload-port /dev/cu.usbmodem101   # flash 1.8 on macOS
 pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0         # flash 2.16 on Linux
 # C6 boards: same native USB-JTAG flashing; flag a chip mismatch ("This chip is ESP32-C6,
