@@ -9,6 +9,7 @@ static const BoardCaps caps = {
     .has_rotation = false,
     .has_battery = true,    // fake battery, adjustable with -/=
     .has_imu = false,
+    .has_touch = true,
 };
 
 const BoardCaps& board_caps(void) { return caps; }
