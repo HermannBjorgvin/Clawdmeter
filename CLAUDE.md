@@ -130,7 +130,7 @@ pio run -d firmware -e waveshare_lcd_154                                        
 pio run -d firmware -e esp32_devkit_st7789                                      # build DIY ESP32 DevKit v1 + ST7789V2 240x280
 pio run -d firmware -e esp32_devkit_st7789 -t upload --upload-port COM5         # flash it (USB-UART bridge, not native USB)
 pio run -d firmware -e lilygo_tdisplay                                          # build LilyGO TTGO T-Display (classic ESP32, 240x135)
-pio run -d firmware -e lilygo_tdisplay -t upload --upload-port /dev/cu.usbserial-*  # flash it on macOS (CP2104 bridge, not native USB)
+pio run -d firmware -e lilygo_tdisplay -t upload --upload-port /dev/cu.wchusbserial*  # flash it on macOS (CH9102 bridge; older units are CP2104 → /dev/cu.usbserial-*)
 pio run -d firmware -e waveshare_amoled_18 -t upload --upload-port /dev/cu.usbmodem101   # flash 1.8 on macOS
 pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0         # flash 2.16 on Linux
 # C6 boards: same native USB-JTAG flashing; flag a chip mismatch ("This chip is ESP32-C6,
