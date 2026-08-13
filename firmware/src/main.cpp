@@ -119,6 +119,17 @@ static bool parse_json(const char* json, UsageData* out) {
     strlcpy(out->reset_date, doc["rd"] | "", sizeof(out->reset_date));
     out->clock_epoch = doc["t"] | 0L;
     out->clock_fmt = doc["tf"] | 24;
+    // OpenCode block is optional — a daemon that found no OpenCode data omits it
+    // entirely and the OpenCode screen stays on its "No data" state.
+    out->oc_valid = !doc["ocs"].isNull();
+    out->oc_rolling_pct = doc["ocs"] | 0;
+    out->oc_rolling_mins = doc["ocsr"] | -1;
+    out->oc_weekly_pct = doc["ocw"] | 0;
+    out->oc_weekly_mins = doc["ocwr"] | -1;
+    out->oc_monthly_pct = doc["ocmo"] | 0;
+    strlcpy(out->oc_status, doc["ocst"] | "unknown", sizeof(out->oc_status));
+    out->oc_tokens = doc["oct"] | 0L;
+    strlcpy(out->oc_model, doc["ocm"] | "", sizeof(out->oc_model));
     out->ok = doc["ok"] | false;
     out->valid = true;
     return true;
@@ -130,9 +141,11 @@ static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_pos = 0;
 
 static void send_screenshot() {
-#ifndef BOARD_HAS_PSRAM
-    // A full RGB565 framebuffer doesn't fit in internal SRAM on PSRAM-free
-    // boards (e.g. 480×480×2 = 460 KB). Capture is unsupported there.
+#if !LV_USE_SNAPSHOT
+    // The env compiles the capture path out when a full RGB565 framebuffer
+    // can't be held — 480×480×2 = 460 KB doesn't fit internal SRAM on a
+    // PSRAM-free board. Small PSRAM-free panels (135×240×2 = 65 KB) do fit and
+    // leave LV_USE_SNAPSHOT on, so the gate is the LVGL flag, not PSRAM.
     Serial.println("SCREENSHOT_UNSUPPORTED");
     return;
 #else
@@ -140,7 +153,9 @@ static void send_screenshot() {
     const uint32_t h = board_caps().height;
     const uint32_t row_bytes = w * 2;
     const uint32_t buf_size = row_bytes * h;
-    uint8_t* sbuf = (uint8_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+    // Same capability as the LVGL draw buffers: PSRAM where there is any,
+    // internal SRAM otherwise. A too-big request just fails into SCREENSHOT_ERR.
+    uint8_t* sbuf = (uint8_t*)heap_caps_malloc(buf_size, LV_BUF_CAPS);
     if (!sbuf) {
         Serial.println("SCREENSHOT_ERR");
         return;
@@ -342,9 +357,13 @@ void loop() {
 
         if (power_hal_pwr_pressed()) {
             if (!idle_consume_wake_press()) {
-                // On splash: cycle animations. On the usage view: cycle
-                // screen brightness (single non-splash view, no more screens).
-                if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
+                // Touchless board: PWR is the only way off the splash, so it
+                // takes over the tap-to-toggle gesture (no animation/brightness
+                // cycling there — the splash still follows the usage rate).
+                // Otherwise, on splash: cycle animations. On the usage view:
+                // cycle screen brightness (single non-splash view).
+                if (!board_caps().has_touch)                  ui_toggle_splash();
+                else if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
                 else                                          brightness_cycle();
             }
         }

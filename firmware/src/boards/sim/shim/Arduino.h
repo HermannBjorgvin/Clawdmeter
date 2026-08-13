@@ -8,6 +8,26 @@
 #include <stdlib.h>
 #include <string.h>
 
+// The shared sources get strlcpy (BSD) and gmtime_r (POSIX) from libc on the
+// Linux/macOS hosts this simulator was written for, and from newlib on the
+// ESP32 targets. mingw-w64's CRT has neither, so building the sim on Windows
+// needs these two — scoped to _WIN32 so the other hosts keep using their libc.
+#if defined(_WIN32)
+#include <time.h>
+static inline size_t strlcpy(char* dst, const char* src, size_t size) {
+    size_t len = strlen(src);
+    if (size) {
+        size_t n = len < size - 1 ? len : size - 1;
+        memcpy(dst, src, n);
+        dst[n] = '\0';
+    }
+    return len;   // BSD contract: the length it *wanted* to write
+}
+static inline struct tm* gmtime_r(const time_t* t, struct tm* out) {
+    return gmtime_s(out, t) == 0 ? out : NULL;
+}
+#endif
+
 unsigned long millis(void);
 void delay(unsigned long ms);
 

@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # Project context
 
 ESP32-S3 / ESP32-C6 firmware for a desk-side Claude Code usage monitor. Each
@@ -6,7 +10,7 @@ selected via PlatformIO's `build_src_filter`. Adding a board means dropping in
 a new folder + a new `[env:...]` block — `main.cpp`, `ui.cpp`, and `splash.cpp`
 never see board-specific code. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md).
 
-Six ports today (two SoC families, four panel sizes):
+Eight ports today (three SoC families, six panel sizes):
 
 - `boards/waveshare_amoled_216/` — original Waveshare ESP32-S3-Touch-AMOLED-2.16 (CO5300, 480×480 square, CST9220 touch, IMU rotation). Build env: `waveshare_amoled_216`.
 - `boards/waveshare_amoled_18/` — Waveshare ESP32-S3-Touch-AMOLED-1.8 (368×448 portrait, XCA9554 IO expander). Build env: `waveshare_amoled_18`. **Two panel revisions are auto-detected at boot** (`board_rev()` in `board_init.cpp`, enum in `board_rev.h`): original = SH8601 display + FT3168 touch (0x38); later = CO5300 display + CST816 touch (0x15). One binary drives both.
@@ -14,6 +18,10 @@ Six ports today (two SoC families, four panel sizes):
 - `boards/waveshare_amoled_18_c6/` — Waveshare ESP32-C6-Touch-AMOLED-1.8 (368×448 portrait, SH8601, FT3168 touch, TCA9554 expander). Build env: `waveshare_amoled_18_c6`. Same panel as the S3 1.8 but on the C6 SoC. All subsystems (display, touch, BOOT + PWR buttons, battery, BLE) verified on hardware.
 - `boards/waveshare_amoled_206/` — Waveshare ESP32-S3-Touch-AMOLED-2.06 (CO5300, 410×502 watch form factor, FT3168 touch, no IO expander, 32 MB flash, PCF85063 RTC, ES8311 codec). Build env: `waveshare_amoled_206`. Display, touch, battery, IMU init, and BLE verified on hardware; the ES8311 chime path is not wired up (`sound.cpp` no-ops).
 - `boards/waveshare_lcd_154/` — Waveshare ESP32-S3-Touch-LCD-1.54 (ST7789, 240×240 square, CST816T touch @ 0x15). Build env: `waveshare_lcd_154`. **The first non-AMOLED port**: a plain 4-wire SPI TFT, not QSPI, and the panel has no brightness command — backlight is LEDC PWM on `LCD_BL`. **No PMU**: battery is an ADC divider on GPIO1 and `BAT_EN` (GPIO2) is a power-hold line that must be driven HIGH early in `board_init()` or the board browns out on battery. Three buttons (BOOT + GPIO5 + a PWR-role GPIO4); ES8311 chime wired up; QMI8658 populated but unused (fixed orientation, no rotation).
+
+- `boards/esp32_devkit_st7789/` — **DIY wiring, not a vendor kit**: classic ESP32 DevKit v1 (WROOM-32) + ST7789V2 240×280 over 4-wire SPI, display-only (no touch/PMU/battery/codec), BOOT + two wired buttons. Build env: `esp32_devkit_st7789`. **The only classic-ESP32 port** (Xtensa LX6, BLE 4.2, no PSRAM, no native USB) — so no `ARDUINO_USB_CDC_ON_BOOT` (Serial is UART0 through the CP2102/CH340) and `huge_app.csv` partitions, since the ~1.7 MB image doesn't fit a 4 MB board's stock 1.25 MB app slot. **Verified on hardware** (2026-08-11): boots, ST7789V2 240×280 renders the splash, BLE advertises, PWR (GPIO 26) cycles the screens. **First touchless board**, so it sets `BOARD_HAS_TOUCH 0` → `caps.has_touch` false → the PWR short press takes over the tap-to-toggle gesture in `main.cpp` (without it the usage screen is unreachable and stays `HIDDEN` forever); animation/brightness cycling is given up here. BOOT/GPIO25 HID and the daemon link are still untested.
+
+- `boards/lilygo_tdisplay/` — LilyGO TTGO T-Display (classic ESP32) + 1.14" ST7789 **135×240 panel, driven landscape as 240×135**. Build env: `lilygo_tdisplay`. A vendor board sharing the DIY DevKit port's shape (classic ESP32, no PSRAM, no native USB, PWM backlight on GPIO 4, `huge_app.csv`), but **the smallest display in the tree** — the splash stage is min(W,H)/60 = **2 px per cell**. Pin map probe-confirmed on the real board (ESP32-D0WDQ6 rev 1.0, 16 MB flash, 0 B PSRAM), matching Arduino_GFX's `LILYGO_T_DISPLAY` block. Two gotchas worth keeping straight: **`LCD_PANEL_W/H` (135×240 native, what the `Arduino_ST7789` constructor wants) is deliberately separate from `LCD_WIDTH/HEIGHT` (240×135, what LVGL and `caps.cpp` publish)** — mixing them draws into a 135-wide window on a 240-wide screen; and the GRAM offsets (52/40/53/40) are passed as-is because `Arduino_TFT::setRotation` picks the right pair per rotation. Unlike the CO5300 AMOLEDs, the ST7789 exchanges rows/columns in hardware, so rotation is one register write and `display_hal_tick` stays empty. **Touchless** (`BOARD_HAS_TOUCH 0`), so PWR = **GPIO 35** cycles screens; GPIO 35 is input-only with no internal pull-up, hence `BTN_PWR_INPUT_ONLY` and `INPUT` (not `INPUT_PULLUP`) in `power.cpp`. BOOT = GPIO 0; the third button is RST wired to EN and invisible to software, so there's no secondary/HID button. Battery is a 2:1 divider on GPIO 34 that reads ~4.2 V on USB with or without a cell — "no battery" and "full battery" are indistinguishable here.
 
 Plus one non-hardware target: `boards/sim/` — **native desktop simulator** (SDL2 window, 480×480, `platform = native`). Build env: `sim`. See "Desktop simulator" below.
 
@@ -82,12 +90,20 @@ firmware/src/
     waveshare_amoled_18_c6/ — C6: SH8601 + FT3168 + AXP PKEY + TCA9554 (gates power), no PSRAM
     waveshare_amoled_206/   — CO5300 + FT3168 + AXP PKEY, no IO expander, 32 MB, no rotation
     waveshare_lcd_154/      — ST7789 SPI TFT + CST816T + ADC battery (no PMU), PWM backlight
+    esp32_devkit_st7789/    — classic ESP32 DIY: ST7789V2 240x280, display-only, touchless
+    lilygo_tdisplay/        — classic ESP32 vendor: ST7789 240x135 landscape, touchless, ADC battery
     sim/                    — native desktop simulator: SDL2 + Arduino shims + scenario playback
     template/               — copy this to bootstrap a new port
   main.cpp                  — setup() + loop(): HAL calls only, zero #ifdef BOARD_*
-  ui.{h,cpp}                — 3-screen UI (splash, usage, bluetooth). compute_layout() picks fonts/positions from board_caps() (responsive — current breakpoint: H >= 460 → large, else compact)
-  splash.{h,cpp}            — 20×20 pixel-art engine. CELL = min(W,H)/20, centered.
+  ui.{h,cpp}                — 3-screen UI (splash, usage, opencode), cycled in enum order by one gesture (tap, or PWR on touchless boards). compute_layout() picks fonts/positions from board_caps() (responsive — current breakpoint: H >= 460 → large, else compact)
+  splash.{h,cpp}            — 60×60 pixel-art engine (see "Splash animations")
+  splash_geometry.h         — pure cell-size/scale math for the splash stage; no LVGL/Arduino deps so it host-unit-tests (PSRAM → full-size canvas at 1.0x; no PSRAM → 60×60 buffer LVGL upscales, ~7 KB instead of ~460 KB)
   ble.{h,cpp}               — NimBLE peripheral: custom data service + HID keyboard
+  idle.{h,cpp}              — idle fade-out/wake. **Owns panel brightness** — never call display_hal_set_brightness directly
+  brightness.{h,cpp}        — user brightness level (PWR short-press cycles), persisted to NVS, applied via idle_set_awake_brightness()
+  usage_rate.{h,cpp}        — %/min rate of change of session_pct → 4 animation groups (idle/normal/active/heavy); also flags session resets to trigger the chime
+  chime.{h,cpp} + es8311.c  — board-agnostic ES8311 + I2S engine; a board's sound.cpp supplies pins/volume/amp_enable. bell_pcm.h is 44.1 kHz stereo — sample_rate must match
+  theme.h                   — color tokens (single source of truth for UI colors)
   data.h                    — UsageData struct
   icons.h                   — icon arrays. Battery (5×) are RGB565A8 with alpha; rest are raw RGB565.
   logo.h                    — 80×80 RGB565 logo
@@ -111,6 +127,10 @@ pio run -d firmware -e waveshare_amoled_216_c6                                  
 pio run -d firmware -e waveshare_amoled_18_c6                                   # build 1.8 (C6)
 pio run -d firmware -e waveshare_amoled_206                                     # build 2.06 (S3, watch)
 pio run -d firmware -e waveshare_lcd_154                                        # build 1.54 (S3, SPI TFT)
+pio run -d firmware -e esp32_devkit_st7789                                      # build DIY ESP32 DevKit v1 + ST7789V2 240x280
+pio run -d firmware -e esp32_devkit_st7789 -t upload --upload-port COM5         # flash it (USB-UART bridge, not native USB)
+pio run -d firmware -e lilygo_tdisplay                                          # build LilyGO TTGO T-Display (classic ESP32, 240x135)
+pio run -d firmware -e lilygo_tdisplay -t upload --upload-port /dev/cu.wchusbserial*  # flash it on macOS (CH9102 bridge; older units are CP2104 → /dev/cu.usbserial-*)
 pio run -d firmware -e waveshare_amoled_18 -t upload --upload-port /dev/cu.usbmodem101   # flash 1.8 on macOS
 pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0         # flash 2.16 on Linux
 # C6 boards: same native USB-JTAG flashing; flag a chip mismatch ("This chip is ESP32-C6,
@@ -120,6 +140,22 @@ pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0
 If `pio` isn't on PATH: try `~/.platformio/penv/bin/pio` (Linux/macOS pio install) or `brew install platformio` on macOS.
 
 Device path differs by OS: `/dev/cu.usbmodem*` on macOS, `/dev/ttyACM0` on Linux. Both expose the ESP32-S3 native USB-JTAG (no boot-mode dance needed).
+
+Wrappers users run (keep working when you touch envs/pins): `./flash.sh` / `./flash-mac.sh <env> [port]` (env list is scraped from `firmware/platformio.ini`), `./install.sh` (Linux systemd), `./install-mac.sh` (venv + LaunchAgent), `./install-windows.ps1` (venv + tray + autostart).
+
+## Tests
+
+There is **no CI** — run these yourself before claiming done.
+
+```bash
+python -m pytest daemon/tests -q                          # host daemon suite (run from repo ROOT: conftest.py puts the repo on sys.path so `import daemon.*` resolves)
+python -m pytest daemon/tests/test_freeride.py -x -q      # one file
+python -m pytest daemon/tests -q -k decode_hex            # one test
+bash daemon/tests/test_bash_token.sh                      # bash daemon's read_token_for() (evals just that function out of the .sh)
+cd firmware/test/test_splash_geometry && g++ -std=c++17 -I ../../src test_main.cpp -o t && ./t   # host C++ unit test, no PlatformIO needed
+```
+
+Two tests in `test_windows_token.py` are **Linux/WSL-only** (skipped on macOS and native Windows — they spawn the Windows daemon and assert its "WinRT unavailable" warning); everything else mocks `bleak`/`httpx` and runs anywhere. Firmware itself has no on-device test suite — `pio run -e <env>` (compile) + the simulator + `screenshot.sh` are the verification loop.
 
 ## Desktop simulator (`-e sim`) — develop UI without hardware
 
@@ -224,6 +260,7 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 
 ## Recent session highlights
 
+- **Official Clawd art on a 60×60 stage (2026-08-10).** Replaced the hand-made 20×20 pixel art with the 17 archived Anthropic animations, loop-region playback, and the corner mascot; splash sizing moved into the host-testable `splash_geometry.h` so PSRAM-less C6 boards render a 60×60 buffer LVGL upscales.
 - **AMOLED-1.8 chime verified on hardware + EXIO2 touch-kill fix (2026-07-13).** The 1.8's `amp_enable` hook drove both GPIO 46 and XCA9554 EXIO2 ("the unused one is harmless") — but pulling EXIO2 low takes the FT3168 off the I2C bus (chip stops ACKing; IDF reports it as `ESP_ERR_INVALID_STATE`, which reads like a driver wedge and cost a long I2S red-herring chase). Amp enable is GPIO 46 only; EXIO2 must stay HIGH. Chime, touch, buttons, and BLE bond persistence all verified on a real 1.8.
 - **Device-abstraction refactor (2026-05-18).** All board-conditional code moved out of shared files into `boards/<name>/` and behind a HAL in `hal/`. ~30 `#ifdef BOARD_*` blocks went to zero. UI is responsive via `compute_layout()` driven by `board_caps()`. New ports add a folder + a PlatformIO env — no shared file edits.
 - Added second board port: Waveshare AMOLED-1.8 (368×448 portrait, SH8601, FT3168, XCA9554 IO expander).
@@ -236,13 +273,26 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 
 ## Daemon / host side
 
-Bash daemon (`daemon/claude-usage-daemon.sh`) reads OAuth token, polls Anthropic API, sends JSON over BLE GATT. Run with `systemctl --user start claude-usage-daemon`. The unit file's `ExecStart` is the absolute path to the script — repoint it when switching between the worktree and the main checkout.
+**Three independent daemons, one per host OS — a protocol/behaviour change must land in all three:**
 
-**Discovery & resilience:**
+| OS | Entry point | Token source | Service manager |
+|---|---|---|---|
+| Linux | `daemon/claude-usage-daemon.sh` (bash + bluetoothctl/busctl) | `~/.claude/.credentials.json` | systemd user unit (`systemctl --user start claude-usage-daemon`) |
+| macOS | `daemon/claude_usage_daemon.py` (bleak + httpx) | Keychain service `Claude Code-credentials` | LaunchAgent `com.user.claude-usage-daemon.plist` |
+| Windows | `daemon/claude_usage_daemon_windows.py` (+ `tray_windows.py`, `autostart_windows.py`) | native-Windows credentials path | tray app + Run-key autostart |
 
-- Connects by name (`"Clawdmeter"`) on first run, caches resolved MAC at `~/.config/claude-usage-monitor/ble-address`. ESP32 BLE addresses are factory-burned per-chip, so swapping any board invalidates the cache.
-- On connect failure: cache is dropped AND device is removed from bluez (`bluetoothctl remove`) so the next scan won't re-pick a dead MAC. Multi-candidate scans pick `head -1` and let the failure cycle converge.
-- `POLL_INTERVAL=60`, `TICK=5`. Inner loop wakes every 5s to detect disconnects fast; polls Anthropic when 60s elapsed OR when ESP fires a refresh request.
+The systemd unit's `ExecStart` is an absolute path to the script — repoint it when switching between a worktree and the main checkout.
+
+**Invariants that hold across all three:**
+
+- **Free-ride tokens.** The daemon NEVER refreshes the OAuth token — Claude Code owns refreshing. The daemon reads whatever access token is stored and, when it's dead, pushes "No data" to the device. Don't reintroduce refresh machinery (it was deliberately deleted; `test_freeride.py` guards this).
+- **Read only `claudeAiOauth`.** A real credentials file holds many `accessToken` fields (MCP servers etc.); concatenating them yields a 401 and the device shows 0% forever. Guarded by `test_bash_token.sh`.
+- **Never scan by name.** The daemon connects only to a Clawdmeter the host already has paired/connected (bluez lists it, or the Mac/PC is bonded to it) — no LE advertising scan, so it can't grab a stranger's board. The firmware side matches: `ble.cpp` locks to a **single owner** identity address in NVS and prunes foreign bonds; the 3-second PWR hold+release gesture clears the owner so the board can be handed to another machine.
+- `POLL_INTERVAL=60`, `TICK=5`. The inner loop wakes every 5 s to detect disconnects fast; polls Anthropic when 60 s elapsed OR when the ESP fires a refresh request.
+- **OpenCode Go is a separate, optional source.** `daemon/opencode_usage.py` (shared by both Python daemons; the bash one shells out to it with `--fragment`) feeds the OpenCode screen, which mirrors the Anthropic one because the data mirrors it too. Two local-first sources:
+  - **Limits** — `GET https://opencode.ai/zen/go/v1/usage`, authenticated with the key OpenCode already stored in `~/.local/share/opencode/auth.json` (`opencode-go.key`, or `$OPENCODE_API_KEY`). Undocumented — found by probing, since the Zen docs list no usage endpoint — and it returns `rolling`/`weekly`/`monthly`, each with `percent` + ISO `resetsAt`. Becomes `ocs`/`ocsr`, `ocw`/`ocwr`, `ocmo`, `ocst`. **The `User-Agent` header is load-bearing**: Cloudflare fronts opencode.ai and 403s urllib's default `Python-urllib/3.x` with error code 1010; any normal UA passes (this is why an httpx probe succeeds where urllib fails). Uses `urllib`, not `httpx`, because the bash daemon runs this module under the host's bare python3, not the daemons' venv.
+  - **Tokens** — read-only stdlib `sqlite3` against `$OPENCODE_DATA_DIR/opencode.db`, whose `session` table carries per-session token counters and `model` (`oct`, `ocm`). **Not** `ccusage`: that parses the older `storage/message/*.json` layout, which current OpenCode versions no longer write, so it silently reports nothing. `time_updated` is epoch **milliseconds** and `model` is a JSON blob (`{"id":…,"providerID":…}`).
+  Go is a subscription, so spend is fractions of a cent and is deliberately not displayed — the windows are what run out. No limits → no fields at all → "No data", never a fabricated 0%. Free-ride like the Anthropic side: the stored key is read, never refreshed.
 
 **GATT characteristics on service `4c41555a-...0001`:**
 

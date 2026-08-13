@@ -326,6 +326,15 @@ build_payload_for_token() {
     chime=$(read_chime_setting)
     [ "$chime" = "on" ] && chime_fragment=",\"c\":1"
 
+    # OpenCode usage on non-Anthropic providers, for the device's OpenCode
+    # screen. Aggregated by the shared Python helper (same python3 shell-out
+    # trick the enterprise branch below uses); empty when python3 or ccusage is
+    # missing, or when OpenCode logged nothing today.
+    local opencode_fragment=""
+    if command -v python3 >/dev/null 2>&1; then
+        opencode_fragment=$(python3 "$(dirname "${BASH_SOURCE[0]}")/opencode_usage.py" --fragment 2>/dev/null) || opencode_fragment=""
+    fi
+
     local payload
     if [ -n "$s5h_util" ]; then
         # Pro/Max account — 5h/7d windows
@@ -337,13 +346,13 @@ build_payload_for_token() {
         s5h_util=${s5h_util:-0}; s5h_reset=${s5h_reset:-0}
         s7d_util=${s7d_util:-0}; s7d_reset=${s7d_reset:-0}
         s5h_status=${s5h_status:-unknown}
-        payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$s5h_status" -v now="$now" -v clk="$clock_fragment" -v chm="$chime_fragment" \
+        payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$s5h_status" -v now="$now" -v clk="$clock_fragment" -v chm="$chime_fragment" -v oc="$opencode_fragment" \
             'BEGIN {
                 sp = sprintf("%.0f", u5 * 100);
                 sr = (r5 - now) / 60; sr = sr > 0 ? sprintf("%.0f", sr) : 0;
                 wp = sprintf("%.0f", u7 * 100);
                 wr = (r7 - now) / 60; wr = wr > 0 ? sprintf("%.0f", wr) : 0;
-                printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"acct\":\"pro\"%s%s,\"ok\":true}", sp, sr, wp, wr, st, clk, chm;
+                printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"acct\":\"pro\"%s%s%s,\"ok\":true}", sp, sr, wp, wr, st, clk, chm, oc;
             }')
     else
         # Enterprise account — spending-limit model
@@ -365,7 +374,7 @@ rd = f"{dt_end.strftime('%b')} {dt_end.day}"
 print(json.dumps({"tp": tp, "pd": pd_days, "rd": rd}))
 PYEOF
 )
-        payload=$(awk -v ou="$overage_util" -v or_="$overage_reset" -v st="$status" -v now="$now" -v pi="$period_info" -v clk="$clock_fragment" -v chm="$chime_fragment" \
+        payload=$(awk -v ou="$overage_util" -v or_="$overage_reset" -v st="$status" -v now="$now" -v pi="$period_info" -v clk="$clock_fragment" -v chm="$chime_fragment" -v oc="$opencode_fragment" \
             'BEGIN {
                 sp = sprintf("%.0f", ou * 100);
                 sr = (or_ - now) / 60; sr = sr > 0 ? sprintf("%.0f", sr) : 0;
@@ -374,7 +383,7 @@ PYEOF
                 match(pi, /"tp": *([0-9]+)/, a); if (RSTART) tp = a[1];
                 match(pi, /"pd": *([0-9]+)/, b); if (RSTART) pd = b[1];
                 match(pi, /"rd": *"([^"]+)"/, c); if (RSTART) rd = c[1];
-                printf "{\"s\":%s,\"sr\":%s,\"w\":0,\"wr\":0,\"st\":\"%s\",\"acct\":\"ent\",\"tp\":%s,\"pd\":%s,\"rd\":\"%s\"%s%s,\"ok\":true}", sp, sr, st, tp, pd, rd, clk, chm;
+                printf "{\"s\":%s,\"sr\":%s,\"w\":0,\"wr\":0,\"st\":\"%s\",\"acct\":\"ent\",\"tp\":%s,\"pd\":%s,\"rd\":\"%s\"%s%s%s,\"ok\":true}", sp, sr, st, tp, pd, rd, clk, chm, oc;
             }')
     fi
 

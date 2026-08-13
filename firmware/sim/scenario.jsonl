@@ -3,6 +3,7 @@
 # Keys: space play/pause · arrows step · 1-9 jump · see boards/sim/board.h.
 {"name":"fresh session","hold_ms":3000,"s":3.0,"sr":295,"w":12.0,"wr":9000,"st":"allowed","ok":true,"t":1785474000,"tf":24}
 {"name":"steady use","hold_ms":3000,"s":42.0,"sr":180,"w":33.0,"wr":7900,"st":"allowed","ok":true}
+{"name":"with opencode windows","hold_ms":3000,"s":45.0,"sr":170,"w":34.0,"wr":7800,"st":"allowed","ok":true,"ocs":38,"ocsr":275,"ocw":12,"ocwr":5819,"ocmo":6,"ocst":"ok","oct":562461,"ocm":"deepseek-v4-flash"}
 {"name":"warning zone","hold_ms":3000,"s":78.0,"sr":75,"w":55.0,"wr":6400,"st":"allowed","ok":true}
 {"name":"maxed out","hold_ms":4000,"s":98.0,"sr":12,"w":88.0,"wr":5200,"st":"limited","ok":true}
 {"name":"session reset + chime","hold_ms":4000,"s":2.0,"sr":298,"w":88.0,"wr":5100,"st":"allowed","c":true,"ok":true}

@@ -1,0 +1,6 @@
+{
+  "name": "clawdmeter-tools",
+  "private": true,
+  "description": "Asset converters. png_to_lvgl.js needs pngjs; it was previously undeclared.",
+  "dependencies": { "pngjs": "^7.0.0" }
+}

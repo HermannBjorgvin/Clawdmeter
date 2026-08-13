@@ -5,13 +5,13 @@ static const BoardCaps caps = {
     .name = BOARD_NAME,
     .width = LCD_WIDTH,
     .height = LCD_HEIGHT,
-    // BOOT (primary) + GPIO5 (secondary). The PWR-role button on GPIO4 is
+    // BOOT (primary) + GPIO25 (secondary). The PWR-role button on GPIO26 is
     // handled in power.cpp and not counted here.
     .button_count = (uint8_t)(1 + BOARD_HAS_SECONDARY_BUTTON),
     .has_rotation = (bool)BOARD_HAS_ROTATION,
     .has_battery  = (bool)BOARD_HAS_BATTERY,
     .has_imu      = (bool)BOARD_HAS_IMU,
-    .has_touch = true,
+    .has_touch    = (bool)BOARD_HAS_TOUCH,
 };
 
 const BoardCaps& board_caps(void) { return caps; }
