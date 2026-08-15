@@ -152,7 +152,11 @@ hardware boards, not shared code).
 
 ## QA your own UI changes — don't ask the user
 
-The firmware ships a `screenshot` serial command that dumps the LVGL framebuffer. `./screenshot.sh out.png [port]` captures a PNG sized to the active display (480×480 or 368×448). **Use this on every UI iteration** — Read the PNG with the Read tool, verify the change visually, iterate. Script auto-picks the macOS/Linux default port and falls back to pio's bundled Python if pyserial isn't on the system Python.
+The firmware ships a `screenshot` serial command that dumps the LVGL framebuffer. `py screenshot.py [out.png] [port]` captures a PNG sized to the active display (480×480 or 368×448). **Use this on every UI iteration** — Read the PNG with the Read tool, verify the change visually, iterate.
+
+Auto-detects the board by USB VID `0x303A` (so it won't grab an unrelated COM port), needs only pyserial, and re-execs under pio's bundled Python if pyserial isn't on the system one. PNG is written with stdlib `zlib` — no Pillow, no ffmpeg. `py screenshot.py --list` shows candidate ports.
+
+Two things it handles that are easy to get wrong: DTR/RTS are held low before opening the port, because toggling them resets the S3's native USB-JTAG and would reboot the device to the splash — destroying the screen you were trying to capture; and RGB565 channels are expanded by bit replication, so panel white lands on `#FFFFFF` rather than `#F8F8F8`.
 
 The boot screen is `SCREEN_SPLASH` and only advances on a physical button press, so a fresh flash will sit on the splash. To screenshot the screen you're actually editing without asking the user to press a button, **temporarily change the default boot screen** in `main.cpp` (search for `ui_show_screen(SCREEN_SPLASH);`) to `SCREEN_USAGE` / `SCREEN_CONTROLLER` / `SCREEN_BLUETOOTH`, do your iteration, then revert before committing.
 
