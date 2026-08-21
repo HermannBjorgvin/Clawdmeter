@@ -48,7 +48,7 @@ Optional:
 
    | File              | Reference port (start here)                                    |
    |-------------------|----------------------------------------------------------------|
-   | `display.cpp`     | `boards/waveshare_amoled_216/display.cpp` (with CPU rotation), `_18/display.cpp` (no rotation), `waveshare_lcd_154/display.cpp` (SPI TFT), or `waveshare_lcd4/display.cpp` (RGB parallel + bounce buffers) |
+   | `display.cpp`     | `boards/waveshare_amoled_216/display.cpp` (with CPU rotation), `_18/display.cpp` (no rotation), `waveshare_lcd_154/display.cpp` (SPI TFT), or `waveshare_lcd_4/display.cpp` (RGB parallel + bounce buffers) |
    | `touch.cpp`       | `_216/touch.cpp` (library-based) or `_18/touch.cpp` (vendored I2C reader) |
    | `input.cpp`       | `_216/input.cpp` (two buttons) or `_18/input.cpp` (one button) |
    | `power.cpp`       | `_216/power.cpp` (PMU IRQ) or `_18/power.cpp` (PMU + IO expander button) |
