@@ -18,3 +18,6 @@ daemon/.venv/
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# Editor swap files
+*.swp
