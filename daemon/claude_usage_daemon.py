@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Claude Usage Tracker Daemon (BLE) — macOS port of claude-usage-daemon.sh.
 
-Polls Claude API rate-limit headers and writes a JSON payload to the
+Polls Claude usage (the zero-token /usage endpoint, falling back to the
+Messages API's rate-limit headers) and writes a JSON payload to the
 ESP32 "Clawdmeter" peripheral over a custom GATT service. Uses
 bleak (CoreBluetooth backend on macOS).
 """
@@ -69,11 +70,50 @@ API_BODY = {
     "messages": [{"role": "user", "content": "hi"}],
 }
 
+# --- Zero-token usage endpoint (primary source) -----------------------------
+# The undocumented endpoint behind Claude Code's own `/usage` view. A GET
+# costs nothing (no model call, no tokens billed) and returns the same 5h/7d
+# windows the rate-limit headers carry, so it replaces the 1-token POST above
+# as the primary source — API_URL stays as the fallback.
+#
+# UNDOCUMENTED means it can change shape or vanish without notice. Every
+# unexpected response falls through to the header path rather than guessing,
+# which is why the header path is kept intact rather than deleted.
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+# Same auth/identity headers as the Messages call, minus Content-Type (no body
+# on a GET). Derived from the template so the OAuth beta flag and User-Agent
+# only ever have to be bumped in one place.
+USAGE_HEADERS_TEMPLATE = {
+    k: v for k, v in API_HEADERS_TEMPLATE.items() if k != "Content-Type"
+}
+# On a 429 the endpoint is benched for this long and the header path carries
+# the daemon meanwhile. This is not a tuning knob: two earlier attempts at this
+# feature (PRs #29/#37) were reverted upstream for hammering the endpoint, so
+# a rate-limit response must cost us a long, quiet pause — never a retry.
+USAGE_ENDPOINT_COOLDOWN_S = 900
+
+# Monotonic-ish wall-clock deadline; 0.0 = not benched. Module-level so the
+# bench survives reconnects and every config dir's poll, exactly like _SELECTOR
+# — a 429 is an account-wide signal, not a per-dir one.
+_usage_endpoint_benched_until: float = 0.0
+
+# Severity values the endpoint reports, mapped onto the vocabulary the header
+# path's "st" already uses ("allowed" / "allowed_warning" / "rejected"), so the
+# key keeps one meaning across both paths. Unknown severities pass through
+# verbatim rather than being flattened into a wrong-but-familiar word.
+_SEVERITY_TO_STATUS = {
+    "normal": "allowed",
+    "warning": "allowed_warning",
+    "exceeded": "rejected",
+    "rejected": "rejected",
+}
+
 
 class TokenExpired(Exception):
-    """Raised by poll_api on a 401/403 — the access token is dead. The daemon never
-    refreshes (pure free-ride: Claude Code owns refreshing), so the caller just
-    signals "No data" to the device until the CLI re-seeds the token."""
+    """Raised by poll_usage_endpoint/poll_api on a 401/403 — the access token is
+    dead. The daemon never refreshes (pure free-ride: Claude Code owns
+    refreshing), so the caller just signals "No data" to the device until the
+    CLI re-seeds the token."""
 
 
 def log(msg: str) -> None:
@@ -493,7 +533,187 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
+def _minutes_until(iso_ts: object, now: float) -> int:
+    """Whole minutes from ``now`` until an ISO-8601 instant; 0 when already past.
+
+    The endpoint reports a real timestamp ("2026-09-06T10:19:59.672495+00:00")
+    where the headers only carried a whole-minute epoch, so this is strictly
+    more precise — but it rounds to the same unit the firmware expects, and
+    matches the header path's ``int(round(mins))`` so "sr"/"wr" keep one
+    meaning across both sources.
+
+    A clock skew or a window that expired mid-poll must never produce a
+    negative: the firmware renders "sr" as a countdown and a negative would
+    read as a garbage reset time.
+    """
+    if not isinstance(iso_ts, str):
+        # null resets_at (seen on the inactive buckets) — same as an absent
+        # header on the old path: no countdown to show.
+        return 0
+    try:
+        dt = datetime.datetime.fromisoformat(iso_ts)
+    except ValueError:
+        return 0
+    if dt.tzinfo is None:
+        # Every observed value carries an explicit offset. If one ever doesn't,
+        # UTC is the right assumption for an API instant — .timestamp() would
+        # otherwise silently read it as host-local time and skew by the tz.
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    mins = (dt.timestamp() - now) / 60.0
+    return int(round(mins)) if mins > 0 else 0
+
+
+def _endpoint_pct(util: object) -> int:
+    """Round the endpoint's ``utilization`` to whole percent.
+
+    NOTE the units difference that makes this NOT the header path's ``pct()``:
+    the endpoint already reports a percentage (16.0 means 16%), whereas the
+    rate-limit headers report a 0..1 fraction that has to be multiplied by 100.
+    Multiplying here would send 1600% to the device.
+    """
+    if isinstance(util, bool) or not isinstance(util, (int, float)):
+        return 0
+    return max(0, int(round(float(util))))
+
+
+def _is_pro_max_usage(data: object) -> bool:
+    """Does this response look like the Pro/Max shape we know how to read?
+
+    Pro/Max accounts report both rolling windows as objects with a numeric
+    ``utilization``. Enterprise/overage accounts are a different model
+    entirely (a single spend limit, surfaced to us only as the
+    ``anthropic-ratelimit-unified-overage-*`` headers) and are the reason
+    ``poll_api`` also produces the "ent" acct value and _billing_period_info().
+    Nothing here can synthesise those, so anything that isn't unmistakably
+    Pro/Max — an Enterprise account, a plan we've never seen, or a future
+    reshaping of this undocumented payload — falls back to the headers rather
+    than being guessed at.
+    """
+    if not isinstance(data, dict):
+        return False
+    for key in ("five_hour", "seven_day"):
+        window = data.get(key)
+        if not isinstance(window, dict):
+            return False
+        util = window.get("utilization")
+        # bool is an int subclass; True must not read as 1%.
+        if isinstance(util, bool) or not isinstance(util, (int, float)):
+            return False
+    return True
+
+
+def _endpoint_status(data: dict) -> str:
+    """The "st" string, from the ``limits`` entry describing the 5h window.
+
+    The headers expose a dedicated 5h status; the endpoint instead carries a
+    per-limit ``severity``, so the session-kind limit is the equivalent. A
+    payload without a usable ``limits`` list still yields a valid payload —
+    the firmware parses "st" but renders nothing from it, so "unknown" (the
+    header path's own default) is a fine answer.
+    """
+    limits = data.get("limits")
+    if not isinstance(limits, list):
+        return "unknown"
+    for entry in limits:
+        if isinstance(entry, dict) and entry.get("kind") == "session":
+            severity = entry.get("severity")
+            if isinstance(severity, str):
+                return _SEVERITY_TO_STATUS.get(severity, severity)
+    return "unknown"
+
+
+async def poll_usage_endpoint(token: str) -> dict | None:
+    """Primary usage source: the zero-token GET behind Claude Code's /usage.
+
+    Returns a payload dict in exactly the shape ``poll_api`` produces (same
+    keys, same units, chime/clock fields already merged) so callers can use it
+    as a drop-in, or ``None`` meaning "I have nothing usable — use the header
+    path". Only a dead token escapes as an exception.
+
+    Everything unexpected returns None rather than raising: a non-200, a
+    network error, a body that isn't JSON, or a body whose shape we don't
+    recognise. The endpoint is undocumented, so that fallback IS the safety
+    story — this function is allowed to be wrong, never to be load-bearing.
+
+    Deliberately NOT surfaced: the per-model weekly bucket (``limits`` entries
+    with kind == "weekly_scoped"). Anthropic removes Fable's separate weekly
+    limit on 2026-09-14, so the extra keys would be dead within days, and the
+    BLE payload is already large enough that the History fields push it past
+    a write-without-response (see WRITE_NR_MAX_BYTES). Nothing should depend
+    on that bucket; if it's ever wanted, it belongs behind new optional keys.
+    """
+    global _usage_endpoint_benched_until
+    if time.time() < _usage_endpoint_benched_until:
+        # Benched by a recent 429; stay off it entirely and let the caller
+        # fall through. No log line — this fires every poll for 15 minutes.
+        return None
+
+    headers = dict(USAGE_HEADERS_TEMPLATE)
+    headers["Authorization"] = f"Bearer {token}"
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.get(USAGE_URL, headers=headers)
+    except httpx.HTTPError as e:
+        log(f"Usage endpoint call failed ({e}); using rate-limit headers")
+        return None
+
+    # 401/403 is a dead token, not an endpoint problem — the header path would
+    # only spend a request to reach the same conclusion. Raise exactly as
+    # poll_api does; the caller reads it as "this config dir has no data".
+    if resp.status_code in (401, 403):
+        log(f"Usage endpoint HTTP {resp.status_code} (token expired/invalid)")
+        raise TokenExpired()
+    if resp.status_code == 429:
+        _usage_endpoint_benched_until = time.time() + USAGE_ENDPOINT_COOLDOWN_S
+        log(f"Usage endpoint rate-limited; benched for "
+            f"{USAGE_ENDPOINT_COOLDOWN_S // 60} min, using rate-limit headers")
+        return None
+    if resp.status_code != 200:
+        log(f"Usage endpoint HTTP {resp.status_code}; using rate-limit headers")
+        return None
+
+    try:
+        data = resp.json()
+    except ValueError as e:  # json.JSONDecodeError subclasses ValueError
+        log(f"Usage endpoint returned non-JSON ({e}); using rate-limit headers")
+        return None
+
+    if not _is_pro_max_usage(data):
+        log("Usage endpoint shape not recognised; using rate-limit headers")
+        return None
+
+    # Re-read the clock after the request: the round trip is part of the
+    # elapsed time the countdown is measured from.
+    now = time.time()
+    five_hour = data["five_hour"]
+    seven_day = data["seven_day"]
+    payload = {
+        "s": _endpoint_pct(five_hour.get("utilization")),
+        "sr": _minutes_until(five_hour.get("resets_at"), now),
+        "w": _endpoint_pct(seven_day.get("utilization")),
+        "wr": _minutes_until(seven_day.get("resets_at"), now),
+        "st": _endpoint_status(data),
+        "acct": "pro",
+        "ok": True,
+    }
+    add_chime_field(payload)   # adds "c":1 iff the config opts in
+    add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
+    return payload
+
+
 async def poll_api(token: str) -> dict | None:
+    # Primary path: the zero-token usage endpoint. It returns None for anything
+    # it can't confidently read (non-200, network error, bad/unknown JSON, a
+    # 429 bench) and the rate-limit header path below then runs unchanged.
+    #
+    # The composition lives here rather than in poll_active so poll_api stays
+    # the daemon's single "give me a payload for this token" chokepoint — every
+    # caller and every test that stubs poll_api keeps working, and there is
+    # exactly one place where a network call can escape.
+    payload = await poll_usage_endpoint(token)   # may raise TokenExpired
+    if payload is not None:
+        return payload
+
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
     try:
