@@ -119,6 +119,36 @@ static bool parse_json(const char* json, UsageData* out) {
     strlcpy(out->reset_date, doc["rd"] | "", sizeof(out->reset_date));
     out->clock_epoch = doc["t"] | 0L;
     out->clock_fmt = doc["tf"] | 24;
+
+    // History: fixed-width arrays, oldest → newest. A short array (young
+    // install) is right-aligned so "today" is always the last slot.
+    out->hist_days = 0;
+    out->hist_mix_n = 0;
+    JsonArrayConst h = doc["h"].as<JsonArrayConst>();
+    if (!h.isNull()) {
+        JsonArrayConst ht = doc["ht"].as<JsonArrayConst>();
+        int n = (int)h.size();
+        if (n > HIST_DAYS) n = HIST_DAYS;
+        for (int i = 0; i < HIST_DAYS; ++i) { out->hist_out_k[i] = 0; out->hist_turns[i] = 0; }
+        int base = HIST_DAYS - n;
+        for (int i = 0; i < n; ++i) {
+            long v = h[i] | 0L;
+            out->hist_out_k[base + i] = (int16_t)(v > 32767 ? 32767 : v);
+            long t = (i < (int)ht.size()) ? (ht[i] | 0L) : 0L;
+            out->hist_turns[base + i] = (int16_t)(t > 32767 ? 32767 : t);
+        }
+        out->hist_days = (int8_t)n;
+        out->hist_weekday = (int8_t)(doc["hw"] | 0);
+        JsonArrayConst hm = doc["hm"].as<JsonArrayConst>();
+        for (JsonArrayConst pair : hm) {
+            if (out->hist_mix_n >= HIST_MIX_N || pair.size() < 2) break;
+            strlcpy(out->hist_mix_name[out->hist_mix_n], pair[0] | "?",
+                    sizeof(out->hist_mix_name[0]));
+            int pct = pair[1] | 0;
+            out->hist_mix_pct[out->hist_mix_n] = (uint8_t)(pct < 0 ? 0 : pct > 100 ? 100 : pct);
+            out->hist_mix_n++;
+        }
+    }
     out->ok = doc["ok"] | false;
     out->valid = true;
     return true;

@@ -16,7 +16,7 @@ Seven ports today (two SoC families, five panel sizes):
 - `boards/waveshare_lcd_154/` — Waveshare ESP32-S3-Touch-LCD-1.54 (ST7789, 240×240 square, CST816T touch @ 0x15). Build env: `waveshare_lcd_154`. **The first non-AMOLED port**: a plain 4-wire SPI TFT, not QSPI, and the panel has no brightness command — backlight is LEDC PWM on `LCD_BL`. **No PMU**: battery is an ADC divider on GPIO1 and `BAT_EN` (GPIO2) is a power-hold line that must be driven HIGH early in `board_init()` or the board browns out on battery. Three buttons (BOOT + GPIO5 + a PWR-role GPIO4); ES8311 chime wired up; QMI8658 populated but unused (fixed orientation, no rotation).
 - `boards/waveshare_lcd_4/` — Waveshare ESP32-S3-Touch-LCD-4 (ST7701 RGB parallel, 480×480 square, GT911 touch). Build env: `waveshare_lcd_4`. **RGB-panel port**: Arduino_ESP32RGBPanel + bounce buffers (tearing fix). IO expander @ 0x24 (TCA9554 / CH32V003) must init before `gfx->begin()` or the panel stays dark; backlight is expander pin 2 (on/off only). No AXP2101 / IMU; KEY/PWR is hardware RST. Single BOOT button (GPIO 0 → Space/PTT).
 
-Plus one non-hardware target: `boards/sim/` — **native desktop simulator** (SDL2 window, 480×480, `platform = native`). Build env: `sim`. See "Desktop simulator" below.
+Plus one non-hardware target: `boards/sim/` — **native desktop simulator** (SDL2 window, `platform = native`). Build envs: `sim` (480×480) and `sim_cyd` (240×320 portrait, for small-layout work — the real CYD has no screenshot path). See "Desktop simulator" below.
 
 **C6 ports have no PSRAM** — shared code gates on `BOARD_HAS_PSRAM` (absent on C6) to use `MALLOC_CAP_INTERNAL` for LVGL/splash buffers, and the `screenshot` serial command is disabled (`LV_USE_SNAPSHOT=0`), so UI changes on a C6 board must be eyeballed on hardware, not auto-captured.
 
@@ -94,7 +94,9 @@ firmware/src/
     sim/                    — native desktop simulator: SDL2 + Arduino shims + scenario playback
     template/               — copy this to bootstrap a new port
   main.cpp                  — setup() + loop(): HAL calls only, zero #ifdef BOARD_*
-  ui.{h,cpp}                — 3-screen UI (splash, usage, bluetooth). compute_layout() picks fonts/positions from board_caps() (responsive — current breakpoint: H >= 460 → large, else compact)
+  ui.{h,cpp}                — 3-screen UI (splash, usage, history); tap cycles them. compute_layout() picks fonts/positions from board_caps() (responsive — H >= 460 → large, H > 320 → compact, else small)
+  history_math.h            — pure arithmetic behind the History screen (week running total, today vs 7d avg, pace projection); host-tested in test/test_history_math/
+  usage_rate.{h,cpp}        — burn-rate ring buffer; usage_rate_pct_per_min() feeds the pace projection
   splash.{h,cpp}            — 20×20 pixel-art engine. CELL = min(W,H)/20, centered.
   ble.{h,cpp}               — NimBLE peripheral: custom data service + HID keyboard
   data.h                    — UsageData struct
@@ -245,6 +247,36 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 - Fonts and icons re-scaled ~1.9× for the higher-DPI panel.
 - All UI margins widened to 20px to clear the rounded display corners.
 - Battery icons converted to RGB565A8 alpha so they blend cleanly over the splash animations.
+
+## History screen (usage over time)
+
+Third screen in the tap cycle (splash → usage → history → splash). A 14-day
+bar chart of output tokens (today in accent) with the current Mon→today
+running total drawn over it on its own scale, then Today / This week / Pace
+rows and a model-mix bar. Everything is derived on-device in
+`history_math.h` from four payload keys the macOS daemon adds:
+
+- `h` — output tokens per local day in thousands, oldest → newest, today last
+- `ht` — assistant turns per day, same order
+- `hw` — weekday of the last bucket (Mon=0), so no clock is needed to find "this week"
+- `hm` — model-family mix over the trailing 7 days, top 3, `[["Opus",71],…]`
+
+Source is the local transcripts (`<config_dir>/projects/*/*.jsonl`) — no API
+call, no token — aggregated incrementally by `daemon/usage_history.py` with
+per-file offsets persisted to `~/.config/claude-usage-monitor/history-state.json`.
+Cold scan ~2 s per GB, then milliseconds. `history = off` in the config skips
+it. The fields ride on the `{"ok":false}` no-data beat too. **Payloads with
+history exceed a write-without-response (ATT_MTU-3), so the daemon sends
+anything over 160 bytes as a GATT long write** (`WRITE_NR_MAX_BYTES`); the RX
+characteristic already allows both. macOS daemon only so far.
+
+The pace row projects from `usage_rate_pct_per_min()` — "Limit in 1h 20m" /
+"62% at reset" / "Idle" / "Warming up" (the ring buffer needs ~4 min of
+samples after boot). It refreshes every 10 s while the screen is up.
+
+To shoot the screen headlessly, use the boot-screen trick above with
+`SCREEN_HISTORY` on the `sim_cyd` or `sim` env; the sim scenario carries
+history fields on every state.
 
 ## Daemon / host side
 
