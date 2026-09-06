@@ -12,11 +12,14 @@
 // more than one gamma table, and the differences are all cosmetic-but-obvious
 // on first boot. Two build flags cover what has been seen in the wild:
 //
-//   -DCYD_ILI9341_TYPE2    washed-out / crushed colours → alternate init
-//                          (the equivalent of TFT_eSPI's ILI9341_2_DRIVER)
-//   -DCYD_INVERT_COLORS    photo-negative image → inverted panel
+//   -DCYD_ILI9341_TYPE2      washed-out / crushed colours → alternate init
+//                            (the equivalent of TFT_eSPI's ILI9341_2_DRIVER)
+//   -DCYD_NO_INVERT_COLORS   photo-negative image → this panel does NOT need
+//                            the inversion that is on by default
 //
-// Neither is needed on the common original (micro-USB) revision.
+// Inversion defaults ON: the panel this port was brought up on renders a
+// photo-negative image without it. If yours comes out inverted, that's the
+// other revision — build with -DCYD_NO_INVERT_COLORS.
 
 static Arduino_DataBus*  bus = nullptr;
 static Arduino_ILI9341*  gfx = nullptr;
@@ -27,10 +30,11 @@ void display_hal_init(void) {
     bus = new Arduino_ESP32SPI(LCD_DC, LCD_CS, LCD_SCLK, LCD_MOSI,
                                GFX_NOT_DEFINED /* no MISO */, HSPI);
 
-#ifdef CYD_INVERT_COLORS
-    const bool ips = true;
-#else
+    // Arduino_GFX's `ips` flag is what drives the panel's INVON/INVOFF.
+#ifdef CYD_NO_INVERT_COLORS
     const bool ips = false;
+#else
+    const bool ips = true;
 #endif
 
 #ifdef CYD_ILI9341_TYPE2
