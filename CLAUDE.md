@@ -281,9 +281,24 @@ history fields on every state.
 
 ## Maxing screen (5-hour windows)
 
-Fourth screen in the tap cycle. One row per local day, one cell per 5h window
-in the order it opened, shaded none / some / most / maxed. Header reads
-"N maxed of M windows".
+Fourth screen in the tap cycle. One row per local day, **five fixed
+time-of-day columns** — 00-05, 05-10, 10-15, 15-20, 20-24 — each shaded none /
+some / most / maxed, with a column header of the band start hours. Header
+reads "N maxed of M windows".
+
+**Columns are times, not ordinals.** The first cut placed windows in the order
+they opened, which meant column 1 was a 01:15 window on one day and 10:35 on
+the next — comparing down a column was meaningless. Banding by start hour makes
+the grid answer "do I max out in the mornings or at night?". Two windows can
+never collide in a band: their starts are always ≥5 h apart. An empty band
+draws a faint `COL_PANEL` track so the column structure stays readable, and a
+barely-used window uses a dim green distinct from it.
+
+A window is filed under the day and band it **opened** in; 6 of 25 windows on
+the reference account cross midnight, so a row can include work done after
+00:00 the next day. Note this differs from the History screen, whose daily
+token bars bucket each *turn* by its own local day — the two screens attribute
+a late-night session differently, on purpose.
 
 **Windows are reconstructed from the transcripts, not from the API.** Claude's
 5h limit window is first-use anchored — the first turn opens it and it runs
@@ -304,10 +319,9 @@ distinguishes them so the screen never passes inference off as fact:
   `DEFAULT_TOKENS_PER_PCT` until the first observation). On the reference
   account one live reading fitted ~4,900 tokens per 1%.
 
-Payload keys: `wg` (7 strings, one per day, one char per window — digits
-`0`-`3` estimated, letters `a`-`d` measured), `wn` (window count), `wx`
-(maxed). A day can hold at most `ceil(24/5) = 5` windows, which is the row
-width on both sides.
+Payload keys: `wg` (7 fixed-width strings, one per day, one char per time band
+— digits `0`-`3` estimated, letters `a`-`d` measured, `.` no window), `wn`
+(window count, empty bands excluded), `wx` (maxed).
 
 **LVGL heap is the binding constraint on this screen, not board DRAM.** The
 pool is a fixed 64 KB `.bss` array (LVGL's builtin allocator, `LV_MEM_SIZE`),

@@ -180,21 +180,23 @@ def test_grid_payload_groups_windows_by_local_day(cfg):
     h = _hist(cfg); h.scan()
     g = h.grid_field(days=7)
     assert len(g) == 7
-    assert len(g[-2]) == 2      # two windows on the 5th
-    assert len(g[-1]) == 1      # one on the 6th
+    assert all(len(row) == 5 for row in g)          # fixed-width: one cell per band
+    # 5th: windows at 01:00 (band 0) and 09:00 (band 1); 6th: 01:00 (band 0)
+    assert [c != "." for c in g[-2]] == [True, True, False, False, False]
+    assert [c != "." for c in g[-1]] == [True, False, False, False, False]
 
 
 def test_grid_levels_are_digits_when_estimated(cfg):
     _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T01:00:00Z", 200_000, "r1", "m1"))
     h = _hist(cfg); h._ratios = [4000.0]; h.scan()
-    assert h.grid_field(days=7)[-1] == "2"          # 50% → level 2, estimated
+    assert h.grid_field(days=7)[-1] == "2...."      # 01:00 → band 0; 50% → level 2
 
 
 def test_grid_levels_are_letters_when_observed(cfg):
     _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100, "r1", "m1"))
     h = _hist(cfg); h.scan()
     h.observe(session_pct=97, reset_minutes=60)
-    assert h.grid_field(days=7)[-1] == "d"          # maxed, observed
+    assert h.grid_field(days=7)[-1] == ".d..."      # 08:00 → band 1; maxed, observed
 
 
 @pytest.mark.parametrize("pct,ch", [(0, "0"), (5, "0"), (24, "0"), (25, "1"),
@@ -206,7 +208,7 @@ def test_level_thresholds(cfg, pct, ch):
 
 def test_grid_is_empty_string_for_days_with_no_windows(cfg):
     h = _hist(cfg); h.scan()
-    assert h.grid_field(days=7) == [""] * 7
+    assert h.grid_field(days=7) == ["....."] * 7
 
 
 def test_payload_includes_grid_and_maxed_count(cfg):
@@ -216,7 +218,7 @@ def test_payload_includes_grid_and_maxed_count(cfg):
     h = _hist(cfg); h._ratios = [4000.0]; h.scan()
     p = h.payload_fields()
     assert "wg" in p and len(p["wg"]) == 7
-    assert p["wg"][-2] == "3"                        # 400k/4000 = 100% → maxed
+    assert p["wg"][-2] == "3...."                    # 400k/4000 = 100% → maxed, band 0
     assert p["wn"] == 2                              # windows this week
     assert p["wx"] == 1                              # maxed
 
@@ -299,3 +301,46 @@ def test_current_state_schema_is_reused_incrementally(cfg, tmp_path):
     h2 = _hist(cfg, state=state); h2.load(); h2.scan()
     assert h2.last_scan_bytes == 0
     assert len(h2.windows()) == 1
+
+
+# ---------------------------------------------------------------------------
+# time-of-day bands
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("hour,band", [(0, 0), (4, 0), (5, 1), (9, 1), (10, 2),
+                                       (14, 2), (15, 3), (19, 3), (20, 4), (23, 4)])
+def test_window_lands_in_its_time_band(cfg, hour, band):
+    _write(cfg / "projects/p/s.jsonl", _turn(f"2026-09-06T{hour:02d}:30:00Z", 200_000, "r1", "m1"))
+    h = _hist(cfg); h._ratios = [4000.0]; h.scan()
+    row = h.grid_field(days=7)[-1]
+    assert row[band] != "." and row.count(".") == 4
+
+
+def test_bands_use_local_time_not_utc(cfg):
+    # 23:30 UTC is 09:30 next day at UTC+10 → band 1 of the *following* day.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-05T23:30:00Z", 200_000, "r1", "m1"))
+    h = UsageHistory([cfg], days=14, tz=timezone(timedelta(hours=10)), now=lambda: NOW)
+    h._ratios = [4000.0]; h.scan()
+    assert h.grid_field(days=7)[-1] == ".2..."
+
+
+def test_columns_align_across_days(cfg):
+    # Both days used the 10-15 band and nothing else; the grid must show that
+    # in the same column, regardless of how many windows each day had.
+    _write(cfg / "projects/p/s.jsonl",
+           _turn("2026-09-05T11:00:00Z", 200_000, "r1", "m1"),
+           _turn("2026-09-05T02:00:00Z", 200_000, "r2", "m2"),
+           _turn("2026-09-06T12:00:00Z", 200_000, "r3", "m3"))
+    h = _hist(cfg); h._ratios = [4000.0]; h.scan()
+    g = h.grid_field(days=7)
+    assert g[-2][2] != "." and g[-1][2] != "."      # same column on both days
+    assert g[-2][0] != "." and g[-1][0] == "."      # only the 5th used band 0
+
+
+def test_window_count_ignores_empty_bands(cfg):
+    _write(cfg / "projects/p/s.jsonl",
+           _turn("2026-09-05T11:00:00Z", 200_000, "r1", "m1"),
+           _turn("2026-09-06T12:00:00Z", 200_000, "r2", "m2"))
+    h = _hist(cfg); h._ratios = [4000.0]; h.scan()
+    p = h.payload_fields()
+    assert p["wn"] == 2

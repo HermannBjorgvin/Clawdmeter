@@ -294,7 +294,9 @@ static lv_obj_t* max_cells[HIST_GRID_DAYS][HIST_WIN_PER_DAY];
 // blew LVGL's 64 KB pool (splash_init then failed to allocate). Shared styles
 // are one allocation total, swapped by pointer on update.
 static lv_style_t max_style_level[4];
+static lv_style_t max_style_empty;      // band with no window — a faint track
 static lv_style_t max_style_measured;
+static lv_obj_t*  max_bandlbl[HIST_BANDS];
 static lv_obj_t* max_daylbl[HIST_GRID_DAYS];
 
 static lv_obj_t* battery_img;
@@ -848,7 +850,9 @@ static lv_color_t maxing_level_color(int level) {
     case 3:  return COL_RED;
     case 2:  return COL_ACCENT;
     case 1:  return COL_GREEN;
-    default: return COL_PANEL;   // a used-but-barely window still reads as one
+    // A window that barely moved: dim, but unmistakably a window. An empty
+    // band uses COL_PANEL below, which is darker still.
+    default: return lv_color_hex(0x4a5240);
     }
 }
 
@@ -861,6 +865,13 @@ static void init_maxing_styles(void) {
         lv_style_set_border_width(&max_style_level[i], 0);
         lv_style_set_pad_all(&max_style_level[i], 0);
     }
+    lv_style_init(&max_style_empty);
+    lv_style_set_bg_color(&max_style_empty, COL_PANEL);
+    lv_style_set_bg_opa(&max_style_empty, LV_OPA_COVER);
+    lv_style_set_radius(&max_style_empty, 3);
+    lv_style_set_border_width(&max_style_empty, 0);
+    lv_style_set_pad_all(&max_style_empty, 0);
+
     // A measured window gets a hairline outline: its level is fact, not
     // inference from token volume.
     lv_style_init(&max_style_measured);
@@ -913,17 +924,31 @@ static void init_maxing_screen(lv_obj_t* scr) {
 
     // Grid geometry: one row per day, one cell per window.
     const int grid_y = L.content_y + lv_font_get_line_height(L.hist_lbl_font) + 8;
+    const int band_h = lv_font_get_line_height(L.hist_sub_font) + 2;
+    const int rows_y  = grid_y + band_h;
     const int foot_h = lv_font_get_line_height(L.hist_sub_font) + L.margin;
-    const int avail  = L.scr_h - grid_y - foot_h;
+    const int avail  = L.scr_h - rows_y - foot_h;
     const int row_h  = avail / HIST_GRID_DAYS;
     const int cell_h = row_h - (L.small_icons ? 3 : 5);
     const int cells_w = L.content_w - lbl_w - 4;
     const int gap    = L.small_icons ? 2 : 4;
     const int cell_w = (cells_w - (HIST_WIN_PER_DAY - 1) * gap) / HIST_WIN_PER_DAY;
 
+    // Column header: the hour each band starts, so the grid reads as a clock.
+    static const char* const band_lbl[HIST_BANDS] = { "00", "05", "10", "15", "20" };
+    for (int b = 0; b < HIST_BANDS; ++b) {
+        max_bandlbl[b] = lv_label_create(maxing_body);
+        lv_label_set_text(max_bandlbl[b], band_lbl[b]);
+        lv_obj_set_style_text_font(max_bandlbl[b], L.hist_sub_font, 0);
+        lv_obj_set_style_text_color(max_bandlbl[b], COL_DIM, 0);
+        lv_obj_set_width(max_bandlbl[b], cell_w);
+        lv_obj_set_style_text_align(max_bandlbl[b], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(max_bandlbl[b], L.margin + lbl_w + 4 + b * (cell_w + gap), grid_y);
+    }
+
     static const char* const wd_short[7] = { "M", "T", "W", "T", "F", "S", "S" };
     for (int d = 0; d < HIST_GRID_DAYS; ++d) {
-        const int y = grid_y + d * row_h;
+        const int y = rows_y + d * row_h;
         max_daylbl[d] = lv_label_create(maxing_body);
         lv_label_set_text(max_daylbl[d], wd_short[d]);
         lv_obj_set_style_text_font(max_daylbl[d], L.hist_sub_font, 0);
@@ -971,11 +996,17 @@ static void update_maxing(const UsageData* d) {
             const char c = src[w] ? src[w] : 0;
             const int level = c ? window_level(c) : -1;
             lv_obj_t* cell = max_cells[row][w];
-            if (level < 0) { lv_obj_add_flag(cell, LV_OBJ_FLAG_HIDDEN); continue; }
             lv_obj_clear_flag(cell, LV_OBJ_FLAG_HIDDEN);
             // Specific styles only — see the note on the history bars.
             for (int k = 0; k < 4; ++k) lv_obj_remove_style(cell, &max_style_level[k], 0);
+            lv_obj_remove_style(cell, &max_style_empty, 0);
             lv_obj_remove_style(cell, &max_style_measured, 0);
+            if (level < 0) {
+                // No window opened in this band — a faint track keeps the
+                // column structure readable.
+                lv_obj_add_style(cell, &max_style_empty, 0);
+                continue;
+            }
             lv_obj_add_style(cell, &max_style_level[level], 0);
             if (window_measured(c)) lv_obj_add_style(cell, &max_style_measured, 0);
         }

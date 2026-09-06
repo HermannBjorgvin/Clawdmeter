@@ -61,7 +61,8 @@ MIX_TOP = 3
 WINDOW_HOURS = 5
 GRID_DAYS = 7
 LEVEL_THRESHOLDS = (25, 50, 85)     # → levels 0..3: none / some / most / maxed
-GRID_MAX_PER_DAY = 5                # ceil(24h / 5h) — matches the device's row width
+GRID_BANDS = 5                      # fixed time-of-day columns: 00-05, 05-10, 10-15, 15-20, 20-24
+GRID_EMPTY = "."                    # no window opened in that band
 OBSERVE_MIN_PCT = 10                # below this, tokens/pct is too noisy to fit
 # The reconstructed window end and the API's reset time don't agree exactly:
 # a window is anchored on the first *request*, while the transcript records the
@@ -76,6 +77,15 @@ WINDOW_MATCH_MINUTES = 45
 STATE_VERSION = 2
 
 _FAMILIES = ("opus", "fable", "sonnet", "haiku")
+
+
+def window_rank(ch: str) -> int:
+    """Level 0-3 for a grid character, or -1 for an empty band."""
+    if ch in "0123":
+        return int(ch)
+    if ch in "abcd":
+        return ord(ch) - ord("a")
+    return -1
 
 
 def model_family(model: str | None) -> str:
@@ -203,7 +213,7 @@ class UsageHistory:
     def payload_fields(self) -> dict:
         keys = self._day_keys()
         grid = self.grid_field()
-        flat = "".join(grid)
+        flat = "".join(c for c in "".join(grid) if c != GRID_EMPTY)
         return {
             "h":  [int(round(self._days.get(k, DayTotals()).out / 1000)) for k in keys],
             "ht": [self._days.get(k, DayTotals()).turns for k in keys],
@@ -306,14 +316,29 @@ class UsageHistory:
         return "abcd"[level] if observed else "0123"[level]
 
     def grid_field(self, days: int = GRID_DAYS) -> list[str]:
-        """One string per local day, oldest → newest; one char per window."""
+        """One fixed-width string per local day, oldest → newest.
+
+        Position is the *time of day* the window opened, not its ordinal —
+        five 5-hour bands (00-05, 05-10, 10-15, 15-20, 20-24), so columns line
+        up across days and you can read "I max out in the mornings" off the
+        grid. GRID_EMPTY marks a band with no window.
+
+        Two windows can't share a band: their starts are always at least 5 h
+        apart. The max() is belt-and-braces for clock changes.
+        """
         keys = self._day_keys()[-days:]
-        rows = {k: "" for k in keys}
+        rows = {k: [GRID_EMPTY] * GRID_BANDS for k in keys}
         for w in self.windows():
-            key = w.start.astimezone(self.tz).date().isoformat()
-            if key in rows and len(rows[key]) < GRID_MAX_PER_DAY:
-                rows[key] += self._level_char(w.pct, w.observed)
-        return [rows[k] for k in keys]
+            local = w.start.astimezone(self.tz)
+            key = local.date().isoformat()
+            if key not in rows:
+                continue
+            band = min(local.hour // 5, GRID_BANDS - 1)
+            ch = self._level_char(w.pct, w.observed)
+            cur = rows[key][band]
+            if cur == GRID_EMPTY or window_rank(ch) > window_rank(cur):
+                rows[key][band] = ch
+        return ["".join(rows[k]) for k in keys]
 
     # ------------------------------------------------------------------- scan
     def scan(self) -> None:

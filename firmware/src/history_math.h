@@ -15,14 +15,17 @@
 #define HIST_MIX_N  3
 
 // --- 5-hour window grid -----------------------------------------------------
-// The daemon sends one string per local day (oldest → newest), one character
-// per 5h window in the order they opened. Digits '0'-'3' are levels ESTIMATED
+// The daemon sends one fixed-width string per local day (oldest → newest).
+// Position is the *time of day* a window opened — five 5-hour bands — so
+// columns line up across days; '.' means no window opened in that band.
+// Digits '0'-'3' are levels ESTIMATED
 // from token volume; letters 'a'-'d' are the same levels MEASURED (the daemon
 // was running and saw that window's peak utilisation). Distinguishing them
 // matters: the API only ever reports the current window, so history is
 // inferred until the daemon has watched it happen.
 #define HIST_GRID_DAYS   7
-#define HIST_WIN_PER_DAY 5      // ceil(24h / 5h): the most that can *start* in one day
+#define HIST_BANDS       5      // fixed time-of-day columns: 00-05, 05-10, 10-15, 15-20, 20-24
+#define HIST_WIN_PER_DAY HIST_BANDS
 
 static inline int  window_level(char c) {
     if (c >= '0' && c <= '3') return c - '0';
