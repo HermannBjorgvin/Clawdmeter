@@ -139,6 +139,7 @@ static bool parse_json(const char* json, UsageData* out) {
         }
         out->hist_days = (int8_t)n;
         out->hist_weekday = (int8_t)(doc["hw"] | 0);
+        out->hist_week_start = (int8_t)(doc["hs"] | -1);
         JsonArrayConst hm = doc["hm"].as<JsonArrayConst>();
         for (JsonArrayConst pair : hm) {
             if (out->hist_mix_n >= HIST_MIX_N || pair.size() < 2) break;

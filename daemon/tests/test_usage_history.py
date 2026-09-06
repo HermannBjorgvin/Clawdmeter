@@ -382,3 +382,37 @@ def test_save_is_atomic(cfg, tmp_path):
     h.save()
     assert not list(tmp_path.glob("history-state.json.*"))   # no temp left behind
     json.loads(state.read_text())
+
+
+# ---------------------------------------------------------------------------
+# rolling weekly window (Anthropic's 7-day limit, not the calendar week)
+# ---------------------------------------------------------------------------
+
+def test_week_start_index_from_reset_minutes(cfg):
+    # NOW is Sunday 12:00 UTC. Resets in 4285 min (~2d 23h) → the window
+    # opened 7d before that: ~4d 0.6h ago → Wednesday → index 13-4 = 9.
+    h = _hist(cfg, days=14)
+    assert h.week_start_index(4285) == 9
+
+
+def test_week_start_index_today_when_window_just_opened(cfg):
+    h = _hist(cfg, days=14)
+    assert h.week_start_index(7 * 1440 - 30) == 13     # opened 30 min ago → today
+
+
+def test_week_start_index_clamps_to_window(cfg):
+    h = _hist(cfg, days=3)
+    assert h.week_start_index(60) == 0                 # opened ~7d ago, only 3 buckets kept
+
+
+def test_week_start_index_respects_local_day_boundary(cfg):
+    # 23:30 UTC Saturday is already Sunday at UTC+10. Window opened 4d ago →
+    # local Wednesday → index 9 (not 8, which UTC bucketing would give).
+    h = UsageHistory([cfg], days=14, tz=timezone(timedelta(hours=10)), now=lambda: NOW)
+    assert h.week_start_index(4285) == 9
+
+
+@pytest.mark.parametrize("bad", [0, -5, None])
+def test_week_start_index_absent_without_a_reset(cfg, bad):
+    h = _hist(cfg, days=14)
+    assert h.week_start_index(bad) is None

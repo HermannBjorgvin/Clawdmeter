@@ -14,17 +14,28 @@
 #define HIST_DAYS   14
 #define HIST_MIX_N  3
 
-// Running total for the current Mon→today week, written into cum[] aligned
-// with the day buckets (entries before Monday are left at -1 = "no point").
-// Returns the number of days in the current week (1..7).
-static inline int history_week_cumulative(const int16_t* out_k, int n,
-                                          int weekday_last, int32_t* cum) {
+// Index of the first bucket of "this week". Prefers the daemon's window
+// start (hs: the day Anthropic's rolling 7-day limit opened — what the
+// weekly % actually meters); falls back to the calendar week's Monday when
+// hs is absent (-1: enterprise accounts, older daemons).
+static inline int history_week_start(int n, int weekday_last, int window_start) {
     if (n <= 0) return 0;
+    if (window_start >= 0 && window_start < n) return window_start;
     if (weekday_last < 0) weekday_last = 0;
     if (weekday_last > 6) weekday_last = 6;
-    int week_len = weekday_last + 1;          // Mon=0 → 1 day, Sun=6 → 7 days
-    if (week_len > n) week_len = n;
-    int start = n - week_len;
+    int start = n - 1 - weekday_last;        // Mon=0 → today, Sun=6 → 6 days back
+    return start < 0 ? 0 : start;
+}
+
+// Running total from bucket `start` to today, written into cum[] aligned
+// with the day buckets (entries before start are left at -1 = "no point").
+// Returns the number of days in the week so far (1..n).
+static inline int history_week_cumulative(const int16_t* out_k, int n,
+                                          int start, int32_t* cum) {
+    if (n <= 0) return 0;
+    if (start < 0) start = 0;
+    if (start > n - 1) start = n - 1;
+    int week_len = n - start;
     int32_t run = 0;
     for (int i = 0; i < n; ++i) {
         if (i < start) { cum[i] = -1; continue; }

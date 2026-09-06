@@ -30,7 +30,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -41,6 +41,8 @@ from typing import Callable, Iterable
 #   hw  weekday of the last bucket, Mon=0 … Sun=6 (so the device can label
 #       bars and find "this week" without a clock)
 #   hm  model mix over the trailing 7 days: [[family, pct], …], top 3
+#   hs  index into h of the day the rolling 7-day limit window opened
+#       (from the payload's wr); absent → device uses the calendar week
 DEFAULT_DAYS = 14
 MIX_DAYS = 7
 MIX_TOP = 3
@@ -130,6 +132,27 @@ class UsageHistory:
             return []
         ranked = sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))[:MIX_TOP]
         return [[fam, int(round(out * 100 / grand))] for fam, out in ranked]
+
+    def week_start_index(self, reset_minutes) -> int | None:
+        """Index into the day buckets of the day Anthropic's rolling 7-day
+        window opened, given minutes until it resets (the payload's "wr").
+
+        The window is exactly 7 days, so it opened at reset - 7d. None when
+        no reset is known (enterprise accounts report 0; no-data beats carry
+        nothing), which tells the device to fall back to the calendar week.
+        """
+        try:
+            mins = int(reset_minutes or 0)
+        except (TypeError, ValueError):
+            return None
+        if mins <= 0:
+            return None
+        opened = self._now() + timedelta(minutes=mins) - timedelta(days=7)
+        key = opened.astimezone(self.tz).date().isoformat()
+        keys = self._day_keys()
+        if key in keys:
+            return keys.index(key)
+        return 0 if key < keys[0] else len(keys) - 1
 
     def payload_fields(self) -> dict:
         keys = self._day_keys()

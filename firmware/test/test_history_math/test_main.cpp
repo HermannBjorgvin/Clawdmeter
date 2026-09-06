@@ -19,7 +19,7 @@ static void week_cumulative_starts_on_monday() {
     // 14 days ending on a Wednesday (weekday 2): the week is Mon, Tue, Wed.
     int16_t out[HIST_DAYS] = {9,9,9,9,9,9,9,9,9,9,9, 100, 200, 300};
     int32_t cum[HIST_DAYS];
-    int len = history_week_cumulative(out, HIST_DAYS, 2, cum);
+    int len = history_week_cumulative(out, HIST_DAYS, history_week_start(HIST_DAYS, 2, -1), cum);
     CHECK(len == 3);
     CHECK(cum[10] == -1);
     CHECK(cum[11] == 100);
@@ -30,7 +30,7 @@ static void week_cumulative_starts_on_monday() {
 static void week_cumulative_on_sunday_spans_seven() {
     int16_t out[HIST_DAYS] = {1,1,1,1,1,1,1, 1,1,1,1,1,1,1};
     int32_t cum[HIST_DAYS];
-    CHECK(history_week_cumulative(out, HIST_DAYS, 6, cum) == 7);
+    CHECK(history_week_cumulative(out, HIST_DAYS, history_week_start(HIST_DAYS, 6, -1), cum) == 7);
     CHECK(cum[6] == -1);
     CHECK(cum[7] == 1);
     CHECK(cum[13] == 7);
@@ -39,9 +39,28 @@ static void week_cumulative_on_sunday_spans_seven() {
 static void week_cumulative_clamps_bad_weekday_and_short_history() {
     int16_t out[3] = {5, 6, 7};
     int32_t cum[3];
-    CHECK(history_week_cumulative(out, 3, 99, cum) == 3);   // Sun, but only 3 days
+    CHECK(history_week_cumulative(out, 3, history_week_start(3, 99, -1), cum) == 3);   // Sun, only 3 days
     CHECK(cum[0] == 5 && cum[2] == 18);
     CHECK(history_week_cumulative(out, 0, 0, cum) == 0);
+}
+
+static void week_start_prefers_rolling_window() {
+    // Sunday, but the 7-day limit window opened on the bucket at index 9.
+    CHECK(history_week_start(HIST_DAYS, 6, 9) == 9);
+    // Out-of-range window index → calendar fallback.
+    CHECK(history_week_start(HIST_DAYS, 6, 14) == 7);
+    CHECK(history_week_start(HIST_DAYS, 6, -1) == 7);
+    // Window opened today.
+    CHECK(history_week_start(HIST_DAYS, 6, 13) == 13);
+}
+
+static void week_cumulative_from_window_start() {
+    int16_t out[HIST_DAYS] = {9,9,9,9,9,9,9,9,9, 10, 20, 30, 40, 50};
+    int32_t cum[HIST_DAYS];
+    CHECK(history_week_cumulative(out, HIST_DAYS, 9, cum) == 5);
+    CHECK(cum[8] == -1);
+    CHECK(cum[9] == 10);
+    CHECK(cum[13] == 150);
 }
 
 static void today_vs_average_uses_prior_seven() {
@@ -112,6 +131,8 @@ int main() {
     week_cumulative_starts_on_monday();
     week_cumulative_on_sunday_spans_seven();
     week_cumulative_clamps_bad_weekday_and_short_history();
+    week_start_prefers_rolling_window();
+    week_cumulative_from_window_start();
     today_vs_average_uses_prior_seven();
     today_vs_average_with_one_day();
     max_never_below_one();

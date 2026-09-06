@@ -430,6 +430,11 @@ async def attach_history(payload: dict) -> None:
             log(f"History: read {hist.last_scan_bytes/1e6:.1f} MB from "
                 f"{hist.last_scan_files} transcript(s) in {time.time()-t0:.2f}s")
         payload.update(hist.payload_fields())
+        # "This week" on the device means Anthropic's rolling 7-day window,
+        # which is what the weekly % meters — not the calendar week.
+        start = hist.week_start_index(payload.get("wr"))
+        if start is not None:
+            payload["hs"] = start
     except Exception as e:  # noqa: BLE001 — deliberately broad, see docstring
         log(f"History scan failed (continuing without it): {e}")
 

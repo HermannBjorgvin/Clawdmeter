@@ -260,6 +260,7 @@ rows and a model-mix bar. Everything is derived on-device in
 - `ht` — assistant turns per day, same order
 - `hw` — weekday of the last bucket (Mon=0), so no clock is needed to find "this week"
 - `hm` — model-family mix over the trailing 7 days, top 3, `[["Opus",71],…]`
+- `hs` — bucket index where **Anthropic's rolling 7-day limit window opened** (derived from `wr`, the minutes-to-weekly-reset header). "This week" on the device means that window — the same one the weekly % meters — with the calendar week (Monday) as the fallback when `hs` is absent (enterprise accounts report `wr = 0`; older daemons).
 
 Source is the local transcripts (`<config_dir>/projects/*/*.jsonl`) — no API
 call, no token — aggregated incrementally by `daemon/usage_history.py` with

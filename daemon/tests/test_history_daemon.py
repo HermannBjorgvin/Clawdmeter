@@ -56,6 +56,7 @@ def _fake_history(fields: dict | None = None, fail: Exception | None = None):
     h.scan = MagicMock(side_effect=fail) if fail else MagicMock()
     h.save = MagicMock()
     h.payload_fields = MagicMock(return_value=fields or {"h": [1], "ht": [2], "hw": 3, "hm": []})
+    h.week_start_index = MagicMock(return_value=None)   # tests opt in explicitly
     h.last_scan_files = 0
     h.last_scan_bytes = 0
     return h
@@ -167,3 +168,24 @@ def test_write_failure_reports_false():
     s, client = _session()
     client.write_gatt_char = AsyncMock(side_effect=mod.BleakError("nope"))
     assert _run(s.write_payload({"s": 1})) is False
+
+
+def test_attach_history_adds_window_start_when_weekly_reset_known(monkeypatch):
+    monkeypatch.setattr(mod, "read_history_setting", lambda: "on")
+    fake = _fake_history()
+    fake.week_start_index = MagicMock(return_value=9)
+    monkeypatch.setattr(mod, "_history", lambda: fake)
+    payload = {"s": 10, "wr": 4285, "ok": True}
+    _run(attach_history(payload))
+    assert payload["hs"] == 9
+    fake.week_start_index.assert_called_once_with(4285)
+
+
+def test_attach_history_omits_window_start_without_reset(monkeypatch):
+    monkeypatch.setattr(mod, "read_history_setting", lambda: "on")
+    fake = _fake_history()
+    fake.week_start_index = MagicMock(return_value=None)
+    monkeypatch.setattr(mod, "_history", lambda: fake)
+    payload = {"ok": False}                      # no-data beat carries no wr
+    _run(attach_history(payload))
+    assert "hs" not in payload

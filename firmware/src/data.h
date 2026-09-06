@@ -20,6 +20,7 @@ struct UsageData {
     int16_t hist_turns[HIST_DAYS];   // assistant turns per day, same order
     int8_t  hist_days;               // buckets received (0 = no history in this payload)
     int8_t  hist_weekday;            // weekday of the last bucket, Mon=0 … Sun=6
+    int8_t  hist_week_start;         // bucket index where the rolling 7-day window opened; -1 = unknown
     char    hist_mix_name[HIST_MIX_N][8];  // model family, e.g. "Opus"
     uint8_t hist_mix_pct[HIST_MIX_N];      // output-token share, trailing 7 days
     uint8_t hist_mix_n;

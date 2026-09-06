@@ -746,10 +746,12 @@ static void update_history(const UsageData* d) {
         lv_obj_set_style_text_color(hist_day_lbls[i], today ? COL_ACCENT : COL_DIM, 0);
     }
 
-    // Running total for Mon → today, on its own scale so it always climbs to
-    // the top-right corner; drawn from the first day of the week only.
+    // Running total for "this week" — the rolling 7-day limit window when the
+    // daemon told us where it opened, else the calendar week — on its own
+    // scale so it always climbs to the top-right corner.
     int32_t cum[HIST_DAYS];
-    const int week_len = history_week_cumulative(out, n, d->hist_weekday, cum);
+    const int start = history_week_start(n, d->hist_weekday, d->hist_week_start);
+    const int week_len = history_week_cumulative(out, n, start, cum);
     const int32_t cmax = (cum[n - 1] > 0) ? cum[n - 1] : 1;
     for (int i = n - week_len; i < n; ++i) {
         hist_line_pts[i].y = L.hist_chart_h - (int)(cum[i] * (int32_t)L.hist_chart_h / cmax);
@@ -770,10 +772,21 @@ static void update_history(const UsageData* d) {
     lv_label_set_text(lbl_hist_today_s, buf);
 
     int32_t week_turns = 0;
-    for (int i = n - week_len; i < n; ++i) week_turns += d->hist_turns[i];
+    for (int i = start; i < n; ++i) week_turns += d->hist_turns[i];
     history_fmt_k(cum[n - 1], b, sizeof b);
     lv_label_set_text(lbl_hist_week_v, b);
-    snprintf(buf, sizeof buf, "%ld turns since Mon", (long)week_turns);
+    static const char* const wd_name[7] = { "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+    const int start_wd = ((d->hist_weekday - (n - 1 - start)) % 7 + 7) % 7;
+    if (d->hist_week_start >= 0 && d->ok && d->weekly_reset_mins > 0) {
+        // Rolling window: say when it opened and when the meter resets.
+        const int m = d->weekly_reset_mins;
+        if (m >= 1440) snprintf(buf, sizeof buf, "%ld turns since %s, resets %dd %dh",
+                                (long)week_turns, wd_name[start_wd], m / 1440, (m % 1440) / 60);
+        else           snprintf(buf, sizeof buf, "%ld turns since %s, resets %dh %dm",
+                                (long)week_turns, wd_name[start_wd], m / 60, m % 60);
+    } else {
+        snprintf(buf, sizeof buf, "%ld turns since %s", (long)week_turns, wd_name[start_wd]);
+    }
     lv_label_set_text(lbl_hist_week_s, buf);
 
     update_history_pace();
