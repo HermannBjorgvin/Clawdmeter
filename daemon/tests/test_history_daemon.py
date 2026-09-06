@@ -57,6 +57,7 @@ def _fake_history(fields: dict | None = None, fail: Exception | None = None):
     h.save = MagicMock()
     h.payload_fields = MagicMock(return_value=fields or {"h": [1], "ht": [2], "hw": 3, "hm": []})
     h.week_start_index = MagicMock(return_value=None)   # tests opt in explicitly
+    h.current_cell = MagicMock(return_value=None)      # tests opt in explicitly
     h.last_scan_files = 0
     h.last_scan_bytes = 0
     return h
@@ -207,3 +208,24 @@ def test_no_data_beat_records_nothing(monkeypatch):
     monkeypatch.setattr(mod, "_history", lambda: fake)
     _run(attach_history({"ok": False}))
     fake.observe.assert_called_once_with(None, None)   # guarded inside observe()
+
+
+def test_attach_history_marks_the_current_cell(monkeypatch):
+    monkeypatch.setattr(mod, "read_history_setting", lambda: "on")
+    fake = _fake_history()
+    fake.current_cell = MagicMock(return_value=31)
+    monkeypatch.setattr(mod, "_history", lambda: fake)
+    payload = {"s": 55, "sr": 58, "ok": True}
+    _run(attach_history(payload))
+    assert payload["wc"] == 31
+    fake.current_cell.assert_called_once_with(58)
+
+
+def test_attach_history_omits_current_cell_when_unplaceable(monkeypatch):
+    monkeypatch.setattr(mod, "read_history_setting", lambda: "on")
+    fake = _fake_history()
+    fake.current_cell = MagicMock(return_value=None)
+    monkeypatch.setattr(mod, "_history", lambda: fake)
+    payload = {"ok": False}
+    _run(attach_history(payload))
+    assert "wc" not in payload

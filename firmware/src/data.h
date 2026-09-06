@@ -27,6 +27,8 @@ struct UsageData {
     int8_t  win_days;
     uint8_t win_count;               // windows in the grid
     uint8_t win_maxed;               // of which hit the limit
+    int8_t  win_current;             // flat cell index (day*HIST_BANDS+band) of the
+                                     // still-open window; -1 = none/unplaceable
     char    hist_mix_name[HIST_MIX_N][8];  // model family, e.g. "Opus"
     uint8_t hist_mix_pct[HIST_MIX_N];      // output-token share, trailing 7 days
     uint8_t hist_mix_n;

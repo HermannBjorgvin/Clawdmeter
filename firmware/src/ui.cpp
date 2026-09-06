@@ -295,7 +295,12 @@ static lv_obj_t* max_cells[HIST_GRID_DAYS][HIST_WIN_PER_DAY];
 // are one allocation total, swapped by pointer on update.
 static lv_style_t max_style_level[4];
 static lv_style_t max_style_empty;      // band with no window — a faint track
-static lv_style_t max_style_measured;
+// Borders mark cells worth a second look. A plain cell is settled fact: a
+// window whose peak the daemon actually measured. Grey = the level is inferred
+// from token volume; white = the window burning right now. As more windows get
+// measured, the grey borders fade out on their own.
+static lv_style_t max_style_estimated;
+static lv_style_t max_style_current;
 static lv_obj_t*  max_bandlbl[HIST_BANDS];
 static lv_obj_t* max_daylbl[HIST_GRID_DAYS];
 
@@ -872,12 +877,15 @@ static void init_maxing_styles(void) {
     lv_style_set_border_width(&max_style_empty, 0);
     lv_style_set_pad_all(&max_style_empty, 0);
 
-    // A measured window gets a hairline outline: its level is fact, not
-    // inference from token volume.
-    lv_style_init(&max_style_measured);
-    lv_style_set_border_width(&max_style_measured, 1);
-    lv_style_set_border_color(&max_style_measured, COL_TEXT);
-    lv_style_set_border_opa(&max_style_measured, LV_OPA_COVER);
+    lv_style_init(&max_style_estimated);
+    lv_style_set_border_width(&max_style_estimated, 1);
+    lv_style_set_border_color(&max_style_estimated, COL_DIM);
+    lv_style_set_border_opa(&max_style_estimated, LV_OPA_60);
+
+    lv_style_init(&max_style_current);
+    lv_style_set_border_width(&max_style_current, 2);
+    lv_style_set_border_color(&max_style_current, COL_TEXT);
+    lv_style_set_border_opa(&max_style_current, LV_OPA_COVER);
 }
 
 static void init_maxing_screen(lv_obj_t* scr) {
@@ -1000,7 +1008,10 @@ static void update_maxing(const UsageData* d) {
             // Specific styles only — see the note on the history bars.
             for (int k = 0; k < 4; ++k) lv_obj_remove_style(cell, &max_style_level[k], 0);
             lv_obj_remove_style(cell, &max_style_empty, 0);
-            lv_obj_remove_style(cell, &max_style_measured, 0);
+            lv_obj_remove_style(cell, &max_style_estimated, 0);
+            lv_obj_remove_style(cell, &max_style_current, 0);
+            const bool is_current = (d->win_current >= 0)
+                                 && (d->win_current == row * HIST_BANDS + w);
             if (level < 0) {
                 // No window opened in this band — a faint track keeps the
                 // column structure readable.
@@ -1008,13 +1019,18 @@ static void update_maxing(const UsageData* d) {
                 continue;
             }
             lv_obj_add_style(cell, &max_style_level[level], 0);
-            if (window_measured(c)) lv_obj_add_style(cell, &max_style_measured, 0);
+            // Current wins over provenance: there is only ever one live
+            // window, and knowing which one you're burning beats knowing
+            // how its level was arrived at.
+            if (is_current)                 lv_obj_add_style(cell, &max_style_current, 0);
+            else if (!window_measured(c))   lv_obj_add_style(cell, &max_style_estimated, 0);
         }
     }
 
-    if (measured >= d->win_count) snprintf(buf, sizeof buf, "all measured");
-    else if (measured > 0)        snprintf(buf, sizeof buf, "%d measured, rest estimated", measured);
-    else                          snprintf(buf, sizeof buf, "estimated from token volume");
+    const int estimated = d->win_count - measured;
+    if (estimated <= 0)            snprintf(buf, sizeof buf, "all measured");
+    else if (d->win_current >= 0)  snprintf(buf, sizeof buf, "white = now, grey = est (%d)", estimated);
+    else                           snprintf(buf, sizeof buf, "grey border = estimated (%d)", estimated);
     lv_label_set_text(lbl_max_foot, buf);
 }
 

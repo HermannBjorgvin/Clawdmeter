@@ -152,6 +152,7 @@ static bool parse_json(const char* json, UsageData* out) {
             }
             out->win_count = (uint8_t)(doc["wn"] | 0);
             out->win_maxed = (uint8_t)(doc["wx"] | 0);
+            out->win_current = (int8_t)(doc["wc"] | -1);
         }
         JsonArrayConst hm = doc["hm"].as<JsonArrayConst>();
         for (JsonArrayConst pair : hm) {

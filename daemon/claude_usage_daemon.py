@@ -439,6 +439,11 @@ async def attach_history(payload: dict) -> None:
         # *current* window's utilisation, so record it against the window it
         # belongs to while we can see it. Past windows fall back to an estimate.
         hist.observe(payload.get("s"), payload.get("sr"))
+        # Which cell is the window currently burning — the device can't derive
+        # it (an open window may have started yesterday).
+        cell = hist.current_cell(payload.get("sr"))
+        if cell is not None:
+            payload["wc"] = cell
     except Exception as e:  # noqa: BLE001 — deliberately broad, see docstring
         log(f"History scan failed (continuing without it): {e}")
 

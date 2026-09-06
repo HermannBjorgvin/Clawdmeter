@@ -250,6 +250,23 @@ def test_observations_and_ratios_survive_a_restart(cfg, tmp_path):
     assert [w.pct for w in h2.windows() if w.observed] == [55]
 
 
+def test_observation_tolerates_a_large_reconstruction_drift(cfg):
+    # Measured in the wild: the API's window ended 54 min after the
+    # reconstructed one. Overlap is still ~4h, so it must match.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=50, reset_minutes=114)       # api window ends 13:54 vs 13:00
+    assert [w.pct for w in h.windows() if w.observed] == [50]
+
+
+def test_observation_rejects_a_window_overlapping_less_than_half(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    # api window [11:00, 16:00) vs local [08:00, 13:00) → 2h overlap, under 2.5h
+    h.observe(session_pct=50, reset_minutes=240)
+    assert not any(w.observed for w in h.windows())
+
+
 def test_observation_tolerates_the_reconstruction_skew(cfg):
     # Reconstruction lags the true window start by a few minutes (the window is
     # anchored on the request, the transcript records the response), so the API
@@ -344,3 +361,49 @@ def test_window_count_ignores_empty_bands(cfg):
     h = _hist(cfg); h._ratios = [4000.0]; h.scan()
     p = h.payload_fields()
     assert p["wn"] == 2
+
+
+# ---------------------------------------------------------------------------
+# current (still-open) window — the cell the device highlights
+# ---------------------------------------------------------------------------
+
+def test_current_cell_points_at_the_open_window(cfg):
+    # NOW is Sun 12:00Z. A window opened 08:00 (band 1) closes at 13:00.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    # day index 6 (today, last of 7) * 5 bands + band 1
+    assert h.current_cell(60) == 6 * 5 + 1
+
+
+def test_current_cell_handles_a_window_opened_yesterday(cfg):
+    # Opened 22:00 on the 5th (band 4), still open at 12:00 on the 6th... a 5h
+    # window from 22:00 closes at 03:00, so use one that genuinely spans: the
+    # device must not assume "current" is always in today's row.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-05T23:00:00Z", 100_000, "r1", "m1"))
+    h = UsageHistory([cfg], days=14, tz=UTC, now=lambda: datetime(2026, 9, 6, 2, 0, tzinfo=UTC))
+    h.scan()
+    # Window 23:00 → 04:00; at 02:00 it has 120 min left. Row is the 5th, not the 6th.
+    cell = h.current_cell(120)
+    assert cell is not None
+    assert cell // 5 == 5           # second-to-last row (the 5th)
+    assert cell % 5 == 4            # band 20-24
+
+
+def test_current_cell_absent_without_a_reset(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    assert h.current_cell(0) is None
+    assert h.current_cell(None) is None
+
+
+def test_current_cell_absent_when_no_local_window_matches(cfg):
+    # Usage on another machine: the API reports a window we can't place locally.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    assert h.current_cell(240) is None
+
+
+def test_current_cell_absent_when_the_window_aged_out_of_the_grid(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-08-20T08:00:00Z", 100_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    assert h.current_cell(60) is None

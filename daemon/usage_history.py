@@ -64,11 +64,16 @@ LEVEL_THRESHOLDS = (25, 50, 85)     # → levels 0..3: none / some / most / maxe
 GRID_BANDS = 5                      # fixed time-of-day columns: 00-05, 05-10, 10-15, 15-20, 20-24
 GRID_EMPTY = "."                    # no window opened in that band
 OBSERVE_MIN_PCT = 10                # below this, tokens/pct is too noisy to fit
-# The reconstructed window end and the API's reset time don't agree exactly:
-# a window is anchored on the first *request*, while the transcript records the
-# assistant turn, so reconstruction runs a few minutes late (measured ~5 min on
-# a live account). Match observations to windows by proximity, not equality.
-WINDOW_MATCH_MINUTES = 45
+# Reconstructed boundaries drift from the API's real ones, and by more than a
+# few minutes: a window is anchored on the first *request* while the transcript
+# records the assistant turn, and one missed turn early in the chain shifts
+# every later boundary. Drifts of ~5 min and ~54 min have both been measured on
+# a live account, so matching on endpoint proximity is unsound.
+#
+# Match on overlap instead, and require more than half a window. Two distinct
+# 5h windows can't each overlap the API's by >50%, so the match is unambiguous
+# whatever the drift, while an unrelated window is still rejected.
+WINDOW_MIN_OVERLAP_HOURS = WINDOW_HOURS / 2.0
 
 # Bump whenever the state file gains a field derived during ingest. The stored
 # per-file offsets sit at EOF, so a new field would stay empty forever on an
@@ -274,14 +279,43 @@ class UsageHistory:
             self._ratios = ([r for r in self._ratios if r != ratio] + [ratio])[-16:]
 
     def _match_window(self, api_end: datetime) -> "Window | None":
-        """The reconstructed window whose end is nearest ``api_end``, within
-        WINDOW_MATCH_MINUTES. None when nothing is close enough."""
-        best, best_delta = None, timedelta(minutes=WINDOW_MATCH_MINUTES)
+        """The reconstructed window overlapping the API's window the most.
+
+        The API's window is ``[api_end - 5h, api_end)``. None when nothing
+        overlaps it by more than half a window — see WINDOW_MIN_OVERLAP_HOURS.
+        """
+        api_start = api_end - timedelta(hours=WINDOW_HOURS)
+        floor = timedelta(hours=WINDOW_MIN_OVERLAP_HOURS)
+        best, best_overlap = None, floor
         for w in self._reconstruct():
-            delta = abs(w.end - api_end)
-            if delta <= best_delta:
-                best, best_delta = w, delta
+            overlap = min(w.end, api_end) - max(w.start, api_start)
+            if overlap > best_overlap:
+                best, best_overlap = w, overlap
         return best
+
+    def current_cell(self, reset_minutes) -> int | None:
+        """Flat grid index (day * GRID_BANDS + band) of the still-open window.
+
+        The device can't work this out from its own clock: a window open right
+        now may have opened *yesterday*, so it isn't necessarily in today's
+        row. None when there's no reset, or when the API's window can't be
+        placed locally (work on another machine) or has aged out of the grid.
+        """
+        try:
+            mins = int(reset_minutes or 0)
+        except (TypeError, ValueError):
+            return None
+        if mins <= 0:
+            return None
+        win = self._match_window(self._now() + timedelta(minutes=mins))
+        if win is None:
+            return None
+        local = win.start.astimezone(self.tz)
+        keys = self._day_keys()[-GRID_DAYS:]
+        key = local.date().isoformat()
+        if key not in keys:
+            return None
+        return keys.index(key) * GRID_BANDS + min(local.hour // 5, GRID_BANDS - 1)
 
     def _reconstruct(self) -> list[Window]:
         """Walk the minute stream, first-use anchoring each 5h window."""
