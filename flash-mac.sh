@@ -20,9 +20,15 @@ if [ -z "$BOARD" ]; then
 fi
 
 if [ -z "$PORT" ]; then
-    PORT=$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)
+    # Native-USB boards (S3/C6) enumerate as cu.usbmodem*; boards behind a
+    # USB-UART bridge (the CYD's CH340, CP210x kits) as cu.usbserial* or
+    # cu.wchusbserial*. Try the native ones first, then the bridges.
+    PORT=$(ls /dev/cu.usbmodem* /dev/cu.wchusbserial* /dev/cu.usbserial* 2>/dev/null | head -1)
     if [ -z "$PORT" ]; then
-        echo "Error: no /dev/cu.usbmodem* device found. Plug in via USB-C."
+        echo "Error: no USB serial device found (looked for /dev/cu.usbmodem*,"
+        echo "       /dev/cu.wchusbserial*, /dev/cu.usbserial*)."
+        echo "       Plug the board in. CH340-based boards may need the driver:"
+        echo "       https://www.wch-ic.com/downloads/CH34XSER_MAC_ZIP.html"
         exit 1
     fi
 fi

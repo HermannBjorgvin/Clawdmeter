@@ -6,7 +6,7 @@ selected via PlatformIO's `build_src_filter`. Adding a board means dropping in
 a new folder + a new `[env:...]` block — `main.cpp`, `ui.cpp`, and `splash.cpp`
 never see board-specific code. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md).
 
-Seven ports today (two SoC families, five panel sizes):
+Eight ports today (three SoC families, six panel sizes):
 
 - `boards/waveshare_amoled_216/` — original Waveshare ESP32-S3-Touch-AMOLED-2.16 (CO5300, 480×480 square, CST9220 touch, IMU rotation). Build env: `waveshare_amoled_216`.
 - `boards/waveshare_amoled_18/` — Waveshare ESP32-S3-Touch-AMOLED-1.8 (368×448 portrait, XCA9554 IO expander). Build env: `waveshare_amoled_18`. **Two panel revisions are auto-detected at boot** (`board_rev()` in `board_init.cpp`, enum in `board_rev.h`): original = SH8601 display + FT3168 touch (0x38); later = CO5300 display + CST816 touch (0x15). One binary drives both.
@@ -15,6 +15,7 @@ Seven ports today (two SoC families, five panel sizes):
 - `boards/waveshare_amoled_206/` — Waveshare ESP32-S3-Touch-AMOLED-2.06 (CO5300, 410×502 watch form factor, FT3168 touch, no IO expander, 32 MB flash, PCF85063 RTC, ES8311 codec). Build env: `waveshare_amoled_206`. Display, touch, battery, IMU init, and BLE verified on hardware; the ES8311 chime path is not wired up (`sound.cpp` no-ops).
 - `boards/waveshare_lcd_154/` — Waveshare ESP32-S3-Touch-LCD-1.54 (ST7789, 240×240 square, CST816T touch @ 0x15). Build env: `waveshare_lcd_154`. **The first non-AMOLED port**: a plain 4-wire SPI TFT, not QSPI, and the panel has no brightness command — backlight is LEDC PWM on `LCD_BL`. **No PMU**: battery is an ADC divider on GPIO1 and `BAT_EN` (GPIO2) is a power-hold line that must be driven HIGH early in `board_init()` or the board browns out on battery. Three buttons (BOOT + GPIO5 + a PWR-role GPIO4); ES8311 chime wired up; QMI8658 populated but unused (fixed orientation, no rotation).
 - `boards/waveshare_lcd_4/` — Waveshare ESP32-S3-Touch-LCD-4 (ST7701 RGB parallel, 480×480 square, GT911 touch). Build env: `waveshare_lcd_4`. **RGB-panel port**: Arduino_ESP32RGBPanel + bounce buffers (tearing fix). IO expander @ 0x24 (TCA9554 / CH32V003) must init before `gfx->begin()` or the panel stays dark; backlight is expander pin 2 (on/off only). No AXP2101 / IMU; KEY/PWR is hardware RST. Single BOOT button (GPIO 0 → Space/PTT).
+- `boards/esp32_2432s028r/` — Sunton ESP32-2432S028R, the "Cheap Yellow Display" (ILI9341 240×320 SPI TFT, XPT2046 **resistive** touch). Build envs: `esp32_2432s028r` (portrait) and `esp32_2432s028r_landscape` (320×240, USB edge left). **First classic-ESP32 port** (ESP32-D0WD, dual-core Xtensa) and **first resistive-touch port**. No PSRAM, 4 MB flash (`huge_app.csv`), CH340 USB-UART rather than native USB-JTAG. No PMU, no battery, no IMU; the single BOOT button is wired to the PWR role, not HID.
 
 Plus one non-hardware target: `boards/sim/` — **native desktop simulator** (SDL2 window, 480×480, `platform = native`). Build env: `sim`. See "Desktop simulator" below.
 
@@ -72,6 +73,16 @@ ESP32-C6 sibling of the S3 1.8: same 368×448 SH8601 panel + FocalTech touch, di
 - No PMU / IMU. Buttons: GPIO 0 only (BOOT → Space/PTT). KEY/PWR is EN/RST (hardware reset). GPIO 18 is display R3.
 - RGB tearing fix: pass `bounce_buffer_size_px = LCD_WIDTH * 10` to `Arduino_ESP32RGBPanel`. Do not call `rgbpanel->getFrameBuffer()` after `gfx->begin()`.
 
+### ESP32-2432S028R "Cheap Yellow Display" — `esp32_2432s028r`
+- SoC: **classic ESP32-D0WD** (dual-core Xtensa), 4 MB flash, **no PSRAM**, CH340 USB-UART. Flashing needs a real serial port (`/dev/cu.usbserial*` / `/dev/ttyUSB*`), not the S3/C6 native USB-JTAG — the flash helpers probe both.
+- Display: **ILI9341** 240×320 via 4-wire SPI on the native HSPI pins (SCLK=14, MOSI=13, MISO=12 *unclaimed*, CS=15, DC=2). **No MCU reset line** — panel RESX is tied to EN. Backlight is LEDC PWM on **GPIO 21**. 40 MHz write clock (80 MHz is unreliable on this wiring). MISO is deliberately passed as `GFX_NOT_DEFINED`: the panel is write-only here and GPIO 12 is the MTDI strapping pin that selects flash voltage at reset.
+- Touch: **XPT2046 resistive** on its own SPI peripheral (CLK=25, MOSI=32, MISO=39, CS=33, IRQ=36) at 2 MHz. These are not native VSPI pins — they route through the GPIO matrix. Vendored ~40-line reader, no external driver.
+- **Resistive touch has no factory calibration.** `TP_RAW_*` in `board.h` are community defaults, not facts about your unit; `TP_SWAP_XY` / `TP_INVERT_X` / `TP_INVERT_Y` handle axis alignment. Build with `-DTOUCH_DEBUG` to stream raw samples over serial and retune. Pressure is derived from the Z1/Z2 conversions and gated on `TP_PRESSURE_MIN` — without that gate, release transients land as phantom corner taps.
+- **Panel revision escape hatches.** Sunton ships this model with more than one panel/gamma. `-DCYD_ILI9341_TYPE2` selects the alternate init (TFT_eSPI's `ILI9341_2_DRIVER` equivalent) for washed-out colour; `-DCYD_INVERT_COLORS` fixes a photo-negative image. Neither is needed on the common original (micro-USB) revision.
+- No PMU, no battery, no IMU, no IO expander. Buttons: **GPIO 0 (BOOT) wired to the PWR role** — screens/brightness/hold-to-pair — rather than HID Space, so the pairing gesture stays reachable while the resistive panel is still uncalibrated. `button_count = 0` to match; `NIMBLE_MAX_CONNECTIONS=1` since there is no HID button to send from.
+- Audio: GPIO 26 drives an amplified speaker, but `chime.cpp` is an ES8311/I2S engine and this board has no codec, so `sound.cpp` no-ops (same posture as LCD-4 / C6). A PWM chime backend would be the way to wire it up.
+- **DRAM is the binding constraint, not flash.** The port links at ~90% of the static DRAM segment (~112 KB of 124.6 KB) and ~88% IRAM, with flash at ~54% of the 3 MB `huge_app` slot. Shared-code growth that adds static data will break this board before any other.
+
 ## Architecture
 
 ```text
@@ -91,6 +102,7 @@ firmware/src/
     waveshare_amoled_206/   — CO5300 + FT3168 + AXP PKEY, no IO expander, 32 MB, no rotation
     waveshare_lcd_154/      — ST7789 SPI TFT + CST816T + ADC battery (no PMU), PWM backlight
     waveshare_lcd_4/         — ST7701 RGB parallel + GT911 + expander backlight, no PMU/IMU
+    esp32_2432s028r/        — CYD: ILI9341 SPI TFT + XPT2046 resistive touch, no PSRAM/PMU/IMU
     sim/                    — native desktop simulator: SDL2 + Arduino shims + scenario playback
     template/               — copy this to bootstrap a new port
   main.cpp                  — setup() + loop(): HAL calls only, zero #ifdef BOARD_*
