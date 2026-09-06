@@ -292,7 +292,7 @@ def test_payload_fields_shape(cfg):
     h.scan()
     p = h.payload_fields()
 
-    assert set(p) == {"h", "ht", "hw", "hm"}
+    assert set(p) == {"h", "ht", "hw", "hm", "wg", "wn", "wx"}
     assert len(p["h"]) == 14 and len(p["ht"]) == 14
     # oldest → newest, today last; output tokens in thousands, rounded
     assert p["h"][-1] == 1225
@@ -305,8 +305,9 @@ def test_payload_fields_shape(cfg):
 
 
 def test_payload_fits_the_ble_budget(cfg):
-    # Worst realistic case: 14 busy days, 3 families. The device's RX buffer
-    # is 512 bytes and the base payload is ~105, so history must stay < 200.
+    # Worst realistic case: 14 busy days, 3 families, plus a full window grid.
+    # The device's RX buffer is 512 bytes and the base payload is ~105, so the
+    # history block has to leave comfortable headroom.
     f = cfg / "projects" / "proj-a" / "s1.jsonl"
     lines = []
     for i in range(14):
@@ -318,7 +319,7 @@ def test_payload_fits_the_ble_budget(cfg):
     h = _hist(cfg, days=14)
     h.scan()
     encoded = json.dumps(h.payload_fields(), separators=(",", ":")).encode()
-    assert len(encoded) < 200, len(encoded)
+    assert len(encoded) < 330, len(encoded)
 
 
 def test_empty_history_still_yields_full_length_arrays(cfg):
@@ -416,3 +417,23 @@ def test_week_start_index_respects_local_day_boundary(cfg):
 def test_week_start_index_absent_without_a_reset(cfg, bad):
     h = _hist(cfg, days=14)
     assert h.week_start_index(bad) is None
+
+
+def test_full_payload_fits_the_device_rx_buffer(cfg):
+    """End-to-end size guard: a real base payload plus the worst-case history
+    block must stay well inside the firmware's 512-byte RX buffer."""
+    lines = []
+    for i in range(14):
+        day = (NOW - timedelta(days=i)).strftime("%Y-%m-%d")
+        for hour in (0, 5, 10, 15, 20):          # five 5h windows a day
+            for j, m in enumerate(["claude-opus-5", "claude-fable-5", "claude-sonnet-5"]):
+                lines.append(_turn(f"{day}T{hour:02d}:30:00.000Z", out=999_999, model=m,
+                                   req=f"r{i}{hour}{j}", mid=f"m{i}{hour}{j}"))
+    _write(cfg / "projects" / "proj-a" / "s1.jsonl", *lines)
+    h = _hist(cfg, days=14)
+    h.scan()
+    base = {"s": 100, "sr": 299, "w": 100, "wr": 9999, "st": "allowed",
+            "acct": "pro", "ok": True, "hs": 13, "t": 1785474000, "tf": 24, "c": 1}
+    base.update(h.payload_fields())
+    encoded = json.dumps(base, separators=(",", ":")).encode()
+    assert len(encoded) < 460, len(encoded)      # 512 buffer, minus a NUL and slack

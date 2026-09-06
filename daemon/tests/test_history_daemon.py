@@ -189,3 +189,21 @@ def test_attach_history_omits_window_start_without_reset(monkeypatch):
     payload = {"ok": False}                      # no-data beat carries no wr
     _run(attach_history(payload))
     assert "hs" not in payload
+
+
+def test_attach_history_records_the_live_window_observation(monkeypatch):
+    monkeypatch.setattr(mod, "read_history_setting", lambda: "on")
+    fake = _fake_history()
+    fake.observe = MagicMock()
+    monkeypatch.setattr(mod, "_history", lambda: fake)
+    _run(attach_history({"s": 55, "sr": 58, "ok": True}))
+    fake.observe.assert_called_once_with(55, 58)
+
+
+def test_no_data_beat_records_nothing(monkeypatch):
+    monkeypatch.setattr(mod, "read_history_setting", lambda: "on")
+    fake = _fake_history()
+    fake.observe = MagicMock()
+    monkeypatch.setattr(mod, "_history", lambda: fake)
+    _run(attach_history({"ok": False}))
+    fake.observe.assert_called_once_with(None, None)   # guarded inside observe()

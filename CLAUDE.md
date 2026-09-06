@@ -279,6 +279,56 @@ To shoot the screen headlessly, use the boot-screen trick above with
 `SCREEN_HISTORY` on the `sim_cyd` or `sim` env; the sim scenario carries
 history fields on every state.
 
+## Maxing screen (5-hour windows)
+
+Fourth screen in the tap cycle. One row per local day, one cell per 5h window
+in the order it opened, shaded none / some / most / maxed. Header reads
+"N maxed of M windows".
+
+**Windows are reconstructed from the transcripts, not from the API.** Claude's
+5h limit window is first-use anchored — the first turn opens it and it runs
+exactly 5 h — so walking the turn stream rebuilds the boundaries. Validated
+against a live account: the reconstructed open time matched the one implied by
+the reset header to within ~5 min (reconstruction sees the assistant turn, the
+window is anchored on the request).
+
+**Utilisation is the hard part.** The API reports a percentage only for the
+*current* window, so history has no ground truth. Two sources, and the payload
+distinguishes them so the screen never passes inference off as fact:
+
+- **Measured** — the daemon was running and saw that window's peak
+  (`observe()` each poll, matched to a reconstructed window by proximity,
+  `WINDOW_MATCH_MINUTES`). Rendered with a hairline outline.
+- **Estimated** — output tokens ÷ a tokens-per-percent ratio *learned from
+  this account's own measured windows* (median of up to 16, bootstrapped at
+  `DEFAULT_TOKENS_PER_PCT` until the first observation). On the reference
+  account one live reading fitted ~4,900 tokens per 1%.
+
+Payload keys: `wg` (7 strings, one per day, one char per window — digits
+`0`-`3` estimated, letters `a`-`d` measured), `wn` (window count), `wx`
+(maxed). A day can hold at most `ceil(24/5) = 5` windows, which is the row
+width on both sides.
+
+**LVGL heap is the binding constraint on this screen, not board DRAM.** The
+pool is a fixed 64 KB `.bss` array (LVGL's builtin allocator, `LV_MEM_SIZE`),
+and the first cut — 56 cells with per-object *local* styles — exhausted it:
+`splash_init()` then hung inside `lv_array_resize`. Cells and history bars use
+**shared `lv_style_t` objects** instead (one allocation total, swapped by
+pointer), which brought steady-state use to ~46.6 KB with ~10 KB free. Two
+rules follow for anyone adding widgets here:
+
+1. Prefer a shared style over `lv_obj_set_style_*` on repeated objects.
+2. Never call `lv_obj_remove_style(obj, NULL, part)` to swap one — in LVGL 9
+   `lv_obj_set_size`/`set_pos` live in the object's *local* style, so that
+   wipes geometry too. Remove the specific shared styles by pointer.
+
+Measure with `lv_mem_monitor()` after `ui_init()` on the `sim_cyd` env.
+
+**The state file is versioned** (`STATE_VERSION` in `usage_history.py`). Bump
+it whenever a field derived during ingest is added: the per-file offsets sit at
+EOF, so on an existing install a new field would stay empty forever. A version
+mismatch drops the offsets and forces one full re-read.
+
 ## Daemon / host side
 
 Bash daemon (`daemon/claude-usage-daemon.sh`) reads OAuth token, polls Anthropic API, sends JSON over BLE GATT. Run with `systemctl --user start claude-usage-daemon`. The unit file's `ExecStart` is the absolute path to the script — repoint it when switching between the worktree and the main checkout.

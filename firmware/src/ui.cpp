@@ -257,6 +257,9 @@ static lv_obj_t* hist_body;                    // everything but the title; hidd
 static lv_obj_t* lbl_hist_empty;               // "No history yet"
 static lv_obj_t* hist_panel;
 static lv_obj_t* hist_bars[HIST_DAYS];
+// Same shared-style discipline as the maxing cells: 14 bars with local styles
+// cost several KB of LVGL's 64 KB pool for no benefit.
+static lv_style_t hist_bar_style[3];   // 0 = empty day, 1 = used, 2 = today
 static lv_obj_t* hist_day_lbls[HIST_DAYS];
 static lv_obj_t* hist_line;
 static lv_point_precise_t hist_line_pts[HIST_DAYS];
@@ -276,6 +279,24 @@ static uint32_t  hist_pace_ms = 0;             // last pace refresh (rate warms 
 #define HIST_PACE_REFRESH_MS 10000
 
 // ---- Battery indicator (shared, on top) ----
+// ---- Maxing screen (5h window grid) ----
+// One row per local day, one cell per 5-hour window in the order they opened,
+// shaded by how much of the limit that window used. Answers "when did I max
+// out, and how often" at a glance.
+static lv_obj_t* maxing_container;
+static lv_obj_t* lbl_max_title;
+static lv_obj_t* lbl_max_head;
+static lv_obj_t* lbl_max_foot;
+static lv_obj_t* maxing_body;
+static lv_obj_t* max_cells[HIST_GRID_DAYS][HIST_WIN_PER_DAY];
+// Cell appearance lives in shared styles, not per-object local styles: a local
+// style allocates its own property array on every object, and 35 cells of that
+// blew LVGL's 64 KB pool (splash_init then failed to allocate). Shared styles
+// are one allocation total, swapped by pointer on update.
+static lv_style_t max_style_level[4];
+static lv_style_t max_style_measured;
+static lv_obj_t* max_daylbl[HIST_GRID_DAYS];
+
 static lv_obj_t* battery_img;
 static lv_obj_t* logo_img;
 static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
@@ -595,6 +616,15 @@ static void init_history_screen(lv_obj_t* scr) {
     const int panel_h = 2 * L.panel_pad_y + L.hist_chart_h + 2 + day_lbl_h;
     hist_panel = make_panel(hist_body, L.margin, L.content_y, L.content_w, panel_h);
 
+    for (int i = 0; i < 3; ++i) {
+        lv_style_init(&hist_bar_style[i]);
+        lv_style_set_bg_color(&hist_bar_style[i], i == 2 ? COL_ACCENT : i == 1 ? COL_DIM : COL_BAR_BG);
+        lv_style_set_bg_opa(&hist_bar_style[i], LV_OPA_COVER);
+        lv_style_set_radius(&hist_bar_style[i], 2);
+        lv_style_set_border_width(&hist_bar_style[i], 0);
+        lv_style_set_pad_all(&hist_bar_style[i], 0);
+    }
+
     const int inner_w = L.content_w - 2 * L.panel_pad_x;
     const int bar_w = (inner_w - (HIST_DAYS - 1) * L.hist_bar_gap) / HIST_DAYS;
     const int used_w = HIST_DAYS * bar_w + (HIST_DAYS - 1) * L.hist_bar_gap;
@@ -602,13 +632,10 @@ static void init_history_screen(lv_obj_t* scr) {
     for (int i = 0; i < HIST_DAYS; ++i) {
         const int x = x0 + i * (bar_w + L.hist_bar_gap);
         hist_bars[i] = lv_obj_create(hist_panel);
+        lv_obj_remove_style_all(hist_bars[i]);
+        lv_obj_add_style(hist_bars[i], &hist_bar_style[0], 0);
         lv_obj_set_size(hist_bars[i], bar_w, 2);
         lv_obj_set_pos(hist_bars[i], x, L.hist_chart_h - 2);
-        lv_obj_set_style_bg_color(hist_bars[i], COL_BAR_BG, 0);
-        lv_obj_set_style_bg_opa(hist_bars[i], LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(hist_bars[i], 2, 0);
-        lv_obj_set_style_border_width(hist_bars[i], 0, 0);
-        lv_obj_set_style_pad_all(hist_bars[i], 0, 0);
         lv_obj_clear_flag(hist_bars[i], (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
 
         hist_day_lbls[i] = lv_label_create(hist_panel);
@@ -738,8 +765,11 @@ static void update_history(const UsageData* d) {
         lv_obj_set_height(hist_bars[i], h);
         lv_obj_set_y(hist_bars[i], L.hist_chart_h - h);
         const bool today = (i == n - 1);
-        lv_obj_set_style_bg_color(hist_bars[i],
-            today ? COL_ACCENT : (out[i] > 0 ? COL_DIM : COL_BAR_BG), 0);
+        // Remove the specific shared styles only — lv_obj_remove_style(NULL)
+        // would also drop the object's *local* style, which is where
+        // lv_obj_set_size/set_pos live.
+        for (int k = 0; k < 3; ++k) lv_obj_remove_style(hist_bars[i], &hist_bar_style[k], 0);
+        lv_obj_add_style(hist_bars[i], &hist_bar_style[today ? 2 : (out[i] > 0 ? 1 : 0)], 0);
         int w = ((d->hist_weekday - (n - 1 - i)) % 7 + 7) % 7;
         char t[2] = { wd[w], 0 };
         lv_label_set_text(hist_day_lbls[i], t);
@@ -809,6 +839,152 @@ static void update_history(const UsageData* d) {
         if (len >= sizeof legend) break;
     }
     lv_label_set_text(lbl_hist_mix, legend);
+}
+
+// Level palette: barely-used → maxed. Deliberately the usage screen's ramp so
+// a hot window reads the same here as a hot bar does there.
+static lv_color_t maxing_level_color(int level) {
+    switch (level) {
+    case 3:  return COL_RED;
+    case 2:  return COL_ACCENT;
+    case 1:  return COL_GREEN;
+    default: return COL_PANEL;   // a used-but-barely window still reads as one
+    }
+}
+
+static void init_maxing_styles(void) {
+    for (int i = 0; i < 4; ++i) {
+        lv_style_init(&max_style_level[i]);
+        lv_style_set_bg_color(&max_style_level[i], maxing_level_color(i));
+        lv_style_set_bg_opa(&max_style_level[i], LV_OPA_COVER);
+        lv_style_set_radius(&max_style_level[i], 3);
+        lv_style_set_border_width(&max_style_level[i], 0);
+        lv_style_set_pad_all(&max_style_level[i], 0);
+    }
+    // A measured window gets a hairline outline: its level is fact, not
+    // inference from token volume.
+    lv_style_init(&max_style_measured);
+    lv_style_set_border_width(&max_style_measured, 1);
+    lv_style_set_border_color(&max_style_measured, COL_TEXT);
+    lv_style_set_border_opa(&max_style_measured, LV_OPA_COVER);
+}
+
+static void init_maxing_screen(lv_obj_t* scr) {
+    maxing_container = lv_obj_create(scr);
+    lv_obj_set_size(maxing_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(maxing_container, 0, 0);
+    lv_obj_set_style_bg_opa(maxing_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(maxing_container, 0, 0);
+    lv_obj_set_style_pad_all(maxing_container, 0, 0);
+    lv_obj_clear_flag(maxing_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(maxing_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+    init_maxing_styles();
+
+    lbl_max_title = lv_label_create(maxing_container);
+    lv_label_set_text(lbl_max_title, "Maxing");
+    lv_obj_set_style_text_font(lbl_max_title, L.title_font, 0);
+    lv_obj_set_style_text_color(lbl_max_title, COL_TEXT, 0);
+    lv_obj_align(lbl_max_title, LV_ALIGN_TOP_MID, L.title_nudge, L.title_y);
+
+    maxing_body = lv_obj_create(maxing_container);
+    lv_obj_set_size(maxing_body, L.scr_w, L.scr_h);
+    lv_obj_set_pos(maxing_body, 0, 0);
+    lv_obj_set_style_bg_opa(maxing_body, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(maxing_body, 0, 0);
+    lv_obj_set_style_pad_all(maxing_body, 0, 0);
+    lv_obj_clear_flag(maxing_body, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(maxing_body, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    lbl_max_head = lv_label_create(maxing_body);
+    lv_label_set_recolor(lbl_max_head, true);
+    lv_label_set_text(lbl_max_head, "");
+    lv_obj_set_style_text_font(lbl_max_head, L.hist_lbl_font, 0);
+    lv_obj_set_style_text_color(lbl_max_head, COL_DIM, 0);
+
+    lbl_max_foot = lv_label_create(maxing_body);
+    lv_label_set_text(lbl_max_foot, "");
+    lv_obj_set_style_text_font(lbl_max_foot, L.hist_sub_font, 0);
+    lv_obj_set_style_text_color(lbl_max_foot, COL_DIM, 0);
+    lv_obj_align(lbl_max_foot, LV_ALIGN_BOTTOM_LEFT, L.margin, -L.margin / 2);
+
+    const int lbl_w = lv_font_get_line_height(L.hist_sub_font) * 2;
+
+    lv_obj_set_pos(lbl_max_head, L.margin, L.content_y);
+
+    // Grid geometry: one row per day, one cell per window.
+    const int grid_y = L.content_y + lv_font_get_line_height(L.hist_lbl_font) + 8;
+    const int foot_h = lv_font_get_line_height(L.hist_sub_font) + L.margin;
+    const int avail  = L.scr_h - grid_y - foot_h;
+    const int row_h  = avail / HIST_GRID_DAYS;
+    const int cell_h = row_h - (L.small_icons ? 3 : 5);
+    const int cells_w = L.content_w - lbl_w - 4;
+    const int gap    = L.small_icons ? 2 : 4;
+    const int cell_w = (cells_w - (HIST_WIN_PER_DAY - 1) * gap) / HIST_WIN_PER_DAY;
+
+    static const char* const wd_short[7] = { "M", "T", "W", "T", "F", "S", "S" };
+    for (int d = 0; d < HIST_GRID_DAYS; ++d) {
+        const int y = grid_y + d * row_h;
+        max_daylbl[d] = lv_label_create(maxing_body);
+        lv_label_set_text(max_daylbl[d], wd_short[d]);
+        lv_obj_set_style_text_font(max_daylbl[d], L.hist_sub_font, 0);
+        lv_obj_set_style_text_color(max_daylbl[d], COL_DIM, 0);
+        lv_obj_set_width(max_daylbl[d], lbl_w);
+        lv_obj_set_style_text_align(max_daylbl[d], LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_pos(max_daylbl[d], L.margin, y + (cell_h - lv_font_get_line_height(L.hist_sub_font)) / 2);
+
+        for (int w = 0; w < HIST_WIN_PER_DAY; ++w) {
+            lv_obj_t* cell = lv_obj_create(maxing_body);
+            max_cells[d][w] = cell;
+            lv_obj_remove_style_all(cell);          // drop the theme's own local styles
+            lv_obj_add_style(cell, &max_style_level[0], 0);
+            lv_obj_set_size(cell, cell_w, cell_h);
+            lv_obj_set_pos(cell, L.margin + lbl_w + 4 + w * (cell_w + gap), y);
+            lv_obj_clear_flag(cell, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+            lv_obj_add_flag(cell, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    lv_obj_add_flag(maxing_container, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void update_maxing(const UsageData* d) {
+    if (!maxing_container || d->win_days <= 0) return;
+
+    char buf[80];
+    int measured = 0;
+    for (int i = 0; i < d->win_days; ++i)
+        for (const char* c = d->win_grid[i]; *c; ++c)
+            if (window_measured(*c)) measured++;
+
+    snprintf(buf, sizeof buf, "#c0392b %d maxed# of %d windows", d->win_maxed, d->win_count);
+    lv_label_set_text(lbl_max_head, buf);
+
+    static const char* const wd_short[7] = { "M", "T", "W", "T", "F", "S", "S" };
+    for (int row = 0; row < HIST_GRID_DAYS; ++row) {
+        // Row 0 is the oldest day in the grid; label it with its real weekday.
+        const int wd = ((d->hist_weekday - (HIST_GRID_DAYS - 1 - row)) % 7 + 7) % 7;
+        lv_label_set_text(max_daylbl[row], wd_short[wd]);
+        const bool today = (row == HIST_GRID_DAYS - 1);
+        lv_obj_set_style_text_color(max_daylbl[row], today ? COL_ACCENT : COL_DIM, 0);
+
+        const char* src = (row < d->win_days) ? d->win_grid[row] : "";
+        for (int w = 0; w < HIST_WIN_PER_DAY; ++w) {
+            const char c = src[w] ? src[w] : 0;
+            const int level = c ? window_level(c) : -1;
+            lv_obj_t* cell = max_cells[row][w];
+            if (level < 0) { lv_obj_add_flag(cell, LV_OBJ_FLAG_HIDDEN); continue; }
+            lv_obj_clear_flag(cell, LV_OBJ_FLAG_HIDDEN);
+            // Specific styles only — see the note on the history bars.
+            for (int k = 0; k < 4; ++k) lv_obj_remove_style(cell, &max_style_level[k], 0);
+            lv_obj_remove_style(cell, &max_style_measured, 0);
+            lv_obj_add_style(cell, &max_style_level[level], 0);
+            if (window_measured(c)) lv_obj_add_style(cell, &max_style_measured, 0);
+        }
+    }
+
+    if (measured >= d->win_count) snprintf(buf, sizeof buf, "all measured");
+    else if (measured > 0)        snprintf(buf, sizeof buf, "%d measured, rest estimated", measured);
+    else                          snprintf(buf, sizeof buf, "estimated from token volume");
+    lv_label_set_text(lbl_max_foot, buf);
 }
 
 static void init_usage_screen(lv_obj_t* scr) {
@@ -900,6 +1076,7 @@ void ui_init(void) {
 
     init_usage_screen(scr);
     init_history_screen(scr);
+    init_maxing_screen(scr);
     splash_init(scr);
 
     if (splash_get_root()) {
@@ -936,6 +1113,7 @@ void ui_init(void) {
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
     update_history(data);           // local history needs no token; refresh on any beat
+    update_maxing(data);
     data_ok = data->ok;
     if (!data->ok) return;          // a {"ok":false} "no data" beat → fall through to idle, keep last numbers
     last_data_ms = lv_tick_get();   // a real usage update just landed
@@ -1117,6 +1295,7 @@ static void global_click_cb(lv_event_t* e) {
     switch (current_screen) {
     case SCREEN_SPLASH:  ui_show_screen(SCREEN_USAGE);   break;
     case SCREEN_USAGE:   ui_show_screen(SCREEN_HISTORY); break;
+    case SCREEN_HISTORY: ui_show_screen(SCREEN_MAXING);  break;
     default:             ui_show_screen(SCREEN_SPLASH);  break;
     }
 }
@@ -1124,6 +1303,7 @@ static void global_click_cb(lv_event_t* e) {
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(history_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(maxing_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
@@ -1132,6 +1312,9 @@ void ui_show_screen(screen_t screen) {
     case SCREEN_HISTORY:
         lv_obj_clear_flag(history_container, LV_OBJ_FLAG_HIDDEN);
         update_history_pace();
+        break;
+    case SCREEN_MAXING:
+        lv_obj_clear_flag(maxing_container, LV_OBJ_FLAG_HIDDEN);
         break;
     default: break;
     }

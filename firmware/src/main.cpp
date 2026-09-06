@@ -140,6 +140,19 @@ static bool parse_json(const char* json, UsageData* out) {
         out->hist_days = (int8_t)n;
         out->hist_weekday = (int8_t)(doc["hw"] | 0);
         out->hist_week_start = (int8_t)(doc["hs"] | -1);
+
+        out->win_days = 0;
+        JsonArrayConst wg = doc["wg"].as<JsonArrayConst>();
+        if (!wg.isNull()) {
+            for (JsonVariantConst v : wg) {
+                if (out->win_days >= HIST_GRID_DAYS) break;
+                strlcpy(out->win_grid[out->win_days], v.as<const char*>() ? v.as<const char*>() : "",
+                        sizeof(out->win_grid[0]));
+                out->win_days++;
+            }
+            out->win_count = (uint8_t)(doc["wn"] | 0);
+            out->win_maxed = (uint8_t)(doc["wx"] | 0);
+        }
         JsonArrayConst hm = doc["hm"].as<JsonArrayConst>();
         for (JsonArrayConst pair : hm) {
             if (out->hist_mix_n >= HIST_MIX_N || pair.size() < 2) break;

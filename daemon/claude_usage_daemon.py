@@ -435,6 +435,10 @@ async def attach_history(payload: dict) -> None:
         start = hist.week_start_index(payload.get("wr"))
         if start is not None:
             payload["hs"] = start
+        # Ground truth for the window grid: the API only ever reports the
+        # *current* window's utilisation, so record it against the window it
+        # belongs to while we can see it. Past windows fall back to an estimate.
+        hist.observe(payload.get("s"), payload.get("sr"))
     except Exception as e:  # noqa: BLE001 — deliberately broad, see docstring
         log(f"History scan failed (continuing without it): {e}")
 

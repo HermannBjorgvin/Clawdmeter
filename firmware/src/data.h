@@ -21,6 +21,12 @@ struct UsageData {
     int8_t  hist_days;               // buckets received (0 = no history in this payload)
     int8_t  hist_weekday;            // weekday of the last bucket, Mon=0 … Sun=6
     int8_t  hist_week_start;         // bucket index where the rolling 7-day window opened; -1 = unknown
+
+    // 5-hour window grid (daemon "wg"/"wn"/"wx"); win_days 0 = not sent
+    char    win_grid[HIST_GRID_DAYS][HIST_WIN_PER_DAY + 1];
+    int8_t  win_days;
+    uint8_t win_count;               // windows in the grid
+    uint8_t win_maxed;               // of which hit the limit
     char    hist_mix_name[HIST_MIX_N][8];  // model family, e.g. "Opus"
     uint8_t hist_mix_pct[HIST_MIX_N];      // output-token share, trailing 7 days
     uint8_t hist_mix_n;

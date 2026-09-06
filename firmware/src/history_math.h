@@ -14,6 +14,23 @@
 #define HIST_DAYS   14
 #define HIST_MIX_N  3
 
+// --- 5-hour window grid -----------------------------------------------------
+// The daemon sends one string per local day (oldest → newest), one character
+// per 5h window in the order they opened. Digits '0'-'3' are levels ESTIMATED
+// from token volume; letters 'a'-'d' are the same levels MEASURED (the daemon
+// was running and saw that window's peak utilisation). Distinguishing them
+// matters: the API only ever reports the current window, so history is
+// inferred until the daemon has watched it happen.
+#define HIST_GRID_DAYS   7
+#define HIST_WIN_PER_DAY 5      // ceil(24h / 5h): the most that can *start* in one day
+
+static inline int  window_level(char c) {
+    if (c >= '0' && c <= '3') return c - '0';
+    if (c >= 'a' && c <= 'd') return c - 'a';
+    return -1;                              // not a window
+}
+static inline bool window_measured(char c) { return c >= 'a' && c <= 'd'; }
+
 // Index of the first bucket of "this week". Prefers the daemon's window
 // start (hs: the day Anthropic's rolling 7-day limit opened — what the
 // weekly % actually meters); falls back to the calendar week's Monday when

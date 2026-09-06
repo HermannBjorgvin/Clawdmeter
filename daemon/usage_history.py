@@ -47,6 +47,34 @@ DEFAULT_DAYS = 14
 MIX_DAYS = 7
 MIX_TOP = 3
 
+# --- 5-hour windows ---------------------------------------------------------
+# Claude's 5h limit window is first-use anchored: the first turn opens it and
+# it runs exactly WINDOW_HOURS, then the next turn opens the next one. That is
+# reconstructible from the transcripts (validated against a live account: the
+# reconstructed open time matched the reset header's to within minutes).
+#
+# What is NOT in the transcripts is utilisation — the API reports a percentage
+# only for the *current* window. So a window's level is either OBSERVED (the
+# daemon was running and saw the peak) or ESTIMATED from output tokens via a
+# ratio learned from this account's own observations. The payload distinguishes
+# them: digits are estimates, letters are observed.
+WINDOW_HOURS = 5
+GRID_DAYS = 7
+LEVEL_THRESHOLDS = (25, 50, 85)     # → levels 0..3: none / some / most / maxed
+GRID_MAX_PER_DAY = 5                # ceil(24h / 5h) — matches the device's row width
+OBSERVE_MIN_PCT = 10                # below this, tokens/pct is too noisy to fit
+# The reconstructed window end and the API's reset time don't agree exactly:
+# a window is anchored on the first *request*, while the transcript records the
+# assistant turn, so reconstruction runs a few minutes late (measured ~5 min on
+# a live account). Match observations to windows by proximity, not equality.
+WINDOW_MATCH_MINUTES = 45
+
+# Bump whenever the state file gains a field derived during ingest. The stored
+# per-file offsets sit at EOF, so a new field would stay empty forever on an
+# existing install — a version mismatch discards the offsets and forces one
+# full re-read instead.
+STATE_VERSION = 2
+
 _FAMILIES = ("opus", "fable", "sonnet", "haiku")
 
 
@@ -57,6 +85,17 @@ def model_family(model: str | None) -> str:
         if fam in m:
             return fam.capitalize()
     return "Other"
+
+
+@dataclass
+class Window:
+    """One reconstructed 5-hour window."""
+    start: datetime
+    end: datetime
+    out: int = 0
+    turns: int = 0
+    pct: int = 0            # utilisation, observed or estimated
+    observed: bool = False  # True when the daemon actually saw this window's peak
 
 
 @dataclass
@@ -100,6 +139,13 @@ class UsageHistory:
         self._days: dict[str, DayTotals] = {}
         self._seen: dict[str, set[str]] = {}          # day → {"req|mid", …}
         self._files: dict[str, int] = {}               # path → consumed byte offset
+        # Minute-resolution token stream, the input to window reconstruction.
+        # Turns arrive per-file (unordered), so they're accumulated by epoch
+        # minute and sorted on demand; minute granularity keeps the state file
+        # small while preserving exact 5h boundaries.
+        self._minutes: dict[int, list[int]] = {}   # epoch minute → [out, turns]
+        self._observed: dict[int, int] = {}        # window key → peak pct seen
+        self._ratios: list[float] = []             # output tokens per 1% of limit
         self.last_scan_bytes = 0
         self.last_scan_files = 0
 
@@ -156,12 +202,118 @@ class UsageHistory:
 
     def payload_fields(self) -> dict:
         keys = self._day_keys()
+        grid = self.grid_field()
+        flat = "".join(grid)
         return {
             "h":  [int(round(self._days.get(k, DayTotals()).out / 1000)) for k in keys],
             "ht": [self._days.get(k, DayTotals()).turns for k in keys],
             "hw": self._today().weekday(),
             "hm": self.model_mix(),
+            "wg": grid,                                        # 5h windows per day
+            "wn": len(flat),                                   # windows this week
+            "wx": sum(1 for c in flat if c in "3d"),           # of which maxed
         }
+
+    # ---------------------------------------------------------------- windows
+    DEFAULT_TOKENS_PER_PCT = 4500.0   # bootstrap until this account is observed
+
+    def tokens_per_pct(self) -> float:
+        """Output tokens per 1% of the 5h limit, as learned from observations.
+
+        The real limit weighs models and input/cache tokens, none of which the
+        transcripts expose in the API's terms — so rather than hardcode a
+        conversion, fit one from windows where we saw both the tokens and the
+        reported percentage. Median, so one odd window can't drag it.
+        """
+        if not self._ratios:
+            return self.DEFAULT_TOKENS_PER_PCT
+        xs = sorted(self._ratios)
+        return xs[len(xs) // 2]
+
+    def _window_key(self, end: datetime) -> int:
+        """Stable id for a window from its end time (epoch minutes / 5)."""
+        return int(end.timestamp() // 300)
+
+    def observe(self, session_pct, reset_minutes) -> None:
+        """Record the live 5h utilisation against the window it belongs to.
+
+        Called each poll with the API's numbers. Keeps the peak per window (a
+        window only ever climbs, but a reset mid-poll must not overwrite it),
+        and fits the tokens→percent ratio once the window is far enough along
+        for the division to mean anything.
+        """
+        try:
+            pct = int(session_pct or 0)
+            mins = int(reset_minutes or 0)
+        except (TypeError, ValueError):
+            return
+        if pct <= 0 or mins <= 0:
+            return
+        api_end = self._now() + timedelta(minutes=mins)
+        win = self._match_window(api_end)
+        if win is None:
+            # The API sees usage we can't place locally yet — the transcript
+            # may not be flushed, or the work happened on another machine.
+            # Next poll will find it once the turn lands.
+            return
+        key = self._window_key(win.end)
+        if pct > self._observed.get(key, 0):
+            self._observed[key] = min(pct, 100)
+        if pct >= OBSERVE_MIN_PCT and win.out > 0:
+            ratio = win.out / float(pct)
+            self._ratios = ([r for r in self._ratios if r != ratio] + [ratio])[-16:]
+
+    def _match_window(self, api_end: datetime) -> "Window | None":
+        """The reconstructed window whose end is nearest ``api_end``, within
+        WINDOW_MATCH_MINUTES. None when nothing is close enough."""
+        best, best_delta = None, timedelta(minutes=WINDOW_MATCH_MINUTES)
+        for w in self._reconstruct():
+            delta = abs(w.end - api_end)
+            if delta <= best_delta:
+                best, best_delta = w, delta
+        return best
+
+    def _reconstruct(self) -> list[Window]:
+        """Walk the minute stream, first-use anchoring each 5h window."""
+        wins: list[Window] = []
+        cur: Window | None = None
+        span = timedelta(hours=WINDOW_HOURS)
+        for minute in sorted(self._minutes):
+            at = datetime.fromtimestamp(minute * 60, timezone.utc)
+            out, turns = self._minutes[minute]
+            if cur is None or at >= cur.end:
+                cur = Window(start=at, end=at + span)
+                wins.append(cur)
+            cur.out += out
+            cur.turns += turns
+        return wins
+
+    def windows(self) -> list[Window]:
+        """Reconstructed windows with a level on each: observed where we saw
+        one, otherwise estimated from tokens."""
+        ratio = self.tokens_per_pct()
+        wins = self._reconstruct()
+        for w in wins:
+            seen = self._observed.get(self._window_key(w.end))
+            if seen is not None:
+                w.pct, w.observed = seen, True
+            else:
+                w.pct = min(100, int(round(w.out / ratio))) if ratio > 0 else 0
+        return wins
+
+    def _level_char(self, pct: int, observed: bool) -> str:
+        level = sum(1 for t in LEVEL_THRESHOLDS if pct >= t)
+        return "abcd"[level] if observed else "0123"[level]
+
+    def grid_field(self, days: int = GRID_DAYS) -> list[str]:
+        """One string per local day, oldest → newest; one char per window."""
+        keys = self._day_keys()[-days:]
+        rows = {k: "" for k in keys}
+        for w in self.windows():
+            key = w.start.astimezone(self.tz).date().isoformat()
+            if key in rows and len(rows[key]) < GRID_MAX_PER_DAY:
+                rows[key] += self._level_char(w.pct, w.observed)
+        return [rows[k] for k in keys]
 
     # ------------------------------------------------------------------- scan
     def scan(self) -> None:
@@ -238,12 +390,17 @@ class UsageHistory:
         day = _local_day(d.get("timestamp"), self.tz)
         if day is None:
             return
+        minute = _epoch_minute(d.get("timestamp"))
         ident = f"{d.get('requestId') or ''}|{msg.get('id') or d.get('uuid') or ''}"
         seen = self._seen.setdefault(day, set())
         if ident in seen:
             return
         seen.add(ident)
         self._days.setdefault(day, DayTotals()).add(usage, model_family(model))
+        if minute is not None:
+            slot = self._minutes.setdefault(minute, [0, 0])
+            slot[0] += int(usage.get("output_tokens") or 0)
+            slot[1] += 1
 
     def _prune(self) -> None:
         keep = set(self._day_keys())
@@ -253,6 +410,14 @@ class UsageHistory:
         for key in list(self._seen):
             if key not in keep:
                 del self._seen[key]
+        # The minute stream and observations only feed the window grid, so they
+        # retain a shorter horizon than the day chart.
+        floor = int((self._now() - timedelta(days=GRID_DAYS + 1)).timestamp() // 60)
+        for m in [m for m in self._minutes if m < floor]:
+            del self._minutes[m]
+        key_floor = self._window_key(self._now() - timedelta(days=GRID_DAYS + 1))
+        for k in [k for k in self._observed if k < key_floor]:
+            del self._observed[k]
 
     # ------------------------------------------------------------ persistence
     def load(self) -> None:
@@ -260,20 +425,33 @@ class UsageHistory:
             return
         try:
             d = json.loads(self.state_file.read_text())
+            if int(d.get("v", 1)) != STATE_VERSION:
+                # Older schema: drop everything and re-read from scratch.
+                self._files, self._days, self._seen = {}, {}, {}
+                self._minutes, self._observed, self._ratios = {}, {}, []
+                return
             self._files = {str(k): int(v) for k, v in (d.get("files") or {}).items()}
             self._days = {k: DayTotals.from_json(v) for k, v in (d.get("days") or {}).items()}
             self._seen = {k: set(v) for k, v in (d.get("seen") or {}).items()}
+            self._minutes = {int(k): list(v) for k, v in (d.get("minutes") or {}).items()}
+            self._observed = {int(k): int(v) for k, v in (d.get("observed") or {}).items()}
+            self._ratios = [float(x) for x in (d.get("ratios") or [])]
         except (ValueError, TypeError, AttributeError, OSError):
             # A corrupt or foreign state file just means a fresh full scan.
             self._files, self._days, self._seen = {}, {}, {}
+            self._minutes, self._observed, self._ratios = {}, {}, []
 
     def save(self) -> None:
         if not self.state_file:
             return
         payload = {
+            "v": STATE_VERSION,
             "files": self._files,
             "days": {k: v.to_json() for k, v in self._days.items()},
             "seen": {k: sorted(v) for k, v in self._seen.items()},
+            "minutes": self._minutes,
+            "observed": self._observed,
+            "ratios": self._ratios,
         }
         tmp = self.state_file.with_name(self.state_file.name + f".{os.getpid()}.tmp")
         try:
@@ -292,6 +470,18 @@ class UsageHistory:
 def _days_delta(n: int):
     from datetime import timedelta
     return timedelta(days=n)
+
+
+def _epoch_minute(ts: str | None) -> int | None:
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() // 60)
 
 
 def _local_day(ts: str | None, tz: tzinfo) -> str | None:
