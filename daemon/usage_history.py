@@ -63,7 +63,15 @@ GRID_DAYS = 7
 LEVEL_THRESHOLDS = (25, 50, 85)     # → levels 0..3: none / some / most / maxed
 GRID_BANDS = 5                      # fixed time-of-day columns: 00-05, 05-10, 10-15, 15-20, 20-24
 GRID_EMPTY = "."                    # no window opened in that band
-OBSERVE_MIN_PCT = 10                # below this, tokens/pct is too noisy to fit
+# Calibration only fits windows this far along. The API reports the percentage
+# as an integer, so the quotient carries at least 1/pct of relative error from
+# rounding alone — 10% at pct=10, 3.3% at pct=30 — and on top of that any token
+# the transcript hasn't accounted for (a turn not yet flushed, work done on
+# another machine) is a fixed offset that skews a barely-used window far more
+# than a full one. Live data made the point: the same account fitted ~1,100
+# tokens/% on a window read at single-digit percent and ~5,700 on mature ones.
+OBSERVE_MIN_PCT = 30
+FIT_WINDOWS = 16                    # how many windows' calibration samples to keep
 # Reconstructed boundaries drift from the API's real ones, and by more than a
 # few minutes: a window is anchored on the first *request* while the transcript
 # records the assistant turn, and one missed turn early in the chain shifts
@@ -79,7 +87,7 @@ WINDOW_MIN_OVERLAP_HOURS = WINDOW_HOURS / 2.0
 # per-file offsets sit at EOF, so a new field would stay empty forever on an
 # existing install — a version mismatch discards the offsets and forces one
 # full re-read instead.
-STATE_VERSION = 2
+STATE_VERSION = 3
 
 _FAMILIES = ("opus", "fable", "sonnet", "haiku")
 
@@ -160,7 +168,10 @@ class UsageHistory:
         # small while preserving exact 5h boundaries.
         self._minutes: dict[int, list[int]] = {}   # epoch minute → [out, turns]
         self._observed: dict[int, int] = {}        # window key → peak pct seen
-        self._ratios: list[float] = []             # output tokens per 1% of limit
+        # Calibration samples, one per *window* (see observe()): the window's
+        # output tokens and the percentage reported alongside them. Kept raw
+        # rather than pre-divided so the fit stays inspectable in the state file.
+        self._fits: dict[int, list[int]] = {}      # window key → [output tokens, pct]
         self.last_scan_bytes = 0
         self.last_scan_files = 0
 
@@ -238,11 +249,12 @@ class UsageHistory:
         The real limit weighs models and input/cache tokens, none of which the
         transcripts expose in the API's terms — so rather than hardcode a
         conversion, fit one from windows where we saw both the tokens and the
-        reported percentage. Median, so one odd window can't drag it.
+        reported percentage. Median *across windows* — one sample each, so
+        neither an odd window nor a heavily-polled one can drag it.
         """
-        if not self._ratios:
+        if not self._fits:
             return self.DEFAULT_TOKENS_PER_PCT
-        xs = sorted(self._ratios)
+        xs = sorted(out / float(pct) for out, pct in self._fits.values())
         return xs[len(xs) // 2]
 
     def _window_key(self, end: datetime) -> int:
@@ -274,9 +286,23 @@ class UsageHistory:
         key = self._window_key(win.end)
         if pct > self._observed.get(key, 0):
             self._observed[key] = min(pct, 100)
-        if pct >= OBSERVE_MIN_PCT and win.out > 0:
-            ratio = win.out / float(pct)
-            self._ratios = ([r for r in self._ratios if r != ratio] + [ratio])[-16:]
+        # Calibration takes one sample per *window*, not per poll. observe()
+        # runs every 60 s, so an afternoon spent inside one window used to append
+        # dozens of near-identical samples that outvoted every other window in
+        # the median — the fit became "whichever window was polled most".
+        if pct < OBSERVE_MIN_PCT or win.out <= 0:
+            return                    # too early to divide; the peak above still stands
+        prev = self._fits.get(key)
+        if prev is not None and pct < prev[1]:
+            return                    # keep the most mature reading of this window
+        # Both tokens and percent grow as a window fills, so a later reading is
+        # a better-conditioned quotient than an earlier one: replace, don't add.
+        self._fits[key] = [win.out, pct]
+        # Bound by window recency (keys are ordered by window end), not by age:
+        # a quiet week can leave the newest sample days old, and expiring it
+        # would drop the account back to the hardcoded bootstrap ratio.
+        for stale in sorted(self._fits)[:-FIT_WINDOWS]:
+            del self._fits[stale]
 
     def _match_window(self, api_end: datetime) -> "Window | None":
         """The reconstructed window overlapping the API's window the most.
@@ -487,18 +513,19 @@ class UsageHistory:
             if int(d.get("v", 1)) != STATE_VERSION:
                 # Older schema: drop everything and re-read from scratch.
                 self._files, self._days, self._seen = {}, {}, {}
-                self._minutes, self._observed, self._ratios = {}, {}, []
+                self._minutes, self._observed, self._fits = {}, {}, {}
                 return
             self._files = {str(k): int(v) for k, v in (d.get("files") or {}).items()}
             self._days = {k: DayTotals.from_json(v) for k, v in (d.get("days") or {}).items()}
             self._seen = {k: set(v) for k, v in (d.get("seen") or {}).items()}
             self._minutes = {int(k): list(v) for k, v in (d.get("minutes") or {}).items()}
             self._observed = {int(k): int(v) for k, v in (d.get("observed") or {}).items()}
-            self._ratios = [float(x) for x in (d.get("ratios") or [])]
-        except (ValueError, TypeError, AttributeError, OSError):
+            self._fits = {int(k): [int(v[0]), int(v[1])]
+                          for k, v in (d.get("fits") or {}).items()}
+        except (ValueError, TypeError, AttributeError, IndexError, KeyError, OSError):
             # A corrupt or foreign state file just means a fresh full scan.
             self._files, self._days, self._seen = {}, {}, {}
-            self._minutes, self._observed, self._ratios = {}, {}, []
+            self._minutes, self._observed, self._fits = {}, {}, {}
 
     def save(self) -> None:
         if not self.state_file:
@@ -510,7 +537,7 @@ class UsageHistory:
             "seen": {k: sorted(v) for k, v in self._seen.items()},
             "minutes": self._minutes,
             "observed": self._observed,
-            "ratios": self._ratios,
+            "fits": self._fits,
         }
         tmp = self.state_file.with_name(self.state_file.name + f".{os.getpid()}.tmp")
         try:

@@ -312,12 +312,28 @@ window is anchored on the request).
 distinguishes them so the screen never passes inference off as fact:
 
 - **Measured** — the daemon was running and saw that window's peak
-  (`observe()` each poll, matched to a reconstructed window by proximity,
-  `WINDOW_MATCH_MINUTES`). Rendered with a hairline outline.
+  (`observe()` each poll, matched to a reconstructed window by **overlap**:
+  the best match must cover more than half a window, `WINDOW_MIN_OVERLAP_HOURS`.
+  Endpoint proximity was tried first and abandoned — drifts of ~5 min and
+  ~54 min were both measured on a live account, so any fixed tolerance either
+  misses real matches or admits wrong ones). No border: settled fact.
 - **Estimated** — output tokens ÷ a tokens-per-percent ratio *learned from
-  this account's own measured windows* (median of up to 16, bootstrapped at
-  `DEFAULT_TOKENS_PER_PCT` until the first observation). On the reference
-  account one live reading fitted ~4,900 tokens per 1%.
+  this account's own measured windows*, bootstrapped at
+  `DEFAULT_TOKENS_PER_PCT` until the first fit. Rendered with a grey border,
+  so the screen never passes inference off as fact; the greys thin out as
+  windows get measured.
+
+**Calibration takes one sample per window, never per poll.** `observe()` runs
+every 60 s, so appending a sample each time let a single heavily-polled window
+outvote every other one — the median became "whichever window we watched
+longest". On the reference account that put the fit at 1,673 tokens/% when the
+mature-window answer was ~5,995, i.e. every estimated window was drawn ~3.5x
+hotter than reality. `_fits` is now keyed by window (`STATE_VERSION` 3), holds
+the most mature reading of each, and only fits windows past
+`OBSERVE_MIN_PCT` (30) — the API reports the percentage as an integer, so the
+quotient carries at least `1/pct` of rounding error before any unaccounted
+token is considered. A window below the threshold still records its peak and
+still renders as measured; it just doesn't vote on the ratio.
 
 Payload keys: `wg` (7 fixed-width strings, one per day, one char per time band
 — digits `0`-`3` estimated, letters `a`-`d` measured, `.` no window), `wn`

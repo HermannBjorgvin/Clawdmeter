@@ -14,7 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from daemon.usage_history import UsageHistory, WINDOW_HOURS
+from daemon.usage_history import (FIT_WINDOWS, OBSERVE_MIN_PCT, STATE_VERSION,
+                                  UsageHistory, WINDOW_HOURS)
 
 UTC = timezone.utc
 NOW = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
@@ -32,6 +33,28 @@ def _turn(ts: str, out: int = 100, req: str = "r", mid: str = "m") -> str:
 def _write(path: Path, *lines: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")
+
+
+def _append(path: Path, *lines: str) -> None:
+    """Grow a transcript mid-test, the way a live session does."""
+    with path.open("a") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+def _seed_ratio(h: UsageHistory, *ratios: float) -> None:
+    """Pin the calibration to these tokens-per-percent values.
+
+    Samples are keyed by window, so each seeded ratio needs its own synthetic
+    window: a fully-used one (100%) whose tokens divide out exactly.
+    """
+    h._fits = {i: [int(r * 100), 100] for i, r in enumerate(ratios)}
+
+
+def _moving(cfg, start: datetime, days: int = 14) -> tuple[UsageHistory, list]:
+    """A history whose clock the test can advance — needed to observe more than
+    one window, since observe() only ever sees the window that is open *now*."""
+    clock = [start]
+    return UsageHistory([cfg], days=days, tz=UTC, now=lambda: clock[0]), clock
 
 
 @pytest.fixture
@@ -123,7 +146,7 @@ def test_observation_sets_the_ratio(cfg):
 
 def test_ratio_is_the_median_of_observations(cfg):
     h = _hist(cfg)
-    h._ratios = [3000.0, 4000.0, 11000.0]
+    _seed_ratio(h, 3000.0, 4000.0, 11000.0)
     assert h.tokens_per_pct() == 4000.0
 
 
@@ -132,7 +155,95 @@ def test_low_percentages_are_ignored_as_noise(cfg):
     _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 5_000, "r1", "m1"))
     h = _hist(cfg); h.scan()
     h.observe(session_pct=2, reset_minutes=60)
-    assert h._ratios == []
+    assert h._fits == {}
+
+
+def test_repeated_polls_of_one_window_contribute_one_sample(cfg):
+    """observe() runs every 60 s; a long window must not stuff the median."""
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 200_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    for _ in range(10):
+        h.observe(session_pct=50, reset_minutes=60)
+    assert len(h._fits) == 1
+    assert h.tokens_per_pct() == pytest.approx(4000)      # 200000 / 50
+
+
+def test_a_more_mature_reading_supersedes_an_earlier_one(cfg):
+    # Tokens and percent both climb as a window fills, so the later quotient is
+    # better conditioned — it replaces the earlier sample rather than adding one.
+    src = cfg / "projects/p/s.jsonl"
+    _write(src, _turn("2026-09-06T08:00:00Z", 160_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=40, reset_minutes=60)           # 160k / 40 = 4000
+    assert h.tokens_per_pct() == pytest.approx(4000)
+
+    _append(src, _turn("2026-09-06T09:00:00Z", 240_000, "r2", "m2"))
+    h.scan()
+    h.observe(session_pct=80, reset_minutes=60)           # 400k / 80 = 5000
+    assert len(h._fits) == 1
+    assert h.tokens_per_pct() == pytest.approx(5000)
+
+
+def test_a_less_mature_reading_does_not_overwrite(cfg):
+    # A reset landing mid-poll can report a lower percentage against the same
+    # matched window; the peak reading has to survive it.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 400_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=80, reset_minutes=60)           # 400k / 80 = 5000
+    h.observe(session_pct=40, reset_minutes=60)           # would fit 10000
+    assert h.tokens_per_pct() == pytest.approx(5000)
+
+
+def test_immature_window_is_measured_but_not_calibrated(cfg):
+    """Below OBSERVE_MIN_PCT the quotient is noise — but the peak is still real."""
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 5_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=OBSERVE_MIN_PCT - 1, reset_minutes=60)
+    assert h._fits == {}
+    assert h.tokens_per_pct() == pytest.approx(h.DEFAULT_TOKENS_PER_PCT)
+    seen = [w for w in h.windows() if w.observed]
+    assert len(seen) == 1 and seen[0].pct == OBSERVE_MIN_PCT - 1
+    assert h.grid_field(days=7)[-1] == ".b..."            # 08:00 → band 1, measured
+
+
+def test_median_is_taken_across_windows_not_polls(cfg):
+    """The live-install regression.
+
+    The observed ratios were [5610, 5619, 5666, 5678, 5763, 5846, 1199, 1090,
+    999]: the first six are one window polled six times, the last three a second
+    window. Per-poll sampling let the polled-most window own the median.
+    """
+    _write(cfg / "projects/p/s.jsonl",
+           _turn("2026-09-06T00:00:00Z", 500_000, "r1", "m1"),   # A: ends 05:00 → 5000
+           _turn("2026-09-06T06:00:00Z", 100_000, "r2", "m2"),   # B: ends 11:00 → 1000
+           _turn("2026-09-06T12:00:00Z", 900_000, "r3", "m3"))   # C: ends 17:00 → 9000
+    h, clock = _moving(cfg, datetime(2026, 9, 6, 4, 0, tzinfo=UTC))
+    h.scan()
+    for pct in (40, 55, 70, 85, 95, 100):                        # six polls, one window
+        h.observe(session_pct=pct, reset_minutes=60)
+    clock[0] = datetime(2026, 9, 6, 10, 0, tzinfo=UTC)
+    h.observe(session_pct=100, reset_minutes=60)
+    clock[0] = datetime(2026, 9, 6, 16, 0, tzinfo=UTC)
+    h.observe(session_pct=100, reset_minutes=60)
+    assert len(h._fits) == 3
+    assert h.tokens_per_pct() == pytest.approx(5000)             # not A's early 12500
+
+
+def test_calibration_keeps_a_bounded_number_of_windows(cfg):
+    # 18 windows, one every 6 h, each observed once at its peak.
+    start = datetime(2026, 9, 1, tzinfo=UTC)
+    stamps = [start + timedelta(hours=6 * i) for i in range(18)]
+    _write(cfg / "projects/p/s.jsonl",
+           *[_turn(t.isoformat().replace("+00:00", "Z"), 100_000, f"r{i}", f"m{i}")
+             for i, t in enumerate(stamps)])
+    h, clock = _moving(cfg, start)
+    h.scan()
+    for t in stamps:
+        clock[0] = t + timedelta(hours=WINDOW_HOURS - 1)
+        h.observe(session_pct=100, reset_minutes=60)
+    assert len(h._fits) == FIT_WINDOWS
+    # What is dropped is the oldest window, so the newest reading survives.
+    assert max(h._fits) == h._window_key(stamps[-1] + timedelta(hours=WINDOW_HOURS))
 
 
 def test_observation_records_peak_not_last(cfg):
@@ -155,7 +266,7 @@ def test_observed_peak_wins_over_the_estimate(cfg):
 def test_estimate_used_when_no_observation(cfg):
     _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T01:00:00Z", 200_000, "r1", "m1"))
     h = _hist(cfg)
-    h._ratios = [4000.0]
+    _seed_ratio(h, 4000.0)
     h.scan()
     w = h.windows()[0]
     assert not w.observed
@@ -164,7 +275,7 @@ def test_estimate_used_when_no_observation(cfg):
 
 def test_estimate_is_capped_at_100(cfg):
     _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T01:00:00Z", 10_000_000, "r1", "m1"))
-    h = _hist(cfg); h._ratios = [4000.0]; h.scan()
+    h = _hist(cfg); _seed_ratio(h, 4000.0); h.scan()
     assert h.windows()[0].pct == 100
 
 
@@ -188,7 +299,7 @@ def test_grid_payload_groups_windows_by_local_day(cfg):
 
 def test_grid_levels_are_digits_when_estimated(cfg):
     _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T01:00:00Z", 200_000, "r1", "m1"))
-    h = _hist(cfg); h._ratios = [4000.0]; h.scan()
+    h = _hist(cfg); _seed_ratio(h, 4000.0); h.scan()
     assert h.grid_field(days=7)[-1] == "2...."      # 01:00 → band 0; 50% → level 2
 
 
@@ -215,7 +326,7 @@ def test_payload_includes_grid_and_maxed_count(cfg):
     _write(cfg / "projects/p/s.jsonl",
            _turn("2026-09-05T01:00:00Z", 400_000, "r1", "m1"),
            _turn("2026-09-06T01:00:00Z", 100, "r2", "m2"))
-    h = _hist(cfg); h._ratios = [4000.0]; h.scan()
+    h = _hist(cfg); _seed_ratio(h, 4000.0); h.scan()
     p = h.payload_fields()
     assert "wg" in p and len(p["wg"]) == 7
     assert p["wg"][-2] == "3...."                    # 400k/4000 = 100% → maxed, band 0
@@ -240,7 +351,7 @@ def test_grid_payload_stays_small(cfg):
 # persistence
 # ---------------------------------------------------------------------------
 
-def test_observations_and_ratios_survive_a_restart(cfg, tmp_path):
+def test_observations_and_calibration_survive_a_restart(cfg, tmp_path):
     state = tmp_path / "s.json"
     _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 220_000, "r1", "m1"))
     h1 = _hist(cfg, state=state); h1.scan(); h1.observe(55, 60); h1.save()
@@ -248,6 +359,45 @@ def test_observations_and_ratios_survive_a_restart(cfg, tmp_path):
     h2 = _hist(cfg, state=state); h2.load(); h2.scan()
     assert h2.tokens_per_pct() == pytest.approx(4000, rel=0.01)
     assert [w.pct for w in h2.windows() if w.observed] == [55]
+
+
+def test_calibration_samples_round_trip_through_the_state_file(cfg, tmp_path):
+    state = tmp_path / "s.json"
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 220_000, "r1", "m1"))
+    h1 = _hist(cfg, state=state); h1.scan(); h1.observe(55, 60); h1.save()
+    assert json.loads(state.read_text())["v"] == STATE_VERSION
+
+    h2 = _hist(cfg, state=state); h2.load(); h2.scan()
+    assert h2._fits == h1._fits
+    assert h2.tokens_per_pct() == pytest.approx(4000, rel=0.01)
+
+
+def test_state_from_the_per_poll_era_is_discarded_not_misread(cfg, tmp_path):
+    """v2 stored "ratios" as a flat per-poll list; v3 stores per-window samples.
+
+    Loading the old shape must neither crash nor smuggle the skewed per-poll
+    ratios in — the version gate drops it and forces one full re-read.
+    """
+    state = tmp_path / "s.json"
+    src = cfg / "projects/p/s.jsonl"
+    _write(src, _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+    state.write_text(json.dumps({
+        "v": 2,
+        "files": {str(src): src.stat().st_size},
+        "days": {"2026-09-06": {"t": 1, "o": 100_000, "i": 0, "cr": 0, "cw": 0,
+                                "m": {"Opus": 100_000}}},
+        "seen": {"2026-09-06": ["r1|m1"]},
+        "minutes": {"29520480": [100_000, 1]},
+        "observed": {"98401": 55},
+        "ratios": [5610.0, 5619.0, 1199.0, 1090.0],
+    }))
+    h = _hist(cfg, state=state)
+    h.load()
+    h.scan()
+    assert h._fits == {}
+    assert h.tokens_per_pct() == pytest.approx(h.DEFAULT_TOKENS_PER_PCT)
+    assert len(h.windows()) == 1                  # transcript re-read from scratch
+    assert h.day("2026-09-06").out == 100_000     # and not double-counted
 
 
 def test_observation_tolerates_a_large_reconstruction_drift(cfg):
@@ -282,7 +432,7 @@ def test_observation_ignores_a_window_it_cannot_place(cfg):
     h = _hist(cfg); h.scan()
     h.observe(session_pct=50, reset_minutes=240)       # 3 h off → no match
     assert not any(w.observed for w in h.windows())
-    assert h._ratios == []
+    assert h._fits == {}
 
 
 def test_old_state_schema_forces_a_full_rescan(cfg, tmp_path):
@@ -328,7 +478,7 @@ def test_current_state_schema_is_reused_incrementally(cfg, tmp_path):
                                        (14, 2), (15, 3), (19, 3), (20, 4), (23, 4)])
 def test_window_lands_in_its_time_band(cfg, hour, band):
     _write(cfg / "projects/p/s.jsonl", _turn(f"2026-09-06T{hour:02d}:30:00Z", 200_000, "r1", "m1"))
-    h = _hist(cfg); h._ratios = [4000.0]; h.scan()
+    h = _hist(cfg); _seed_ratio(h, 4000.0); h.scan()
     row = h.grid_field(days=7)[-1]
     assert row[band] != "." and row.count(".") == 4
 
@@ -337,7 +487,7 @@ def test_bands_use_local_time_not_utc(cfg):
     # 23:30 UTC is 09:30 next day at UTC+10 → band 1 of the *following* day.
     _write(cfg / "projects/p/s.jsonl", _turn("2026-09-05T23:30:00Z", 200_000, "r1", "m1"))
     h = UsageHistory([cfg], days=14, tz=timezone(timedelta(hours=10)), now=lambda: NOW)
-    h._ratios = [4000.0]; h.scan()
+    _seed_ratio(h, 4000.0); h.scan()
     assert h.grid_field(days=7)[-1] == ".2..."
 
 
@@ -348,7 +498,7 @@ def test_columns_align_across_days(cfg):
            _turn("2026-09-05T11:00:00Z", 200_000, "r1", "m1"),
            _turn("2026-09-05T02:00:00Z", 200_000, "r2", "m2"),
            _turn("2026-09-06T12:00:00Z", 200_000, "r3", "m3"))
-    h = _hist(cfg); h._ratios = [4000.0]; h.scan()
+    h = _hist(cfg); _seed_ratio(h, 4000.0); h.scan()
     g = h.grid_field(days=7)
     assert g[-2][2] != "." and g[-1][2] != "."      # same column on both days
     assert g[-2][0] != "." and g[-1][0] == "."      # only the 5th used band 0
@@ -358,7 +508,7 @@ def test_window_count_ignores_empty_bands(cfg):
     _write(cfg / "projects/p/s.jsonl",
            _turn("2026-09-05T11:00:00Z", 200_000, "r1", "m1"),
            _turn("2026-09-06T12:00:00Z", 200_000, "r2", "m2"))
-    h = _hist(cfg); h._ratios = [4000.0]; h.scan()
+    h = _hist(cfg); _seed_ratio(h, 4000.0); h.scan()
     p = h.payload_fields()
     assert p["wn"] == 2
 
