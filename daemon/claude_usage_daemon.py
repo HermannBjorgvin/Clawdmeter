@@ -21,6 +21,12 @@ import time
 from pathlib import Path
 
 import httpx
+
+try:
+    from daemon.usage_history import UsageHistory
+except ImportError:  # launched as a plain script (launchd), not as daemon.*
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from daemon.usage_history import UsageHistory
 from bleak import BleakClient
 from bleak.exc import BleakError
 
@@ -39,6 +45,16 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 DEFAULT_CONFIG_DIR = Path.home() / ".claude"
 SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
 CONFIG_FILE = Path.home() / ".config" / "claude-usage-monitor" / "config"
+HISTORY_STATE_FILE = Path.home() / ".config" / "claude-usage-monitor" / "history-state.json"
+
+# BLE write sizing. The device's RX buffer is 512 bytes. A write-without-
+# response is capped at ATT_MTU-3 and CoreBluetooth silently truncates past
+# it; the base usage payload (~105 bytes) has always fit, but the History
+# fields push a payload past what a conservative MTU allows. Anything over
+# this threshold goes as a write-with-response, which CoreBluetooth chunks
+# as a standard GATT long write and NimBLE reassembles on the device.
+WRITE_NR_MAX_BYTES = 160
+LONG_WRITE_TIMEOUT = 10.0
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
@@ -359,6 +375,65 @@ def read_clock_setting() -> str:
     return "off"
 
 
+def read_history_setting() -> str:
+    """Read the `history` option from the config file. One of: on|off.
+
+    Defaults to "on": the History screen is fed purely from local transcripts
+    (no API call, no token), so there's nothing to opt into beyond the daemon
+    itself. Set `history = off` to skip the transcript scan entirely.
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "history":
+                    val = val.strip().lower()
+                    if val in ("off", "on"):
+                        return val
+    except OSError:
+        pass
+    return "on"
+
+
+_HISTORY: UsageHistory | None = None
+
+
+def _history() -> UsageHistory:
+    """The process-wide history aggregator, built on first use from the
+    configured config dirs and primed from its on-disk state."""
+    global _HISTORY
+    if _HISTORY is None:
+        _HISTORY = UsageHistory(read_config_dirs(), state_file=HISTORY_STATE_FILE)
+        _HISTORY.load()
+    return _HISTORY
+
+
+async def attach_history(payload: dict) -> None:
+    """Merge the History fields (h/ht/hw/hm) into ``payload`` when enabled.
+
+    The scan is incremental and normally milliseconds, but the very first one
+    walks the whole retention window (a gigabyte-plus corpus is common), so it
+    runs in a thread and never blocks the BLE loop. Any failure is logged and
+    swallowed — the usage numbers must never depend on the transcript scan.
+    """
+    if read_history_setting() == "off":
+        return
+    try:
+        hist = _history()
+        t0 = time.time()
+        await asyncio.to_thread(hist.scan)
+        await asyncio.to_thread(hist.save)
+        if hist.last_scan_files:
+            log(f"History: read {hist.last_scan_bytes/1e6:.1f} MB from "
+                f"{hist.last_scan_files} transcript(s) in {time.time()-t0:.2f}s")
+        payload.update(hist.payload_fields())
+    except Exception as e:  # noqa: BLE001 — deliberately broad, see docstring
+        log(f"History scan failed (continuing without it): {e}")
+
+
 def add_chime_field(payload: dict) -> None:
     """Add "c":1 to the payload when the config opts in, so the firmware may
     sound the session-reset chime. Omitted entirely when chime is off."""
@@ -621,11 +696,26 @@ class Session:
     async def write_payload(self, payload: dict) -> bool:
         data = json.dumps(payload, separators=(",", ":")).encode()
         log(f"Sending: {data.decode()}")
+        # Small payloads keep the historical write-without-response path
+        # exactly as it was. Larger ones (History fields) would be silently
+        # truncated by CoreBluetooth at ATT_MTU-3, so they go with-response —
+        # a GATT long write — bounded like the subscribe, since an ACK that
+        # never comes on a half-open link must not wedge the poll loop.
+        long_write = len(data) > WRITE_NR_MAX_BYTES
         try:
-            await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
+            if long_write:
+                await asyncio.wait_for(
+                    self.client.write_gatt_char(RX_CHAR_UUID, data, response=True),
+                    timeout=LONG_WRITE_TIMEOUT,
+                )
+            else:
+                await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
             return True
         except BleakError as e:
             log(f"Write failed: {e}")
+            return False
+        except asyncio.TimeoutError:
+            log(f"Write timed out ({len(data)} bytes, with-response)")
             return False
 
 
@@ -768,6 +858,7 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                 # numbers until the CLI re-seeds it.
                 payload, dead = await poll_active()
                 if payload is not None:
+                    await attach_history(payload)
                     if await session.write_payload(payload):
                         last_poll = time.time()
                         used_successfully = True
@@ -779,7 +870,9 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                     # be a healthy link for a full POLL_INTERVAL.
                     log("No usable token; signalling no-data to device — run "
                         "`claude login` or use the CLI to let Claude Code renew it")
-                    if await session.write_payload({"ok": False}):
+                    beat: dict = {"ok": False}
+                    await attach_history(beat)   # local history needs no token
+                    if await session.write_payload(beat):
                         last_poll = time.time()
                 else:
                     # Transient poll failure (a live token that didn't answer this
