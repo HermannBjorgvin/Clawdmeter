@@ -5,6 +5,10 @@ Polls Claude usage (the zero-token /usage endpoint, falling back to the
 Messages API's rate-limit headers) and writes a JSON payload to the
 ESP32 "Clawdmeter" peripheral over a custom GATT service. Uses
 bleak (CoreBluetooth backend on macOS).
+
+Polling and transmitting are separate: UsagePoller keeps a fixed schedule for
+the daemon's whole life so the usage history stays complete while the hardware
+is unplugged, and connect_and_run transmits whatever it has published.
 """
 
 import asyncio
@@ -39,6 +43,13 @@ REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 POLL_INTERVAL = 60
 TICK = 5
 CONNECT_TIMEOUT = 20.0
+
+# How stale a cached payload may be and still be worth handing to a device that
+# has just connected. Polling runs on its own schedule (see UsagePoller), so the
+# cache is normally well under one POLL_INTERVAL old; past two of them the last
+# polls have been failing, and the device is better off holding its own idle
+# screen than being shown numbers we already know are out of date.
+PAYLOAD_MAX_AGE_S = POLL_INTERVAL * 2
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
@@ -900,6 +911,163 @@ async def poll_active_payload(selector: PlanSelector = _SELECTOR) -> dict | None
     return payload
 
 
+async def _wait_first(*events: asyncio.Event, timeout: float) -> None:
+    """Return when any of ``events`` is set, or after ``timeout`` seconds.
+
+    Lets a wait wake immediately on a stop signal (prompt SIGINT/SIGTERM exit)
+    without losing the other wakeups it is there for. Cancels and drains the
+    loser tasks so they don't warn. Mirrors the Windows daemon's helper of the
+    same name — the two daemons keep the same shutdown behaviour.
+    """
+    tasks = [asyncio.ensure_future(e.wait()) for e in events]
+    try:
+        await asyncio.wait(tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+class UsagePoller:
+    """Owns the usage-poll schedule, independent of the BLE link.
+
+    WHY this is not driven from connect_and_run any more: the poll results are
+    the ground truth behind ``usage_history.observe()`` — each 5-hour window's
+    measured peak, and the tokens-per-percent ratio calibrated from those peaks.
+    Polling only while a device happened to be connected meant unplugging the
+    hardware and carrying on working left holes in the history, not just in the
+    live display. Polling was gated on a connection because it used to cost a
+    token per call (a POST to /v1/messages), so polling with nothing to display
+    on was pure waste; the primary path is now the zero-token GET on USAGE_URL,
+    so the reason for the gating is gone.
+
+    One task does all the polling for the daemon's lifetime. It publishes "the
+    payload a device should be shown" — a usage payload or the {"ok": False}
+    no-data beat, History fields already merged — and connect_and_run only
+    transmits what is already published. A device never has to be connected,
+    or ever to have been seen, for a cycle to run.
+
+    Because exactly one task polls, a device-requested refresh can never run
+    concurrently with a scheduled poll: request_poll() just nudges this loop's
+    sleep. The nudge flag is cleared *after* a cycle completes, so a request
+    that arrives while a poll is already in flight is answered by that poll's
+    result instead of queueing a second poll immediately behind it.
+    """
+
+    def __init__(
+        self,
+        stop_event: asyncio.Event,
+        selector: PlanSelector = _SELECTOR,
+    ) -> None:
+        self.stop_event = stop_event
+        self.selector = selector
+        # Latest payload to send, or None until the first cycle produces one.
+        self.payload: dict | None = None
+        self.published_at: float = 0.0
+        # Bumped on every publish. Consumers compare it against the last value
+        # they sent, so a reconnect re-sends the cache and a failed write is
+        # retried next tick without costing another poll.
+        self.seq: int = 0
+        self._wake = asyncio.Event()
+        # The "no usable token" notice used to be bounded by a device being
+        # connected; now it would repeat every POLL_INTERVAL for as long as the
+        # user stays logged out, so log it on the transition only.
+        self._warned_no_token = False
+
+    def request_poll(self) -> None:
+        """Ask for an early poll — the firmware's refresh nudge."""
+        self._wake.set()
+
+    def fresh_payload(self, now: float | None = None) -> tuple[dict | None, int]:
+        """The cached payload and its sequence number, or (None, seq) when the
+        cache is too old to be worth sending (see PAYLOAD_MAX_AGE_S)."""
+        if self.payload is None:
+            return None, self.seq
+        age = (now if now is not None else time.time()) - self.published_at
+        if age > PAYLOAD_MAX_AGE_S:
+            return None, self.seq
+        return self.payload, self.seq
+
+    def _publish(self, payload: dict) -> None:
+        self.payload = payload
+        self.published_at = time.time()
+        self.seq += 1
+
+    async def poll_once(self) -> None:
+        """One cycle: read the token(s), poll, attach history, publish.
+
+        Pure free-ride: read whatever access token(s) Claude Code currently
+        holds across the configured config dirs and NEVER refresh them
+        ourselves. Claude Code (the token's owner) does all refreshing;
+        refreshing here would race its rotation and feed the OAuth endpoint's
+        rate limit (429). When no dir has a usable token we publish "No data"
+        so a connected device idles instead of holding stale numbers until the
+        CLI re-seeds it.
+        """
+        payload, dead = await poll_active(self.selector)
+        if payload is not None:
+            # attach_history() runs on the POLL schedule, not the send
+            # schedule: it is what calls observe(), which records the live
+            # window's peak and keeps the tokens-per-percent calibration
+            # learning. Skipping it while no device is connected would leave
+            # exactly the gaps this class exists to close.
+            await attach_history(payload)
+            self._publish(payload)
+            self._warned_no_token = False
+        elif dead:
+            # No live token in any config dir (missing, or a 401/expired token)
+            # -> publish "No data" so a connected device shows its idle screen
+            # rather than stale numbers.
+            if not self._warned_no_token:
+                log("No usable token; signalling no-data to device — run "
+                    "`claude login` or use the CLI to let Claude Code renew it")
+                self._warned_no_token = True
+            beat: dict = {"ok": False}
+            await attach_history(beat)   # local history needs no token
+            self._publish(beat)
+        else:
+            # Transient poll failure (a live token that didn't answer this
+            # cycle) -> publish nothing, so a connected device stays on its
+            # last payload and we retry on the next scheduled poll.
+            log("No usable config dir this cycle")
+
+    async def run(self) -> None:
+        """The poll loop. Runs until stop_event is set (or the task is
+        cancelled); one poll happens immediately at startup so the daemon has
+        data to hand out before the first device ever connects."""
+        while not self.stop_event.is_set():
+            try:
+                await self.poll_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — the schedule must outlive
+                # any single bad cycle; dropping the task would silently stop
+                # the history calibration for the rest of the daemon's life.
+                log(f"Poll cycle failed (continuing): {e}")
+            # Cleared here, after the cycle, so an in-flight poll absorbs any
+            # refresh request that arrived while it was running.
+            self._wake.clear()
+            await _wait_first(self.stop_event, self._wake, timeout=POLL_INTERVAL)
+
+
+def _with_current_clock(payload: dict) -> dict:
+    """``payload`` with its wall-clock fields re-stamped for now, if it has any.
+
+    The firmware anchors its clock to the moment a payload lands (clock_base_ms
+    in ui.cpp), so sending a cached payload verbatim would set the device's
+    clock back by the payload's own age — up to a POLL_INTERVAL when a device
+    connects mid-cycle. Only "t"/"tf" are time-sensitive; the usage numbers are
+    by definition as fresh as the last poll. Returns the original object
+    untouched when the clock is switched off, so the common path allocates
+    nothing.
+    """
+    if "t" not in payload:
+        return payload
+    stamped = dict(payload)
+    add_clock_fields(stamped)
+    return stamped
+
+
 class Session:
     def __init__(self, client: BleakClient) -> None:
         self.client = client
@@ -1038,13 +1206,21 @@ def unpair_macos() -> bool:
     return True
 
 
-async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
-    """Connect to a target and poll until disconnected or stopped.
+async def connect_and_run(
+    target, stop_event: asyncio.Event, poller: UsagePoller
+) -> bool:
+    """Connect to a target and transmit until disconnected or stopped.
 
     ``target`` is either an address string (Linux) or a BLEDevice carrying
     live CoreBluetooth details (macOS). Returns True if the connection was
     used successfully (so the caller keeps the cached address), False if the
     connection failed and the cache should be invalidated.
+
+    This function no longer polls: ``poller`` owns the schedule and runs whether
+    or not anything is connected (see UsagePoller). All that happens here is
+    transmitting each newly published payload, plus an immediate send of the
+    cache on connect so a device doesn't wait out a whole POLL_INTERVAL for its
+    first screenful.
     """
     display = target if isinstance(target, str) else target.address
     log(f"Connecting to {display}...")
@@ -1075,48 +1251,36 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     session = Session(client)
     await session.setup_refresh_subscription()
 
-    last_poll = 0.0
+    # 0 = nothing sent on THIS connection yet, and the poller's seq starts at 0
+    # and only ever rises — so a cache published before this connect is sent
+    # straight away, and a reconnect re-sends it rather than idling the device.
+    last_sent_seq = 0
     used_successfully = False
     try:
         while client.is_connected and not stop_event.is_set():
-            now = time.time()
-            elapsed = now - last_poll
-            if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
+            resend = False
+            if session.refresh_requested.is_set():
                 session.refresh_requested.clear()
-                # Pure free-ride: read whatever access token(s) Claude Code
-                # currently holds across the configured config dirs and NEVER
-                # refresh them ourselves. Claude Code (the token's owner) does all
-                # refreshing; refreshing here would race its rotation and feed the
-                # OAuth endpoint's rate limit (429). When no dir has a usable token
-                # we signal "No data" so the device idles instead of holding stale
-                # numbers until the CLI re-seeds it.
-                payload, dead = await poll_active()
-                if payload is not None:
-                    await attach_history(payload)
-                    if await session.write_payload(payload):
-                        last_poll = time.time()
-                        used_successfully = True
-                elif dead:
-                    # No live token in any config dir (missing, or a 401/expired
-                    # token) -> show "No data" now instead of stale numbers. Guard
-                    # last_poll on the write result (like the data path) so a
-                    # failed beat retries next tick instead of throttling what may
-                    # be a healthy link for a full POLL_INTERVAL.
-                    log("No usable token; signalling no-data to device — run "
-                        "`claude login` or use the CLI to let Claude Code renew it")
-                    beat: dict = {"ok": False}
-                    await attach_history(beat)   # local history needs no token
-                    if await session.write_payload(beat):
-                        last_poll = time.time()
-                else:
-                    # Transient poll failure (a live token that didn't answer this
-                    # cycle) -> stay silent and retry next tick.
-                    log("No usable config dir this cycle")
+                # The firmware nudges when it has nothing to show, so answer
+                # from the cache immediately, and ask the poller for a fresh
+                # reading to follow. request_poll() can't start a second
+                # concurrent poll — see UsagePoller.
+                resend = True
+                poller.request_poll()
 
-            try:
-                await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
-            except asyncio.TimeoutError:
-                pass
+            payload, seq = poller.fresh_payload()
+            if payload is not None and (resend or seq != last_sent_seq):
+                if await session.write_payload(_with_current_clock(payload)):
+                    last_sent_seq = seq
+                    used_successfully = True
+                # A failed write leaves last_sent_seq alone, so the same
+                # payload is retried on the next tick — no extra poll, and no
+                # POLL_INTERVAL of silence on what may be a healthy link.
+
+            # Wake on a refresh request, on stop (prompt SIGINT/SIGTERM exit),
+            # or every TICK — the periodic wake is what notices a disconnect
+            # quickly and picks up the poller's newly published payloads.
+            await _wait_first(session.refresh_requested, stop_event, timeout=TICK)
     finally:
         try:
             await client.disconnect()
@@ -1144,39 +1308,54 @@ async def main() -> None:
     log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
 
+    # Polling starts here and runs for the daemon's whole life, on its own task:
+    # usage is recorded whether or not a device is connected, and whether or not
+    # one has ever been seen. The BLE loop below only transmits what the poller
+    # has already published.
+    poller = UsagePoller(stop_event)
+    poll_task = asyncio.create_task(poller.run())
+
     backoff = 1
     skip_addr: str | None = None  # macOS: a peripheral to skip for one cycle
-    while not stop_event.is_set():
-        # Apply any pending skip exactly once, then clear it so the next
-        # cycle re-tries retrieveConnected (the device may have recovered).
-        target = await discover_target(skip_addr=skip_addr)
-        skip_addr = None
-        if not target:
-            log(f"Device not found, retrying in {backoff}s...")
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=backoff)
-            except asyncio.TimeoutError:
-                pass
-            backoff = min(backoff * 2, 60)
-            continue
+    try:
+        while not stop_event.is_set():
+            # Apply any pending skip exactly once, then clear it so the next
+            # cycle re-tries retrieveConnected (the device may have recovered).
+            target = await discover_target(skip_addr=skip_addr)
+            skip_addr = None
+            if not target:
+                log(f"Device not found, retrying in {backoff}s...")
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+                except asyncio.TimeoutError:
+                    pass
+                backoff = min(backoff * 2, 60)
+                continue
 
-        addr = target if isinstance(target, str) else target.address
-        ok = await connect_and_run(target, stop_event)
-        if not ok:
-            if sys.platform == "darwin":
-                # No string cache to drop; instead skip this stale handle on
-                # the next retrieveConnected so the scan fallback is reachable.
-                skip_addr = addr
+            addr = target if isinstance(target, str) else target.address
+            ok = await connect_and_run(target, stop_event, poller)
+            if not ok:
+                if sys.platform == "darwin":
+                    # No string cache to drop; instead skip this stale handle on
+                    # the next retrieveConnected so the scan fallback is reachable.
+                    skip_addr = addr
+                else:
+                    log("Invalidating cached address")
+                    SAVED_ADDR_FILE.unlink(missing_ok=True)
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+                except asyncio.TimeoutError:
+                    pass
+                backoff = min(backoff * 2, 60)
             else:
-                log("Invalidating cached address")
-                SAVED_ADDR_FILE.unlink(missing_ok=True)
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=backoff)
-            except asyncio.TimeoutError:
-                pass
-            backoff = min(backoff * 2, 60)
-        else:
-            backoff = 1
+                backoff = 1
+    finally:
+        # The poll loop returns on its own once stop_event is set; the cancel
+        # covers a poll (or its sleep) already in flight, and unwinding for any
+        # other reason. Awaiting it means no task outlives asyncio.run().
+        stop_event.set()
+        poll_task.cancel()
+        await asyncio.gather(poll_task, return_exceptions=True)
 
 
 if __name__ == "__main__":
