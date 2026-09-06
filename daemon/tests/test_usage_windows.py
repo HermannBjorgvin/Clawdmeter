@@ -203,7 +203,7 @@ def test_immature_window_is_measured_but_not_calibrated(cfg):
     assert h.tokens_per_pct() == pytest.approx(h.DEFAULT_TOKENS_PER_PCT)
     seen = [w for w in h.windows() if w.observed]
     assert len(seen) == 1 and seen[0].pct == OBSERVE_MIN_PCT - 1
-    assert h.grid_field(days=7)[-1] == ".b..."            # 08:00 → band 1, measured
+    assert h.grid_field(days=7)[-1] == ".B..."            # 08:00 → band 1, measured (partial)
 
 
 def test_median_is_taken_across_windows_not_polls(cfg):
@@ -252,7 +252,7 @@ def test_observation_records_peak_not_last(cfg):
     h.observe(session_pct=80, reset_minutes=60)
     h.observe(session_pct=42, reset_minutes=60)       # same window, lower reading
     key = h._window_key(datetime(2026, 9, 6, 13, 0, tzinfo=UTC))
-    assert h._observed[key] == 80
+    assert h._observed[key][0] == 80          # peak, not the later lower reading
 
 
 def test_observed_peak_wins_over_the_estimate(cfg):
@@ -306,8 +306,13 @@ def test_grid_levels_are_digits_when_estimated(cfg):
 def test_grid_levels_are_letters_when_observed(cfg):
     _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100, "r1", "m1"))
     h = _hist(cfg); h.scan()
+    # Observed an hour from the reset: measured, but we never saw it close, so
+    # the level is a floor — uppercase rather than lowercase.
     h.observe(session_pct=97, reset_minutes=60)
-    assert h.grid_field(days=7)[-1] == ".d..."      # 08:00 → band 1; maxed, observed
+    assert h.grid_field(days=7)[-1] == ".D..."      # 08:00 → band 1; maxed, partial
+    # …and watching it to the close promotes it to exact.
+    h.observe(session_pct=97, reset_minutes=1)
+    assert h.grid_field(days=7)[-1] == ".d..."
 
 
 @pytest.mark.parametrize("pct,ch", [(0, "0"), (5, "0"), (24, "0"), (25, "1"),
@@ -557,3 +562,89 @@ def test_current_cell_absent_when_the_window_aged_out_of_the_grid(cfg):
     _write(cfg / "projects/p/s.jsonl", _turn("2026-08-20T08:00:00Z", 100_000, "r1", "m1"))
     h = _hist(cfg); h.scan()
     assert h.current_cell(60) is None
+
+
+# ---------------------------------------------------------------------------
+# partial vs final observation — "measured" must mean the peak we hold is the
+# window's *final* value, not just the highest we happened to see
+# ---------------------------------------------------------------------------
+
+def test_window_watched_to_its_close_is_final(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 200_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=40, reset_minutes=60)   # mid-window
+    h.observe(session_pct=90, reset_minutes=1)    # caught it just before reset
+    w = [x for x in h.windows() if x.observed][0]
+    assert w.pct == 90 and w.final
+
+
+def test_window_abandoned_mid_flight_is_not_final(cfg):
+    # Device unplugged an hour in: we hold a peak, but it is a floor, not the
+    # window's final value.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 200_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=40, reset_minutes=120)
+    w = [x for x in h.windows() if x.observed][0]
+    assert w.pct == 40 and not w.final
+
+
+def test_final_flag_uses_the_closest_approach_to_the_reset(cfg):
+    # Order must not matter: a late reading makes it final even if a distant
+    # reading arrives afterwards (a new poll matched to the same window).
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 200_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=90, reset_minutes=2)
+    h.observe(session_pct=91, reset_minutes=45)
+    assert [x for x in h.windows() if x.observed][0].final
+
+
+@pytest.mark.parametrize("pct,final,ch", [
+    (90, True,  "d"),    # measured to the close  → exact
+    (90, False, "D"),    # measured but abandoned → at least this much
+    (60, True,  "c"),
+    (60, False, "C"),
+])
+def test_grid_encodes_final_separately_from_partial(cfg, pct, final, ch):
+    h = _hist(cfg)
+    assert h._level_char(pct, observed=True, final=final) == ch
+
+
+def test_estimated_windows_still_use_digits(cfg):
+    h = _hist(cfg)
+    assert h._level_char(90, observed=False, final=False) == "3"
+
+
+def test_maxed_count_includes_partial_and_exact(cfg):
+    _write(cfg / "projects/p/s.jsonl",
+           _turn("2026-09-05T01:00:00Z", 400_000, "r1", "m1"),
+           _turn("2026-09-06T08:00:00Z", 100, "r2", "m2"))
+    h = _hist(cfg); h._fits = {}; h.scan()
+    h.observe(session_pct=95, reset_minutes=120)      # partial, maxed
+    p = h.payload_fields()
+    assert p["wx"] >= 1
+    assert any(c in "Dd" for row in p["wg"] for c in row)
+
+
+def test_window_count_still_counts_partial_windows(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=40, reset_minutes=120)
+    assert h.payload_fields()["wn"] == 1
+
+
+def test_partial_observation_still_calibrates(cfg):
+    # The fit stores tokens and pct captured at the SAME moment, so a partial
+    # observation is still a valid pair — only the displayed peak is a floor.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 200_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=50, reset_minutes=120)
+    assert h.tokens_per_pct() == pytest.approx(4000, rel=0.01)
+
+
+def test_final_state_survives_a_restart(cfg, tmp_path):
+    state = tmp_path / "s.json"
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 200_000, "r1", "m1"))
+    h1 = _hist(cfg, state=state); h1.scan(); h1.observe(90, 1); h1.save()
+    h2 = _hist(cfg, state=state); h2.load(); h2.scan()
+    w = [x for x in h2.windows() if x.observed][0]
+    assert w.pct == 90 and w.final

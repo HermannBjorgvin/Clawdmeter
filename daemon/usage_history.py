@@ -72,6 +72,12 @@ GRID_EMPTY = "."                    # no window opened in that band
 # tokens/% on a window read at single-digit percent and ~5,700 on mature ones.
 OBSERVE_MIN_PCT = 30
 FIT_WINDOWS = 16                    # how many windows' calibration samples to keep
+# A window counts as watched-to-the-close if we ever saw it this near its
+# reset. Polls are a minute apart, so the last poll of a window normally lands
+# within a minute or two of the end; anything further out means we stopped
+# looking early (device unplugged, daemon down) and the peak we hold is a
+# floor, not the window's final value.
+OBSERVE_FINAL_MINUTES = 5
 # Reconstructed boundaries drift from the API's real ones, and by more than a
 # few minutes: a window is anchored on the first *request* while the transcript
 # records the assistant turn, and one missed turn early in the chain shifts
@@ -87,7 +93,7 @@ WINDOW_MIN_OVERLAP_HOURS = WINDOW_HOURS / 2.0
 # per-file offsets sit at EOF, so a new field would stay empty forever on an
 # existing install — a version mismatch discards the offsets and forces one
 # full re-read instead.
-STATE_VERSION = 3
+STATE_VERSION = 4
 
 _FAMILIES = ("opus", "fable", "sonnet", "haiku")
 
@@ -98,6 +104,8 @@ def window_rank(ch: str) -> int:
         return int(ch)
     if ch in "abcd":
         return ord(ch) - ord("a")
+    if ch in "ABCD":
+        return ord(ch) - ord("A")
     return -1
 
 
@@ -119,6 +127,8 @@ class Window:
     turns: int = 0
     pct: int = 0            # utilisation, observed or estimated
     observed: bool = False  # True when the daemon actually saw this window's peak
+    final: bool = False     # …and saw it close, so `pct` is its final value
+                            # rather than "at least this much"
 
 
 @dataclass
@@ -167,7 +177,7 @@ class UsageHistory:
         # minute and sorted on demand; minute granularity keeps the state file
         # small while preserving exact 5h boundaries.
         self._minutes: dict[int, list[int]] = {}   # epoch minute → [out, turns]
-        self._observed: dict[int, int] = {}        # window key → peak pct seen
+        self._observed: dict[int, list[int]] = {}  # window key → [peak pct, min minutes-to-reset seen]
         # Calibration samples, one per *window* (see observe()): the window's
         # output tokens and the percentage reported alongside them. Kept raw
         # rather than pre-divided so the fit stays inspectable in the state file.
@@ -237,7 +247,7 @@ class UsageHistory:
             "hm": self.model_mix(),
             "wg": grid,                                        # 5h windows per day
             "wn": len(flat),                                   # windows this week
-            "wx": sum(1 for c in flat if c in "3d"),           # of which maxed
+            "wx": sum(1 for c in flat if c in "3dD"),          # of which maxed
         }
 
     # ---------------------------------------------------------------- windows
@@ -284,8 +294,10 @@ class UsageHistory:
             # Next poll will find it once the turn lands.
             return
         key = self._window_key(win.end)
-        if pct > self._observed.get(key, 0):
-            self._observed[key] = min(pct, 100)
+        # Track the peak *and* how close to the reset we ever got. Both are
+        # monotone in the useful direction, so order of arrival doesn't matter.
+        prev_pct, prev_mins = self._observed.get(key, (0, 10**6))
+        self._observed[key] = [max(min(pct, 100), prev_pct), min(mins, prev_mins)]
         # Calibration takes one sample per *window*, not per poll. observe()
         # runs every 60 s, so an afternoon spent inside one window used to append
         # dozens of near-identical samples that outvoted every other window in
@@ -366,14 +378,24 @@ class UsageHistory:
         for w in wins:
             seen = self._observed.get(self._window_key(w.end))
             if seen is not None:
-                w.pct, w.observed = seen, True
+                w.pct, w.observed = seen[0], True
+                w.final = seen[1] <= OBSERVE_FINAL_MINUTES
             else:
                 w.pct = min(100, int(round(w.out / ratio))) if ratio > 0 else 0
         return wins
 
-    def _level_char(self, pct: int, observed: bool) -> str:
+    def _level_char(self, pct: int, observed: bool, final: bool = False) -> str:
+        """One grid character: level plus how much to trust it.
+
+        digits  0-3  estimated from token volume, never measured
+        UPPER   A-D  measured, but we stopped watching before the window closed
+                     — the level is a floor, "at least this much"
+        lower   a-d  measured to the close: the window's final value
+        """
         level = sum(1 for t in LEVEL_THRESHOLDS if pct >= t)
-        return "abcd"[level] if observed else "0123"[level]
+        if not observed:
+            return "0123"[level]
+        return "abcd"[level] if final else "ABCD"[level]
 
     def grid_field(self, days: int = GRID_DAYS) -> list[str]:
         """One fixed-width string per local day, oldest → newest.
@@ -394,7 +416,7 @@ class UsageHistory:
             if key not in rows:
                 continue
             band = min(local.hour // 5, GRID_BANDS - 1)
-            ch = self._level_char(w.pct, w.observed)
+            ch = self._level_char(w.pct, w.observed, w.final)
             cur = rows[key][band]
             if cur == GRID_EMPTY or window_rank(ch) > window_rank(cur):
                 rows[key][band] = ch
@@ -519,7 +541,8 @@ class UsageHistory:
             self._days = {k: DayTotals.from_json(v) for k, v in (d.get("days") or {}).items()}
             self._seen = {k: set(v) for k, v in (d.get("seen") or {}).items()}
             self._minutes = {int(k): list(v) for k, v in (d.get("minutes") or {}).items()}
-            self._observed = {int(k): int(v) for k, v in (d.get("observed") or {}).items()}
+            self._observed = {int(k): [int(v[0]), int(v[1])]
+                              for k, v in (d.get("observed") or {}).items()}
             self._fits = {int(k): [int(v[0]), int(v[1])]
                           for k, v in (d.get("fits") or {}).items()}
         except (ValueError, TypeError, AttributeError, IndexError, KeyError, OSError):

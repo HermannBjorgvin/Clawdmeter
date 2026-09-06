@@ -18,11 +18,13 @@
 // The daemon sends one fixed-width string per local day (oldest → newest).
 // Position is the *time of day* a window opened — five 5-hour bands — so
 // columns line up across days; '.' means no window opened in that band.
-// Digits '0'-'3' are levels ESTIMATED
-// from token volume; letters 'a'-'d' are the same levels MEASURED (the daemon
-// was running and saw that window's peak utilisation). Distinguishing them
-// matters: the API only ever reports the current window, so history is
-// inferred until the daemon has watched it happen.
+// Digits '0'-'3' are levels ESTIMATED from token volume. Letters are MEASURED
+// — the daemon saw the API's own number — and the case says how far to trust
+// it: lowercase 'a'-'d' means the window was watched all the way to its reset,
+// so the level is final; uppercase 'A'-'D' means we stopped watching early
+// (device unplugged, daemon down), so the level is a floor — "at least this
+// much". The API only ever reports the *current* window, so nothing can
+// backfill a window nobody watched.
 #define HIST_GRID_DAYS   7
 #define HIST_BANDS       5      // fixed time-of-day columns: 00-05, 05-10, 10-15, 15-20, 20-24
 #define HIST_WIN_PER_DAY HIST_BANDS
@@ -30,9 +32,12 @@
 static inline int  window_level(char c) {
     if (c >= '0' && c <= '3') return c - '0';
     if (c >= 'a' && c <= 'd') return c - 'a';
+    if (c >= 'A' && c <= 'D') return c - 'A';
     return -1;                              // not a window
 }
-static inline bool window_measured(char c) { return c >= 'a' && c <= 'd'; }
+// Exact: measured *and* watched to the close. Only these are settled fact.
+static inline bool window_exact(char c)    { return c >= 'a' && c <= 'd'; }
+static inline bool window_measured(char c) { return window_exact(c) || (c >= 'A' && c <= 'D'); }
 
 // Index of the first bucket of "this week". Prefers the daemon's window
 // start (hs: the day Anthropic's rolling 7-day limit opened — what the

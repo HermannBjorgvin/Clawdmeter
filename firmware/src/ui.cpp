@@ -295,10 +295,11 @@ static lv_obj_t* max_cells[HIST_GRID_DAYS][HIST_WIN_PER_DAY];
 // are one allocation total, swapped by pointer on update.
 static lv_style_t max_style_level[4];
 static lv_style_t max_style_empty;      // band with no window — a faint track
-// Borders mark cells worth a second look. A plain cell is settled fact: a
-// window whose peak the daemon actually measured. Grey = the level is inferred
-// from token volume; white = the window burning right now. As more windows get
-// measured, the grey borders fade out on their own.
+// Borders mark cells worth a second look. A plain cell is settled fact: the
+// daemon watched that window from before its peak right through to its reset.
+// Grey = the number could be higher than shown — either inferred from token
+// volume, or measured but abandoned before the window closed. White = the
+// window burning right now. The greys thin out as windows get watched.
 static lv_style_t max_style_estimated;
 static lv_style_t max_style_current;
 static lv_obj_t*  max_bandlbl[HIST_BANDS];
@@ -983,10 +984,10 @@ static void update_maxing(const UsageData* d) {
     if (!maxing_container || d->win_days <= 0) return;
 
     char buf[80];
-    int measured = 0;
+    int exact = 0;
     for (int i = 0; i < d->win_days; ++i)
         for (const char* c = d->win_grid[i]; *c; ++c)
-            if (window_measured(*c)) measured++;
+            if (window_exact(*c)) exact++;
 
     snprintf(buf, sizeof buf, "#c0392b %d maxed# of %d windows", d->win_maxed, d->win_count);
     lv_label_set_text(lbl_max_head, buf);
@@ -1022,15 +1023,18 @@ static void update_maxing(const UsageData* d) {
             // Current wins over provenance: there is only ever one live
             // window, and knowing which one you're burning beats knowing
             // how its level was arrived at.
-            if (is_current)                 lv_obj_add_style(cell, &max_style_current, 0);
-            else if (!window_measured(c))   lv_obj_add_style(cell, &max_style_estimated, 0);
+            // Anything not watched to the close is a floor, not a fact — an
+            // abandoned measurement is no more trustworthy than an estimate,
+            // so both wear the grey.
+            if (is_current)              lv_obj_add_style(cell, &max_style_current, 0);
+            else if (!window_exact(c))   lv_obj_add_style(cell, &max_style_estimated, 0);
         }
     }
 
-    const int estimated = d->win_count - measured;
-    if (estimated <= 0)            snprintf(buf, sizeof buf, "all measured");
-    else if (d->win_current >= 0)  snprintf(buf, sizeof buf, "white = now, grey = est (%d)", estimated);
-    else                           snprintf(buf, sizeof buf, "grey border = estimated (%d)", estimated);
+    const int unconfirmed = d->win_count - exact;
+    if (unconfirmed <= 0)          snprintf(buf, sizeof buf, "all confirmed");
+    else if (d->win_current >= 0)  snprintf(buf, sizeof buf, "white = now, grey = unconfirmed (%d)", unconfirmed);
+    else                           snprintf(buf, sizeof buf, "grey = could be higher (%d)", unconfirmed);
     lv_label_set_text(lbl_max_foot, buf);
 }
 

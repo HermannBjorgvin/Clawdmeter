@@ -311,17 +311,29 @@ window is anchored on the request).
 *current* window, so history has no ground truth. Two sources, and the payload
 distinguishes them so the screen never passes inference off as fact:
 
-- **Measured** — the daemon was running and saw that window's peak
+- **Measured** — the daemon saw the API's own number for that window
   (`observe()` each poll, matched to a reconstructed window by **overlap**:
   the best match must cover more than half a window, `WINDOW_MIN_OVERLAP_HOURS`.
   Endpoint proximity was tried first and abandoned — drifts of ~5 min and
   ~54 min were both measured on a live account, so any fixed tolerance either
-  misses real matches or admits wrong ones). No border: settled fact.
+  misses real matches or admits wrong ones).
+
+  Measured splits in two, because "we saw a peak" is not "we saw the final
+  peak". `observe()` also tracks the *smallest* minutes-to-reset ever seen for
+  a window; within `OBSERVE_FINAL_MINUTES` of the reset the window was watched
+  to its close and the level is **exact** (lowercase `a`-`d`, no border).
+  Otherwise we stopped looking early — device unplugged, daemon down — and the
+  level is a floor, "at least this much" (**uppercase `A`-`D`**, grey border,
+  drawn like an estimate because it is equally not-a-fact). Nothing can
+  backfill it later: the API only ever reports the *current* window.
+
+  Calibration is unaffected by the split — `_fits` stores the token count and
+  the percentage captured in the *same* poll, so a partial observation is
+  still a valid contemporaneous pair. Only the displayed peak is a floor.
 - **Estimated** — output tokens ÷ a tokens-per-percent ratio *learned from
   this account's own measured windows*, bootstrapped at
-  `DEFAULT_TOKENS_PER_PCT` until the first fit. Rendered with a grey border,
-  so the screen never passes inference off as fact; the greys thin out as
-  windows get measured.
+  `DEFAULT_TOKENS_PER_PCT` until the first fit. Grey border, like a partial
+  measurement: the greys thin out as windows get watched to their close.
 
 **Calibration takes one sample per window, never per poll.** `observe()` runs
 every 60 s, so appending a sample each time let a single heavily-polled window
@@ -336,8 +348,9 @@ token is considered. A window below the threshold still records its peak and
 still renders as measured; it just doesn't vote on the ratio.
 
 Payload keys: `wg` (7 fixed-width strings, one per day, one char per time band
-— digits `0`-`3` estimated, letters `a`-`d` measured, `.` no window), `wn`
-(window count, empty bands excluded), `wx` (maxed).
+— digits `0`-`3` estimated, lowercase `a`-`d` measured-to-the-close,
+uppercase `A`-`D` measured-but-abandoned, `.` no window), `wn` (window count,
+empty bands excluded), `wx` (maxed, counting all three provenances).
 
 **LVGL heap is the binding constraint on this screen, not board DRAM.** The
 pool is a fixed 64 KB `.bss` array (LVGL's builtin allocator, `LV_MEM_SIZE`),
