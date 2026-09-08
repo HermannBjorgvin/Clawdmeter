@@ -5,6 +5,7 @@
 enum screen_t {
     SCREEN_SPLASH,
     SCREEN_CLOCK,
+    SCREEN_SENSOR,
     SCREEN_USAGE,
     SCREEN_COPILOT,
     SCREEN_SYSINFO,
@@ -21,6 +22,8 @@ void ui_update_copilot(const CopilotData* data);
 void ui_update_sysinfo(const SysInfoData* data);
 void ui_update_vscode(const VscodeData* data);
 void ui_update_env(const EnvData* data);         // {"src":"env",...} — clock + weather
+void ui_update_sensor(bool present, float temp_c, float pressure_hpa,
+                       bool has_humidity, float humidity_pct); // env sensor (BME280/BMP180), on-device
 void ui_update_ci(const CiData* data);           // {"src":"ci",...}  — CI + review queue
 void ui_update_today(int act_min, int tok_k, int usd, int commits, int cp_used); // {"src":"sum",...}
 void ui_update_act(const char* state, int agents); // {"src":"act",...} — Claude activity

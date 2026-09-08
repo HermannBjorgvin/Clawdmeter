@@ -26,7 +26,8 @@ def default_port() -> str:
 
 
 def capture(port_path: str, screen: str | None = None,
-            feeds: list[str] | None = None) -> tuple[int, int, bytes]:
+            feeds: list[str] | None = None,
+            cmds: list[str] | None = None) -> tuple[int, int, bytes]:
     port = serial.Serial(port_path, 115200, timeout=2)
     try:
         # Opening the port toggles DTR/RTS on many adapters, resetting the
@@ -36,6 +37,11 @@ def capture(port_path: str, screen: str | None = None,
 
         for payload in feeds or []:
             port.write(b"feed " + payload.encode() + b"\n")
+            port.flush()
+            time.sleep(0.3)
+
+        for raw in cmds or []:
+            port.write(raw.encode() + b"\n")
             port.flush()
             time.sleep(0.3)
 
@@ -138,10 +144,11 @@ def main() -> None:
     opts = [a for a in sys.argv[1:] if a.startswith("--")]
     screen = next((a.split("=", 1)[1] for a in opts if a.startswith("--screen=")), None)
     feeds = [a.split("=", 1)[1] for a in opts if a.startswith("--feed=")]
+    cmds = [a.split("=", 1)[1] for a in opts if a.startswith("--cmd=")]
     out = args[0] if args else "screenshot.png"
     port = args[1] if len(args) > 1 else default_port()
     print(f"Capturing from {port} ...")
-    w, h, raw = capture(port, screen, feeds)
+    w, h, raw = capture(port, screen, feeds, cmds)
     write_png(out, w, h, rgb565le_to_rgb888(w, h, raw))
     print(f"Saved {out} ({w}x{h})")
 

@@ -7,6 +7,7 @@
 #include "ble.h"
 #include "power.h"
 #include "imu.h"
+#include "env_sensor.h"
 #include "splash.h"
 #include "usage_rate.h"
 
@@ -232,6 +233,10 @@ static void check_serial_cmd() {
             } else if (strcmp(cmd_buf, "timer") == 0) {
                 ui_timer_toggle();
                 Serial.println("timer toggled");
+            } else if (strcmp(cmd_buf, "i2cscan") == 0) {
+                env_sensor_scan_bus();
+            } else if (strcmp(cmd_buf, "gpiotest") == 0) {
+                env_sensor_gpio_test();
             }
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
@@ -258,6 +263,12 @@ void setup() {
 
     // Init IMU stub (no-op)
     imu_init();
+
+    // Init environmental sensor (I2C, SDA=21/SCL=22) — auto-detects a
+    // BME280 or BMP180, whichever is wired up. No-op UI impact if nothing's
+    // wired: sensor_has_data stays false and the Sensor screen is skipped
+    // in the cycle.
+    env_sensor_init();
 
     // Init LVGL
     lv_init();
@@ -301,6 +312,7 @@ void loop() {
     ble_tick();
     power_tick();
     imu_tick();
+    env_sensor_tick();
     splash_tick();
     backlight_tick();
 
@@ -360,6 +372,20 @@ void loop() {
         last_pct = pct;
         last_charging = charging;
         ui_update_battery(pct, charging);
+    }
+
+    // Push env sensor reading to the UI on change (sensor is local, not a BLE payload)
+    {
+        static bool  last_present = false;
+        static float last_t = -999, last_p = -999, last_h = -999;
+        bool  s_present = env_sensor_is_present();
+        float s_t = env_sensor_temp_c(), s_p = env_sensor_pressure_hpa();
+        bool  s_has_h = env_sensor_has_humidity();
+        float s_h = s_has_h ? env_sensor_humidity_pct() : 0;
+        if (s_present != last_present || s_t != last_t || s_p != last_p || s_h != last_h) {
+            last_present = s_present; last_t = s_t; last_p = s_p; last_h = s_h;
+            ui_update_sensor(s_present, s_t, s_p, s_has_h, s_h);
+        }
     }
 
     // Check for serial commands (screenshot, etc.)

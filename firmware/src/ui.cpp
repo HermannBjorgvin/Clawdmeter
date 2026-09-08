@@ -94,10 +94,13 @@ static lv_obj_t* lbl_clock_time;
 static lv_obj_t* lbl_clock_date;
 static lv_obj_t* wx_icon;            // colour-coded condition dot
 static lv_obj_t* lbl_wx_temp;
-static lv_obj_t* lbl_wx_deg;         // small degree ring after the temp
+static lv_obj_t* lbl_wx_deg;         // small degree ring after the outdoor temp
 static lv_obj_t* lbl_wx_cond;
 static lv_obj_t* lbl_wx_hilo;
 static lv_obj_t* lbl_wx_loc;
+static lv_obj_t* lbl_clock_intemp;    // indoor temp, same line/size as the outdoor temp
+static lv_obj_t* lbl_in_deg;          // small degree ring after the indoor temp
+static lv_obj_t* lbl_clock_indoor;    // env-sensor pressure readout: "1013 hPa" (+ "  45%")
 static lv_obj_t* bar_strip_claude;   // bottom "overall usage" strip
 static lv_obj_t* bar_strip_copilot;
 
@@ -665,11 +668,11 @@ static void init_env_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_clock_date, "");
     lv_obj_set_style_text_font(lbl_clock_date, &font_styrene_16, 0);
     lv_obj_set_style_text_color(lbl_clock_date, COL_DIM, 0);
-    lv_obj_align(lbl_clock_date, LV_ALIGN_TOP_MID, 0, 80);
+    lv_obj_align(lbl_clock_date, LV_ALIGN_TOP_MID, 0, 78);
 
     lv_obj_t* rule = lv_obj_create(clock_container);
     lv_obj_set_size(rule, CONTENT_W - 24, 2);
-    lv_obj_align(rule, LV_ALIGN_TOP_MID, 0, 110);
+    lv_obj_align(rule, LV_ALIGN_TOP_MID, 0, 106);
     lv_obj_set_style_bg_color(rule, COL_BAR_BG, 0);
     lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(rule, 0, 0);
@@ -683,13 +686,13 @@ static void init_env_screen(lv_obj_t* scr) {
     lv_obj_set_style_bg_color(wx_icon, COL_DIM, 0);
     lv_obj_set_style_bg_opa(wx_icon, LV_OPA_COVER, 0);
     lv_obj_clear_flag(wx_icon, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_pos(wx_icon, MARGIN + 8, 126);
+    lv_obj_set_pos(wx_icon, MARGIN + 2, 116);
 
     lbl_wx_temp = lv_label_create(clock_container);
     lv_label_set_text(lbl_wx_temp, "--");
     lv_obj_set_style_text_font(lbl_wx_temp, &font_styrene_24, 0);
     lv_obj_set_style_text_color(lbl_wx_temp, COL_TEXT, 0);
-    lv_obj_set_pos(lbl_wx_temp, MARGIN + 40, 122);
+    lv_obj_set_pos(lbl_wx_temp, MARGIN + 34, 112);
 
     // Degree mark — a small ring (no ° glyph in the ASCII-only fonts).
     lbl_wx_deg = lv_obj_create(clock_container);
@@ -702,38 +705,63 @@ static void init_env_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(lbl_wx_deg, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align_to(lbl_wx_deg, lbl_wx_temp, LV_ALIGN_OUT_RIGHT_TOP, 3, 3);
 
+    // Indoor temp (env sensor) — same line / same size, right-aligned, dimmed.
+    lbl_clock_intemp = lv_label_create(clock_container);
+    lv_label_set_text(lbl_clock_intemp, "--");
+    lv_obj_set_style_text_font(lbl_clock_intemp, &font_styrene_24, 0);
+    lv_obj_set_style_text_color(lbl_clock_intemp, COL_DIM, 0);
+    lv_obj_align(lbl_clock_intemp, LV_ALIGN_TOP_RIGHT, -MARGIN - 10, 112);
+
+    lbl_in_deg = lv_obj_create(clock_container);
+    lv_obj_set_size(lbl_in_deg, 7, 7);
+    lv_obj_set_style_radius(lbl_in_deg, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(lbl_in_deg, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(lbl_in_deg, 2, 0);
+    lv_obj_set_style_border_color(lbl_in_deg, COL_DIM, 0);
+    lv_obj_set_style_pad_all(lbl_in_deg, 0, 0);
+    lv_obj_clear_flag(lbl_in_deg, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align_to(lbl_in_deg, lbl_clock_intemp, LV_ALIGN_OUT_RIGHT_TOP, 3, 3);
+    lv_obj_add_flag(lbl_in_deg, LV_OBJ_FLAG_HIDDEN);
+
     lbl_wx_cond = lv_label_create(clock_container);
     lv_label_set_text(lbl_wx_cond, "");
     lv_obj_set_style_text_font(lbl_wx_cond, &font_styrene_14, 0);
     lv_obj_set_style_text_color(lbl_wx_cond, COL_TEXT, 0);
-    lv_obj_align(lbl_wx_cond, LV_ALIGN_TOP_MID, 0, 154);
+    lv_obj_align(lbl_wx_cond, LV_ALIGN_TOP_MID, 0, 142);
 
     lbl_wx_hilo = lv_label_create(clock_container);
     lv_label_set_text(lbl_wx_hilo, "");
     lv_obj_set_style_text_font(lbl_wx_hilo, &font_styrene_12, 0);
     lv_obj_set_style_text_color(lbl_wx_hilo, COL_DIM, 0);
-    lv_obj_align(lbl_wx_hilo, LV_ALIGN_TOP_MID, 0, 174);
+    lv_obj_align(lbl_wx_hilo, LV_ALIGN_TOP_MID, 0, 160);
 
     lbl_wx_loc = lv_label_create(clock_container);
     lv_label_set_text(lbl_wx_loc, "");
     lv_obj_set_style_text_font(lbl_wx_loc, &font_styrene_12, 0);
     lv_obj_set_style_text_color(lbl_wx_loc, COL_DIM, 0);
-    lv_obj_align(lbl_wx_loc, LV_ALIGN_TOP_MID, 0, 190);
+    lv_obj_align(lbl_wx_loc, LV_ALIGN_TOP_MID, 0, 174);
+
+    // Indoor reading (env sensor, on-device) — pressure (+humidity) line.
+    lbl_clock_indoor = lv_label_create(clock_container);
+    lv_label_set_text(lbl_clock_indoor, "-- hPa");
+    lv_obj_set_style_text_font(lbl_clock_indoor, &font_styrene_12, 0);
+    lv_obj_set_style_text_color(lbl_clock_indoor, COL_DIM, 0);
+    lv_obj_align(lbl_clock_indoor, LV_ALIGN_TOP_MID, 0, 188);
 
     // Bottom overall-usage strip
     lv_obj_t* lbl_cl = lv_label_create(clock_container);
     lv_label_set_text(lbl_cl, "CL");
     lv_obj_set_style_text_font(lbl_cl, &font_styrene_12, 0);
     lv_obj_set_style_text_color(lbl_cl, COL_DIM, 0);
-    lv_obj_set_pos(lbl_cl, MARGIN, 207);
-    bar_strip_claude = make_bar(clock_container, MARGIN + 24, 211, CONTENT_W - 24, 6);
+    lv_obj_set_pos(lbl_cl, MARGIN, 203);
+    bar_strip_claude = make_bar(clock_container, MARGIN + 24, 207, CONTENT_W - 24, 6);
 
     lv_obj_t* lbl_cp = lv_label_create(clock_container);
     lv_label_set_text(lbl_cp, "CP");
     lv_obj_set_style_text_font(lbl_cp, &font_styrene_12, 0);
     lv_obj_set_style_text_color(lbl_cp, COL_DIM, 0);
-    lv_obj_set_pos(lbl_cp, MARGIN, 221);
-    bar_strip_copilot = make_bar(clock_container, MARGIN + 24, 225, CONTENT_W - 24, 6);
+    lv_obj_set_pos(lbl_cp, MARGIN, 216);
+    bar_strip_copilot = make_bar(clock_container, MARGIN + 24, 220, CONTENT_W - 24, 6);
 
     lv_obj_add_flag(clock_container, LV_OBJ_FLAG_HIDDEN);
 }
@@ -870,6 +898,15 @@ static lv_obj_t* today_container;
 static lv_obj_t* lbl_today_rows[5];   // Claude time / tokens / cost / commits / copilot
 static bool today_has_data = false;
 
+static lv_obj_t* sensor_container;
+static lv_obj_t* lbl_sensor_temp_v;
+static lv_obj_t* lbl_sensor_hum_label;    // "Humidity" — hidden when the active chip lacks it (BMP180)
+static lv_obj_t* lbl_sensor_hum_v;
+static lv_obj_t* lbl_sensor_press_label;  // repositioned depending on whether Humidity is shown
+static lv_obj_t* lbl_sensor_press_v;
+static bool sensor_has_data = false;
+static bool sensor_shows_humidity = false;  // current layout state — reposition only when this changes
+
 static lv_obj_t* make_today_row(lv_obj_t* parent, int y, const char* label) {
     lv_obj_t* l = lv_label_create(parent);
     lv_label_set_text(l, label);
@@ -895,6 +932,37 @@ static void init_today_screen(lv_obj_t* scr) {
     lv_obj_add_flag(today_container, LV_OBJ_FLAG_HIDDEN);
 }
 
+// ======== Sensor Screen (env sensor: BME280 or BMP180, on-device I2C) ========
+
+#define SENSOR_ROW0_Y (CONTENT_Y + 6)
+
+// Like make_today_row(), but also hands back the label object — the
+// Humidity row needs to hide/show as a pair (label + value) depending on
+// which chip is active.
+static lv_obj_t* make_sensor_row(lv_obj_t* parent, int y, const char* label,
+                                  lv_obj_t** out_label) {
+    lv_obj_t* l = lv_label_create(parent);
+    lv_label_set_text(l, label);
+    lv_obj_set_style_text_font(l, &font_styrene_12, 0);
+    lv_obj_set_style_text_color(l, COL_DIM, 0);
+    lv_obj_set_pos(l, MARGIN + 2, y);
+    lv_obj_t* v = lv_label_create(parent);
+    lv_label_set_text(v, "--");
+    lv_obj_set_style_text_font(v, &font_styrene_16, 0);
+    lv_obj_set_style_text_color(v, COL_TEXT, 0);
+    lv_obj_align(v, LV_ALIGN_TOP_RIGHT, -MARGIN - 2, y - 3);
+    if (out_label) *out_label = l;
+    return v;
+}
+
+static void init_sensor_screen(lv_obj_t* scr) {
+    sensor_container = make_screen_container(scr, "Sensor");
+    lbl_sensor_temp_v  = make_sensor_row(sensor_container, SENSOR_ROW0_Y, "Temp", nullptr);
+    lbl_sensor_hum_v   = make_sensor_row(sensor_container, SENSOR_ROW0_Y + 32, "Humidity", &lbl_sensor_hum_label);
+    lbl_sensor_press_v = make_sensor_row(sensor_container, SENSOR_ROW0_Y + 64, "Press", &lbl_sensor_press_label);
+    lv_obj_add_flag(sensor_container, LV_OBJ_FLAG_HIDDEN);
+}
+
 // ======== Public API ========
 
 void ui_init(void) {
@@ -917,6 +985,7 @@ void ui_init(void) {
     init_vscode_screen(scr);
     init_ci_screen(scr);
     init_today_screen(scr);
+    init_sensor_screen(scr);
     init_bluetooth_screen(scr);
     splash_init(scr);
 
@@ -1349,6 +1418,60 @@ void ui_update_today(int act_min, int tok_k, int usd, int commits, int cp_used) 
     lv_label_set_text(lbl_today_rows[4], b);
 }
 
+// Env sensor reading (BME280 or BMP180, whichever env_sensor.cpp found),
+// pushed locally by main.cpp — not a daemon payload, so no note_data() here;
+// this shouldn't count toward daemon-link freshness.
+void ui_update_sensor(bool present, float temp_c, float pressure_hpa,
+                       bool has_humidity, float humidity_pct) {
+    sensor_has_data = present;
+    if (!present) {
+        if (lbl_clock_intemp) {
+            lv_label_set_text(lbl_clock_intemp, "--");
+            lv_obj_add_flag(lbl_in_deg, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (lbl_clock_indoor) lv_label_set_text(lbl_clock_indoor, "-- hPa");
+        return;
+    }
+
+    if (has_humidity != sensor_shows_humidity) {
+        sensor_shows_humidity = has_humidity;
+        if (has_humidity) {
+            lv_obj_clear_flag(lbl_sensor_hum_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(lbl_sensor_hum_v, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(lbl_sensor_press_label, MARGIN + 2, SENSOR_ROW0_Y + 64);
+            lv_obj_align(lbl_sensor_press_v, LV_ALIGN_TOP_RIGHT, -MARGIN - 2, SENSOR_ROW0_Y + 64 - 3);
+        } else {
+            lv_obj_add_flag(lbl_sensor_hum_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(lbl_sensor_hum_v, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(lbl_sensor_press_label, MARGIN + 2, SENSOR_ROW0_Y + 32);
+            lv_obj_align(lbl_sensor_press_v, LV_ALIGN_TOP_RIGHT, -MARGIN - 2, SENSOR_ROW0_Y + 32 - 3);
+        }
+    }
+
+    char b[24];
+    snprintf(b, sizeof(b), "%.1f C", (double)temp_c);
+    lv_label_set_text(lbl_sensor_temp_v, b);
+    if (has_humidity) {
+        snprintf(b, sizeof(b), "%.0f%%", (double)humidity_pct);
+        lv_label_set_text(lbl_sensor_hum_v, b);
+    }
+    snprintf(b, sizeof(b), "%.0fhPa", (double)pressure_hpa);
+    lv_label_set_text(lbl_sensor_press_v, b);
+
+    if (lbl_clock_intemp) {
+        snprintf(b, sizeof(b), "%.0f", (double)temp_c);
+        lv_label_set_text(lbl_clock_intemp, b);
+        lv_obj_align_to(lbl_in_deg, lbl_clock_intemp, LV_ALIGN_OUT_RIGHT_TOP, 3, 5);
+        lv_obj_clear_flag(lbl_in_deg, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (lbl_clock_indoor) {
+        if (has_humidity) snprintf(b, sizeof(b), "%.0f hPa   %.0f%%", (double)pressure_hpa, (double)humidity_pct);
+        else              snprintf(b, sizeof(b), "%.0f hPa", (double)pressure_hpa);
+        lv_label_set_text(lbl_clock_indoor, b);
+    }
+}
+
 // "safe to run" / "cap ~1h40m" / "cap imminent" — from the smoothed session
 // %/min and the reset countdown. false when there's no usable rate yet.
 static bool quota_verdict(char* buf, size_t n, lv_color_t* col) {
@@ -1534,6 +1657,7 @@ void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(vscode_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ci_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(today_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(sensor_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
@@ -1550,6 +1674,7 @@ void ui_show_screen(screen_t screen) {
     case SCREEN_VSCODE:     lv_obj_clear_flag(vscode_container, LV_OBJ_FLAG_HIDDEN); break;
     case SCREEN_CI:         lv_obj_clear_flag(ci_container, LV_OBJ_FLAG_HIDDEN); break;
     case SCREEN_TODAY:      lv_obj_clear_flag(today_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_SENSOR:     lv_obj_clear_flag(sensor_container, LV_OBJ_FLAG_HIDDEN); break;
     case SCREEN_BLUETOOTH:  lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
     }
@@ -1566,7 +1691,8 @@ void ui_show_screen(screen_t screen) {
 void ui_cycle_screen(void) {
     screen_t next = current_screen;
     do {
-        if (next == SCREEN_CLOCK)          next = SCREEN_USAGE;
+        if (next == SCREEN_CLOCK)          next = SCREEN_SENSOR;
+        else if (next == SCREEN_SENSOR)    next = SCREEN_USAGE;
         else if (next == SCREEN_USAGE)     next = SCREEN_COPILOT;
         else if (next == SCREEN_COPILOT)   next = SCREEN_SYSINFO;
         else if (next == SCREEN_SYSINFO)   next = SCREEN_VSCODE;
@@ -1581,6 +1707,7 @@ void ui_cycle_screen(void) {
         if (next == SCREEN_VSCODE && !vscode_has_data) continue;
         if (next == SCREEN_CI && !ci_has_data) continue;
         if (next == SCREEN_TODAY && !today_has_data) continue;
+        if (next == SCREEN_SENSOR && !sensor_has_data) continue;
         break;
     } while (true);
     ui_show_screen(next);

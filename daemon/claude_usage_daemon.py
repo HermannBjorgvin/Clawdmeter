@@ -22,6 +22,10 @@ import httpx
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 
+# Windows: prevent gh/git subprocess calls from flashing a console window
+# when the daemon itself runs without one (e.g. under the Scheduled Task).
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 DEVICE_NAME = "Claude Controller"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
@@ -110,7 +114,7 @@ def read_github_token() -> str | None:
     try:
         result = subprocess.run(
             ["gh", "auth", "token"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW,
         )
         if result.returncode == 0:
             token = result.stdout.strip()
@@ -544,7 +548,7 @@ def poll_activity() -> dict:
 def _run(args: list[str], cwd: Path | None = None, timeout: float = 10.0) -> str | None:
     try:
         r = subprocess.run(args, cwd=str(cwd) if cwd else None, capture_output=True,
-                           text=True, timeout=timeout)
+                           text=True, timeout=timeout, creationflags=_NO_WINDOW)
         return r.stdout.strip() if r.returncode == 0 else None
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
@@ -1258,12 +1262,12 @@ async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
                 payload = await poll_active_payload()
+                last_poll = time.time()
                 if payload is None:
                     state = "no_token" if not have_any_token() else "api_error"
                     log(f"No Claude payload; sending status={state}")
                     await session.write_payload(status_payload(state))
                 elif await session.write_payload(payload):
-                    last_poll = time.time()
                     used_successfully = True
 
             try:
