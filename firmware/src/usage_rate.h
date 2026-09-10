@@ -13,3 +13,8 @@ bool usage_rate_sample(float session_pct);
 // 0 = idle, 1 = normal, 2 = active, 3 = heavy.
 // Defaults to 0 when the buffer doesn't have enough samples yet.
 int usage_rate_group(void);
+
+// Smoothed burn rate in %/min over the ring-buffer window, or a negative
+// value while warming up (fewer than 2 samples, or under MIN_WINDOW_MS of
+// span). Feeds the History screen's pace projection.
+float usage_rate_pct_per_min(void);
