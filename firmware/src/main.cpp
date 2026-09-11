@@ -8,6 +8,8 @@
 #include "power.h"
 #include "imu.h"
 #include "env_sensor.h"
+#include "sensor_hist.h"
+#include "usage_hist.h"
 #include "splash.h"
 #include "usage_rate.h"
 
@@ -157,6 +159,8 @@ static bool process_payload(const char* raw) {
         strlcpy(envd.loc, doc["tn"] | "", sizeof(envd.loc));
         envd.has_weather = doc["tc"].is<int>();
         envd.valid = true;
+        sensor_hist_set_time(envd.epoch);
+        usage_hist_set_time(envd.epoch);
         ui_update_env(&envd);
     } else {
         usage.session_pct        = doc["s"]  | 0.0f;
@@ -170,6 +174,7 @@ static bool process_payload(const char* raw) {
         usage.valid = true;
         int g_before = usage_rate_group();
         usage_rate_sample(usage.session_pct);
+        usage_hist_sample(usage.session_pct, usage.weekly_pct);
         if (usage_rate_group() != g_before && splash_is_active()) {
             splash_pick_for_current_rate();
         }
@@ -237,6 +242,16 @@ static void check_serial_cmd() {
                 env_sensor_scan_bus();
             } else if (strcmp(cmd_buf, "gpiotest") == 0) {
                 env_sensor_gpio_test();
+            } else if (strcmp(cmd_buf, "histclear") == 0) {
+                sensor_hist_clear();
+                Serial.println("sensor history cleared");
+            } else if (strcmp(cmd_buf, "histfill") == 0) {
+                sensor_hist_debug_fill();   // QA: synthetic 24 h trace
+            } else if (strcmp(cmd_buf, "uhistclear") == 0) {
+                usage_hist_clear();
+                Serial.println("usage history cleared");
+            } else if (strcmp(cmd_buf, "uhistfill") == 0) {
+                usage_hist_debug_fill();   // QA: synthetic 24 h trace
             }
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
@@ -269,6 +284,12 @@ void setup() {
     // wired: sensor_has_data stays false and the Sensor screen is skipped
     // in the cycle.
     env_sensor_init();
+
+    // Restore the 24 h sensor trend from NVS. Must follow env_sensor_init()
+    // only in spirit (it doesn't touch I2C) but must precede ui_init(), which
+    // draws the trend graphs from it.
+    sensor_hist_init();
+    usage_hist_init();
 
     // Init LVGL
     lv_init();
@@ -313,20 +334,31 @@ void loop() {
     power_tick();
     imu_tick();
     env_sensor_tick();
+    sensor_hist_tick();
+    usage_hist_tick();
     splash_tick();
     backlight_tick();
 
     // Single button (GPIO 0 / BOOT) — the only input on this board (no touch):
-    //   Short press  → next screen (Usage → Copilot → System → VS Code →
-    //                  Bluetooth → Splash → …; unpopulated screens skipped)
-    //   Long press   → Bluetooth screen: clear the BLE bond;
-    //                  any other screen: ask the daemon for a fresh poll
+    //   Short press       → next screen (Usage → Copilot → System → VS Code →
+    //                       Bluetooth → Splash → …; unpopulated screens skipped)
+    //   Quick double-press → jump straight to the Clock ("home") screen —
+    //                       with up to 10 screens in the cycle, waiting on
+    //                       every short press to see if a second one follows
+    //                       would make normal cycling feel laggy, so instead
+    //                       the first press always cycles immediately and a
+    //                       second one landing within DOUBLE_PRESS_MS just
+    //                       redirects straight to Clock.
+    //   Long press        → Bluetooth screen: clear the BLE bond;
+    //                       any other screen: ask the daemon for a fresh poll
     //   NOTE: GPIO18 = LCD SCLK (no right button); AXP PWR not present
     {
         static bool     btn_was = false;
         static uint32_t btn_down_ms = 0;
         static bool     long_fired = false;
+        static uint32_t last_release_ms = 0;
         const uint32_t  LONG_PRESS_MS = 700;
+        const uint32_t  DOUBLE_PRESS_MS = 350;
 
         bool btn_now = (digitalRead(BTN_BACK) == LOW);
 
@@ -350,8 +382,19 @@ void loop() {
             }
         } else if (!btn_now && btn_was && !long_fired) {
             ui_flash_feedback();  // released before long-press threshold
-            if (ui_banner_visible()) ui_hide_banner();  // dismiss, don't advance
-            else                     ui_cycle_screen();
+            if (ui_banner_visible()) {
+                ui_hide_banner();  // dismiss, don't advance
+            } else {
+                uint32_t now = millis();
+                bool is_double = (now - last_release_ms) <= DOUBLE_PRESS_MS;
+                if (is_double && ui_get_current_screen() != SCREEN_CLOCK) {
+                    last_release_ms = 0;  // consumed — a 3rd quick press starts fresh
+                    ui_show_screen(SCREEN_CLOCK);
+                } else {
+                    last_release_ms = now;
+                    ui_cycle_screen();
+                }
+            }
         }
         btn_was = btn_now;
     }
@@ -385,6 +428,14 @@ void loop() {
         if (s_present != last_present || s_t != last_t || s_p != last_p || s_h != last_h) {
             last_present = s_present; last_t = s_t; last_p = s_p; last_h = s_h;
             ui_update_sensor(s_present, s_t, s_p, s_has_h, s_h);
+        }
+
+        // Feed the 24 h history on a fixed cadence rather than on change, so
+        // each 15-minute slot averages a consistent number of readings.
+        static uint32_t hist_ms = 0;
+        if (s_present && (hist_ms == 0 || millis() - hist_ms >= 10000)) {
+            hist_ms = millis();
+            sensor_hist_sample(s_t, s_has_h, s_h, s_p);
         }
     }
 

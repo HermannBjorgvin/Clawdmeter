@@ -6,6 +6,7 @@ enum screen_t {
     SCREEN_SPLASH,
     SCREEN_CLOCK,
     SCREEN_SENSOR,
+    SCREEN_SENSOR_GRAPH,   // 24 h trend graphs from the on-device sensor
     SCREEN_USAGE,
     SCREEN_COPILOT,
     SCREEN_SYSINFO,
