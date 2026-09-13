@@ -81,6 +81,10 @@ launchctl unload ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist  # st
 launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # start
 ```
 
+### Optional: webhook sink (works without the display)
+
+Set `webhook_url` in `~/.config/claude-usage-monitor/config` (see `daemon/config.example`) and the daemon POSTs every polled payload as JSON to that URL — and keeps polling once a minute even while no Clawdmeter is connected. This is how you get the same numbers into Home Assistant (a `local_only` webhook trigger with template sensors on top), a log, or a metrics stack, with the display as a nice-to-have rather than a requirement. The config is re-read every cycle, so no restart is needed. macOS/Linux Python daemon only; the Windows tray daemon and the bash daemon don't have it.
+
 ## Linux installation
 
 ### Flash the firmware

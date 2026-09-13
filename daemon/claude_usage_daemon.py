@@ -321,6 +321,57 @@ async def discover_target(skip_addr: str | None = None):
     return address
 
 
+def read_webhook_url() -> str | None:
+    """Read the `webhook_url` option from the config file, or None.
+
+    When set, every payload the daemon polls is also POSTed as JSON to this
+    URL — and the daemon keeps polling even while no display is connected, so
+    the sink (e.g. a Home Assistant webhook trigger) gets data without the
+    hardware. Unset (default) = BLE-only, unchanged behavior.
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "webhook_url":
+                    val = val.strip()
+                    if val.startswith(("http://", "https://")):
+                        return val
+    except OSError:
+        pass
+    return None
+
+
+async def post_webhook(url: str, payload: dict) -> bool:
+    """POST the payload as JSON to the webhook sink. Never raises; a failed
+    post is logged and ignored so the display path is unaffected."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            resp = await http.post(url, json=payload)
+    except httpx.HTTPError as e:
+        log(f"Webhook post failed: {e}")
+        return False
+    if resp.status_code >= 400:
+        log(f"Webhook HTTP {resp.status_code}: {resp.text[:200]}")
+        return False
+    return True
+
+
+async def webhook_only_cycle(url: str) -> bool:
+    """One poll-and-post cycle with no display connected. Returns True if a
+    payload was posted (so the caller waits a full POLL_INTERVAL before the
+    next one instead of retrying the BLE discovery backoff)."""
+    payload = await poll_active_payload()
+    if payload is None:
+        log("No usable config dir this cycle (webhook-only)")
+        return False
+    log(f"Posting to webhook (no display): {json.dumps(payload)}")
+    return await post_webhook(url, payload)
+
+
 def read_chime_setting() -> str:
     """Read the `chime` option from the config file. One of: off|on.
 
@@ -844,6 +895,9 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                 # numbers until the CLI re-seeds it.
                 payload, dead = await poll_active()
                 if payload is not None:
+                    webhook = read_webhook_url()
+                    if webhook:
+                        await post_webhook(webhook, payload)
                     if await session.write_payload(payload):
                         last_poll = time.time()
                         used_successfully = True
@@ -901,9 +955,18 @@ async def main() -> None:
         target = await discover_target(skip_addr=skip_addr)
         skip_addr = None
         if not target:
-            log(f"Device not found, retrying in {backoff}s...")
+            webhook = read_webhook_url()
+            if webhook and await webhook_only_cycle(webhook):
+                # Sink fed; no point hammering BLE discovery faster than the
+                # data changes. Any display that shows up is picked up on the
+                # next cycle.
+                wait = POLL_INTERVAL
+                log(f"Device not found, next webhook poll in {wait}s...")
+            else:
+                wait = backoff
+                log(f"Device not found, retrying in {wait}s...")
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+                await asyncio.wait_for(stop_event.wait(), timeout=wait)
             except asyncio.TimeoutError:
                 pass
             backoff = min(backoff * 2, 60)

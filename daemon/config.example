@@ -42,3 +42,13 @@ clock = off
 #   off = plain single-color bar (default)
 #   on  = bar is split into per-model segments, dominant model named below it
 model_split = off
+
+# Also POST every polled payload as JSON to a URL, and keep polling even while
+# no display is connected. Lets you feed the numbers into something else — e.g.
+# a Home Assistant webhook trigger (use a `local_only` webhook and put the
+# sensors on top of it), a tiny HTTP logger, or a metrics pipeline.
+#   - macOS/Linux Python daemon only (not the bash daemon, not Windows).
+#   - The payload is the same JSON the display gets: s/sr (5h %, reset in min),
+#     w/wr (7d %), st, acct, ok, plus ms (model split) / c / t when enabled.
+#   - Unset (default) = BLE-only; the daemon idles until a display shows up.
+# webhook_url = http://homeassistant.local:8123/api/webhook/<your-webhook-id>
