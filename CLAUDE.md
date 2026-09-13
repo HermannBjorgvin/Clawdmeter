@@ -123,32 +123,14 @@ Device path differs by OS: `/dev/cu.usbmodem*` on macOS, `/dev/ttyACM0` on Linux
 
 ## Desktop simulator (`-e sim`) — develop UI without hardware
 
-```bash
-sudo apt install libsdl2-dev   # once (macOS: brew install sdl2)
-pio run -d firmware -e sim && (cd firmware && .pio/build/sim/program)
-```
+A native SDL2 build (`pio run -d firmware -e sim`) runs the full firmware
+loop without hardware — for UI iteration, scenario playback, and headless
+screenshots. Controls, env vars, and the CI recipe: skill **`desktop-simulator`**
+(`.claude/skills/desktop-simulator/SKILL.md`) and `SIM-USAGE.md`.
 
-An SDL2 window stands in for the 480×480 panel; the **full firmware loop runs
-unmodified** — `main.cpp`, `ui.cpp`, `splash.cpp`, idle fade, pair gesture,
-JSON parsing, usage-rate/chime logic. Only `ble.cpp`/`chime.cpp` are swapped
-for stubs. How it works: `boards/sim/` implements the HAL against SDL2, thin
-Arduino shims live in `boards/sim/shim/` (`millis`/`Serial`→stdio,
-`heap_caps`→malloc, in-memory `Preferences`), and `ble_sim.cpp` plays back
-daemon payloads from `firmware/sim/scenario.jsonl` (one JSON line per state +
-optional `name`/`hold_ms`; override with `SIM_SCENARIO=<path>`).
-
-Controls (full map in `boards/sim/board.h`): mouse = touch · space =
-play/pause scenario · ←/→ = step · 1-9 = jump · d = BLE link toggle ·
-b/n = BOOT/secondary buttons · p = PWR · c/-/= = charging/battery ·
-s = screenshot BMP · esc = quit.
-
-Headless screenshots (works in CI, no display):
-`SDL_VIDEODRIVER=dummy SIM_AUTOSHOT_MS=6000 .pio/build/sim/program` saves
-`sim-autoshot.bmp` (or `SIM_AUTOSHOT_PATH`) after 6 s and exits. Combine with
-the boot-screen swap trick below to capture any screen. **The sim renders with
-desktop LVGL and fake data — always do a final check on real hardware before
-merging panel-related changes** (col offsets, rotation, rounding live in the
-hardware boards, not shared code).
+**The sim renders with desktop LVGL and fake data — always do a final check on
+real hardware before merging panel-related changes** (col offsets, rotation,
+rounding live in the hardware boards, not shared code).
 
 ## QA your own UI changes — don't ask the user
 
@@ -171,52 +153,18 @@ The boot screen is `SCREEN_SPLASH` and only advances on a physical button press,
 
 ## Icons
 
-`tools/png_to_lvgl.js <input.png> <symbol> [W_MACRO] [H_MACRO] [--tint=RRGGBB | --no-tint]` converts an alpha PNG to RGB565A8. Default tint is white (`0xFFFFFF`) — necessary for Lucide PNGs. Splice output into `firmware/src/icons.h` and use `init_icon_dsc_rgb565a8()` in ui.cpp. Currently only the 5 battery icons use this format; the rest are still raw RGB565 baked over the panel background, fine because they live inside opaque zones.
+Icons are converted from alpha PNGs to LVGL RGB565A8 via `tools/png_to_lvgl.js`.
+Full invocation, tinting rules, and how to splice into `firmware/src/icons.h`:
+skill **`icon-conversion`** (`.claude/skills/icon-conversion/SKILL.md`).
 
 ## Splash animations
 
-17 official Anthropic Clawd animations (core poses + persona scenes), archived
-with full provenance in `research/clawd-official/`. Pipeline:
-
-```bash
-node tools/convert_official_clawd.js            # → firmware/src/splash_animations.h
-node tools/convert_official_clawd.js --verify DIR   # + per-animation PNGs for eyeballing
-```
-
-Requires ImageMagick; Laptop and Soccer convert from their Lottie exports
-(crisp) rather than GIFs. Frames are bounding-box crops on the official 55×37
-art stage (ox/oy = stage offset — every animation shares one idle-Clawd
-position, so transitions are seamless), one byte per cell into a per-animation
-≤16-color RGB565 palette (index 0 = background, true black), per-frame hold ms
-with duplicates collapsed (~400 KB total). The converter also: detects each
-animation's **loop region** (gait cycles, scene middles; sailing scene's is
-located by cross-matching the standalone sailing-loop asset, which is not
-emitted), synthesizes the **eyes** (transparent holes in the source GIFs) as
-`#141413` ink via border flood-fill, and applies two contrast recolors
-(trumpet notes → ivory, magnifier fedora → gray) via component analysis.
-
-The splash engine (`splash.cpp`) plays intro → loop → outro on a **60×60
-stage** (`SPLASH_GRID`, cell = min(W,H)/60 → 8 px on 480, 6 px on 368, 4 px on
-240): loops hold until released (walk arrival, scene timer, rotation), so
-switches always pass through the shared idle pose. Walkers translate with
-foot-locked per-frame schedules and mirror when heading left. Usage-rate
-groups pick animations by name; the same rate drives the **corner mascot** on
-the usage screen (`splash_mascot_*`, PSRAM boards; C6 falls back to the static
-`clawd_still.h` icon) — idle stills, rate-scaled acts, and walk-off/lurk/
-walk-back trips. Default boot screen.
-
-**Where the animations come from / finding new ones:** all assets are plain
-files under `https://claude.ai/images/clawd/{core,persona}/…` — static assets
-are not Cloudflare-gated, only HTML routes are. The asset server returns a
-real GIF for a valid filename and an HTML catch-all (both HTTP 200) otherwise,
-so **name probing works**: fetch `Clawd-<Name>.gif` and check the magic bytes.
-Seven current animations are referenced by no shipped bundle and were found
-exactly this way (Anthropic stages seasonal drops — Soccer appeared for the
-World Cup). To hunt for new ones: run `research/clawd-official/fetch.sh`
-(extend its probe list), and grep a fresh desktop .deb's `ion-dist/` bundles
-for `/images/` paths (`research/clawd-official/CLAUDE.md` documents the full
-methodology, including the Lottie sources and the assets-proxy).
-
+17 official Anthropic Clawd animations, archived with provenance in
+`research/clawd-official/`, converted by `tools/convert_official_clawd.js` into
+`firmware/src/splash_animations.h` (generated — do not hand-edit) and played by
+the 60×60-stage engine in `splash.cpp`. Pipeline, loop/eye/recolor handling, the
+corner mascot, and how to probe claude.ai for newly released assets:
+skill **`splash-animations`** (`.claude/skills/splash-animations/SKILL.md`).
 
 ## Per-model split of the 5h window
 
@@ -290,13 +238,6 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 - **Per-model split of the 5h window (2026-08-23).** The Current bar now breaks down by model. Established first that the API cannot answer this (no per-model header exists), then rebuilt it host-side from Claude Code transcripts, plus an `"~"` Elsewhere slice for the desktop-app/web usage the transcripts can't see. See the section above for the gotchas and the legend's fit-measuring fallback. Also fixed a pre-existing bug found while testing: the weekly pill kept the enterprise "Period" label after a Pro payload (only reachable via a mixed-plan `config_dirs`).
 - **AMOLED-1.8 chime verified on hardware + EXIO2 touch-kill fix (2026-07-13).** The 1.8's `amp_enable` hook drove both GPIO 46 and XCA9554 EXIO2 ("the unused one is harmless") — but pulling EXIO2 low takes the FT3168 off the I2C bus (chip stops ACKing; IDF reports it as `ESP_ERR_INVALID_STATE`, which reads like a driver wedge and cost a long I2S red-herring chase). Amp enable is GPIO 46 only; EXIO2 must stay HIGH. Chime, touch, buttons, and BLE bond persistence all verified on a real 1.8.
 - **Device-abstraction refactor (2026-05-18).** All board-conditional code moved out of shared files into `boards/<name>/` and behind a HAL in `hal/`. ~30 `#ifdef BOARD_*` blocks went to zero. UI is responsive via `compute_layout()` driven by `board_caps()`. New ports add a folder + a PlatformIO env — no shared file edits.
-- Added second board port: Waveshare AMOLED-1.8 (368×448 portrait, SH8601, FT3168, XCA9554 IO expander).
-- Migrated from Panlee SC01 Plus (480×320 IPS) to Waveshare 2.16" AMOLED (480×480 square). Full hardware/library swap.
-- Added IMU auto-rotation, battery indicator, USB-state-aware screen switching.
-- Added splash screen with scraped pixel-art animations and 3-button physical input layout.
-- Fonts and icons re-scaled ~1.9× for the higher-DPI panel.
-- All UI margins widened to 20px to clear the rounded display corners.
-- Battery icons converted to RGB565A8 alpha so they blend cleanly over the splash animations.
 
 ## Daemon / host side
 
