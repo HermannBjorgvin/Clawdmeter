@@ -416,9 +416,19 @@ async def poll_api(token: str) -> dict | None:
     if resp.status_code in (401, 403):
         log(f"API HTTP {resp.status_code} (token expired/invalid)")
         raise TokenExpired()
+    # A refusal still carries the rate-limit headers, and when the limit is
+    # what caused it those headers are exactly what the user wants to see:
+    # spent, and when it comes back. Discarding them showed "no data" at the
+    # one moment the screen had something to say — indistinguishable from a
+    # dead link. Only bail when the response tells us nothing.
+    has_quota_headers = bool(
+        resp.headers.get("anthropic-ratelimit-unified-5h-utilization")
+        or resp.headers.get("anthropic-ratelimit-unified-overage-utilization"))
     if resp.status_code >= 400:
-        log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
-        return None
+        if not has_quota_headers:
+            log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+        log(f"API HTTP {resp.status_code} — reading quota from the headers anyway")
 
     def hdr(name: str, default: str = "0") -> str:
         return resp.headers.get(name, default)

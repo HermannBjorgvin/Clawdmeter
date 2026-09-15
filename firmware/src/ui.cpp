@@ -229,7 +229,8 @@ static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 static lv_obj_t* idle_group;            // the "Zzz" idle screen
 static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage update landed
 static bool      data_received = false; // any valid update since boot
-static bool      data_ok = true;        // last payload's ok flag; a {"ok":false} beat = "no fresh data"
+static bool      data_ok = true;
+static bool      usage_limited = false;   // the 5h window is spent (payload "st")        // last payload's ok flag; a {"ok":false} beat = "no fresh data"
 static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage
 static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within this window (daemon sends ~60s)
 
@@ -608,6 +609,7 @@ void ui_update(const UsageData* data) {
     }
 
     int s_pct = (int)(data->session_pct + 0.5f);
+    usage_limited = (strcmp(data->status, "limited") == 0) || s_pct >= 100;
 
     if (data->enterprise) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
@@ -646,7 +648,19 @@ void ui_update(const UsageData* data) {
                         LV_ALIGN_OUT_RIGHT_TOP, 4, 12);
     } else {
         lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
-        format_reset_time(data->session_reset_mins, buf, sizeof(buf));
+        // "limited" means the window is spent. Saying so beats a bare
+        // countdown: the number alone leaves you guessing whether there is a
+        // sliver left or none at all.
+        if (usage_limited) {
+            char left[24];
+            format_reset_time(data->session_reset_mins, left, sizeof(left));
+            const char* tail = strncmp(left, "Resets in ", 10) == 0 ? left + 10 : left;
+            snprintf(buf, sizeof(buf), "Spent - back in %s", tail);
+            lv_obj_set_style_text_color(lbl_session_reset, COL_RED, 0);
+        } else {
+            format_reset_time(data->session_reset_mins, buf, sizeof(buf));
+            lv_obj_set_style_text_color(lbl_session_reset, COL_DIM, 0);
+        }
         lv_label_set_text(lbl_session_reset, buf);
     }
 
@@ -743,6 +757,10 @@ void ui_tick_anim(void) {
         text = "Waiting";              // advertising / waiting for a host connection
     } else if (view_state == 1) {      // idle — alternate so it reads as alive AND data-less
         text = (anim_msg_idx & 1) ? "No data" : "Listening";
+    } else if (usage_limited) {
+        // Whimsy is for when there is nothing to report. A spent limit is
+        // something to report.
+        text = "Limit reached";
     } else if (now - connected_at_ms < 5000) {
         text = "Connected";
     } else {
