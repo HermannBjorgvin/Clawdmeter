@@ -41,6 +41,22 @@
 // ---- PMU ----
 #define AXP2101_ADDR         0x34
 
+// ---- Audio (ES8311 codec, I2S) ----
+// Pins verified against the official Waveshare XiaoZhi BSP for this exact
+// board (waveshareteam/ESP32-C6-Touch-AMOLED-2.16, XiaoZhi config.h) — the
+// same source that gave the display/touch/I2C pins above, all of which
+// checked out against hardware, so these are trusted without a separate
+// bring-up. No PA/amp-enable GPIO on this board (XiaoZhi's own
+// AUDIO_CODEC_PA_PIN is GPIO_NUM_NC) — the amp is on the ES8311's own
+// output, no external enable line to drive.
+#define SND_I2S_MCLK          19
+#define SND_I2S_BCLK          20
+#define SND_I2S_WS            22     // LRCK
+#define SND_I2S_DOUT          23     // ESP → ES8311 (speaker)
+#define SND_I2S_DIN           21     // ES8311 → ESP (mic; unused, set for STD mode)
+#define SND_SAMPLE_RATE       44100  // must match the embedded PCM (bell_pcm.h)
+#define SND_ES8311_ADDR       0x18
+
 // ---- Buttons ----
 // Three side-mounted buttons:
 //   BOOT (primary) — GPIO 9, sends Space (PTT) over BLE HID
@@ -56,4 +72,11 @@
 #define BOARD_HAS_ROTATION         0    // C6 has no PSRAM headroom for the rotation strip
 #define BOARD_HAS_IMU              1    // present + initialized for I2C bus health
 #define BOARD_HAS_BATTERY          1
-#define BOARD_HAS_IO_EXPANDER      0    // TCA9554 exists on board but only services audio
+// Previously commented "TCA9554 exists on board but only services audio" —
+// the official Waveshare XiaoZhi reference firmware for this exact board
+// uses no IO expander for audio at all (ES8311 + AXP2101 ALDO rails only,
+// no PA-enable GPIO or expander bit), so that was either a different
+// revision or a mistaken assumption. Left at 0; revisit if a real TCA9554
+// turns up on hardware.
+#define BOARD_HAS_IO_EXPANDER      0
+#define BOARD_HAS_SOUND            1
