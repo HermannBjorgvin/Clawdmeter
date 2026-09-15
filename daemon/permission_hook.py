@@ -67,18 +67,24 @@ def split_subcommands(command: str) -> list[str]:
     return [p.strip() for p in _BASH_SPLIT_RE.split(command) if p.strip()]
 
 
-# Commands that are read-only regardless of arguments — no flag turns grep
-# or cat into something that writes or deletes. Deliberately conservative:
-# nothing here can ever mutate anything, so these never even reach the
-# device. `find` is left out on purpose (-delete, -exec rm are real) and so
-# is env/printenv (can dump secrets into the transcript, worth a beat of
-# friction). git gets its own narrower check below since most of git can
-# mutate (reset, push, clean, checkout --) even though a few subcommands
-# can't.
+# Commands that can't cause harm regardless of arguments — no flag turns
+# grep into something that writes or deletes, and `cd`/`mkdir` have no
+# destructive mode (mkdir only ever fails-if-exists or creates parents,
+# never overwrites or deletes). Deliberately conservative: nothing here can
+# ever mutate/remove existing data, so these never even reach the device.
+# `find` is left out on purpose (-delete, -exec rm are real) and so is
+# env/printenv (can dump secrets into the transcript, worth a beat of
+# friction). `python`/`python3` are deliberately NOT here — arbitrary code
+# execution can do anything a full script can (delete files, hit the
+# network, anything), so blanket-allowing it would gut the entire point of
+# an approval step for exactly the category of action it exists to catch.
+# git gets its own narrower check below since most of git can mutate
+# (reset, push, clean, checkout --) even though a few subcommands can't.
 SAFE_READONLY_COMMANDS = frozenset({
     "grep", "egrep", "fgrep", "rg", "ag",
     "ls", "cat", "head", "tail", "wc", "pwd", "echo",
     "which", "whoami", "file", "stat", "du", "df", "date",
+    "cd", "mkdir",
 })
 SAFE_GIT_SUBCOMMANDS = frozenset({"status", "diff", "log", "show", "branch"})
 
