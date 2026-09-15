@@ -16,9 +16,14 @@
 // sound_hal_init() runs, shared with touch/PMU/IMU.
 
 void sound_hal_init(void) {
+    // 100 (max) clips audibly — the ES8311's volume register is linear
+    // digital gain with no separate analog/PA stage on this board to fall
+    // back on, so past a point it's just clipping the embedded PCM harder,
+    // not getting cleanly louder. 85 trades a little loudness back for no
+    // audible distortion.
     const ChimeConfig cfg = {
         SND_I2S_MCLK, SND_I2S_BCLK, SND_I2S_WS, SND_I2S_DOUT, SND_I2S_DIN,
-        SND_SAMPLE_RATE, SND_ES8311_ADDR, 65, nullptr
+        SND_SAMPLE_RATE, SND_ES8311_ADDR, 85, nullptr
     };
     chime_init(cfg);
 }
