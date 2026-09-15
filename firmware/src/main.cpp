@@ -144,6 +144,10 @@ static void handle_perm_request(const char* json) {
     }
     Serial.printf("perm-req: showing screen at millis=%lu (tool=%s)\n", (unsigned long)millis(), tool);
     ui_show_permission_request(id, tool, summary);
+    // Unconditional (not gated on the daemon's usage-reset `chime` opt-in) —
+    // a permission prompt you don't notice defeats the point of the feature.
+    // No-ops on boards without sound hardware (see BOARD_HAS_SOUND).
+    sound_hal_play_reset();
 }
 
 // ---- Serial command buffer ----
