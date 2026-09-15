@@ -254,6 +254,65 @@ def persist_allow_rules(settings_path: Path, new_rules: list) -> None:
     _ensure_gitignored(settings_path)
 
 
+# ---- Session-scoped quieting ----
+#
+# The permanent per-project rule above is deliberately exact-match-narrow
+# (a repeat of the identical command). That's not enough for a long, busy
+# session running many DIFFERENT invocations of the same program (e.g. a
+# batch job calling `python3 -c "..."` with different inline code each
+# time) — tapping Always on one doesn't help the next slightly-different
+# one, and the project-forever rule would be too broad a thing to persist
+# just to get through one session.
+#
+# So a tap ALSO quiets the program (not the exact command) for the REST OF
+# THIS SESSION ONLY: a small JSON file per Claude Code session_id under
+# ~/.config/claude-usage-monitor/session_quiet/. A fresh session (a new
+# window, or the same automation run again tomorrow) starts with nothing
+# quieted and prompts normally. This is deliberately separate from and
+# additive to the permanent per-project rule, not a replacement for it.
+SESSION_QUIET_DIR = Path.home() / ".config" / "claude-usage-monitor" / "session_quiet"
+
+
+def session_quiet_key(tool_name: str, tool_input: dict) -> str:
+    """What a session-quiet covers: the base program for Bash (its first
+    whitespace token — "python3", not the whole command), or the whole tool
+    for anything else (Write/Edit/NotebookEdit)."""
+    if tool_name == "Bash":
+        tokens = tool_input.get("command", "").split()
+        return f"Bash:{tokens[0]}" if tokens else ""
+    return tool_name
+
+
+def session_quiet_path(session_id: str) -> Path:
+    # session_id comes from Claude Code, not attacker-controlled input, but
+    # keep it to path-safe characters regardless of what it turns out to be.
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", session_id)
+    return SESSION_QUIET_DIR / f"{safe}.json"
+
+
+def load_session_quiet(session_id: str) -> set:
+    if not session_id:
+        return set()
+    path = session_quiet_path(session_id)
+    if not path.exists():
+        return set()
+    try:
+        return set(json.loads(path.read_text()))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return set()
+
+
+def add_session_quiet(session_id: str, key: str) -> None:
+    if not session_id or not key:
+        return
+    quiet = load_session_quiet(session_id)
+    if key in quiet:
+        return
+    quiet.add(key)
+    SESSION_QUIET_DIR.mkdir(parents=True, exist_ok=True)
+    session_quiet_path(session_id).write_text(json.dumps(sorted(quiet)))
+
+
 def ask(reason: str) -> dict:
     return {
         "hookSpecificOutput": {
@@ -274,7 +333,7 @@ def allow(reason: str) -> dict:
     }
 
 
-def decide(decision: str, reason: str, persisted: list) -> dict:
+def decide(decision: str, reason: str, persisted: list, quiet_key: str = "") -> dict:
     mapped = "allow" if decision in ("allow", "always") else "deny" if decision == "deny" else "ask"
     out = {
         "hookSpecificOutput": {
@@ -284,18 +343,20 @@ def decide(decision: str, reason: str, persisted: list) -> dict:
         }
     }
     if decision == "always":
+        msg = ""
         if persisted:
             rule_list = ", ".join(f"`{r}`" for r in persisted)
-            out["hookSpecificOutput"]["systemMessage"] = (
-                f"Tapped 'Always Allow' on Clawdmeter — saved {rule_list} to this "
-                "project's .claude/settings.local.json. Won't prompt again for "
-                "an exact repeat of this call in this project."
-            )
+            msg = (f"Tapped 'Always Allow' on Clawdmeter — saved {rule_list} to this "
+                   "project's .claude/settings.local.json (won't prompt again for an "
+                   "exact repeat of this call in this project)")
         else:
-            out["hookSpecificOutput"]["systemMessage"] = (
-                "Tapped 'Always Allow' on Clawdmeter — allowed for this call only; "
-                "couldn't determine a rule to persist for this tool."
-            )
+            msg = ("Tapped 'Always Allow' on Clawdmeter — allowed for this call only; "
+                   "couldn't determine a rule to persist for this tool")
+        if quiet_key:
+            msg += f", and quieted {quiet_key} for the rest of this session."
+        else:
+            msg += "."
+        out["hookSpecificOutput"]["systemMessage"] = msg
     return out
 
 
@@ -305,6 +366,7 @@ def main() -> None:
         tool_name = req.get("tool_name", "Tool")
         tool_input = req.get("tool_input", {}) or {}
         cwd = req.get("cwd", "")
+        session_id = req.get("session_id", "")
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         print(json.dumps(ask(f"hook could not parse stdin: {e}")))
         return
@@ -316,6 +378,14 @@ def main() -> None:
     if tool_name == "Bash" and is_inherently_safe_bash(tool_input.get("command", "")):
         print(json.dumps(allow("Inherently read-only command (grep/cat/git diff/etc.) "
                                 "— Clawdmeter always allows these without a device prompt")))
+        return
+
+    # A prior Always tap THIS SESSION already quieted this program (not this
+    # exact command — see session_quiet_key). A fresh session starts clean.
+    quiet_key = session_quiet_key(tool_name, tool_input)
+    if session_id and quiet_key in load_session_quiet(session_id):
+        print(json.dumps(allow(f"Session-quieted after an earlier Always tap on "
+                                f"{quiet_key} (this Claude Code session only)")))
         return
 
     project_root = find_project_root(cwd)
@@ -379,8 +449,12 @@ def main() -> None:
             # without a systemMessage claiming it was saved.
             print(f"permission_hook: failed to persist rule: {e}", file=sys.stderr)
             persisted = []
+        try:
+            add_session_quiet(session_id, quiet_key)
+        except OSError as e:
+            print(f"permission_hook: failed to save session-quiet: {e}", file=sys.stderr)
 
-    print(json.dumps(decide(decision, reason, persisted)))
+    print(json.dumps(decide(decision, reason, persisted, quiet_key if decision == "always" else "")))
 
 
 if __name__ == "__main__":
