@@ -1,0 +1,13 @@
+# Name,     Type, SubType,  Offset,   Size,     Flags
+#
+# No OTA in this project (see min_spiffs.csv's own comment in
+# platformio.ini's history) — that scheme still wasted a ~1.9 MB second
+# OTA app slot nobody ever uses. This table drops OTA entirely for one
+# single "factory" app partition covering essentially the whole rest of
+# the 4 MB chip, since the web dashboard/config page (PROGMEM-embedded,
+# no filesystem) needs flash headroom for WiFi + WebServer on top of
+# LVGL/NimBLE. `nvs` stays at the exact same offset/size as min_spiffs.csv
+# so BLE bonds and the sensor_hist/usage_hist NVS blobs survive the switch.
+nvs,        data, nvs,      0x9000,   0x5000,
+app0,       app,  factory,  0x10000,  0x3E0000,
+coredump,   data, coredump, 0x3F0000, 0x10000,

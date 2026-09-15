@@ -31,8 +31,20 @@ bool splash_is_active(void);
 // Root container (so ui.cpp can attach a click event).
 lv_obj_t* splash_get_root(void);
 
-// Copilot screen pixel-art animation (60x60, 3x scale).
-// splash_copilot_init() creates a canvas widget inside `parent` and allocates its buffer.
+// Copilot screen pixel-art animation (60x60, 3x scale). Shares a single
+// buffer with the splash and Aurora canvases (see splash.cpp) since only
+// one of the three is ever visible at a time.
+// splash_copilot_init() creates the canvas widget inside `parent`.
+// splash_copilot_show() re-renders the first frame fresh — call every time
+// the Copilot screen becomes visible, since the shared buffer may hold
+// stale content from whichever of the three was shown last.
 // splash_copilot_tick() advances the frame if the hold time has elapsed.
 void splash_copilot_init(lv_obj_t* parent);
+void splash_copilot_show(void);
 void splash_copilot_tick(void);
+
+// Aurora screen pixel-art animation ("aurora shimmer") — same shared-buffer
+// pattern as Copilot above.
+void splash_aurora_init(lv_obj_t* parent);
+void splash_aurora_show(void);
+void splash_aurora_tick(void);

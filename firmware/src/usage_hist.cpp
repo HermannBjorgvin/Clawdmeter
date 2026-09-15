@@ -98,7 +98,12 @@ void usage_hist_init(void) {
     bool restored = false;
 
     Preferences p;
-    if (p.begin("uhist", true)) {
+    // Read-write, not read-only: opening a namespace that has never been
+    // created before in read-only mode crashes on this esp32-arduino version
+    // (assert failed: xQueueSemaphoreTake, right after the expected nvs_open
+    // NOT_FOUND) -- read-write auto-creates the namespace instead. Only
+    // matters on a truly fresh device (namespace already exists otherwise).
+    if (p.begin("uhist", false)) {
         if (p.getBytesLength("ring") == sizeof(Blob)) {
             Blob tmp;
             if (p.getBytes("ring", &tmp, sizeof(tmp)) == sizeof(tmp) &&

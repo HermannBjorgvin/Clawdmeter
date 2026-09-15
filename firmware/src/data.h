@@ -68,3 +68,22 @@ struct EnvData {
     bool has_weather;    // false → time only (weather fetch failed)
     bool valid;          // false until first successful parse
 };
+
+struct TodayData {
+    int  active_min;   // active minutes today
+    int  tok_k;         // tokens today, thousands
+    int  usd;           // cost today, whole dollars, -1 if unknown
+    int  commits;       // commits today
+    int  cp_used;        // Copilot premium requests used today, -1 if unknown
+    bool valid;          // false until first successful parse
+};
+
+struct AuroraData {
+    long epoch;        // unix seconds (UTC) at the moment the daemon sent this
+    int  pct;           // 0-100 local aurora visibility probability (NOAA OVATION), -1 if unavailable
+    int  kp_x10;         // current 3h-bucket planetary Kp index * 10, -1 if unavailable
+    int  kpmax_x10;      // max Kp forecast over the next 24h * 10, -1 if unavailable
+    int  cloud_pct;      // 0-100 cloud cover at the same location, -1 if unknown
+    bool night;          // false = daylight (aurora won't be visible regardless of pct)
+    bool valid;          // false until first successful parse
+};

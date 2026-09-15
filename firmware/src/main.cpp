@@ -12,6 +12,9 @@
 #include "usage_hist.h"
 #include "splash.h"
 #include "usage_rate.h"
+#include "wifi_net.h"
+#include "web_server.h"
+#include "device_api.h"
 
 // Physical buttons:
 //   BTN_BACK  (GPIO 0 / BOOT) — cycle screens (splash→usage→bluetooth→usage…)
@@ -33,10 +36,22 @@ static CopilotData copilot = {};
 static SysInfoData sysinfo = {};
 static VscodeData vscode = {};
 static EnvData envd = {};
+static AuroraData aurorad = {};
 static CiData cid = {};
+static TodayData todayd = {};
 
 // ---- LVGL draw buffers (partial render) ----
-#define BUF_LINES 40
+// Was 40 (21.6 KB across both buffers) — trimmed to give WiFi's runtime init
+// (esp_wifi_init's own task + RX/TX buffer pools, ~40-70 KB, only allocated
+// once WiFi.mode() actually runs) enough free heap to succeed. More flush()
+// calls per full redraw (15 vs 6) is imperceptible for this UI's mostly
+// text/bar content — not a video buffer.
+// Was 40 (21.6 KB across both buffers) — trimmed to give WiFi's runtime init
+// (esp_wifi_init's own task + RX/TX buffer pools, ~40-70 KB, only allocated
+// once WiFi.mode() actually runs) enough free heap to succeed. More flush()
+// calls per full redraw (15 vs 6) is imperceptible for this UI's mostly
+// text/bar content — not a video buffer.
+#define BUF_LINES 16
 static uint16_t *buf1 = nullptr;
 static uint16_t *buf2 = nullptr;
 
@@ -45,10 +60,13 @@ static uint32_t my_tick(void) {
     return millis();
 }
 
-// When true, my_flush_cb also streams each flushed tile over serial so the host
-// can reassemble a screenshot — no full-frame buffer needed (heap is too
-// fragmented on this board to malloc one; see send_screenshot()).
+// When true, my_flush_cb also captures each flushed tile — either streamed
+// over serial (shot_fb == nullptr, the QA `screenshot` command) or copied
+// into shot_fb (the HTTP screenshot endpoint, web_server.cpp). Either way no
+// full-frame buffer is kept permanently — heap is too fragmented on this
+// board for that; the caller mallocs a transient buffer only when needed.
 static volatile bool shot_active = false;
+static uint16_t*     shot_fb     = nullptr;
 
 // LVGL flush callback — ST7789 direct SPI write, no rotation needed
 static void my_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
@@ -56,13 +74,41 @@ static void my_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_m
     int32_t h = area->y2 - area->y1 + 1;
     gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t*)px_map, w, h);
     if (shot_active) {
-        Serial.printf("A %ld %ld %ld %ld\n",
-            (long)area->x1, (long)area->y1, (long)area->x2, (long)area->y2);
-        Serial.write(px_map, (size_t)(w * h * 2));
-        Serial.write('\n');
-        Serial.flush();
+        if (shot_fb) {
+            const uint16_t* src = (const uint16_t*)px_map;
+            for (int32_t row = 0; row < h; row++) {
+                memcpy(&shot_fb[(area->y1 + row) * LCD_WIDTH + area->x1],
+                       &src[row * w], (size_t)w * 2);
+            }
+        } else {
+            Serial.printf("A %ld %ld %ld %ld\n",
+                (long)area->x1, (long)area->y1, (long)area->x2, (long)area->y2);
+            Serial.write(px_map, (size_t)(w * h * 2));
+            Serial.write('\n');
+            Serial.flush();
+        }
     }
     lv_display_flush_ready(disp);
+}
+
+// Force a full redraw and capture it via my_flush_cb (either sink above).
+static void capture_screenshot(void) {
+    shot_active = true;
+    lv_obj_invalidate(lv_screen_active());
+    for (int i = 0; i < 30; i++) {   // ~1.5s ceiling; a full 135x240 redraw is a handful of tiles
+        lv_timer_handler();
+        delay(5);
+    }
+    shot_active = false;
+}
+
+// Capture the current LVGL frame into `out` (must hold LCD_WIDTH*LCD_HEIGHT
+// uint16_t RGB565 pixels). Declared in device_api.h for web_server.cpp.
+bool capture_screenshot_rgb565(uint16_t* out) {
+    shot_fb = out;
+    capture_screenshot();
+    shot_fb = nullptr;
+    return true;
 }
 
 // Parse a JSON line into UsageData or CopilotData based on the "src" field.
@@ -79,14 +125,7 @@ static void send_screenshot() {
         (unsigned long)w, (unsigned long)h, (unsigned long)(w * h * 2));
     Serial.flush();
 
-    // Force a full redraw; my_flush_cb streams each tile while shot_active.
-    shot_active = true;
-    lv_obj_invalidate(lv_screen_active());
-    for (int i = 0; i < 30; i++) {   // ~1.5s ceiling; a full 135x240 redraw is a handful of tiles
-        lv_timer_handler();
-        delay(5);
-    }
-    shot_active = false;
+    capture_screenshot();   // shot_fb is null here, so my_flush_cb streams to Serial
 
     Serial.println("SCREENSHOT_END");
 }
@@ -147,8 +186,13 @@ static bool process_payload(const char* raw) {
         cid.valid = true;
         ui_update_ci(&cid);
     } else if (strcmp(src, "sum") == 0) {
-        ui_update_today(doc["am"] | 0, doc["tk"] | 0, doc["usd"] | 0,
-                        doc["cm"] | 0, doc["cp"] | -1);
+        todayd.active_min = doc["am"]  | 0;
+        todayd.tok_k      = doc["tk"]  | 0;
+        todayd.usd        = doc["usd"] | 0;
+        todayd.commits    = doc["cm"]  | 0;
+        todayd.cp_used    = doc["cp"]  | -1;
+        todayd.valid = true;
+        ui_update_today(&todayd);
     } else if (strcmp(src, "env") == 0) {
         envd.epoch       = doc["ts"] | 0L;
         envd.tz_off_min  = doc["tz"] | 0;
@@ -162,6 +206,17 @@ static bool process_payload(const char* raw) {
         sensor_hist_set_time(envd.epoch);
         usage_hist_set_time(envd.epoch);
         ui_update_env(&envd);
+    } else if (strcmp(src, "aurora") == 0) {
+        aurorad.epoch     = doc["ts"]    | 0L;
+        aurorad.pct       = doc["pct"]   | -1;
+        aurorad.kp_x10    = doc["kp"]    | -1;
+        aurorad.kpmax_x10 = doc["kpmax"] | -1;
+        aurorad.cloud_pct = doc["cloud"] | -1;
+        aurorad.night     = doc["night"] | 0;
+        aurorad.valid = true;
+        ui_update_aurora(&aurorad);
+    } else if (strcmp(src, "wifi") == 0) {
+        wifi_set_credentials(doc["ssid"] | "", doc["pass"] | "");
     } else {
         usage.session_pct        = doc["s"]  | 0.0f;
         usage.session_reset_mins = doc["sr"] | -1;
@@ -181,6 +236,97 @@ static bool process_payload(const char* raw) {
         ui_update(&usage);
     }
     return true;
+}
+
+// GET /api/state (web_server.cpp) — dump everything the device currently
+// holds, from the same structs process_payload() above populates.
+void build_state_json(JsonDocument& doc) {
+    JsonObject claude = doc["claude"].to<JsonObject>();
+    claude["session_pct"]        = usage.session_pct;
+    claude["session_reset_mins"] = usage.session_reset_mins;
+    claude["weekly_pct"]         = usage.weekly_pct;
+    claude["weekly_reset_mins"]  = usage.weekly_reset_mins;
+    claude["status"]             = usage.status;
+    claude["model"]              = usage.model;
+    claude["ctx_pct"]            = usage.ctx_pct;
+    claude["valid"]              = usage.valid;
+
+    JsonObject act = doc["activity"].to<JsonObject>();
+    act["state"]  = ui_get_act_state_str();
+    act["agents"] = ui_get_act_agents();
+
+    JsonObject cp = doc["copilot"].to<JsonObject>();
+    cp["premium_pct"]       = copilot.premium_pct;
+    cp["premium_remaining"] = copilot.premium_remaining;
+    cp["premium_total"]     = copilot.premium_total;
+    cp["premium_reset_str"] = copilot.premium_reset_str;
+    cp["plan"]               = copilot.plan;
+    cp["enabled"]            = copilot.enabled;
+    cp["valid"]              = copilot.valid;
+
+    JsonObject si = doc["sysinfo"].to<JsonObject>();
+    si["cpu_pct"]       = sysinfo.cpu_pct;
+    si["cpu_temp"]      = sysinfo.cpu_temp;
+    si["ram_pct"]       = sysinfo.ram_pct;
+    si["ram_used_gb"]   = sysinfo.ram_used_gb;
+    si["ram_total_gb"]  = sysinfo.ram_total_gb;
+    si["disk_pct"]      = sysinfo.disk_pct;
+    si["disk_used_gb"]  = sysinfo.disk_used_gb;
+    si["disk_total_gb"] = sysinfo.disk_total_gb;
+    si["valid"]         = sysinfo.valid;
+
+    JsonObject vs = doc["vscode"].to<JsonObject>();
+    vs["mem_mb"]      = vscode.mem_mb;
+    vs["cpu_pct"]     = vscode.cpu_pct;
+    vs["ext_count"]   = vscode.ext_count;
+    vs["error_count"] = vscode.error_count;
+    vs["last_error"]  = vscode.last_error;
+    vs["valid"]       = vscode.valid;
+
+    JsonObject env = doc["env"].to<JsonObject>();
+    env["temp_c"]      = envd.temp_c;
+    env["hi_c"]        = envd.hi_c;
+    env["lo_c"]        = envd.lo_c;
+    env["wcode"]       = envd.wcode;
+    env["loc"]         = envd.loc;
+    env["has_weather"] = envd.has_weather;
+    env["valid"]       = envd.valid;
+
+    JsonObject au = doc["aurora"].to<JsonObject>();
+    au["pct"]       = aurorad.pct;
+    au["kp_x10"]    = aurorad.kp_x10;
+    au["kpmax_x10"] = aurorad.kpmax_x10;
+    au["cloud_pct"] = aurorad.cloud_pct;
+    au["night"]     = aurorad.night;
+    au["valid"]     = aurorad.valid;
+
+    JsonObject ci = doc["ci"].to<JsonObject>();
+    ci["state"]    = cid.state;
+    ci["wf"]       = cid.wf;
+    ci["branch"]   = cid.branch;
+    ci["age_min"]  = cid.age_min;
+    ci["review"]   = cid.review;
+    ci["changes"]  = cid.changes;
+    ci["dirty"]    = cid.dirty;
+    ci["ahead"]    = cid.ahead;
+    ci["behind"]   = cid.behind;
+    ci["conflict"] = cid.conflict;
+    ci["valid"]    = cid.valid;
+
+    JsonObject today = doc["today"].to<JsonObject>();
+    today["active_min"] = todayd.active_min;
+    today["tok_k"]       = todayd.tok_k;
+    today["usd"]         = todayd.usd;
+    today["commits"]     = todayd.commits;
+    today["cp_used"]     = todayd.cp_used;
+    today["valid"]       = todayd.valid;
+
+    JsonObject conn = doc["connectivity"].to<JsonObject>();
+    conn["ble_state"]   = (int)ble_get_state();
+    conn["ble_device"]  = ble_get_device_name();
+    conn["daemon_state"] = ui_get_daemon_state();
+    conn["wifi_state"]  = (int)wifi_get_state();
+    conn["wifi_ip"]     = wifi_get_ip();
 }
 
 // ---- Backlight: steady / breathe-while-working / idle-dim ----
@@ -311,7 +457,15 @@ void setup() {
     // Physical button: back (GPIO 0 / BOOT button)
     pinMode(BTN_BACK, INPUT_PULLUP);
 
-    // Build dashboard
+    // Build dashboard — deliberately BEFORE wifi_init() below: this makes
+    // its one-time mallocs (LVGL partial buffers already done above, the
+    // ~29 KB splash canvas here) claim heap while it's most free. WiFi's
+    // own runtime buffers (~40-70 KB, allocated once WiFi.mode() actually
+    // runs — not visible in the static RAM% the build report prints) are
+    // the biggest heap consumer added by this feature; letting the UI go
+    // first avoids it starving the splash canvas malloc (which used to
+    // crash the device — see the null-guards in splash.cpp — when it lost
+    // that race).
     ui_init();
 
     // Show initial BLE status on Bluetooth screen
@@ -322,6 +476,14 @@ void setup() {
 
     ui_show_screen(SCREEN_SPLASH);
 
+    // WiFi is additive to BLE, not a replacement — connects only if
+    // credentials were previously provisioned (over BLE, see process_payload's
+    // "wifi" case). web_server_init() only registers routes; it defers
+    // actually starting the listener until WiFi has a real IP (see its own
+    // comment in web_server.cpp for why that has to be deferred).
+    wifi_init();
+    web_server_init();
+
     Serial.println("Dashboard ready, waiting for data on BLE...");
 }
 
@@ -331,6 +493,8 @@ void loop() {
     lv_timer_handler();
     ui_tick_anim();
     ble_tick();
+    wifi_tick();
+    web_server_tick();
     power_tick();
     imu_tick();
     env_sensor_tick();
@@ -404,6 +568,16 @@ void loop() {
     if (bs != last_ble_state) {
         last_ble_state = bs;
         ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());
+    }
+
+    // Update WiFi status on screen when state changes (IP only settles once
+    // CONNECTED, so re-push on every tick while in that state is unnecessary —
+    // a state-change edge is enough since the IP doesn't change once assigned).
+    static wifi_state_t last_wifi_state = (wifi_state_t)-1;
+    wifi_state_t ws = wifi_get_state();
+    if (ws != last_wifi_state) {
+        last_wifi_state = ws;
+        ui_update_wifi_status(ws, wifi_get_ip().c_str(), wifi_get_token());
     }
 
     // Update battery indicator

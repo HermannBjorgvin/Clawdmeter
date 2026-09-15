@@ -58,6 +58,7 @@ static lv_obj_t* ble_container;
 static lv_obj_t* lbl_ble_status;
 static lv_obj_t* lbl_ble_device;
 static lv_obj_t* lbl_ble_mac;
+static lv_obj_t* lbl_wifi_status;
 
 // ---- Copilot screen widgets ----
 static lv_obj_t* copilot_container;
@@ -66,6 +67,15 @@ static lv_obj_t* bar_copilot;
 static lv_obj_t* lbl_copilot_detail;
 static lv_obj_t* lbl_copilot_suggest;
 static lv_obj_t* lbl_copilot_status;
+
+// ---- Aurora screen widgets ----
+static lv_obj_t* aurora_container;
+static lv_obj_t* lbl_aurora_pct;
+static lv_obj_t* lbl_aurora_desc;
+static lv_obj_t* lbl_aurora_kp;
+static lv_obj_t* bar_aurora_kp;
+static lv_obj_t* lbl_aurora_peak;
+static lv_obj_t* lbl_aurora_caveat;
 
 // ---- Sysinfo screen widgets ----
 static lv_obj_t* sysinfo_container;
@@ -255,6 +265,7 @@ static void format_reset_time(int mins, char* buf, size_t len) {
 }
 
 static void refresh_status_label(void);
+static void note_data(void);
 static void refresh_clock(bool force);
 static void refresh_usage_strip(void);
 static void banner_show(banner_kind_t kind, const char* text, lv_color_t bg,
@@ -883,11 +894,131 @@ static void init_env_screen(lv_obj_t* scr) {
     lv_obj_add_flag(clock_container, LV_OBJ_FLAG_HIDDEN);
 }
 
+// ======== Aurora Screen (135x240) ========
+
+// Thresholds echo the shimmer animation's own palette (teal -> green -> purple
+// as intensity rises), so the number and the graphic agree.
+static lv_color_t aurora_color(int pct) {
+    if (pct < 0)   return COL_DIM;
+    if (pct >= 70) return lv_color_hex(0x9b5de5);   // purple — high chance
+    if (pct >= 40) return COL_GREEN;                // good chance
+    if (pct >= 15) return lv_color_hex(0x2dd4bf);   // teal — possible
+    return COL_DIM;                                  // low chance
+}
+
+static const char* aurora_desc(int pct) {
+    if (pct < 0)   return "No data";
+    if (pct >= 70) return "High";
+    if (pct >= 40) return "Good";
+    if (pct >= 15) return "Possible";
+    return "Low";
+}
+
+// NOAA G-scale: Kp<4 quiet, 4-6 unsettled/active, 6+ storm.
+static lv_color_t kp_color(int kp_x10) {
+    if (kp_x10 < 0)  return COL_DIM;
+    if (kp_x10 >= 60) return COL_RED;
+    if (kp_x10 >= 40) return COL_AMBER;
+    return COL_GREEN;
+}
+
+static bool aurora_has_data = false;
+
+static void init_aurora_screen(lv_obj_t* scr) {
+    aurora_container = make_screen_container(scr, "Aurora");
+
+    // Pixel-art shimmer animation (60x60, top-mid, below the title)
+    splash_aurora_init(aurora_container);
+
+    lbl_aurora_pct = lv_label_create(aurora_container);
+    lv_label_set_text(lbl_aurora_pct, "---%");
+    lv_obj_set_style_text_font(lbl_aurora_pct, &font_styrene_24, 0);
+    lv_obj_set_style_text_color(lbl_aurora_pct, COL_TEXT, 0);
+    lv_obj_align(lbl_aurora_pct, LV_ALIGN_TOP_MID, 0, 96);
+
+    lbl_aurora_desc = lv_label_create(aurora_container);
+    lv_label_set_text(lbl_aurora_desc, "No data");
+    lv_obj_set_style_text_font(lbl_aurora_desc, &font_styrene_14, 0);
+    lv_obj_set_style_text_color(lbl_aurora_desc, COL_DIM, 0);
+    lv_obj_align(lbl_aurora_desc, LV_ALIGN_TOP_MID, 0, 126);
+
+    lbl_aurora_kp = lv_label_create(aurora_container);
+    lv_label_set_text(lbl_aurora_kp, "Kp --");
+    lv_obj_set_style_text_font(lbl_aurora_kp, &font_styrene_14, 0);
+    lv_obj_set_style_text_color(lbl_aurora_kp, COL_TEXT, 0);
+    lv_obj_set_pos(lbl_aurora_kp, MARGIN, 156);
+
+    bar_aurora_kp = make_bar(aurora_container, MARGIN, 178, CONTENT_W, 10);
+    lv_bar_set_range(bar_aurora_kp, 0, 90);   // Kp 0-9, x10
+
+    lbl_aurora_peak = lv_label_create(aurora_container);
+    lv_label_set_text(lbl_aurora_peak, "");
+    lv_obj_set_style_text_font(lbl_aurora_peak, &font_styrene_12, 0);
+    lv_obj_set_style_text_color(lbl_aurora_peak, COL_DIM, 0);
+    lv_obj_align(lbl_aurora_peak, LV_ALIGN_TOP_MID, 0, 196);
+
+    lbl_aurora_caveat = lv_label_create(aurora_container);
+    lv_label_set_text(lbl_aurora_caveat, "");
+    lv_obj_set_style_text_font(lbl_aurora_caveat, &font_styrene_12, 0);
+    lv_obj_set_style_text_color(lbl_aurora_caveat, COL_DIM, 0);
+    lv_obj_align(lbl_aurora_caveat, LV_ALIGN_TOP_MID, 0, 214);
+
+    lv_obj_add_flag(aurora_container, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_update_aurora(const AuroraData* data) {
+    if (!data->valid) return;
+    note_data();
+    aurora_has_data = true;
+
+    if (data->pct >= 0) {
+        lv_label_set_text_fmt(lbl_aurora_pct, "%d%%", data->pct);
+        lv_obj_set_style_text_color(lbl_aurora_pct, aurora_color(data->pct), 0);
+    } else {
+        lv_label_set_text(lbl_aurora_pct, "---%");
+        lv_obj_set_style_text_color(lbl_aurora_pct, COL_DIM, 0);
+    }
+    lv_label_set_text(lbl_aurora_desc, aurora_desc(data->pct));
+
+    if (data->kp_x10 >= 0) {
+        lv_label_set_text_fmt(lbl_aurora_kp, "Kp %d.%d", data->kp_x10 / 10, data->kp_x10 % 10);
+        lv_bar_set_value(bar_aurora_kp, data->kp_x10, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_aurora_kp, kp_color(data->kp_x10), LV_PART_INDICATOR);
+    } else {
+        lv_label_set_text(lbl_aurora_kp, "Kp --");
+        lv_bar_set_value(bar_aurora_kp, 0, LV_ANIM_OFF);
+    }
+
+    if (data->kpmax_x10 >= 0 && data->kp_x10 >= 0 && data->kpmax_x10 > data->kp_x10) {
+        lv_label_set_text_fmt(lbl_aurora_peak, "Peak next 24h: Kp %d.%d",
+                              data->kpmax_x10 / 10, data->kpmax_x10 % 10);
+    } else {
+        lv_label_set_text(lbl_aurora_peak, "");
+    }
+
+    // Caveat line: only one message at a time, daylight takes priority since
+    // it makes the probability moot regardless of sky conditions.
+    if (!data->night) {
+        lv_label_set_text(lbl_aurora_caveat, "Daylight now");
+    } else if (data->cloud_pct >= 60) {
+        lv_label_set_text(lbl_aurora_caveat, "Cloudy - may be obscured");
+    } else if (data->cloud_pct >= 0 && data->cloud_pct < 30) {
+        lv_label_set_text(lbl_aurora_caveat, "Clear skies");
+    } else {
+        lv_label_set_text(lbl_aurora_caveat, "");
+    }
+}
+
+// Info panel grew by one line (WiFi status) beyond the original BLE-only
+// 108px — CONN_PANEL_H is the single source of truth so reset_zone below it
+// stays derived, not a second magic number to keep in sync.
+#define CONN_PANEL_H 124
+
 static void init_bluetooth_screen(lv_obj_t* scr) {
-    ble_container = make_screen_container(scr, "Bluetooth");
+    ble_container = make_screen_container(scr, "Connectivity");
 
     // Info panel
-    lv_obj_t* p_info = make_panel(ble_container, MARGIN, CONTENT_Y, CONTENT_W, 108);
+    lv_obj_t* p_info = make_panel(ble_container, MARGIN, CONTENT_Y, CONTENT_W, CONN_PANEL_H);
 
     // Bluetooth icon (centered at top of panel)
     static lv_image_dsc_t icon_bt_dsc;
@@ -915,9 +1046,17 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_color(lbl_ble_mac, COL_DIM, 0);
     lv_obj_set_pos(lbl_ble_mac, 0, 86);
 
+    // WiFi is additive to BLE — one compact line: IP + auth token once
+    // connected (both needed to reach the HTTP dashboard), else the state.
+    lbl_wifi_status = lv_label_create(p_info);
+    lv_label_set_text(lbl_wifi_status, "WiFi: not set up");
+    lv_obj_set_style_text_font(lbl_wifi_status, &font_styrene_12, 0);
+    lv_obj_set_style_text_color(lbl_wifi_status, COL_DIM, 0);
+    lv_obj_set_pos(lbl_wifi_status, 0, 102);
+
     // Unpair hint — the action is a long-press of the physical button while
     // this screen is showing (see main.cpp). No touch on this board.
-    int reset_y = CONTENT_Y + 108 + 8;
+    int reset_y = CONTENT_Y + CONN_PANEL_H + 8;
     lv_obj_t* reset_zone = lv_obj_create(ble_container);
     lv_obj_set_pos(reset_zone, MARGIN, reset_y);
     lv_obj_set_size(reset_zone, CONTENT_W, 38);
@@ -1419,7 +1558,7 @@ static void refresh_trends_if_visible(void) {
 // short row of dots gives a sense of "how many presses to get back here"
 // without a persistent on-screen element. Shown for DOTS_VISIBLE_MS after
 // every ui_show_screen(), then hidden by ui_tick_anim().
-#define MAX_DOTS 10
+#define MAX_DOTS 11
 static lv_obj_t* dot_objs[MAX_DOTS] = { nullptr };
 static uint32_t  dots_hide_ms = 0;   // 0 = not pending
 #define DOTS_VISIBLE_MS  1500
@@ -1427,7 +1566,7 @@ static uint32_t  dots_hide_ms = 0;   // 0 = not pending
 // Mirrors the traversal order in ui_cycle_screen() (SPLASH excluded — it's
 // the "off ramp", not a stop with a position).
 static const screen_t CYCLE_ORDER[] = {
-    SCREEN_CLOCK, SCREEN_SENSOR, SCREEN_SENSOR_GRAPH, SCREEN_USAGE,
+    SCREEN_CLOCK, SCREEN_AURORA, SCREEN_SENSOR, SCREEN_SENSOR_GRAPH, SCREEN_USAGE,
     SCREEN_COPILOT, SCREEN_SYSINFO, SCREEN_VSCODE, SCREEN_BLUETOOTH,
     SCREEN_CI, SCREEN_TODAY,
 };
@@ -1439,6 +1578,7 @@ static bool screen_is_populated(screen_t s) {
     case SCREEN_VSCODE:       return vscode_has_data;
     case SCREEN_CI:           return ci_has_data;
     case SCREEN_TODAY:        return today_has_data;
+    case SCREEN_AURORA:       return aurora_has_data;
     case SCREEN_SENSOR:
     case SCREEN_SENSOR_GRAPH: return sensor_has_data;
     default:                  return true;
@@ -1501,6 +1641,7 @@ void ui_init(void) {
     init_battery_icons();
 
     init_env_screen(scr);
+    init_aurora_screen(scr);
     init_usage_screen(scr);
     init_copilot_screen(scr);
     init_sysinfo_screen(scr);
@@ -2007,10 +2148,14 @@ void ui_update_ci(const CiData* data) {
     }
 }
 
-void ui_update_today(int act_min, int tok_k, int usd, int commits, int cp_used) {
+void ui_update_today(const TodayData* data) {
+    if (!data->valid) return;
     note_data();
     today_has_data = true;
     char b[16];
+
+    int act_min = data->active_min, tok_k = data->tok_k, usd = data->usd,
+        commits = data->commits, cp_used = data->cp_used;
 
     if (act_min >= 60) snprintf(b, sizeof(b), "%dh %02dm", act_min / 60, act_min % 60);
     else               snprintf(b, sizeof(b), "%dm", act_min);
@@ -2031,6 +2176,20 @@ void ui_update_today(int act_min, int tok_k, int usd, int commits, int cp_used) 
     else              snprintf(b, sizeof(b), "--");
     lv_label_set_text(lbl_today_rows[4], b);
 }
+
+const char* ui_get_act_state_str(void) {
+    switch (g_act) {
+    case ACT_WORKING:     return "working";
+    case ACT_NEEDS_INPUT: return "needs_input";
+    case ACT_DONE:        return "done";
+    case ACT_IDLE:        return "idle";
+    default:              return "unknown";
+    }
+}
+
+int ui_get_act_agents(void) { return g_act_agents; }
+
+const char* ui_get_daemon_state(void) { return daemon_state; }
 
 // Env sensor reading (BME280 or BMP180, whichever env_sensor.cpp found),
 // pushed locally by main.cpp — not a daemon payload, so no note_data() here;
@@ -2240,6 +2399,12 @@ void ui_tick_anim(void) {
         return;
     }
 
+    // Aurora screen: advance pixel-art shimmer animation
+    if (current_screen == SCREEN_AURORA) {
+        splash_aurora_tick();
+        return;
+    }
+
     if (current_screen != SCREEN_USAGE) return;
 
     // When the daemon link is not live, the "working" spinner would imply
@@ -2305,6 +2470,7 @@ static void apply_battery_visibility(void) {
 
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(clock_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(aurora_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(copilot_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(sysinfo_container, LV_OBJ_FLAG_HIDDEN);
@@ -2323,8 +2489,15 @@ void ui_show_screen(screen_t screen) {
         refresh_clock(true);
         refresh_usage_strip();
         break;
+    case SCREEN_AURORA:
+        lv_obj_clear_flag(aurora_container, LV_OBJ_FLAG_HIDDEN);
+        splash_aurora_show();  // shared canvas buffer may hold stale content
+        break;
     case SCREEN_USAGE:      lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
-    case SCREEN_COPILOT:    lv_obj_clear_flag(copilot_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_COPILOT:
+        lv_obj_clear_flag(copilot_container, LV_OBJ_FLAG_HIDDEN);
+        splash_copilot_show();  // shared canvas buffer may hold stale content
+        break;
     case SCREEN_SYSINFO:    lv_obj_clear_flag(sysinfo_container, LV_OBJ_FLAG_HIDDEN); break;
     case SCREEN_VSCODE:     lv_obj_clear_flag(vscode_container, LV_OBJ_FLAG_HIDDEN); break;
     case SCREEN_CI:         lv_obj_clear_flag(ci_container, LV_OBJ_FLAG_HIDDEN); break;
@@ -2354,7 +2527,8 @@ void ui_show_screen(screen_t screen) {
 void ui_cycle_screen(void) {
     screen_t next = current_screen;
     do {
-        if (next == SCREEN_CLOCK)          next = SCREEN_SENSOR;
+        if (next == SCREEN_CLOCK)          next = SCREEN_AURORA;
+        else if (next == SCREEN_AURORA)    next = SCREEN_SENSOR;
         else if (next == SCREEN_SENSOR)    next = SCREEN_SENSOR_GRAPH;
         else if (next == SCREEN_SENSOR_GRAPH) next = SCREEN_USAGE;
         else if (next == SCREEN_USAGE)     next = SCREEN_COPILOT;
@@ -2405,6 +2579,31 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
     // Raw name/MAC — no "Device:"/"Address:" prefix; a 123px panel can't hold it.
     if (name) lv_label_set_text(lbl_ble_device, name);
     if (mac)  lv_label_set_text(lbl_ble_mac, mac);
+}
+
+void ui_update_wifi_status(wifi_state_t state, const char* ip, const char* token) {
+    if (!lbl_wifi_status) return;
+    char b[40];
+    switch (state) {
+    case WIFI_STATE_CONNECTED:
+        // Both needed to reach the dashboard, so one line carries both.
+        snprintf(b, sizeof(b), "%s  *  %s", ip, token);
+        lv_label_set_text(lbl_wifi_status, b);
+        lv_obj_set_style_text_color(lbl_wifi_status, COL_GREEN, 0);
+        break;
+    case WIFI_STATE_CONNECTING:
+        lv_label_set_text(lbl_wifi_status, "WiFi: connecting");
+        lv_obj_set_style_text_color(lbl_wifi_status, COL_AMBER, 0);
+        break;
+    case WIFI_STATE_FAILED:
+        lv_label_set_text(lbl_wifi_status, "WiFi: failed");
+        lv_obj_set_style_text_color(lbl_wifi_status, COL_RED, 0);
+        break;
+    default:
+        lv_label_set_text(lbl_wifi_status, "WiFi: not set up");
+        lv_obj_set_style_text_color(lbl_wifi_status, COL_DIM, 0);
+        break;
+    }
 }
 
 void ui_update_battery(int percent, bool charging) {

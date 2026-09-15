@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clawdmeter</title>
+<style>
+  :root {
+    --bg: #000000;
+    --panel: #1f1f1e;
+    --text: #faf9f5;
+    --dim: #b0aea5;
+    --accent: #d97757;
+    --green: #8faa6a;
+    --amber: #e0a458;
+    --red: #c0392b;
+    --bar-bg: #2a2a28;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 20px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 12px;
+  }
+  .card {
+    background: var(--panel);
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .card h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--dim);
+    margin: 0 0 10px;
+  }
+  .row {
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 0;
+    font-size: 13px;
+  }
+  .row .k { color: var(--dim); }
+  .row .v { color: var(--text); font-weight: 500; }
+  .pct { font-size: 28px; font-weight: 600; }
+  .bar {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--bar-bg);
+    margin: 8px 0;
+    overflow: hidden;
+  }
+  .bar > div { height: 100%; border-radius: 4px; background: var(--green); }
+  .dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    background: var(--dim);
+  }
+  .dot.ok { background: var(--green); }
+  .dot.warn { background: var(--amber); }
+  .dot.bad { background: var(--red); }
+  .shot {
+    max-width: 100%;
+    image-rendering: pixelated;
+    border-radius: 8px;
+    border: 1px solid var(--bar-bg);
+    display: block;
+  }
+  button {
+    background: var(--accent);
+    color: var(--bg);
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 10px;
+  }
+  button:active { opacity: 0.8; }
+  .stale { opacity: 0.4; }
+</style>
+</head>
+<body>
+  <h1>Clawdmeter</h1>
+  <div class="sub" id="conn-line">connecting&hellip;</div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Claude</h2>
+      <div class="pct" id="claude-pct">--%</div>
+      <div class="bar"><div id="claude-bar" style="width:0%"></div></div>
+      <div class="row"><span class="k">Weekly</span><span class="v" id="claude-weekly">--%</span></div>
+      <div class="row"><span class="k">Model</span><span class="v" id="claude-model">--</span></div>
+      <div class="row"><span class="k">Activity</span><span class="v" id="claude-act">--</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Copilot</h2>
+      <div class="pct" id="copilot-pct">--%</div>
+      <div class="bar"><div id="copilot-bar" style="width:0%"></div></div>
+      <div class="row"><span class="k">Plan</span><span class="v" id="copilot-plan">--</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Weather / Aurora</h2>
+      <div class="row"><span class="k">Location</span><span class="v" id="env-loc">--</span></div>
+      <div class="row"><span class="k">Temp</span><span class="v" id="env-temp">--</span></div>
+      <div class="row"><span class="k">Aurora</span><span class="v" id="aurora-pct">--</span></div>
+      <div class="row"><span class="k">Kp</span><span class="v" id="aurora-kp">--</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Host</h2>
+      <div class="row"><span class="k">CPU</span><span class="v" id="sys-cpu">--</span></div>
+      <div class="row"><span class="k">RAM</span><span class="v" id="sys-ram">--</span></div>
+      <div class="row"><span class="k">Disk</span><span class="v" id="sys-disk">--</span></div>
+    </div>
+
+    <div class="card">
+      <h2>VS Code</h2>
+      <div class="row"><span class="k">Memory</span><span class="v" id="vs-mem">--</span></div>
+      <div class="row"><span class="k">CPU</span><span class="v" id="vs-cpu">--</span></div>
+      <div class="row"><span class="k">Extensions</span><span class="v" id="vs-ext">--</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Checks</h2>
+      <div class="row"><span class="k">State</span><span class="v" id="ci-state">--</span></div>
+      <div class="row"><span class="k">Branch</span><span class="v" id="ci-branch">--</span></div>
+      <div class="row"><span class="k">Review</span><span class="v" id="ci-review">--</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Today</h2>
+      <div class="row"><span class="k">Active</span><span class="v" id="today-min">--</span></div>
+      <div class="row"><span class="k">Tokens</span><span class="v" id="today-tok">--</span></div>
+      <div class="row"><span class="k">Cost</span><span class="v" id="today-usd">--</span></div>
+      <div class="row"><span class="k">Commits</span><span class="v" id="today-commits">--</span></div>
+    </div>
+
+    <div class="card" style="grid-column: 1 / -1;">
+      <h2>Screen</h2>
+      <img class="shot" id="shot" alt="device screenshot">
+      <button id="refresh-shot">Refresh screenshot</button>
+    </div>
+  </div>
+
+<script>
+function dotClass(state) {
+  if (state === 2) return 'ok';    // BLE_STATE_CONNECTED
+  if (state === 1) return 'warn';  // advertising / connecting
+  return 'bad';
+}
+
+function fmtPct(v) { return (v === null || v === undefined || v < 0) ? '--' : Math.round(v) + '%'; }
+
+async function refreshState() {
+  let d;
+  try {
+    const r = await fetch('/api/state');
+    d = await r.json();
+  } catch (e) {
+    document.getElementById('conn-line').textContent = 'device unreachable';
+    return;
+  }
+
+  const conn = d.connectivity || {};
+  document.getElementById('conn-line').innerHTML =
+    '<span class="dot ' + dotClass(conn.ble_state) + '"></span>BLE &middot; ' +
+    (conn.wifi_ip ? conn.wifi_ip : 'wifi: no IP');
+
+  const c = d.claude || {};
+  document.getElementById('claude-pct').textContent = fmtPct(c.session_pct);
+  document.getElementById('claude-bar').style.width = Math.max(0, Math.min(100, c.session_pct || 0)) + '%';
+  document.getElementById('claude-weekly').textContent = fmtPct(c.weekly_pct);
+  document.getElementById('claude-model').textContent = c.model || '--';
+  const act = d.activity || {};
+  document.getElementById('claude-act').textContent = act.state || '--';
+
+  const cp = d.copilot || {};
+  document.getElementById('copilot-pct').textContent = cp.valid ? fmtPct(cp.premium_pct) : '--%';
+  document.getElementById('copilot-bar').style.width = Math.max(0, Math.min(100, cp.premium_pct || 0)) + '%';
+  document.getElementById('copilot-plan').textContent = cp.plan || '--';
+
+  const env = d.env || {};
+  const au = d.aurora || {};
+  document.getElementById('env-loc').textContent = env.loc || '--';
+  document.getElementById('env-temp').textContent = env.valid ? (env.temp_c + '°C') : '--';
+  document.getElementById('aurora-pct').textContent = (au.valid && au.pct >= 0) ? (au.pct + '%') : '--';
+  document.getElementById('aurora-kp').textContent = (au.valid && au.kp_x10 >= 0) ? (au.kp_x10 / 10).toFixed(1) : '--';
+
+  const si = d.sysinfo || {};
+  document.getElementById('sys-cpu').textContent = si.valid ? fmtPct(si.cpu_pct) : '--';
+  document.getElementById('sys-ram').textContent = si.valid ? fmtPct(si.ram_pct) : '--';
+  document.getElementById('sys-disk').textContent = si.valid ? fmtPct(si.disk_pct) : '--';
+
+  const vs = d.vscode || {};
+  document.getElementById('vs-mem').textContent = vs.valid && vs.mem_mb >= 0 ? (vs.mem_mb + ' MB') : '--';
+  document.getElementById('vs-cpu').textContent = vs.valid ? fmtPct(vs.cpu_pct) : '--';
+  document.getElementById('vs-ext').textContent = vs.valid && vs.ext_count >= 0 ? vs.ext_count : '--';
+
+  const ci = d.ci || {};
+  document.getElementById('ci-state').textContent = ci.valid ? ci.state : '--';
+  document.getElementById('ci-branch').textContent = ci.valid ? ci.branch : '--';
+  document.getElementById('ci-review').textContent = ci.valid ? ci.review : '--';
+
+  const t = d.today || {};
+  document.getElementById('today-min').textContent = t.valid ? (t.active_min + 'm') : '--';
+  document.getElementById('today-tok').textContent = t.valid ? (t.tok_k + 'k') : '--';
+  document.getElementById('today-usd').textContent = t.valid && t.usd > 0 ? ('$' + t.usd) : '--';
+  document.getElementById('today-commits').textContent = t.valid ? t.commits : '--';
+}
+
+function refreshShot() {
+  document.getElementById('shot').src = '/api/screenshot.bmp?t=' + Date.now();
+}
+
+document.getElementById('refresh-shot').addEventListener('click', refreshShot);
+refreshShot();
+refreshState();
+setInterval(refreshState, 5000);
+</script>
+</body>
+</html>

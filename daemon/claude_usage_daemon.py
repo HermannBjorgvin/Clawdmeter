@@ -9,13 +9,14 @@ bleak (CoreBluetooth backend on macOS).
 import asyncio
 import getpass
 import json
+import math
 import os
 import re
 import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -36,6 +37,7 @@ COPILOT_POLL_INTERVAL = 300  # 5 minutes
 SYSINFO_POLL_INTERVAL = 30   # 30 seconds
 VSCODE_POLL_INTERVAL = 30    # 30 seconds
 ENV_POLL_INTERVAL = 900      # 15 minutes (clock + weather)
+AURORA_POLL_INTERVAL = 300   # 5 minutes (matches NOAA OVATION nowcast refresh)
 ACT_POLL_INTERVAL = 5        # Claude activity — needs to feel responsive
 CI_POLL_INTERVAL = 120       # 2 minutes (CI status + review queue + git)
 SUM_POLL_INTERVAL = 300      # 5 minutes (daily summary)
@@ -437,11 +439,15 @@ async def _resolve_location() -> tuple[float, float, str]:
     return hit
 
 
+_last_cloud_pct = -1  # cloud_cover %, cached from poll_env() for poll_aurora() to reuse
+
+
 async def poll_env() -> dict:
     """Clock + local weather for the device's Clock screen (src='env').
 
     Time is always included; weather is best-effort (open-meteo, keyless).
     """
+    global _last_cloud_pct
     now = datetime.now().astimezone()
     result: dict = {
         "src": "env",
@@ -457,7 +463,7 @@ async def poll_env() -> dict:
                 "https://api.open-meteo.com/v1/forecast",
                 params={
                     "latitude": round(lat, 3), "longitude": round(lon, 3),
-                    "current": "temperature_2m,weather_code",
+                    "current": "temperature_2m,weather_code,cloud_cover",
                     "daily": "temperature_2m_max,temperature_2m_min",
                     "forecast_days": 1, "timezone": "auto",
                 },
@@ -470,11 +476,126 @@ async def poll_env() -> dict:
         result["th"] = round((daily.get("temperature_2m_max") or [0])[0])
         result["tl"] = round((daily.get("temperature_2m_min") or [0])[0])
         result["tn"] = city
+        if "cloud_cover" in cur:
+            _last_cloud_pct = int(cur["cloud_cover"])
         log(f"Env: {city} {result['tp']}C code={result['tc']} "
             f"H{result['th']} L{result['tl']}")
     except (httpx.HTTPError, KeyError, ValueError, IndexError) as e:
         log(f"Weather fetch failed: {e}")
         result["tn"] = city
+    return result
+
+
+def _solar_altitude_deg(lat: float, lon: float, when: datetime) -> float:
+    """Approximate solar altitude in degrees (NOAA solar position algorithm,
+    simplified). Positive = sun above horizon (daylight); used only to flag
+    day/night for the aurora screen, so a few degrees of error is fine.
+    """
+    ts = when.astimezone(timezone.utc)
+    day_of_year = ts.timetuple().tm_yday
+    frac_hour = ts.hour + ts.minute / 60 + ts.second / 3600
+
+    gamma = 2 * math.pi / 365 * (day_of_year - 1 + (frac_hour - 12) / 24)
+    decl = (0.006918 - 0.399912 * math.cos(gamma) + 0.070257 * math.sin(gamma)
+            - 0.006758 * math.cos(2 * gamma) + 0.000907 * math.sin(2 * gamma)
+            - 0.002697 * math.cos(3 * gamma) + 0.00148 * math.sin(3 * gamma))
+    eqtime = 229.18 * (0.000075 + 0.001868 * math.cos(gamma) - 0.032077 * math.sin(gamma)
+                       - 0.014615 * math.cos(2 * gamma) - 0.040849 * math.sin(2 * gamma))
+
+    time_offset = eqtime + 4 * lon
+    tst = frac_hour * 60 + time_offset
+    hour_angle = math.radians(tst / 4 - 180)
+
+    lat_rad = math.radians(lat)
+    sin_alt = (math.sin(lat_rad) * math.sin(decl)
+               + math.cos(lat_rad) * math.cos(decl) * math.cos(hour_angle))
+    return math.degrees(math.asin(max(-1.0, min(1.0, sin_alt))))
+
+
+_OVATION_CACHE: dict = {"ts": 0.0, "coords": None}
+_OVATION_CACHE_TTL = 240  # slightly under AURORA_POLL_INTERVAL
+
+
+async def _fetch_ovation_pct(lat: float, lon: float) -> int | None:
+    """Nearest-gridpoint lookup into NOAA's OVATION-Prime aurora nowcast."""
+    now = time.time()
+    coords = _OVATION_CACHE["coords"]
+    if coords is None or now - _OVATION_CACHE["ts"] >= _OVATION_CACHE_TTL:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.get("https://services.swpc.noaa.gov/json/ovation_aurora_latest.json")
+        d = resp.json()
+        coords = d.get("coordinates") or []
+        _OVATION_CACHE["coords"] = coords
+        _OVATION_CACHE["ts"] = now
+
+    if not coords:
+        return None
+
+    target_lon = lon % 360  # file uses 0..360, config uses -180..180
+    best = min(coords, key=lambda c: (c[0] - target_lon) ** 2 + (c[1] - lat) ** 2)
+    return int(best[2])
+
+
+async def _fetch_kp_forecast() -> tuple[float, float] | None:
+    """(current 3h-bucket Kp, max Kp forecast over next 24h) from NOAA's
+    3-day planetary Kp forecast — a list of
+    {"time_tag": "2026-09-07T00:00:00", "kp": 1.33, "observed": "predicted", ...}."""
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        resp = await http.get("https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json")
+    rows = resp.json() or []
+    if not rows:
+        return None
+
+    now_utc = datetime.now(timezone.utc)
+
+    parsed: list[tuple[datetime, float]] = []
+    for row in rows:
+        try:
+            ts = datetime.fromisoformat(row["time_tag"]).replace(tzinfo=timezone.utc)
+            parsed.append((ts, float(row["kp"])))
+        except (ValueError, KeyError, TypeError):
+            continue
+    if not parsed:
+        return None
+
+    past = [(ts, kp) for ts, kp in parsed if ts <= now_utc]
+    current_kp = past[-1][1] if past else parsed[0][1]
+    next24 = [kp for ts, kp in parsed if now_utc <= ts <= now_utc + timedelta(hours=24)]
+    max_kp = max(next24) if next24 else current_kp
+    return (current_kp, max_kp)
+
+
+async def poll_aurora() -> dict:
+    """Aurora borealis visibility forecast for the device's Aurora screen
+    (src='aurora'), for the same location as the Clock screen's weather.
+
+    NOAA SWPC, keyless: OVATION-Prime nowcast for local probability %, plus
+    the 3-day Kp forecast for activity level / peak-tonight context.
+    """
+    result: dict = {"src": "aurora", "ts": int(time.time())}
+    lat, lon, _city = await _resolve_location()
+
+    try:
+        pct = await _fetch_ovation_pct(lat, lon)
+        if pct is not None:
+            result["pct"] = pct
+
+        kp = await _fetch_kp_forecast()
+        if kp is not None:
+            current_kp, max_kp = kp
+            result["kp"] = round(current_kp * 10)
+            result["kpmax"] = round(max_kp * 10)
+
+        result["cloud"] = _last_cloud_pct
+
+        alt = _solar_altitude_deg(lat, lon, datetime.now())
+        result["night"] = 1 if alt < -6 else 0  # below civil twilight
+
+        log(f"Aurora: pct={result.get('pct')} kp={result.get('kp')} "
+            f"kpmax={result.get('kpmax')} cloud={result.get('cloud')} night={result.get('night')}")
+    except (httpx.HTTPError, KeyError, ValueError, IndexError, TypeError) as e:
+        log(f"Aurora fetch failed: {e}")
+
     return result
 
 
@@ -1205,6 +1326,19 @@ class Session:
                     pass
             return False
 
+    async def push_wifi_credentials(self) -> None:
+        """One-shot per connection: if wifi_ssid/wifi_pass are set in the
+        config file, push them to the device over the existing RX channel
+        (same {"src":...} envelope as every other payload). The device
+        no-ops if they're unchanged (see firmware wifi_net.cpp's
+        wifi_set_credentials()), so resending on every connect is harmless
+        and self-heals if the config value changes."""
+        cfg = read_config()
+        ssid = cfg.get("wifi_ssid", "").strip()
+        if not ssid:
+            return
+        await self.write_payload({"src": "wifi", "ssid": ssid, "pass": cfg.get("wifi_pass", "")})
+
     async def replay_last_payloads(self) -> None:
         """Re-send the last known values so a fresh reconnect isn't blank."""
         for src, payload in list(_last_payloads.items()):
@@ -1235,12 +1369,14 @@ async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
     session = Session(client)
     await session.setup_refresh_subscription()
     await session.replay_last_payloads()
+    await session.push_wifi_credentials()
 
     last_poll = 0.0
     last_copilot_poll = 0.0
     last_sysinfo_poll = 0.0
     last_vscode_poll = 0.0
     last_env_poll = 0.0
+    last_aurora_poll = 0.0
     last_act_poll = 0.0
     last_act_state: str | None = None
     last_act_sent = 0.0
@@ -1306,6 +1442,12 @@ async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
             if now - last_env_poll >= ENV_POLL_INTERVAL:
                 last_env_poll = now
                 await session.write_payload(await poll_env())
+
+            # Aurora borealis forecast every 5 minutes (same location as weather)
+            now = time.time()
+            if now - last_aurora_poll >= AURORA_POLL_INTERVAL:
+                last_aurora_poll = now
+                await session.write_payload(await poll_aurora())
 
             # Claude activity — check often, send on change or as a 60s keepalive
             now = time.time()

@@ -30,7 +30,27 @@ echo "Taking screenshot from $PORT..."
 "$PY" - "$PORT" "$TMPRAW" "$TMPDIMS" << 'PYEOF'
 import serial, sys
 
+# The device has no PSRAM, so send_screenshot() (firmware/src/main.cpp)
+# can't buffer a full frame — it streams each flushed tile as it's drawn:
+#   A <x1> <y1> <x2> <y2>\n<(x2-x1+1)*(y2-y1+1)*2 raw RGB565LE bytes>\n
+# repeated until SCREENSHOT_END. Reassemble tiles into one w*h*2 buffer
+# rather than reading raw_size as one contiguous blob (that interleaves the
+# "A ..." headers into the pixel stream and corrupts the image).
+
 port_path, raw_path, dims_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def read_line(p):
+    return p.readline().decode("utf-8", errors="replace").strip()
+
+def read_exact(p, n):
+    data = bytearray()
+    while len(data) < n:
+        chunk = p.read(n - len(data))
+        if not chunk:
+            print(f"Timeout: got {len(data)} of {n} bytes", file=sys.stderr)
+            sys.exit(1)
+        data += chunk
+    return bytes(data)
 
 port = serial.Serial(port_path, 115200, timeout=10)
 port.reset_input_buffer()
@@ -38,7 +58,7 @@ port.write(b"screenshot\n")
 port.flush()
 
 while True:
-    line = port.readline().decode("utf-8", errors="replace").strip()
+    line = read_line(port)
     if line.startswith("SCREENSHOT_START"):
         parts = line.split()
         w, h, raw_size = int(parts[1]), int(parts[2]), int(parts[3])
@@ -47,26 +67,40 @@ while True:
         print("Device reported screenshot error", file=sys.stderr)
         sys.exit(1)
 
-data = b""
-while len(data) < raw_size:
-    chunk = port.read(min(4096, raw_size - len(data)))
-    if not chunk:
-        print(f"Timeout: got {len(data)} of {raw_size} bytes", file=sys.stderr)
-        sys.exit(1)
-    data += chunk
+framebuf = bytearray(w * h * 2)
+total_px_bytes = 0
+
+while total_px_bytes < raw_size:
+    line = read_line(port)
+    if line == "SCREENSHOT_END":
+        break
+    if not line.startswith("A "):
+        continue  # stray/blank line between tiles
+    _, x1s, y1s, x2s, y2s = line.split()
+    x1, y1, x2, y2 = int(x1s), int(y1s), int(x2s), int(y2s)
+    tile_w, tile_h = x2 - x1 + 1, y2 - y1 + 1
+    tile_bytes = read_exact(port, tile_w * tile_h * 2)
+    port.read(1)  # trailing '\n' after the binary chunk
+
+    row_bytes = tile_w * 2
+    for row in range(tile_h):
+        dst_off = ((y1 + row) * w + x1) * 2
+        src_off = row * row_bytes
+        framebuf[dst_off:dst_off + row_bytes] = tile_bytes[src_off:src_off + row_bytes]
+    total_px_bytes += len(tile_bytes)
+
+for _ in range(10):
+    line = read_line(port)
+    if line == "SCREENSHOT_END" or not line:
+        break
 
 with open(raw_path, "wb") as f:
-    f.write(data)
+    f.write(framebuf)
 with open(dims_path, "w") as f:
     f.write(f"{w}x{h}\n")
 
-for _ in range(10):
-    line = port.readline().decode("utf-8", errors="replace").strip()
-    if line == "SCREENSHOT_END":
-        break
-
 port.close()
-print(f"Captured {w}x{h} ({len(data)} bytes)")
+print(f"Captured {w}x{h} ({len(framebuf)} bytes)")
 PYEOF
 
 if [ $? -ne 0 ]; then

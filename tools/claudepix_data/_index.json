@@ -96,5 +96,19 @@
     "category": "Copilot",
     "frame_count": 4,
     "palette_size": 5
+  },
+  {
+    "filename": "copilot_thinking.json",
+    "name": "copilot thinking",
+    "category": "Copilot",
+    "frame_count": 4,
+    "palette_size": 6
+  },
+  {
+    "filename": "aurora_shimmer.json",
+    "name": "aurora shimmer",
+    "category": "Aurora",
+    "frame_count": 4,
+    "palette_size": 7
   }
 ]
