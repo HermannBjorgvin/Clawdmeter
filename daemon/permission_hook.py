@@ -67,6 +67,44 @@ def split_subcommands(command: str) -> list[str]:
     return [p.strip() for p in _BASH_SPLIT_RE.split(command) if p.strip()]
 
 
+# Commands that are read-only regardless of arguments — no flag turns grep
+# or cat into something that writes or deletes. Deliberately conservative:
+# nothing here can ever mutate anything, so these never even reach the
+# device. `find` is left out on purpose (-delete, -exec rm are real) and so
+# is env/printenv (can dump secrets into the transcript, worth a beat of
+# friction). git gets its own narrower check below since most of git can
+# mutate (reset, push, clean, checkout --) even though a few subcommands
+# can't.
+SAFE_READONLY_COMMANDS = frozenset({
+    "grep", "egrep", "fgrep", "rg", "ag",
+    "ls", "cat", "head", "tail", "wc", "pwd", "echo",
+    "which", "whoami", "file", "stat", "du", "df", "date",
+})
+SAFE_GIT_SUBCOMMANDS = frozenset({"status", "diff", "log", "show", "branch"})
+
+
+def is_inherently_safe_subcommand(sub: str) -> bool:
+    tokens = sub.split()
+    if not tokens:
+        return False
+    cmd = tokens[0]
+    if cmd == "git":
+        return len(tokens) > 1 and tokens[1] in SAFE_GIT_SUBCOMMANDS
+    return cmd in SAFE_READONLY_COMMANDS
+
+
+def is_inherently_safe_bash(command: str) -> bool:
+    """True if every subcommand is a known read-only inspection command.
+
+    This is independent of (and checked before) the persisted-rule system —
+    grep and friends don't need a human to have tapped Always first, they're
+    just never going to change anything on disk. A pipeline only qualifies
+    if EVERY stage does (e.g. `grep foo file | rm -rf $(cat -)` still prompts,
+    since `rm` isn't in the safe set)."""
+    subs = split_subcommands(command)
+    return bool(subs) and all(is_inherently_safe_subcommand(s) for s in subs)
+
+
 def path_field(tool_input: dict) -> str:
     return tool_input.get("file_path") or tool_input.get("notebook_path") or ""
 
@@ -263,6 +301,15 @@ def main() -> None:
         cwd = req.get("cwd", "")
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         print(json.dumps(ask(f"hook could not parse stdin: {e}")))
+        return
+
+    # Read-only inspection commands (grep, cat, git diff, ...) never reach
+    # the device at all — nothing here can mutate anything, so there's
+    # nothing for a human to actually decide. Checked before the persisted-
+    # rule lookup since it doesn't need a prior tap to be safe.
+    if tool_name == "Bash" and is_inherently_safe_bash(tool_input.get("command", "")):
+        print(json.dumps(allow("Inherently read-only command (grep/cat/git diff/etc.) "
+                                "— Clawdmeter always allows these without a device prompt")))
         return
 
     project_root = find_project_root(cwd)
