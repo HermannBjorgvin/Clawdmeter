@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -28,6 +29,15 @@ DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
+PERM_REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000005"   # we write here
+PERM_RESP_CHAR_UUID = "4c41555a-4465-7669-6365-000000000006"  # device notifies here
+
+# Unix socket the PreToolUse hook script talks to. One process (this daemon)
+# owns the live BLE connection; the hook is a short-lived process per tool
+# call, so it relays through here rather than opening its own BLE link (which
+# would fight this daemon's connection and redo the slow macOS discovery
+# dance on every single tool call).
+PERM_SOCK_FILE = Path.home() / ".config" / "claude-usage-monitor" / "permission.sock"
 
 POLL_INTERVAL = 60
 TICK = 5
@@ -537,6 +547,12 @@ class PlanSelector:
 # Module-level so the active-plan state survives reconnects.
 _SELECTOR = PlanSelector()
 
+# The Session for the current BLE connection, or None while disconnected.
+# request_permission_via_active_session() reads this to reach the live link
+# from the Unix-socket handler, which runs independently of connect_and_run's
+# reconnect loop.
+_active_session: "Session | None" = None
+
 
 async def poll_active(selector: PlanSelector = _SELECTOR) -> tuple[dict | None, bool]:
     """Poll every configured config dir; return ``(active_payload, all_dead)``.
@@ -595,10 +611,68 @@ class Session:
     def __init__(self, client: BleakClient) -> None:
         self.client = client
         self.refresh_requested = asyncio.Event()
+        # id -> Future[str decision]. One physical screen, so callers should
+        # serialize through perm_lock rather than relying on this dict to
+        # multiplex several prompts at once.
+        self.pending_perm: dict[str, asyncio.Future] = {}
+        self.perm_lock = asyncio.Lock()
 
     def _on_refresh(self, _char, _data: bytearray) -> None:
         log("Refresh requested by device")
         self.refresh_requested.set()
+
+    def _on_perm_resp(self, _char, data: bytearray) -> None:
+        try:
+            msg = json.loads(bytes(data).decode())
+            req_id, decision = msg["id"], msg["decision"]
+        except (json.JSONDecodeError, KeyError, UnicodeDecodeError) as e:
+            log(f"Malformed perm-resp notify, ignoring: {e}")
+            return
+        fut = self.pending_perm.pop(req_id, None)
+        if fut is not None and not fut.done():
+            fut.set_result(decision)
+
+    async def setup_perm_subscription(self) -> None:
+        try:
+            await asyncio.wait_for(
+                self.client.start_notify(PERM_RESP_CHAR_UUID, self._on_perm_resp),
+                timeout=10,
+            )
+        except (BleakError, ValueError) as e:
+            log(f"Permission-response subscription unavailable: {e}")
+        except asyncio.TimeoutError:
+            log("Permission-response subscription timed out")
+
+    async def request_permission(self, tool: str, summary: str, timeout_s: float) -> dict:
+        """Show a tool-call approval prompt on the device and await the tap.
+
+        Returns {"decision": "allow"|"always"|"deny"|"ask", "reason": str|None}.
+        "ask" (never "deny") is what a caller gets on any failure short of an
+        explicit tap — no BLE link, a malformed write, nobody home — so a
+        problem with the *hardware* path never silently blocks Claude Code;
+        it just falls back to the normal terminal/UI prompt.
+        """
+        async with self.perm_lock:  # one screen — serialize concurrent tool calls
+            req_id = uuid.uuid4().hex[:8]
+            fut: asyncio.Future = asyncio.get_event_loop().create_future()
+            self.pending_perm[req_id] = fut
+            payload = json.dumps({"id": req_id, "tool": tool, "summary": summary},
+                                  separators=(",", ":")).encode()
+            t0 = time.monotonic()
+            try:
+                await self.client.write_gatt_char(PERM_REQ_CHAR_UUID, payload, response=False)
+            except BleakError as e:
+                self.pending_perm.pop(req_id, None)
+                return {"decision": "ask", "reason": f"BLE write failed: {e}"}
+            log(f"perm-req {req_id} written to device ({time.monotonic() - t0:.3f}s)")
+
+            try:
+                decision = await asyncio.wait_for(fut, timeout=timeout_s)
+                log(f"perm-req {req_id} decision after {time.monotonic() - t0:.3f}s total")
+                return {"decision": decision, "reason": None}
+            except asyncio.TimeoutError:
+                self.pending_perm.pop(req_id, None)
+                return {"decision": "ask", "reason": "no tap within timeout"}
 
     async def setup_refresh_subscription(self) -> None:
         # start_notify awaits CoreBluetooth's CCCD-write confirmation, which
@@ -750,6 +824,9 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     log("Connected")
     session = Session(client)
     await session.setup_refresh_subscription()
+    await session.setup_perm_subscription()
+    global _active_session
+    _active_session = session
 
     last_poll = 0.0
     used_successfully = False
@@ -791,6 +868,12 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
             except asyncio.TimeoutError:
                 pass
     finally:
+        _active_session = None
+        # Fail any prompt still waiting on a tap rather than leaving it to
+        # find out via its own timeout — the link is already gone.
+        for fut in session.pending_perm.values():
+            if not fut.done():
+                fut.set_result("ask")
         try:
             await client.disconnect()
         except BleakError:
@@ -798,6 +881,48 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
 
     log("Device disconnected" if not stop_event.is_set() else "Stopping")
     return used_successfully
+
+
+PERM_REQ_DEFAULT_TIMEOUT_S = 45  # generous vs. human reaction time; hook scripts should set their own timeout a bit above this
+
+
+async def handle_permission_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Serve one PreToolUse hook invocation: one JSON request line in, one JSON reply line out, close.
+
+    Request:  {"tool": str, "summary": str, "timeout_s": float (optional)}
+    Response: {"decision": "allow"|"always"|"deny"|"ask", "reason": str|None}
+
+    "ask" (never "deny") is the answer for every failure mode short of an
+    explicit tap — no device connected, a malformed request, nothing tapped
+    in time — so a hardware hiccup falls back to Claude Code's normal
+    prompt instead of silently blocking every tool call.
+    """
+    try:
+        line = await reader.readline()
+        req = json.loads(line.decode())
+        tool = str(req.get("tool", "Tool"))[:40]
+        summary = str(req.get("summary", ""))[:200]
+        timeout_s = float(req.get("timeout_s", PERM_REQ_DEFAULT_TIMEOUT_S))
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError, AttributeError) as e:
+        log(f"Malformed permission request from socket: {e}")
+        result = {"decision": "ask", "reason": "malformed request"}
+    else:
+        session = _active_session
+        if session is None:
+            log(f"Permission request for {tool!r} with no device connected — falling back to normal prompt")
+            result = {"decision": "ask", "reason": "device not connected"}
+        else:
+            log(f"Permission request: {tool} — {summary!r}")
+            result = await session.request_permission(tool, summary, timeout_s)
+            log(f"Permission decision: {result['decision']} ({result['reason'] or 'tapped'})")
+
+    try:
+        writer.write(json.dumps(result).encode() + b"\n")
+        await writer.drain()
+    except (ConnectionError, OSError):
+        pass
+    finally:
+        writer.close()
 
 
 async def main() -> None:
@@ -817,39 +942,49 @@ async def main() -> None:
     log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
 
-    backoff = 1
-    skip_addr: str | None = None  # macOS: a peripheral to skip for one cycle
-    while not stop_event.is_set():
-        # Apply any pending skip exactly once, then clear it so the next
-        # cycle re-tries retrieveConnected (the device may have recovered).
-        target = await discover_target(skip_addr=skip_addr)
-        skip_addr = None
-        if not target:
-            log(f"Device not found, retrying in {backoff}s...")
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=backoff)
-            except asyncio.TimeoutError:
-                pass
-            backoff = min(backoff * 2, 60)
-            continue
+    PERM_SOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PERM_SOCK_FILE.unlink(missing_ok=True)  # stale socket from a crashed previous run
+    perm_server = await asyncio.start_unix_server(handle_permission_conn, path=str(PERM_SOCK_FILE))
+    log(f"Permission-approval socket listening at {PERM_SOCK_FILE}")
 
-        addr = target if isinstance(target, str) else target.address
-        ok = await connect_and_run(target, stop_event)
-        if not ok:
-            if sys.platform == "darwin":
-                # No string cache to drop; instead skip this stale handle on
-                # the next retrieveConnected so the scan fallback is reachable.
-                skip_addr = addr
+    try:
+        backoff = 1
+        skip_addr: str | None = None  # macOS: a peripheral to skip for one cycle
+        while not stop_event.is_set():
+            # Apply any pending skip exactly once, then clear it so the next
+            # cycle re-tries retrieveConnected (the device may have recovered).
+            target = await discover_target(skip_addr=skip_addr)
+            skip_addr = None
+            if not target:
+                log(f"Device not found, retrying in {backoff}s...")
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+                except asyncio.TimeoutError:
+                    pass
+                backoff = min(backoff * 2, 60)
+                continue
+
+            addr = target if isinstance(target, str) else target.address
+            ok = await connect_and_run(target, stop_event)
+            if not ok:
+                if sys.platform == "darwin":
+                    # No string cache to drop; instead skip this stale handle on
+                    # the next retrieveConnected so the scan fallback is reachable.
+                    skip_addr = addr
+                else:
+                    log("Invalidating cached address")
+                    SAVED_ADDR_FILE.unlink(missing_ok=True)
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+                except asyncio.TimeoutError:
+                    pass
+                backoff = min(backoff * 2, 60)
             else:
-                log("Invalidating cached address")
-                SAVED_ADDR_FILE.unlink(missing_ok=True)
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=backoff)
-            except asyncio.TimeoutError:
-                pass
-            backoff = min(backoff * 2, 60)
-        else:
-            backoff = 1
+                backoff = 1
+    finally:
+        perm_server.close()
+        await perm_server.wait_closed()
+        PERM_SOCK_FILE.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

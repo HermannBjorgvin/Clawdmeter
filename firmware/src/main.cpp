@@ -124,6 +124,28 @@ static bool parse_json(const char* json, UsageData* out) {
     return true;
 }
 
+// Parse a pending permission-approval request written to PERM_REQ and show
+// it. Fields are pre-truncated by the daemon/hook script to fit the small
+// display; missing fields fall back to something sane rather than a blank
+// screen so a malformed write never yields a stuck, decision-less prompt.
+static void handle_perm_request(const char* json) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, json);
+    if (err) {
+        Serial.printf("perm-req JSON parse error: %s\n", err.c_str());
+        return;
+    }
+    const char* id = doc["id"] | "";
+    const char* tool = doc["tool"] | "Tool";
+    const char* summary = doc["summary"] | "";
+    if (!id[0]) {
+        Serial.println("perm-req missing id, ignoring");
+        return;
+    }
+    Serial.printf("perm-req: showing screen at millis=%lu (tool=%s)\n", (unsigned long)millis(), tool);
+    ui_show_permission_request(id, tool, summary);
+}
+
 // ---- Serial command buffer ----
 #define CMD_BUF_SIZE 64
 static char cmd_buf[CMD_BUF_SIZE];
@@ -370,6 +392,10 @@ void loop() {
     }
 
     check_serial_cmd();
+
+    if (ble_has_perm_request()) {
+        handle_perm_request(ble_get_perm_request());
+    }
 
     if (ble_has_data()) {
         if (parse_json(ble_get_data(), &usage)) {

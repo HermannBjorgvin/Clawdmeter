@@ -215,12 +215,15 @@ Space and Shift+Tab go out as standard BLE HID keyboard reports, so they trigger
 
 The device advertises a custom GATT service alongside the standard HID keyboard service:
 
-|                            | UUID                                   |
-| -------------------------- | -------------------------------------- |
-| **Data Service**           | `4c41555a-4465-7669-6365-000000000001` |
-| RX Characteristic (write)  | `4c41555a-4465-7669-6365-000000000002` |
-| TX Characteristic (notify) | `4c41555a-4465-7669-6365-000000000003` |
-| **HID Service**            | `00001812-0000-1000-8000-00805f9b34fb` |
+|                                    | UUID                                   |
+| ---------------------------------- | --------------------------------------- |
+| **Data Service**                   | `4c41555a-4465-7669-6365-000000000001` |
+| RX Characteristic (write)          | `4c41555a-4465-7669-6365-000000000002` |
+| TX Characteristic (notify)         | `4c41555a-4465-7669-6365-000000000003` |
+| REQ Characteristic (notify)        | `4c41555a-4465-7669-6365-000000000004` |
+| PERM_REQ Characteristic (write)    | `4c41555a-4465-7669-6365-000000000005` |
+| PERM_RESP Characteristic (notify)  | `4c41555a-4465-7669-6365-000000000006` |
+| **HID Service**                    | `00001812-0000-1000-8000-00805f9b34fb` |
 
 JSON payload format (written to RX):
 
@@ -229,6 +232,44 @@ JSON payload format (written to RX):
 ```
 
 Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
+
+REQ notifies a single `0x01` byte when the firmware wants an out-of-cycle usage refresh (e.g. right after boot, before it has ever received data). PERM_REQ/PERM_RESP are the permission-approval channel — see below.
+
+## Permission approval on the device
+
+<img src="assets/readme/waving.gif" width="90" align="right" alt="">
+
+The device can also show Claude Code's tool-call approval prompts and let you tap **Deny / Always / Allow** on the touchscreen instead of answering in the terminal — handy when Claude Code is running somewhere you're not looking at the screen.
+
+**How it works:** a Claude Code [`PreToolUse` hook](https://code.claude.com/docs/en/hooks.md) (`daemon/permission_hook.py`) runs once per matching tool call. It relays the request through the usage daemon's Unix socket (`~/.config/claude-usage-monitor/permission.sock`) rather than opening its own Bluetooth connection — the daemon already holds the live BLE link, so the hook just asks it to forward the request over the existing connection (PERM_REQ), wait for your tap, and relay the decision back (PERM_RESP). The firmware switches to a dedicated permission screen showing the tool name and a short summary, with Deny/Always/Allow as touch targets.
+
+**Setup** — add a `PreToolUse` hook entry to `settings.json` (project or global), scoped to whichever tools you want gated:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/python3 /path/to/Clawdmeter/daemon/permission_hook.py",
+            "timeout": 65
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The `timeout` must stay comfortably above the hook script's own internal socket timeout (50s) — Claude Code's hook timeout fails *open* (silently proceeds with the normal prompt) if it's hit first, whereas the hook script itself always fails to `ask` (never a silent allow, never a bare deny) on any problem: daemon not running, device not connected, or nobody tapped in time. Worst case, a hardware hiccup just costs you the fallback to the terminal prompt — it never blocks or rubber-stamps a tool call on its own.
+
+**Known limitations:**
+- **"Always Allow" doesn't persist yet** — it's a one-time allow for that call, not a standing permission rule. Tapping it again on a repeat of the same command will prompt again.
+- **One physical screen** — concurrent tool calls (e.g. two parallel Bash calls) are serialized through the pending request; a second prompt waits for the first to resolve rather than overwriting it.
+- **macOS BLE service cache**: if you change which BLE characteristics the firmware exposes (as this feature did) and the Mac was already paired, macOS/CoreBluetooth may keep using its cached GATT table and not see new characteristics until you toggle Bluetooth off/on (or forget & re-pair the device). One-time, not a recurring issue.
 
 ## Development
 

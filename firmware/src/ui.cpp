@@ -6,6 +6,7 @@
 #include "clawd_still.h"
 #include "icons.h"
 #include "hal/board_caps.h"
+#include "idle.h"
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
@@ -217,6 +218,14 @@ static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
 static lv_obj_t* lbl_spending_status = nullptr;   // "Under pace" / "On pace" / "Over pace"
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
 
+// ---- Permission-approval screen ----
+static lv_obj_t* perm_container = nullptr;
+static lv_obj_t* lbl_perm_tool = nullptr;
+static lv_obj_t* lbl_perm_summary = nullptr;
+static char perm_pending_id[40] = {0};
+static uint32_t perm_shown_at_ms = 0;
+#define PERM_SCREEN_TIMEOUT_MS 90000  // on-device backstop only — see ui_tick_anim
+
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
 static lv_obj_t* logo_img;
@@ -236,62 +245,19 @@ static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within t
 // ---- Shared ----
 static lv_image_dsc_t logo_dsc;
 static screen_t current_screen = SCREEN_USAGE;
+static screen_t prev_non_splash_screen = SCREEN_USAGE;  // where ui_tick_anim's permission-timeout backstop and perm_button_cb return to
 static bool     s_ble_connected = false;   // cached BLE connection state
 static uint32_t connected_at_ms = 0;       // when we last entered CONNECTED ("Connected" dwell)
 
-// Animation state
-static uint32_t anim_last_ms = 0;
-static uint8_t anim_spinner_idx = 0;
-static uint8_t anim_phase = 0;
+// Status line state. No spinner glyph and no whimsical word cycling — both were
+// pure decoration that forced a label redraw (LVGL invalidate -> AMOLED partial
+// flush) every ~130ms while the usage screen was up, for no functional benefit.
+// The only cadence kept is the idle screen's slow Listening/No data alternation,
+// which actually conveys "still alive, still no data" at a much cheaper 4s tick,
+// and even that only redraws when the shown text changes.
 static uint8_t anim_msg_idx = 0;
 static uint32_t anim_msg_start = 0;
 #define ANIM_MSG_MS     4000
-
-static const char* const spinner_frames[] = {
-    "\xC2\xB7", "\xE2\x9C\xBB", "\xE2\x9C\xBD",
-    "\xE2\x9C\xB6", "\xE2\x9C\xB3", "\xE2\x9C\xA2",
-};
-#define SPINNER_COUNT 6
-#define SPINNER_PHASES (2 * (SPINNER_COUNT - 1))  // 10: ping-pong 0..5..0
-
-static const uint16_t spinner_ms[SPINNER_COUNT] = {
-    260, 130, 130, 130, 130, 260,
-};
-
-static const char* const anim_messages[] = {
-    "Accomplishing", "Elucidating", "Perusing",
-    "Actioning", "Enchanting", "Philosophising",
-    "Actualizing", "Envisioning", "Pondering",
-    "Baking", "Finagling", "Pontificating",
-    "Booping", "Flibbertigibbeting", "Processing",
-    "Brewing", "Forging", "Puttering",
-    "Calculating", "Forming", "Puzzling",
-    "Cerebrating", "Frolicking", "Reticulating",
-    "Channelling", "Generating", "Ruminating",
-    "Churning", "Germinating", "Scheming",
-    "Clauding", "Hatching", "Schlepping",
-    "Coalescing", "Herding", "Shimmying",
-    "Cogitating", "Honking", "Shucking",
-    "Combobulating", "Hustling", "Simmering",
-    "Computing", "Ideating", "Smooshing",
-    "Concocting", "Imagining", "Spelunking",
-    "Conjuring", "Incubating", "Spinning",
-    "Considering", "Inferring", "Stewing",
-    "Contemplating", "Jiving", "Sussing",
-    "Cooking", "Manifesting", "Synthesizing",
-    "Crafting", "Marinating", "Thinking",
-    "Creating", "Meandering", "Tinkering",
-    "Crunching", "Moseying", "Transmuting",
-    "Deciphering", "Mulling", "Unfurling",
-    "Deliberating", "Mustering", "Unravelling",
-    "Determining", "Musing", "Vibing",
-    "Discombobulating", "Noodling", "Wandering",
-    "Divining", "Percolating", "Whirring",
-    "Doing", "Wibbling",
-    "Effecting", "Wizarding",
-    "Working", "Wrangling",
-};
-#define ANIM_MSG_COUNT (sizeof(anim_messages) / sizeof(anim_messages[0]))
 
 static lv_color_t pct_color(float pct) {
     if (pct >= 80.0f) return COL_RED;
@@ -313,6 +279,7 @@ static void format_reset_time(int mins, char* buf, size_t len) {
 
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
+static void perm_button_cb(lv_event_t* e);
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -540,6 +507,76 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
 }
 
+// Permission-approval screen — shown when the host (via a Claude Code
+// PreToolUse hook) is waiting on a physical tap for a pending tool call.
+// A dedicated top-level screen (not a sub-view of usage_container) so its
+// buttons never interact with the tap-anywhere-to-toggle-splash handler.
+static void init_perm_screen(lv_obj_t* scr) {
+    perm_container = lv_obj_create(scr);
+    lv_obj_set_size(perm_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(perm_container, 0, 0);
+    lv_obj_set_style_bg_color(perm_container, COL_BG, 0);
+    lv_obj_set_style_bg_opa(perm_container, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(perm_container, 0, 0);
+    lv_obj_set_style_pad_all(perm_container, 0, 0);
+    lv_obj_clear_flag(perm_container, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* l_head = lv_label_create(perm_container);
+    lv_label_set_text(l_head, "Approve?");
+    lv_obj_set_style_text_font(l_head, L.bt_status_font, 0);
+    lv_obj_set_style_text_color(l_head, COL_TEXT, 0);
+    lv_obj_align(l_head, LV_ALIGN_TOP_MID, 0, L.margin);
+
+    lbl_perm_tool = lv_label_create(perm_container);
+    lv_label_set_text(lbl_perm_tool, "");
+    lv_obj_set_style_text_font(lbl_perm_tool, L.bt_device_font, 0);
+    lv_obj_set_style_text_color(lbl_perm_tool, COL_ACCENT, 0);
+    lv_obj_align(l_head, LV_ALIGN_TOP_MID, 0, L.margin);
+    lv_obj_align_to(lbl_perm_tool, l_head, LV_ALIGN_OUT_BOTTOM_MID, 0, 12);
+
+    lbl_perm_summary = lv_label_create(perm_container);
+    lv_label_set_text(lbl_perm_summary, "");
+    lv_obj_set_width(lbl_perm_summary, L.content_w);
+    lv_label_set_long_mode(lbl_perm_summary, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(lbl_perm_summary, L.bt_device_font, 0);
+    lv_obj_set_style_text_color(lbl_perm_summary, COL_DIM, 0);
+    lv_obj_set_style_text_align(lbl_perm_summary, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align_to(lbl_perm_summary, lbl_perm_tool, LV_ALIGN_OUT_BOTTOM_MID, 0, 16);
+
+    // Three touch targets along the bottom: Deny / Always Allow / Allow.
+    // Deliberately NOT LV_OBJ_FLAG_EVENT_BUBBLE — a tap here must only ever
+    // fire perm_button_cb, never bubble into any other screen's handler.
+    static const struct { const char* label; const char* decision; } btn_defs[3] = {
+        {"Deny",   "deny"},
+        {"Always", "always"},
+        {"Allow",  "allow"},
+    };
+    const lv_color_t btn_colors[3] = { COL_RED, COL_AMBER, COL_GREEN };
+    const int gap = 10;
+    const int btn_h = 72;
+    const int btn_w = (L.content_w - 2 * gap) / 3;
+    const int btn_y = L.scr_h - L.margin - btn_h;
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t* b = lv_obj_create(perm_container);
+        lv_obj_set_size(b, btn_w, btn_h);
+        lv_obj_set_pos(b, L.margin + i * (btn_w + gap), btn_y);
+        lv_obj_set_style_bg_color(b, btn_colors[i], 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(b, 10, 0);
+        lv_obj_set_style_border_width(b, 0, 0);
+        lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(b, perm_button_cb, LV_EVENT_CLICKED, (void*)btn_defs[i].decision);
+
+        lv_obj_t* lbl = lv_label_create(b);
+        lv_label_set_text(lbl, btn_defs[i].label);
+        lv_obj_set_style_text_font(lbl, L.bt_device_font, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_black(), 0);
+        lv_obj_center(lbl);
+    }
+
+    lv_obj_add_flag(perm_container, LV_OBJ_FLAG_HIDDEN);
+}
+
 // ======== Public API ========
 
 void ui_init(void) {
@@ -588,6 +625,9 @@ void ui_init(void) {
         lv_obj_del(battery_img);
         battery_img = nullptr;
     }
+
+    // Last child of scr → topmost, so it overlays the mascot/logo/battery too.
+    init_perm_screen(scr);
 }
 
 void ui_update(const UsageData* data) {
@@ -699,6 +739,18 @@ static void update_view_state(void) {
 }
 
 void ui_tick_anim(void) {
+    // On-device backstop only: the daemon owns the real timeout and always
+    // tells the hook script to fall back to the normal prompt well before
+    // this fires. This just stops the screen being stuck forever in the
+    // pathological case where the host vanished (crashed, BLE dropped) and
+    // never got the chance to cancel. No decision is sent — reverting the
+    // screen grants nothing.
+    if (current_screen == SCREEN_PERMISSION &&
+        lv_tick_get() - perm_shown_at_ms >= PERM_SCREEN_TIMEOUT_MS) {
+        perm_pending_id[0] = '\0';
+        ui_show_screen(prev_non_splash_screen);
+        return;
+    }
     if (current_screen != SCREEN_USAGE) return;
     update_view_state();
     if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
@@ -727,40 +779,38 @@ void ui_tick_anim(void) {
     }
 
     if (now - anim_msg_start >= ANIM_MSG_MS) {
-        anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
+        anim_msg_idx = (anim_msg_idx + 1) % 2;
         anim_msg_start = now;
     }
 
-    if (now - anim_last_ms < spinner_ms[anim_spinner_idx]) return;
-    anim_last_ms = now;
-    anim_phase = (anim_phase + 1) % SPINNER_PHASES;
-    anim_spinner_idx = (anim_phase < SPINNER_COUNT) ? anim_phase
-                                                    : (SPINNER_PHASES - anim_phase);
-
-    // Status text by priority. Whimsical messages only when connected & settled.
+    // Status text by priority. Blank once connected & data is flowing — the
+    // usage panels already say everything worth saying at that point.
     const char* text;
     if (!s_ble_connected) {
-        text = "Waiting";              // advertising / waiting for a host connection
+        text = "Waiting...";           // advertising / waiting for a host connection
     } else if (view_state == 1) {      // idle — alternate so it reads as alive AND data-less
-        text = (anim_msg_idx & 1) ? "No data" : "Listening";
+        text = (anim_msg_idx & 1) ? "No data" : "Listening...";
     } else if (now - connected_at_ms < 5000) {
         text = "Connected";
     } else {
-        text = anim_messages[anim_msg_idx];
+        text = "";
     }
 
-    // All states share the whimsical style: "<glyph> <Title-case word>…"
-    static char buf[80];
-    snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6",
-             spinner_frames[anim_spinner_idx], text);
-    lv_label_set_text(lbl_anim, buf);
+    // Only touch LVGL (invalidate + redraw) when the text actually changes.
+    static char last_text[16] = "\x01";  // sentinel so the first call always applies
+    if (strncmp(text, last_text, sizeof(last_text)) != 0) {
+        strncpy(last_text, text, sizeof(last_text) - 1);
+        last_text[sizeof(last_text) - 1] = '\0';
+        lv_label_set_text(lbl_anim, text);
+    }
 }
 
-static screen_t prev_non_splash_screen = SCREEN_USAGE;
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
-    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-    else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    if (current_screen == SCREEN_SPLASH || current_screen == SCREEN_PERMISSION)
+        lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    else
+        lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void global_click_cb(lv_event_t* e) {
@@ -769,23 +819,39 @@ static void global_click_cb(lv_event_t* e) {
     else                                  ui_show_screen(SCREEN_SPLASH);
 }
 
+// A tap on Deny/Always/Allow. Reports the decision back over BLE (the pending
+// request may already be gone — e.g. the daemon gave up and told the hook to
+// fall back to the normal prompt — the notify is harmless either way, the
+// daemon only listens while a request is actually outstanding) and returns to
+// whatever screen was showing before the prompt interrupted it.
+static void perm_button_cb(lv_event_t* e) {
+    const char* decision = (const char*)lv_event_get_user_data(e);
+    if (perm_pending_id[0]) {
+        ble_send_perm_decision(perm_pending_id, decision);
+        perm_pending_id[0] = '\0';
+    }
+    ui_show_screen(prev_non_splash_screen);
+}
+
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+    if (perm_container) lv_obj_add_flag(perm_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
-    case SCREEN_SPLASH:  splash_show(); break;
-    case SCREEN_USAGE:   lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_SPLASH:      splash_show(); break;
+    case SCREEN_USAGE:       lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_PERMISSION:  if (perm_container) lv_obj_clear_flag(perm_container, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
     }
 
-    splash_mascot_set_visible(screen != SCREEN_SPLASH);
+    splash_mascot_set_visible(screen != SCREEN_SPLASH && screen != SCREEN_PERMISSION);
     if (logo_img) {
-        if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        if (screen == SCREEN_SPLASH || screen == SCREEN_PERMISSION) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        else                                                         lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
     }
 
-    if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
+    if (screen != SCREEN_SPLASH && screen != SCREEN_PERMISSION) prev_non_splash_screen = screen;
     current_screen = screen;
     apply_battery_visibility();
 }
@@ -797,6 +863,22 @@ void ui_toggle_splash(void) {
 
 screen_t ui_get_current_screen(void) {
     return current_screen;
+}
+
+void ui_show_permission_request(const char* id, const char* tool, const char* summary) {
+    if (!perm_container) return;
+    strncpy(perm_pending_id, id, sizeof(perm_pending_id) - 1);
+    perm_pending_id[sizeof(perm_pending_id) - 1] = '\0';
+    lv_label_set_text(lbl_perm_tool, tool);
+    lv_label_set_text(lbl_perm_summary, summary);
+    perm_shown_at_ms = lv_tick_get();
+    // Force the display awake — a pending approval is exactly the kind of
+    // thing that must never be silently sitting on a dimmed/sleeping panel.
+    // Without this, the screen content is correct but invisible until
+    // whatever next touch/button happens to wake it (previously the only
+    // path here), which reads as an inexplicable multi-minute "delay".
+    idle_note_activity();
+    ui_show_screen(SCREEN_PERMISSION);
 }
 
 void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) {

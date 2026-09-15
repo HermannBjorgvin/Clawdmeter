@@ -23,6 +23,12 @@ void ble_request_refresh(void);
 
 void ble_set_battery_level(int pct);
 
+// Permission-approval channel: the host writes a pending tool-call request,
+// the device shows it and notifies back the user's tapped decision.
+bool ble_has_perm_request(void);
+const char* ble_get_perm_request(void);  // clears the pending flag
+void ble_send_perm_decision(const char* id, const char* decision);
+
 // BLE HID keyboard
 void ble_keyboard_press(uint8_t key, uint8_t modifier);
 void ble_keyboard_release(void);

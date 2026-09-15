@@ -11,6 +11,8 @@
 #define RX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000002"  // host writes here
 #define TX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000003"  // device ack/nack notifies
 #define REQ_CHAR_UUID       "4c41555a-4465-7669-6365-000000000004"  // device-initiated refresh request
+#define PERM_REQ_CHAR_UUID  "4c41555a-4465-7669-6365-000000000005"  // host writes a pending tool-call request
+#define PERM_RESP_CHAR_UUID "4c41555a-4465-7669-6365-000000000006"  // device notifies the tapped decision
 
 #define BLE_BUF_SIZE 512
 
@@ -61,6 +63,8 @@ static NimBLECharacteristic* input_kbd = nullptr;
 static NimBLECharacteristic* tx_char = nullptr;
 static NimBLECharacteristic* rx_char = nullptr;
 static NimBLECharacteristic* req_char = nullptr;
+static NimBLECharacteristic* perm_req_char = nullptr;
+static NimBLECharacteristic* perm_resp_char = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
@@ -75,6 +79,8 @@ static volatile uint16_t param_fix_spent  = CONN_HANDLE_NONE;  // one per connec
 static char rx_buf[BLE_BUF_SIZE];
 static volatile bool data_ready = false;
 static volatile bool has_received_data = false;
+static char perm_req_buf[BLE_BUF_SIZE];
+static volatile bool perm_req_ready = false;
 static char mac_str[18];
 
 // --- Single-owner lock -----------------------------------------------------
@@ -286,6 +292,32 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
     }
 };
 
+// Same owner/encryption gate as RxCallbacks — a permission-approval request
+// is a security control, so it must be at least as strict as usage-data
+// writes, not looser.
+class PermReqCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
+        std::string id = info.getIdAddress().toString();
+        if (!info.isEncrypted()) {
+            Serial.println("BLE: dropping perm-req write from unencrypted link");
+            return;
+        }
+        if (!owner_set && id != ZERO_ADDR) {
+            claim_owner(id);
+        }
+        if (owner_set && strcmp(id.c_str(), owner_addr) != 0) {
+            Serial.printf("BLE: dropping perm-req write from non-owner %s\n", id.c_str());
+            return;
+        }
+        std::string val = chr->getValue();
+        size_t len = std::min(val.length(), (size_t)(BLE_BUF_SIZE - 1));
+        memcpy(perm_req_buf, val.c_str(), len);
+        perm_req_buf[len] = '\0';
+        perm_req_ready = true;
+        Serial.printf("BLE: perm-req received at millis=%lu\n", (unsigned long)millis());
+    }
+};
+
 // When the daemon enables notifications on the refresh char, ask for data
 // if we have none yet. Firing on subscribe (not on connect) ensures the
 // notification isn't dropped before the daemon's CCCD write completes.
@@ -357,6 +389,18 @@ void ble_init(void) {
     );
     static ReqCallbacks reqCb;
     req_char->setCallbacks(&reqCb);
+
+    perm_req_char = svc->createCharacteristic(
+        PERM_REQ_CHAR_UUID,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+    );
+    static PermReqCallbacks permReqCb;
+    perm_req_char->setCallbacks(&permReqCb);
+
+    perm_resp_char = svc->createCharacteristic(
+        PERM_RESP_CHAR_UUID,
+        NIMBLE_PROPERTY::NOTIFY
+    );
 
     svc->start();
     server->start();
@@ -445,6 +489,24 @@ void ble_request_refresh(void) {
         req_char->notify();
         Serial.println("BLE: refresh requested");
     }
+}
+
+bool ble_has_perm_request(void) {
+    return perm_req_ready;
+}
+
+const char* ble_get_perm_request(void) {
+    perm_req_ready = false;
+    return perm_req_buf;
+}
+
+void ble_send_perm_decision(const char* id, const char* decision) {
+    if (state != BLE_STATE_CONNECTED || !perm_resp_char) return;
+    char buf[128];
+    snprintf(buf, sizeof(buf), "{\"id\":\"%s\",\"decision\":\"%s\"}", id, decision);
+    perm_resp_char->setValue((uint8_t*)buf, strlen(buf));
+    perm_resp_char->notify();
+    Serial.printf("BLE: perm decision sent: %s\n", buf);
 }
 
 void ble_keyboard_press(uint8_t key, uint8_t modifier) {
