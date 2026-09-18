@@ -305,6 +305,14 @@ static lv_style_t max_style_current;
 static lv_obj_t*  max_bandlbl[HIST_BANDS];
 static lv_obj_t* max_daylbl[HIST_GRID_DAYS];
 
+// Time-elapsed tick on the session/weekly bars — a thin marker at "where the
+// clock is" overlaid on "where the spend is" (the bar's own fill). One shared
+// style: two objects don't need per-instance styles, and it keeps the same
+// discipline as the History/Maxing screens' shared bar styles.
+static lv_style_t usage_tick_style;
+static lv_obj_t*  tick_session;
+static lv_obj_t*  tick_weekly;
+
 static lv_obj_t* battery_img;
 static lv_obj_t* logo_img;
 static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
@@ -1038,6 +1046,32 @@ static void update_maxing(const UsageData* d) {
     lv_label_set_text(lbl_max_foot, buf);
 }
 
+// Position the time-elapsed tick on a bar and fold the spend-vs-clock gap
+// into its reset label ("Resets in 1h 20m   +25 pts"). Points, not a ratio:
+// a ratio divides badly moments after a window opens (see history_math.h);
+// a percentage-point gap is exactly as small as it looks even then.
+static void update_burn_hint(lv_obj_t* tick, lv_obj_t* reset_label, int used_pct,
+                             int reset_mins, int window_mins, const char* reset_text) {
+    int time_pct = burn_time_pct(reset_mins, window_mins);
+    if (time_pct < 0) {
+        lv_obj_add_flag(tick, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(reset_label, reset_text);
+        return;
+    }
+    lv_obj_clear_flag(tick, LV_OBJ_FLAG_HIDDEN);
+    const int track_w = L.content_w - 2 * L.panel_pad_x;
+    int tx = (track_w * time_pct) / 100;
+    if (tx > track_w - 2) tx = track_w - 2;
+    lv_obj_set_x(tick, tx);
+
+    const int gap = used_pct - time_pct;
+    char buf[64];
+    if (gap == 0) snprintf(buf, sizeof buf, "%s   even pace", reset_text);
+    else          snprintf(buf, sizeof buf, "%s   #%s %+d pts#",
+                           reset_text, gap > 0 ? "c0392b" : "788c5d", gap);
+    lv_label_set_text(reset_label, buf);
+}
+
 static void init_usage_screen(lv_obj_t* scr) {
     usage_container = lv_obj_create(scr);
     lv_obj_set_size(usage_container, L.scr_w, L.scr_h);
@@ -1067,9 +1101,31 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
+    lv_style_init(&usage_tick_style);
+    lv_style_set_bg_color(&usage_tick_style, COL_TEXT);
+    lv_style_set_bg_opa(&usage_tick_style, LV_OPA_COVER);
+    lv_style_set_border_width(&usage_tick_style, 0);
+    lv_style_set_radius(&usage_tick_style, 0);
+    lv_style_set_pad_all(&usage_tick_style, 0);
+
     panel_session = make_usage_panel(usage_group, L.content_y, "Current",
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
+    // A child of the bar itself, so it draws on top of the fill and tracks the
+    // bar's position for free; hidden until ui_update knows a reset time.
+    tick_session = lv_obj_create(bar_session);
+    lv_obj_remove_style_all(tick_session);
+    lv_obj_add_style(tick_session, &usage_tick_style, 0);
+    lv_obj_set_size(tick_session, 2, L.bar_h);
+    lv_obj_clear_flag(tick_session, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+    lv_obj_add_flag(tick_session, LV_OBJ_FLAG_HIDDEN);
+
+    // Both reset labels grow a second, recolored segment ("+12 pts" / "even" /
+    // "-5 pts"); DOT-truncate rather than risk it running past the panel edge
+    // on the narrowest boards (240px).
+    lv_label_set_recolor(lbl_session_reset, true);
+    lv_label_set_long_mode(lbl_session_reset, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(lbl_session_reset, L.content_w - 2 * L.panel_pad_x);
 
     // Enterprise-only overlays inside panel_session — hidden until enterprise data arrives
     lbl_session_pct_sym = lv_label_create(panel_session);
@@ -1095,8 +1151,17 @@ static void init_usage_screen(lv_obj_t* scr) {
                      L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
                      &lbl_weekly_pct, &lbl_weekly_label,
                      &bar_weekly, &lbl_weekly_reset);
+    tick_weekly = lv_obj_create(bar_weekly);
+    lv_obj_remove_style_all(tick_weekly);
+    lv_obj_add_style(tick_weekly, &usage_tick_style, 0);
+    lv_obj_set_size(tick_weekly, 2, L.bar_h);
+    lv_obj_clear_flag(tick_weekly, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+    lv_obj_add_flag(tick_weekly, LV_OBJ_FLAG_HIDDEN);
+
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
+    lv_label_set_long_mode(lbl_weekly_reset, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(lbl_weekly_reset, L.content_w - 2 * L.panel_pad_x);
 
     build_pair_group(usage_container);
     build_idle_group(usage_container);
@@ -1187,6 +1252,10 @@ void ui_update(const UsageData* data) {
         lv_obj_set_style_text_font(lbl_session_pct, L.ent_pct_font, 0);
         lv_label_set_text(lbl_session_label, "Spending");
         lv_obj_add_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
+        // Enterprise reset_mins means something different (spending-limit
+        // reset, not a 5h/7d window) — the tick would be meaningless here.
+        lv_obj_add_flag(tick_session, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(tick_weekly,  LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_status,   LV_OBJ_FLAG_HIDDEN);
@@ -1220,7 +1289,8 @@ void ui_update(const UsageData* data) {
     } else {
         lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
         format_reset_time(data->session_reset_mins, buf, sizeof(buf));
-        lv_label_set_text(lbl_session_reset, buf);
+        update_burn_hint(tick_session, lbl_session_reset, s_pct,
+                         data->session_reset_mins, BURN_SESSION_MINS, buf);
     }
 
     lv_bar_set_value(bar_session, s_pct, LV_ANIM_ON);
@@ -1244,7 +1314,8 @@ void ui_update(const UsageData* data) {
         lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
         lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
         format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
-        lv_label_set_text(lbl_weekly_reset, buf);
+        update_burn_hint(tick_weekly, lbl_weekly_reset, w_pct,
+                         data->weekly_reset_mins, BURN_WEEK_MINS, buf);
     }
 }
 

@@ -101,6 +101,36 @@ static inline void history_fmt_k(int32_t k, char* buf, size_t len) {
     else               snprintf(buf, len, "0");
 }
 
+// --- burn: time elapsed vs allowance spent ------------------------------------
+//
+// The corollary to the pace projection on the History screen. Pace asks "will
+// I run out before the reset?"; this asks the plainer question the usage bars
+// don't answer on their own: "at this point in the window, am I ahead of or
+// behind an even spend?" At 50% of the window, an even spend is 50% of the
+// allowance — the gap between the two percentages is the whole story, which is
+// why this returns the gap directly rather than a ratio. A ratio divides badly
+// right after a window opens (3% used at 2% elapsed reads as "1.5x", which is
+// alarming for one prompt); a percentage-point gap degrades gracefully instead
+// — a small absolute gap early on is exactly as small as it looks.
+//
+// The Enterprise path already computes the equivalent (`time_pct` in data.h)
+// against a billing period; this is the same idea for the rolling Pro/Max
+// windows, derived on-device because the window lengths are fixed and the
+// daemon already sends minutes-to-reset.
+
+#define BURN_SESSION_MINS  300      // the 5-hour window
+#define BURN_WEEK_MINS   10080      // the rolling 7-day window
+
+// Percentage of a window already elapsed, from its minutes-to-reset.
+// -1 when the reset time is unknown.
+static inline int burn_time_pct(int reset_mins, int window_mins) {
+    if (reset_mins < 0 || window_mins <= 0) return -1;
+    int elapsed = window_mins - reset_mins;
+    if (elapsed < 0) elapsed = 0;
+    if (elapsed > window_mins) elapsed = window_mins;
+    return (int)(((int32_t)elapsed * 100) / window_mins);
+}
+
 // --- pace projection --------------------------------------------------------
 //
 // Given the live session numbers and the smoothed burn rate, will the 5-hour

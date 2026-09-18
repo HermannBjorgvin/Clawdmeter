@@ -127,7 +127,23 @@ static void pace_boundary_counts_as_limit() {
     CHECK(p.minutes == 100);
 }
 
+static void burn_time_pct_from_minutes_remaining() {
+    CHECK(burn_time_pct(300, BURN_SESSION_MINS) == 0);     // just opened
+    CHECK(burn_time_pct(150, BURN_SESSION_MINS) == 50);    // halfway
+    CHECK(burn_time_pct(0,   BURN_SESSION_MINS) == 100);   // about to reset
+    CHECK(burn_time_pct(10080, BURN_WEEK_MINS) == 0);
+    CHECK(burn_time_pct(2520,  BURN_WEEK_MINS) == 75);
+}
+
+static void burn_time_pct_clamps_and_reports_unknown() {
+    CHECK(burn_time_pct(-1, BURN_SESSION_MINS) == -1);     // no reset time
+    CHECK(burn_time_pct(400, BURN_SESSION_MINS) == 0);     // more than a window left
+    CHECK(burn_time_pct(150, 0) == -1);
+}
+
 int main() {
+    burn_time_pct_from_minutes_remaining();
+    burn_time_pct_clamps_and_reports_unknown();
     week_cumulative_starts_on_monday();
     week_cumulative_on_sunday_spans_seven();
     week_cumulative_clamps_bad_weekday_and_short_history();
