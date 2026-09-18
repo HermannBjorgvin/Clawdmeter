@@ -5,6 +5,8 @@
 enum screen_t {
     SCREEN_SPLASH,
     SCREEN_USAGE,
+    SCREEN_HISTORY,
+    SCREEN_MAXING,
     SCREEN_COUNT,
 };
 

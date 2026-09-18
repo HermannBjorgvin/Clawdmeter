@@ -16,7 +16,7 @@ Seven ports today (two SoC families, five panel sizes):
 - `boards/waveshare_lcd_154/` — Waveshare ESP32-S3-Touch-LCD-1.54 (ST7789, 240×240 square, CST816T touch @ 0x15). Build env: `waveshare_lcd_154`. **The first non-AMOLED port**: a plain 4-wire SPI TFT, not QSPI, and the panel has no brightness command — backlight is LEDC PWM on `LCD_BL`. **No PMU**: battery is an ADC divider on GPIO1 and `BAT_EN` (GPIO2) is a power-hold line that must be driven HIGH early in `board_init()` or the board browns out on battery. Three buttons (BOOT + GPIO5 + a PWR-role GPIO4); ES8311 chime wired up; QMI8658 populated but unused (fixed orientation, no rotation).
 - `boards/waveshare_lcd_4/` — Waveshare ESP32-S3-Touch-LCD-4 (ST7701 RGB parallel, 480×480 square, GT911 touch). Build env: `waveshare_lcd_4`. **RGB-panel port**: Arduino_ESP32RGBPanel + bounce buffers (tearing fix). IO expander @ 0x24 (TCA9554 / CH32V003) must init before `gfx->begin()` or the panel stays dark; backlight is expander pin 2 (on/off only). No AXP2101 / IMU; KEY/PWR is hardware RST. Single BOOT button (GPIO 0 → Space/PTT).
 
-Plus one non-hardware target: `boards/sim/` — **native desktop simulator** (SDL2 window, 480×480, `platform = native`). Build env: `sim`. See "Desktop simulator" below.
+Plus one non-hardware target: `boards/sim/` — **native desktop simulator** (SDL2 window, `platform = native`). Build envs: `sim` (480×480) and `sim_cyd` (240×320 portrait, for small-layout work — the real CYD has no screenshot path). See "Desktop simulator" below.
 
 **C6 ports have no PSRAM** — shared code gates on `BOARD_HAS_PSRAM` (absent on C6) to use `MALLOC_CAP_INTERNAL` for LVGL/splash buffers, and the `screenshot` serial command is disabled (`LV_USE_SNAPSHOT=0`), so UI changes on a C6 board must be eyeballed on hardware, not auto-captured.
 
@@ -94,7 +94,9 @@ firmware/src/
     sim/                    — native desktop simulator: SDL2 + Arduino shims + scenario playback
     template/               — copy this to bootstrap a new port
   main.cpp                  — setup() + loop(): HAL calls only, zero #ifdef BOARD_*
-  ui.{h,cpp}                — 3-screen UI (splash, usage, bluetooth). compute_layout() picks fonts/positions from board_caps() (responsive — current breakpoint: H >= 460 → large, else compact)
+  ui.{h,cpp}                — 3-screen UI (splash, usage, history); tap cycles them. compute_layout() picks fonts/positions from board_caps() (responsive — H >= 460 → large, H > 320 → compact, else small)
+  history_math.h            — pure arithmetic behind the History screen (week running total, today vs 7d avg, pace projection); host-tested in test/test_history_math/
+  usage_rate.{h,cpp}        — burn-rate ring buffer; usage_rate_pct_per_min() feeds the pace projection
   splash.{h,cpp}            — 20×20 pixel-art engine. CELL = min(W,H)/20, centered.
   ble.{h,cpp}               — NimBLE peripheral: custom data service + HID keyboard
   data.h                    — UsageData struct
@@ -245,6 +247,130 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 - Fonts and icons re-scaled ~1.9× for the higher-DPI panel.
 - All UI margins widened to 20px to clear the rounded display corners.
 - Battery icons converted to RGB565A8 alpha so they blend cleanly over the splash animations.
+
+## History screen (usage over time)
+
+Third screen in the tap cycle (splash → usage → history → splash). A 14-day
+bar chart of output tokens (today in accent) with the current Mon→today
+running total drawn over it on its own scale, then Today / This week / Pace
+rows and a model-mix bar. Everything is derived on-device in
+`history_math.h` from four payload keys the macOS daemon adds:
+
+- `h` — output tokens per local day in thousands, oldest → newest, today last
+- `ht` — assistant turns per day, same order
+- `hw` — weekday of the last bucket (Mon=0), so no clock is needed to find "this week"
+- `hm` — model-family mix over the trailing 7 days, top 3, `[["Opus",71],…]`
+- `hs` — bucket index where **Anthropic's rolling 7-day limit window opened** (derived from `wr`, the minutes-to-weekly-reset header). "This week" on the device means that window — the same one the weekly % meters — with the calendar week (Monday) as the fallback when `hs` is absent (enterprise accounts report `wr = 0`; older daemons).
+
+Source is the local transcripts (`<config_dir>/projects/*/*.jsonl`) — no API
+call, no token — aggregated incrementally by `daemon/usage_history.py` with
+per-file offsets persisted to `~/.config/claude-usage-monitor/history-state.json`.
+Cold scan ~2 s per GB, then milliseconds. `history = off` in the config skips
+it. The fields ride on the `{"ok":false}` no-data beat too. **Payloads with
+history exceed a write-without-response (ATT_MTU-3), so the daemon sends
+anything over 160 bytes as a GATT long write** (`WRITE_NR_MAX_BYTES`); the RX
+characteristic already allows both. macOS daemon only so far.
+
+The pace row projects from `usage_rate_pct_per_min()` — "Limit in 1h 20m" /
+"62% at reset" / "Idle" / "Warming up" (the ring buffer needs ~4 min of
+samples after boot). It refreshes every 10 s while the screen is up.
+
+To shoot the screen headlessly, use the boot-screen trick above with
+`SCREEN_HISTORY` on the `sim_cyd` or `sim` env; the sim scenario carries
+history fields on every state.
+
+## Maxing screen (5-hour windows)
+
+Fourth screen in the tap cycle. One row per local day, **five fixed
+time-of-day columns** — 00-05, 05-10, 10-15, 15-20, 20-24 — each shaded none /
+some / most / maxed, with a column header of the band start hours. Header
+reads "N maxed of M windows".
+
+**Columns are times, not ordinals.** The first cut placed windows in the order
+they opened, which meant column 1 was a 01:15 window on one day and 10:35 on
+the next — comparing down a column was meaningless. Banding by start hour makes
+the grid answer "do I max out in the mornings or at night?". Two windows can
+never collide in a band: their starts are always ≥5 h apart. An empty band
+draws a faint `COL_PANEL` track so the column structure stays readable, and a
+barely-used window uses a dim green distinct from it.
+
+A window is filed under the day and band it **opened** in; 6 of 25 windows on
+the reference account cross midnight, so a row can include work done after
+00:00 the next day. Note this differs from the History screen, whose daily
+token bars bucket each *turn* by its own local day — the two screens attribute
+a late-night session differently, on purpose.
+
+**Windows are reconstructed from the transcripts, not from the API.** Claude's
+5h limit window is first-use anchored — the first turn opens it and it runs
+exactly 5 h — so walking the turn stream rebuilds the boundaries. Validated
+against a live account: the reconstructed open time matched the one implied by
+the reset header to within ~5 min (reconstruction sees the assistant turn, the
+window is anchored on the request).
+
+**Utilisation is the hard part.** The API reports a percentage only for the
+*current* window, so history has no ground truth. Two sources, and the payload
+distinguishes them so the screen never passes inference off as fact:
+
+- **Measured** — the daemon saw the API's own number for that window
+  (`observe()` each poll, matched to a reconstructed window by **overlap**:
+  the best match must cover more than half a window, `WINDOW_MIN_OVERLAP_HOURS`.
+  Endpoint proximity was tried first and abandoned — drifts of ~5 min and
+  ~54 min were both measured on a live account, so any fixed tolerance either
+  misses real matches or admits wrong ones).
+
+  Measured splits in two, because "we saw a peak" is not "we saw the final
+  peak". `observe()` also tracks the *smallest* minutes-to-reset ever seen for
+  a window; within `OBSERVE_FINAL_MINUTES` of the reset the window was watched
+  to its close and the level is **exact** (lowercase `a`-`d`, no border).
+  Otherwise we stopped looking early — device unplugged, daemon down — and the
+  level is a floor, "at least this much" (**uppercase `A`-`D`**, grey border,
+  drawn like an estimate because it is equally not-a-fact). Nothing can
+  backfill it later: the API only ever reports the *current* window.
+
+  Calibration is unaffected by the split — `_fits` stores the token count and
+  the percentage captured in the *same* poll, so a partial observation is
+  still a valid contemporaneous pair. Only the displayed peak is a floor.
+- **Estimated** — output tokens ÷ a tokens-per-percent ratio *learned from
+  this account's own measured windows*, bootstrapped at
+  `DEFAULT_TOKENS_PER_PCT` until the first fit. Grey border, like a partial
+  measurement: the greys thin out as windows get watched to their close.
+
+**Calibration takes one sample per window, never per poll.** `observe()` runs
+every 60 s, so appending a sample each time let a single heavily-polled window
+outvote every other one — the median became "whichever window we watched
+longest". On the reference account that put the fit at 1,673 tokens/% when the
+mature-window answer was ~5,995, i.e. every estimated window was drawn ~3.5x
+hotter than reality. `_fits` is now keyed by window (`STATE_VERSION` 3), holds
+the most mature reading of each, and only fits windows past
+`OBSERVE_MIN_PCT` (30) — the API reports the percentage as an integer, so the
+quotient carries at least `1/pct` of rounding error before any unaccounted
+token is considered. A window below the threshold still records its peak and
+still renders as measured; it just doesn't vote on the ratio.
+
+Payload keys: `wg` (7 fixed-width strings, one per day, one char per time band
+— digits `0`-`3` estimated, lowercase `a`-`d` measured-to-the-close,
+uppercase `A`-`D` measured-but-abandoned, `.` no window), `wn` (window count,
+empty bands excluded), `wx` (maxed, counting all three provenances).
+
+**LVGL heap is the binding constraint on this screen, not board DRAM.** The
+pool is a fixed 64 KB `.bss` array (LVGL's builtin allocator, `LV_MEM_SIZE`),
+and the first cut — 56 cells with per-object *local* styles — exhausted it:
+`splash_init()` then hung inside `lv_array_resize`. Cells and history bars use
+**shared `lv_style_t` objects** instead (one allocation total, swapped by
+pointer), which brought steady-state use to ~46.6 KB with ~10 KB free. Two
+rules follow for anyone adding widgets here:
+
+1. Prefer a shared style over `lv_obj_set_style_*` on repeated objects.
+2. Never call `lv_obj_remove_style(obj, NULL, part)` to swap one — in LVGL 9
+   `lv_obj_set_size`/`set_pos` live in the object's *local* style, so that
+   wipes geometry too. Remove the specific shared styles by pointer.
+
+Measure with `lv_mem_monitor()` after `ui_init()` on the `sim_cyd` env.
+
+**The state file is versioned** (`STATE_VERSION` in `usage_history.py`). Bump
+it whenever a field derived during ingest is added: the per-file offsets sit at
+EOF, so on an existing install a new field would stay empty forever. A version
+mismatch drops the offsets and forces one full re-read.
 
 ## Daemon / host side
 
