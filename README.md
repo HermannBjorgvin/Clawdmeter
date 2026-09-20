@@ -41,7 +41,7 @@ Boards supported out of the box:
 
 - Linux (tested on Ubuntu), macOS, or Windows 10/11
 - [PlatformIO CLI](https://docs.platformio.org/en/latest/core/installation/index.html)
-- Linux: `curl`, `bluetoothctl`, `busctl`, `dbus-monitor` (BlueZ Bluetooth stack), `python3`
+- Linux: `curl`, `bluetoothctl`, `busctl`, `dbus-monitor` (BlueZ Bluetooth stack), `python3`, `setsid`, `stdbuf` (util-linux / coreutils), `systemctl` (systemd user services)
 - macOS: `python3` (the installer sets up a venv with `bleak` and `httpx`)
 - Windows: `python3` 3.11+ (the installer sets up a venv with `bleak`, `httpx`, and `pystray`)
 - Claude Code with an active subscription

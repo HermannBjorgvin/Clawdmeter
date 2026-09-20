@@ -2,7 +2,7 @@
 # Claude Usage Tracker Daemon (BLE)
 # Reads Claude Code OAuth token, polls usage via API, sends to ESP32 over BLE GATT.
 # Auto-connects and reconnects to the Clawdmeter BLE device.
-# Dependencies: curl, awk, bluetoothctl, busctl, dbus-monitor, python3
+# Dependencies: curl, awk, bluetoothctl, busctl, dbus-monitor, python3, setsid, stdbuf
 
 DEVICE_NAME="Clawdmeter"
 DEVICE_MAC="${DEVICE_MAC:-}"  # auto-discovered if empty
