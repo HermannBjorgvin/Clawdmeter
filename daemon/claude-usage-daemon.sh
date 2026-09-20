@@ -9,7 +9,20 @@ DEVICE_MAC="${DEVICE_MAC:-}"  # auto-discovered if empty
 SERVICE_UUID="4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID="4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID="4c41555a-4465-7669-6365-000000000004"
-POLL_INTERVAL_DEFAULT="${POLL_INTERVAL:-60}"  # env var sets the default; `poll_interval` in the config file overrides
+# The POLL_INTERVAL env var seeds the default that `poll_interval` in the
+# config file overrides. Validate it the same way as the config value: an
+# integer, clamped to >= 10s; anything else falls back to 60.
+poll_interval_default_from_env() {
+    local val="${POLL_INTERVAL:-}"
+    if [[ "$val" =~ ^[0-9]+$ ]]; then
+        (( val < 10 )) && val=10
+        echo "$val"
+    else
+        [ -n "$val" ] && echo "Ignoring invalid POLL_INTERVAL='$val' (need an integer >= 10); using 60" >&2
+        echo 60
+    fi
+}
+POLL_INTERVAL_DEFAULT=$(poll_interval_default_from_env)
 POLL_INTERVAL=$POLL_INTERVAL_DEFAULT
 HEARTBEAT_INTERVAL_DEFAULT=60
 TICK=5

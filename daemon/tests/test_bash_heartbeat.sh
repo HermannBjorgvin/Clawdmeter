@@ -12,6 +12,7 @@ set -u
 DAEMON="$(dirname "$0")/../claude-usage-daemon.sh"
 
 extract() { awk -v fn="$1" '$0 ~ "^"fn"\\(\\) \\{"{f=1} f{print} f&&/^\}/{exit}' "$DAEMON"; }
+eval "$(extract poll_interval_default_from_env)"
 eval "$(extract read_poll_interval)"
 eval "$(extract read_heartbeat_interval)"
 eval "$(extract age_payload)"
@@ -45,6 +46,13 @@ printf 'poll_interval = 30\npoll_interval = 90\n' > "$CONFIG_FILE"
 check "poll: last occurrence wins"        "$(read_poll_interval)" "90"
 POLL_INTERVAL_DEFAULT=45; rm -f "$CONFIG_FILE"
 check "poll: env-provided default"        "$(read_poll_interval)" "45"
+
+# --- POLL_INTERVAL env var validation ---
+check "env: unset -> 60"                  "$(POLL_INTERVAL= poll_interval_default_from_env)" "60"
+check "env: plain value"                  "$(POLL_INTERVAL=300 poll_interval_default_from_env)" "300"
+check "env: clamped to 10"                "$(POLL_INTERVAL=1 poll_interval_default_from_env)" "10"
+check "env: garbage -> 60"                "$(POLL_INTERVAL=abc poll_interval_default_from_env 2>/dev/null)" "60"
+check "env: negative -> 60"               "$(POLL_INTERVAL=-5 poll_interval_default_from_env 2>/dev/null)" "60"
 
 # --- payload aging ---
 check "age: 300s ticks sr/wr down 5 min" \
