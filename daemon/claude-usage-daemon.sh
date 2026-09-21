@@ -2,7 +2,7 @@
 # Claude Usage Tracker Daemon (BLE)
 # Reads Claude Code OAuth token, polls usage via API, sends to ESP32 over BLE GATT.
 # Auto-connects and reconnects to the Clawdmeter BLE device.
-# Dependencies: curl, awk, bluetoothctl
+# Dependencies: curl, awk, bluetoothctl, busctl, dbus-monitor, python3, setsid, stdbuf
 
 DEVICE_NAME="Clawdmeter"
 DEVICE_MAC="${DEVICE_MAC:-}"  # auto-discovered if empty
@@ -391,9 +391,10 @@ build_payload_for_token() {
     fi
 
     local headers
-    headers=$(curl -s -D - -o /dev/null \
+    # The bearer token goes in via a curl config on stdin (-K -) so it never
+    # appears in the process argv (visible to any local user via ps/proc).
+    headers=$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -s -D - -o /dev/null -K - \
         "https://api.anthropic.com/v1/messages" \
-        -H "Authorization: Bearer $token" \
         -H "anthropic-version: 2023-06-01" \
         -H "anthropic-beta: oauth-2025-04-20" \
         -H "Content-Type: application/json" \
