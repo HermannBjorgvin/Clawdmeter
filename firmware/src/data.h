@@ -6,11 +6,6 @@
 // the API so future scoped models ride along without a firmware change.
 #define MAX_SCOPED_WEEKLY 4
 
-// How many reset credits the Weekly card can draw as individual pips. Matches
-// MAX_CREDIT_PIPS in daemon/claude_usage_daemon.py. Past this the big number
-// still reports the true count -- there is just no room to draw them all.
-#define MAX_CREDIT_PIPS 6
-
 struct ScopedWeekly {
     char name[16];           // model label from the daemon (e.g. "Fable")
     float pct;               // utilization 0-100 (0% is a real value)
@@ -45,13 +40,11 @@ struct UsageData {
     // a provider meters only one window the second card has nothing to show,
     // so it carries these instead of sitting empty.
     int  reset_credits;          // 0 = none / provider has no such thing
-    char reset_credits_exp[10];  // soonest expiry, pre-formatted e.g. "Oct 3"
-    // Percent of each credit's granted life still left ("rl"), soonest expiry
-    // first, so the card can draw them draining instead of only counting them.
-    // A count shorter than reset_credits means the daemon could not read the
-    // detail endpoint for the rest; those draw as lifetime-unknown.
-    int     reset_credit_life_count;
-    uint8_t reset_credit_life[MAX_CREDIT_PIPS];
+    int  reset_credits_exp_mins; // minutes until the soonest expiry ("rm"); -1 = unknown
+    // Percent of the soonest-expiring credit's granted life still left ("rl"),
+    // which the card draws as a bar filling toward that expiry. -1 = the
+    // daemon could not read the detail endpoint, so the track stays empty.
+    int  reset_credit_life;
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
 };

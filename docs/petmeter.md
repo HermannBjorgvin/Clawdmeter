@@ -132,18 +132,21 @@ credit. That is a second slow request against an endpoint already measured at
 caches the pair for an hour and keeps the last known value when the call fails.
 
 **The cache holds the raw stamps, never anything derived from them.** The
-device draws how much of each credit's life is left, and that has to be
-recomputed against the clock on every poll — caching the percentage instead
-would freeze the pips for an hour at a time, which is the one thing the visual
-exists to show. `test_cached_credits_still_age` guards this.
+device draws how much of the soonest credit's life has elapsed and counts down
+to its expiry, and both have to be recomputed against the clock on every poll —
+caching the derived values instead would freeze the card for an hour at a time,
+which is the one thing the visual exists to show. `test_cached_credits_still_age`
+guards this.
 
-They reach the device as `rc` (count), `rx` (soonest expiry, pre-formatted
-host-side, e.g. `"Oct 3"` — the firmware has no date handling and its fonts are
-ASCII-only) and `rl` (percent of each credit's granted life still left, soonest
-expiry first, capped at `MAX_CREDIT_PIPS`). `rl` absent means the detail
-endpoint was unreadable; the device then draws the pips grey rather than
-inventing a full life for them. The count is never capped — past six pips the
-big number still carries the truth.
+They reach the device as `rc` (count), `rm` (minutes until the soonest expiry —
+a duration like `sr`/`wr`, because the firmware has no date handling and
+formats every countdown with the same `"in 4d 21h"` line) and `rl` (percent of
+the soonest-expiring credit's granted life still left — the head of the queue
+is the one you spend first, and it is the only clock the card shows, so the
+others are not sent). `rl`/`rm` absent means the
+detail endpoint was unreadable; the device then leaves the track empty and the
+line reads `Available` rather than inventing a lifetime. The count is never
+capped.
 
 ### Codex panel mapping
 
@@ -167,24 +170,27 @@ second card carries reset credits instead — count where the percentage goes,
 credits, the card is hidden outright: a card whose only content is a dash
 reads as a fault, not as "this plan has no such limit".
 
-**The credit row (`render_credit_pips`).** The card keeps a quota card's exact
-anatomy, so the bar's row is filled rather than left empty — but with one pip
-per credit instead of one continuous bar, because what is being shown is
-countable things with lifetimes, not a proportion of a whole. Each pip is
-filled by how much of that credit's granted life is left and the row is ordered
-soonest-expiry-first, so it reads as a lifecycle — issued, draining, gone — and
-the pip about to lapse is the leftmost, where the eye lands first.
+**The credit card (`render_credit_card`).** The card keeps a quota card's exact
+anatomy and, more importantly, a quota card's *reading*: the number is how many
+you hold, the bar is how much of a window has elapsed, the line under it counts
+down to the moment that window ends. The window is the soonest-expiring
+credit's granted life — the head of the queue, the one you will spend first —
+so the bar fills toward its expiry exactly as the quota bar above fills toward
+its limit, and shares `pct_color()`'s amber/red thresholds (75% / 90% elapsed,
+about a week and about three days on a 30-day grant). A credit is lost by not
+spending it, so a red bar means the same thing on both cards: act now.
 
-Urgency runs the *other way* from a quota: a credit is lost by not spending it,
-so the colour follows life remaining (`CREDIT_WARN_LIFE` 25%, `CREDIT_CRIT_LIFE`
-10% — about a week and about three days on Codex's 30-day grants), not usage.
-The pips share the bar's row, height and corner radius, and integer division's
-remainder is handed out a pixel at a time so the row ends flush with the bar on
-the card above.
+The line reads `Next expires in 11d` (or `Expires in 2d` when only one is held;
+hours and minutes only inside the last day). Whole days, not `11d 3h`: a
+30-day grant is spent on a scale of days, and the longer form did not fit the
+368 px boards. Earlier attempts — one pip per credit, each filled by its own
+life left — drew the count twice, put the actionable number (days) off screen
+behind a date, and with one credit collapsed into a bar that read as "8%
+used"; worse, the pips drained toward bad while the bar above filled toward
+bad, so the same shape carried opposite semantics on the two cards.
 
 `render_weekly_face()` owns those labels and runs after that branch, so it
-stands down when the card is showing credits; the pips hide on the enterprise
-path and whenever a real second quota is present.
+stands down when the card is showing credits.
 
 ---
 

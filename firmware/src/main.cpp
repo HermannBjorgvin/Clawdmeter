@@ -134,18 +134,12 @@ static void parse_provider(JsonObjectConst doc, UsageData* out) {
     strlcpy(out->session_model, doc["sm"] | "", sizeof(out->session_model));
     strlcpy(out->weekly_model,  doc["wm"] | "", sizeof(out->weekly_model));
     out->reset_credits = doc["rc"] | 0;
-    strlcpy(out->reset_credits_exp, doc["rx"] | "", sizeof(out->reset_credits_exp));
-    // Per-credit life left. Absent (older daemon, or the detail endpoint was
-    // down) leaves the count at 0 and the card draws the pips as
-    // lifetime-unknown rather than claiming they are fresh.
-    out->reset_credit_life_count = 0;
-    for (JsonVariantConst v : doc["rl"].as<JsonArrayConst>()) {
-        if (out->reset_credit_life_count >= MAX_CREDIT_PIPS) break;
-        int pct = v | 0;
-        if (pct < 0) pct = 0;
-        if (pct > 100) pct = 100;
-        out->reset_credit_life[out->reset_credit_life_count++] = (uint8_t)pct;
-    }
+    out->reset_credits_exp_mins = doc["rm"] | -1;
+    // Life left of the soonest expiry. Absent (older daemon, or the detail
+    // endpoint was down) draws an empty track rather than claiming the credit
+    // is fresh.
+    out->reset_credit_life = doc["rl"] | -1;
+    if (out->reset_credit_life > 100) out->reset_credit_life = 100;
     out->ok = doc["ok"] | false;
     out->valid = true;
 }

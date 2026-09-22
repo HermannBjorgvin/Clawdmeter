@@ -366,21 +366,28 @@ def test_reset_credits_ride_along_with_count_and_expiry(monkeypatch):
     """The second card carries reset credits when there is no second quota.
 
     wham/usage reports only how many credits exist; the expiry comes from the
-    detail endpoint, so the payload carries both a count and a pre-formatted
-    date (the device has no date handling and ASCII-only fonts).
+    detail endpoint, so the payload carries both a count and minutes until
+    the soonest expiry -- a duration, like sr/wr, because the device has no
+    date handling and formats every countdown the same way.
     """
-    import datetime
+    import time
     from daemon.collectors import UsageSnapshot, Window
     import daemon.claude_usage_daemon as mod
 
-    expiry = datetime.datetime(2026, 10, 3, 19, 29).timestamp()
+    expiry = time.time() + 11 * 1440 * 60 + 3 * 3600 + 30   # 11d 3h from now
     snap = UsageSnapshot(provider="codex", plan="pro",
                          windows={WINDOW_7D: Window(31.0, resets_in=7177 * 60)},
                          reset_credits=2, reset_credits_expire=expiry)
     monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: snap)
 
     p = mod.codex_payload()
-    assert p["rc"] == 2 and p["rx"] == "Oct 3"
+    assert p["rc"] == 2 and p["rm"] == 11 * 1440 + 3 * 60
+
+    # A lapsed stamp the endpoint has not pruned yet clamps at 0, never negative.
+    import dataclasses
+    lapsed = dataclasses.replace(snap, reset_credits_expire=time.time() - 600)
+    monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: lapsed)
+    assert mod.codex_payload()["rm"] == 0
 
 
 def test_no_credits_means_no_keys(monkeypatch):
@@ -393,7 +400,7 @@ def test_no_credits_means_no_keys(monkeypatch):
     monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: snap)
 
     p = mod.codex_payload()
-    assert "rc" not in p and "rx" not in p
+    assert "rc" not in p and "rm" not in p
 
 
 # --- reset-credit lifetimes -------------------------------------------------
@@ -467,8 +474,9 @@ def test_credit_stamps_keep_last_known_value_when_endpoint_fails(monkeypatch):
         assert cx._credit_stamps("tok", None) == known
 
 
-def test_payload_carries_per_credit_life_soonest_first(monkeypatch):
-    """"rl" is what lets the device draw a lifecycle instead of a tally."""
+def test_payload_sends_the_head_of_the_queue(monkeypatch):
+    """"rl" is the soonest-expiring credit's life left -- the only clock the
+    card shows, because it is the one you spend first."""
     from daemon.collectors import UsageSnapshot, Window
     import daemon.claude_usage_daemon as mod
 
@@ -478,11 +486,11 @@ def test_payload_carries_per_credit_life_soonest_first(monkeypatch):
                          reset_credit_life=(37, 71))
     monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: snap)
 
-    assert mod.codex_payload()["rl"] == [37, 71]
+    assert mod.codex_payload()["rl"] == 37
 
 
-def test_payload_caps_pips_but_not_the_count(monkeypatch):
-    """More credits than the card can draw: the number still tells the truth."""
+def test_payload_count_is_never_capped(monkeypatch):
+    """However many are held, the number reports the true count."""
     from daemon.collectors import UsageSnapshot, Window
     import daemon.claude_usage_daemon as mod
 
@@ -493,13 +501,12 @@ def test_payload_caps_pips_but_not_the_count(monkeypatch):
     monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: snap)
 
     p = mod.codex_payload()
-    assert p["rc"] == 9
-    assert len(p["rl"]) == mod.MAX_CREDIT_PIPS
+    assert p["rc"] == 9 and p["rl"] == 10
 
 
 def test_unknown_lifetimes_send_no_rl_key(monkeypatch):
-    """Detail endpoint down: send the count, and let the device draw the pips
-    as lifetime-unknown rather than inventing a full life for them."""
+    """Detail endpoint down: send the count, and let the device leave the
+    track empty rather than inventing a life for the credit."""
     from daemon.collectors import UsageSnapshot, Window
     import daemon.claude_usage_daemon as mod
 
@@ -509,4 +516,4 @@ def test_unknown_lifetimes_send_no_rl_key(monkeypatch):
     monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: snap)
 
     p = mod.codex_payload()
-    assert p["rc"] == 2 and "rl" not in p and "rx" not in p
+    assert p["rc"] == 2 and "rl" not in p and "rm" not in p

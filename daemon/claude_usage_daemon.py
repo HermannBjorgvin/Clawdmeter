@@ -762,11 +762,6 @@ async def poll_active(selector: PlanSelector = _SELECTOR) -> tuple[dict | None, 
 
 _CODEX = CodexCollector()
 
-# How many reset credits the device can draw as individual pips. Matches
-# MAX_CREDIT_PIPS in firmware/src/data.h -- beyond this the card's number
-# still reports the true count, there just is not room to draw them all.
-MAX_CREDIT_PIPS = 6
-
 
 def codex_payload() -> dict | None:
     """Codex usage in the device's wire shape, or None when unavailable.
@@ -859,19 +854,18 @@ def codex_payload() -> dict | None:
         "has_s": s_pct is not None,
         "has_w": w_pct is not None,
     }
-    # Reset credits: grants that restore a spent quota. Count, the soonest
-    # expiry formatted host-side (the device has no date handling and its
-    # fonts are ASCII-only), and how much of each credit's life is left so the
-    # device can draw them draining rather than just print a number. Soonest
-    # expiry first, and capped -- the device only has room for a few, and past
-    # that the count carries the truth.
+    # Reset credits: grants that restore a spent quota. Count, minutes until
+    # the soonest expiry (a duration, like sr/wr, so the device formats it with
+    # the same "in 4d 21h" line as a quota reset -- it has no date handling),
+    # and how much of that credit's granted life is left, which the card draws
+    # as a bar filling toward the expiry. Only the head of the queue is sent:
+    # it is the one you spend first, and it is the only clock the card shows.
     if snap.reset_credits:
         payload["rc"] = snap.reset_credits
         if snap.reset_credits_expire:
-            payload["rx"] = datetime.datetime.fromtimestamp(
-                snap.reset_credits_expire).strftime("%b %-d")
+            payload["rm"] = max(0, int(snap.reset_credits_expire - time.time()) // 60)
         if snap.reset_credit_life:
-            payload["rl"] = list(snap.reset_credit_life[:MAX_CREDIT_PIPS])
+            payload["rl"] = snap.reset_credit_life[0]
 
     # Pill overrides. Short form only -- the pill is a few characters wide, so
     # "GPT-5.3-Codex-Spark" would never fit and "Spark" is the distinguishing
