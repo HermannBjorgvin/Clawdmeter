@@ -170,8 +170,11 @@ def test_absent_window_is_reported_absent_not_zero(monkeypatch):
     monkeypatch.setattr(mod._CODEX, "collect_blocking",
                         lambda: _snap(**{WINDOW_7D: Window(83.0, resets_in=6891 * 60)}))
     p = mod.codex_payload()
-    assert (p["w"], p["wr"], p["has_w"]) == (83, 6891, True)
-    assert p["has_s"] is False and p["sr"] == -1
+    # The lone quota takes the prominent panel (see the single-quota test);
+    # what matters here is that the slot WITHOUT a quota is marked absent
+    # rather than reported as 0%.
+    assert (p["s"], p["sr"], p["has_s"]) == (83, 6891, True)
+    assert p["has_w"] is False
 
 
 def test_both_windows_map_through(monkeypatch):
@@ -290,7 +293,7 @@ def test_codex_survives_a_dead_claude_token(monkeypatch):
     if codex:
         beat["x"] = codex
     assert beat["ok"] is False          # Claude mode still says "No data"
-    assert beat["x"]["w"] == 85         # Codex mode stays live
+    assert beat["x"]["s"] == 85         # Codex mode stays live (lone quota, top slot)
 
 
 def test_expired_log_window_is_not_carried_forward(tmp_path):
@@ -337,3 +340,23 @@ def test_stale_log_record_is_refused(tmp_path):
     old = time.time() - (MAX_LOG_AGE_S + 600)
     os.utime(path, (old, old))
     assert collect_via_logs(tmp_path) is None
+
+
+def test_single_quota_is_promoted_to_the_prominent_panel(monkeypatch):
+    """OpenAI dropped additional_rate_limits in Sept 2026.
+
+    Pro accounts then report one weekly window and nothing else, which under
+    the old 5h-on-top mapping put a dash in the prominent panel and the only
+    real number underneath it. The lone quota now takes the top slot and the
+    second is marked absent so the device drops the empty card.
+    """
+    from daemon.collectors import UsageSnapshot, Window
+    import daemon.claude_usage_daemon as mod
+
+    snap = UsageSnapshot(provider="codex", plan="pro",
+                         windows={WINDOW_7D: Window(26.0, resets_in=434649)})
+    monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: snap)
+
+    p = mod.codex_payload()
+    assert (p["s"], p["has_s"], p["sm"]) == (26, True, "Weekly")
+    assert p["has_w"] is False          # device hides the second card

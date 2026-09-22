@@ -17,6 +17,18 @@
 #   - install.sh can detect your ~/.claude* dirs and fill this in for you.
 # config_dirs = ~/.claude, ~/.claude-work
 
+# Seconds between Anthropic API polls (Linux daemon). Default 60. Minimum 10.
+# The firmware marks data older than 90s as stale and only updates its "resets
+# in" countdown when a payload lands, so anything above ~80 relies on the
+# heartbeat below to keep the display live.
+# poll_interval = 60
+
+# Seconds between heartbeat replays of the last payload while waiting for the
+# next API poll (Linux daemon). The replay ages the reset countdowns and clock
+# so the display stays accurate without an API call. Default 60. Minimum 10.
+# Set it >= poll_interval to disable.
+# heartbeat_interval = 60
+
 # Play a sound on the device when your 5-hour session limit resets, so you know
 # you can use Claude again without watching the screen.
 #   off = silent (default)

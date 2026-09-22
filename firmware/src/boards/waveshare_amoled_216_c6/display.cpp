@@ -1,15 +1,19 @@
 #include "../../hal/display_hal.h"
+#include "../../hal/imu_hal.h"
+#include "../../brightness.h"
 #include "board.h"
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
+#include <lvgl.h>
 
 // C6 AMOLED-2.16 uses a CO5300 AMOLED panel (per the Waveshare
 // ESP32-C6-Touch-AMOLED-2.16 spec) — the same controller as the S3
 // AMOLED-2.16 sibling, so we drive it with Arduino_CO5300 and reuse that
 // class's vendor-correct init rather than the SH8601 class + a hand-patched
 // sequence. LCD reset is not wired to any MCU GPIO; the panel boots from its
-// internal power-on reset (rst = GFX_NOT_DEFINED). Rotation is disabled (no
-// PSRAM headroom for a rotation strip).
+// internal power-on reset (rst = GFX_NOT_DEFINED). Auto-rotation is done by
+// the panel itself through MADCTL (no CPU rotation strip, so no RAM cost):
+// each IMU quadrant maps to a MADCTL value below and LVGL simply redraws.
 
 static Arduino_DataBus* bus = nullptr;
 static Arduino_CO5300*  gfx = nullptr;
@@ -67,8 +71,52 @@ void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
     if (gfx) gfx->draw16bitRGBBitmap(x, y, (uint16_t*)pixels, w, h);
 }
 
+// MADCTL per IMU quadrant. Base orientation is MV|ML (0x30, see
+// send_panel_driving_init). A 90° step toggles MV and mirrors one axis;
+// 180° mirrors both. ML (0x10) is kept in all four.
+// Measured on hardware: upright on the desk stand the IMU reads gravity on +Y
+// (quadrant 3), and that is the orientation the base MADCTL (0x30) is tuned
+// for. 0x90 rotates the image 90° CCW relative to base, 0x50 90° CW, 0xF0 180°.
+//   q3 (upright):        MV|ML         0x30
+//   q1 (upside down):    MV|MX|MY|ML   0xF0
+//   q2 / q0 (on a side): MY|ML 0x90 / MX|ML 0x50
+static const uint8_t MADCTL_BY_QUADRANT[4] = { 0x50, 0xF0, 0x90, 0x30 };
+
+static void apply_rotation(uint8_t q) {
+    if (!bus) return;
+    bus->beginWrite();
+    bus->writeC8D8(0x36, MADCTL_BY_QUADRANT[q & 3]);
+    bus->endWrite();
+}
+
+// On rotation change: blank, switch MADCTL, force a full LVGL redraw at the
+// new orientation, then ramp brightness back up over ~125 ms (same feel as
+// the S3 port).
 void display_hal_tick(void) {
-    // No rotation cycle on this board.
+    static uint8_t  last_rotation = 0;
+    static uint8_t  ramp_step = 0;     // 0=idle, 1..4=ramping
+    static uint32_t ramp_last = 0;
+
+    uint8_t rot = imu_hal_rotation_quadrant();
+    if (rot != last_rotation) {
+        display_hal_set_brightness(0);
+        last_rotation = rot;
+        apply_rotation(rot);
+        lv_obj_invalidate(lv_screen_active());
+        ramp_step = 1;
+        return;
+    }
+
+    if (ramp_step == 0) return;
+    uint32_t now = millis();
+    if (now - ramp_last < 25) return;
+    ramp_last = now;
+
+    static const uint8_t pct[] = {30, 60, 85, 100};
+    uint8_t target = brightness_get();
+    display_hal_set_brightness((uint8_t)(((uint16_t)target * pct[ramp_step - 1]) / 100));
+    if (ramp_step >= 4) ramp_step = 0;
+    else                ramp_step++;
 }
 
 // CO5300 requires even-aligned flush regions.

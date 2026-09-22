@@ -817,8 +817,20 @@ def codex_payload() -> dict | None:
                 if label in windows:
                     return windows[label]
             return None
-        top, top_label = anywhere(WINDOW_5H), None
-        bottom, bottom_label = anywhere(WINDOW_7D), None
+        five, week = anywhere(WINDOW_5H), anywhere(WINDOW_7D)
+        if five is None and week is not None:
+            # One quota and nothing to pair it with. OpenAI dropped
+            # additional_rate_limits (the GPT-5.3-Codex-Spark bucket) in
+            # September 2026, leaving Pro accounts with a single weekly
+            # window -- so the old 5h-on-top mapping put a dash in the
+            # prominent panel and the only real number underneath it.
+            # Promote the number and leave the second slot absent; the device
+            # drops the empty card rather than drawing a dash in it.
+            top, top_label = week, "Weekly"
+            bottom, bottom_label = None, None
+        else:
+            top, top_label = five, None
+            bottom, bottom_label = week, None
 
     def wire(w):
         if w is None:

@@ -2,14 +2,29 @@
 # Claude Usage Tracker Daemon (BLE)
 # Reads Claude Code OAuth token, polls usage via API, sends to ESP32 over BLE GATT.
 # Auto-connects and reconnects to the Clawdmeter BLE device.
-# Dependencies: curl, awk, bluetoothctl
+# Dependencies: curl, awk, bluetoothctl, busctl, dbus-monitor, python3, setsid, stdbuf
 
 DEVICE_NAME="Clawdmeter"
 DEVICE_MAC="${DEVICE_MAC:-}"  # auto-discovered if empty
 SERVICE_UUID="4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID="4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID="4c41555a-4465-7669-6365-000000000004"
-POLL_INTERVAL=60
+# The POLL_INTERVAL env var seeds the default that `poll_interval` in the
+# config file overrides. Validate it the same way as the config value: an
+# integer, clamped to >= 10s; anything else falls back to 60.
+poll_interval_default_from_env() {
+    local val="${POLL_INTERVAL:-}"
+    if [[ "$val" =~ ^[0-9]+$ ]]; then
+        (( val < 10 )) && val=10
+        echo "$val"
+    else
+        [ -n "$val" ] && echo "Ignoring invalid POLL_INTERVAL='$val' (need an integer >= 10); using 60" >&2
+        echo 60
+    fi
+}
+POLL_INTERVAL_DEFAULT=$(poll_interval_default_from_env)
+POLL_INTERVAL=$POLL_INTERVAL_DEFAULT
+HEARTBEAT_INTERVAL_DEFAULT=60
 TICK=5
 SAVED_MAC_FILE="$HOME/.config/claude-usage-monitor/ble-address"
 CONFIG_FILE="$HOME/.config/claude-usage-monitor/config"
@@ -18,6 +33,9 @@ NUDGE_MIN_INTERVAL=900   # seconds between token-refresh nudges (see nudge_token
 NUDGE_TIMEOUT=120        # hard cap on one nudge
 NUDGE_MODEL="claude-haiku-4-5-20251001"
 LAST_NUDGE=0
+LAST_PAYLOAD=""      # last payload written to the device (replayed by the heartbeat)
+LAST_PAYLOAD_TS=0    # epoch when LAST_PAYLOAD's numbers were fetched from the API
+LAST_WRITE_TS=0      # epoch of the last GATT write of any kind (poll or heartbeat)
 DBUS_DEST="org.bluez"
 NOTIFY_PID=""
 
@@ -70,6 +88,76 @@ read_token_for() {
     local dir="$1"
     grep -o '"claudeAiOauth"[[:space:]]*:[[:space:]]*{[^}]*}' "$dir/.credentials.json" 2>/dev/null \
         | grep -o '"accessToken":"[^"]*"' | head -1 | cut -d'"' -f4
+}
+
+# Read the `poll_interval` option (seconds between Anthropic API polls).
+# Falls back to $POLL_INTERVAL_DEFAULT. Clamped to >= 10s. The firmware treats
+# data older than 90s as stale (DATA_FRESH_MS in ui.cpp); polling slower than
+# that is fine as long as the heartbeat below keeps writing in between.
+read_poll_interval() {
+    local val=""
+    if [ -f "$CONFIG_FILE" ]; then
+        val=$(grep -E '^[[:space:]]*poll_interval[[:space:]]*=' "$CONFIG_FILE" | tail -1 \
+            | tr -d '\r' \
+            | sed -E 's/^[[:space:]]*poll_interval[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//')
+    fi
+    if [[ "$val" =~ ^[0-9]+$ ]]; then
+        (( val < 10 )) && val=10
+        echo "$val"
+    else
+        echo "$POLL_INTERVAL_DEFAULT"
+    fi
+}
+
+# Read the `heartbeat_interval` option (seconds between replays of the last
+# payload while waiting for the next API poll). Default 60, clamped to >= 10.
+# The firmware only refreshes its "resets in" labels and its freshness stamp
+# when a payload lands (there is no on-device timer and no tap-to-refresh), so
+# the heartbeat is what keeps the display alive when poll_interval > ~80s.
+# Set it >= poll_interval to disable.
+read_heartbeat_interval() {
+    local val=""
+    if [ -f "$CONFIG_FILE" ]; then
+        val=$(grep -E '^[[:space:]]*heartbeat_interval[[:space:]]*=' "$CONFIG_FILE" | tail -1 \
+            | tr -d '\r' \
+            | sed -E 's/^[[:space:]]*heartbeat_interval[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//')
+    fi
+    if [[ "$val" =~ ^[0-9]+$ ]]; then
+        (( val < 10 )) && val=10
+        echo "$val"
+    else
+        echo "$HEARTBEAT_INTERVAL_DEFAULT"
+    fi
+}
+
+# Age a payload by $2 seconds: "sr"/"wr" reset countdowns (minutes) tick down
+# toward 0 and the optional clock epoch "t" advances. Everything else (usage %,
+# status, chime permission flag) is left as fetched. Echoes the adjusted JSON.
+age_payload() {
+    python3 - "$1" "$2" <<'PYEOF'
+import json, sys
+d = json.loads(sys.argv[1]); secs = int(sys.argv[2]); mins = secs // 60
+for k in ("sr", "wr"):
+    if isinstance(d.get(k), int) and d[k] > 0:
+        d[k] = max(d[k] - mins, 0)
+if isinstance(d.get("t"), int) and d["t"] > 0:
+    d["t"] += secs
+print(json.dumps(d, separators=(",", ":")))
+PYEOF
+}
+
+# Replay the last payload, aged by the time since it was fetched, so the
+# device's freshness window (90s in firmware) never lapses between polls.
+heartbeat() {
+    [ -z "$LAST_PAYLOAD" ] && return 1
+    local now aged
+    now=$(date +%s)
+    aged=$(age_payload "$LAST_PAYLOAD" $(( now - LAST_PAYLOAD_TS ))) || return 1
+    [ -z "$aged" ] && return 1
+    log "Heartbeat: $aged"
+    write_gatt "$RX_CHAR_PATH" "$aged" || { log "Heartbeat write failed"; return 1; }
+    LAST_WRITE_TS=$now
+    return 0
 }
 
 # Read the `chime` option from the config file. Echoes one of: off|on.
@@ -371,9 +459,10 @@ build_payload_for_token() {
     fi
 
     local headers
-    headers=$(curl -s -D - -o /dev/null \
+    # The bearer token goes in via a curl config on stdin (-K -) so it never
+    # appears in the process argv (visible to any local user via ps/proc).
+    headers=$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -s -D - -o /dev/null -K - \
         "https://api.anthropic.com/v1/messages" \
-        -H "Authorization: Bearer $token" \
         -H "anthropic-version: 2023-06-01" \
         -H "anthropic-beta: oauth-2025-04-20" \
         -H "Content-Type: application/json" \
@@ -544,6 +633,9 @@ poll() {
     fi
     log "Sending: ${cycle_payload[$best_dir]}"
     write_gatt "$RX_CHAR_PATH" "${cycle_payload[$best_dir]}" || { log "Write failed"; return 1; }
+    LAST_PAYLOAD="${cycle_payload[$best_dir]}"
+    LAST_PAYLOAD_TS=$(date +%s)
+    LAST_WRITE_TS=$LAST_PAYLOAD_TS
     return 0
 }
 
@@ -556,7 +648,13 @@ cleanup() {
 trap cleanup INT TERM
 
 log "=== Claude Usage Tracker Daemon (BLE) ==="
+POLL_INTERVAL=$(read_poll_interval)
 log "Poll interval: ${POLL_INTERVAL}s"
+HEARTBEAT_INTERVAL=$(read_heartbeat_interval)
+log "Heartbeat interval: ${HEARTBEAT_INTERVAL}s"
+if (( POLL_INTERVAL > 80 && HEARTBEAT_INTERVAL > 80 )); then
+    log "Warning: neither poll_interval nor heartbeat_interval is <= 80s; the firmware marks data stale after 90s"
+fi
 
 BACKOFF=1
 
@@ -601,12 +699,24 @@ while true; do
     LAST_POLL=0
     while is_connected; do
         NOW=$(date +%s)
+        NEW_INTERVAL=$(read_poll_interval)
+        if (( NEW_INTERVAL != POLL_INTERVAL )); then
+            POLL_INTERVAL=$NEW_INTERVAL
+            log "Poll interval changed: ${POLL_INTERVAL}s"
+        fi
+        NEW_HB=$(read_heartbeat_interval)
+        if (( NEW_HB != HEARTBEAT_INTERVAL )); then
+            HEARTBEAT_INTERVAL=$NEW_HB
+            log "Heartbeat interval changed: ${HEARTBEAT_INTERVAL}s"
+        fi
         if [ -f "$REFRESH_FLAG" ] || (( NOW - LAST_POLL >= POLL_INTERVAL )); then
             if [ -f "$REFRESH_FLAG" ]; then
                 log "Refresh requested by device"
                 rm -f "$REFRESH_FLAG"
             fi
             poll && LAST_POLL=$NOW
+        elif (( HEARTBEAT_INTERVAL < POLL_INTERVAL && NOW - LAST_WRITE_TS >= HEARTBEAT_INTERVAL )); then
+            heartbeat
         fi
         sleep "$TICK"
     done

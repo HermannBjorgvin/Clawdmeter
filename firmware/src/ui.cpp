@@ -720,7 +720,13 @@ void ui_update(const UsageData* data) {
         lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
-        if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+        // A provider with only one quota gets one card. Drawing a second card
+        // whose only content is a dash reads as a fault rather than as "this
+        // plan has no such limit".
+        if (panel_weekly) {
+            if (data->has_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+            else                  lv_obj_add_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
     char buf[48];
