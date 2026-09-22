@@ -360,3 +360,37 @@ def test_single_quota_is_promoted_to_the_prominent_panel(monkeypatch):
     p = mod.codex_payload()
     assert (p["s"], p["has_s"], p["sm"]) == (26, True, "Weekly")
     assert p["has_w"] is False          # device hides the second card
+
+
+def test_reset_credits_ride_along_with_count_and_expiry(monkeypatch):
+    """The second card carries reset credits when there is no second quota.
+
+    wham/usage reports only how many credits exist; the expiry comes from the
+    detail endpoint, so the payload carries both a count and a pre-formatted
+    date (the device has no date handling and ASCII-only fonts).
+    """
+    import datetime
+    from daemon.collectors import UsageSnapshot, Window
+    import daemon.claude_usage_daemon as mod
+
+    expiry = datetime.datetime(2026, 10, 3, 19, 29).timestamp()
+    snap = UsageSnapshot(provider="codex", plan="pro",
+                         windows={WINDOW_7D: Window(31.0, resets_in=7177 * 60)},
+                         reset_credits=2, reset_credits_expire=expiry)
+    monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: snap)
+
+    p = mod.codex_payload()
+    assert p["rc"] == 2 and p["rx"] == "Oct 3"
+
+
+def test_no_credits_means_no_keys(monkeypatch):
+    """A provider without reset credits sends nothing, so the card stays gone."""
+    from daemon.collectors import UsageSnapshot, Window
+    import daemon.claude_usage_daemon as mod
+
+    snap = UsageSnapshot(provider="codex", plan="pro",
+                         windows={WINDOW_7D: Window(31.0, resets_in=600)})
+    monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: snap)
+
+    p = mod.codex_payload()
+    assert "rc" not in p and "rx" not in p

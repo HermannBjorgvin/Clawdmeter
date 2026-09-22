@@ -58,6 +58,12 @@ class UsageSnapshot:
     # merging them would report one limit's headroom against another's usage.
     model_windows: dict[str, dict[str, Window]] = field(default_factory=dict)
 
+    # Grants that restore a spent quota, where the provider offers them.
+    # Codex hands these out as "full resets"; Claude has no equivalent, so the
+    # fields stay at their defaults and the device shows nothing.
+    reset_credits: int = 0
+    reset_credits_expire: float | None = None   # soonest expiry, epoch seconds
+
     source: str = "unknown"
 
     # Set by the collector, never inferred from stale_seconds: a log file

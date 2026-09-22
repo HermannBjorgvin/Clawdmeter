@@ -34,6 +34,12 @@ struct UsageData {
     // the account's, e.g. "Spark". The pill says so instead of "Current".
     char session_model[13];
     char weekly_model[13];
+
+    // Grants that restore a spent quota, where the provider offers them. When
+    // a provider meters only one window the second card has nothing to show,
+    // so it carries these instead of sitting empty.
+    int  reset_credits;          // 0 = none / provider has no such thing
+    char reset_credits_exp[10];  // soonest expiry, pre-formatted e.g. "Oct 3"
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
 };

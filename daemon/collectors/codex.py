@@ -30,6 +30,7 @@ never a token refresh -- the Codex CLI owns that token.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import os
 import time
@@ -40,6 +41,7 @@ from pathlib import Path
 from . import UsageSnapshot, Window, WINDOW_5H, WINDOW_7D
 
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 DEFAULT_CODEX_DIR = Path(os.path.expanduser("~/.codex"))
 # The endpoint is slow even when healthy -- successful calls measured at 3-4s,
 # and during a degraded spell 6 of 8 attempts exceeded 10s. A short timeout
@@ -72,6 +74,47 @@ def _read_auth(codex_dir: Path) -> tuple[str, str | None] | None:
         return None
     token = tokens.get("access_token")
     return (token, tokens.get("account_id")) if token else None
+
+
+# The usage endpoint reports how MANY reset credits exist but not when they
+# expire; only the detail endpoint carries expires_at. That is a second slow
+# request, and an expiry date moves at most once a day, so it is cached.
+_CREDITS_TTL_S = 3600
+_credits_cache: dict[str, object] = {"at": 0.0, "soonest": None}
+
+
+def _soonest_credit_expiry(token: str, account_id: str | None) -> float | None:
+    """Epoch of the first reset credit to expire, or None."""
+    now = time.time()
+    if now - float(_credits_cache["at"]) < _CREDITS_TTL_S:
+        return _credits_cache["soonest"]
+
+    req = urllib.request.Request(CREDITS_URL, method="GET")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Accept", "application/json")
+    req.add_header("User-Agent", "petmeter")
+    req.add_header("OpenAI-Beta", "codex-1")
+    req.add_header("originator", "Codex Desktop")
+    if account_id:
+        req.add_header("ChatGPT-Account-Id", account_id)
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            raw = json.loads(resp.read().decode())
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError):
+        return _credits_cache["soonest"]     # keep the last known value
+
+    stamps = []
+    for c in raw.get("credits") or []:
+        if c.get("status") != "available" or not c.get("expires_at"):
+            continue
+        try:
+            stamps.append(datetime.datetime.fromisoformat(
+                c["expires_at"].replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            continue
+    _credits_cache["at"] = now
+    _credits_cache["soonest"] = min(stamps) if stamps else None
+    return _credits_cache["soonest"]
 
 
 def _windows_from_endpoint(rate_limit: dict) -> dict[str, Window]:
@@ -131,11 +174,16 @@ def collect_via_oauth(codex_dir: Path = DEFAULT_CODEX_DIR) -> UsageSnapshot | No
         if name and w:
             model_windows[name] = w
 
+    credits = raw.get("rate_limit_reset_credits") or {}
+    count = int(credits.get("available_count") or 0)
+
     return UsageSnapshot(
         provider="codex",
         plan=raw.get("plan_type"),
         windows=windows,
         model_windows=model_windows,
+        reset_credits=count,
+        reset_credits_expire=_soonest_credit_expiry(token, account_id) if count else None,
         source="oauth:wham/usage",
         live=True,
         stale_seconds=0,

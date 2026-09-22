@@ -122,6 +122,19 @@ Codex mode stays live — an expired Claude token says nothing about Codex.
 Every unit test passed while the device never received an `x` key; only the
 live daemon log caught it. `test_poll_active_itself_merges_codex` guards this.
 
+### Reset credits
+
+`wham/usage` reports how many reset credits exist (`rate_limit_reset_credits.
+available_count`) but **not when they expire** — only
+`GET .../wham/rate-limit-reset-credits` carries `expires_at` per credit. That
+is a second slow request against an endpoint already measured at 3–4s, and an
+expiry date moves at most once a day, so the collector caches it for an hour
+and keeps the last known value when the call fails.
+
+They reach the device as `rc` (count) and `rx` (soonest expiry, pre-formatted
+host-side, e.g. `"Oct 3"`) — the firmware has no date handling and its fonts
+are ASCII-only.
+
 ### Codex panel mapping
 
 A Codex Pro account has no account 5-hour window, so the top panel cannot
@@ -135,6 +148,18 @@ spent, and it is the account limit that actually stops you. An earlier
 version sourced both panels from Spark for consistency and produced an
 accurate, useless screen: `0% / 0%` at the moment the binding limit was at
 84%.
+
+**Since September 2026 this is moot on Pro:** OpenAI dropped
+`additional_rate_limits` entirely, so the account reports one weekly window and
+nothing else. A lone quota takes the top slot labelled `"Weekly"`, and the
+second card carries reset credits instead — count where the percentage goes,
+`"Resets"` in the pill, expiry underneath, no bar since there is no proportion
+to draw. With neither a second quota nor credits, the card is hidden outright:
+a card whose only content is a dash reads as a fault, not as "this plan has no
+such limit".
+
+`render_weekly_face()` owns those labels and runs after that branch, so it
+stands down when the card is showing credits.
 
 ---
 

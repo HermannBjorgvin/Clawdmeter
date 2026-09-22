@@ -720,12 +720,38 @@ void ui_update(const UsageData* data) {
         lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
-        // A provider with only one quota gets one card. Drawing a second card
-        // whose only content is a dash reads as a fault rather than as "this
-        // plan has no such limit".
+        // A provider with only one quota leaves the second card with nothing to
+        // show. Rather than draw a card whose only content is a dash -- which
+        // reads as a fault -- give the space to reset credits when the provider
+        // grants them, and drop the card entirely when it does not.
+        const bool show_credits = !data->has_weekly && data->reset_credits > 0;
         if (panel_weekly) {
-            if (data->has_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
-            else                  lv_obj_add_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+            if (data->has_weekly || show_credits)
+                lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+            else
+                lv_obj_add_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (show_credits) {
+            // Same card anatomy as a quota -- count where the percentage goes,
+            // pill naming it, detail line underneath -- minus the bar, since
+            // there is no proportion to draw.
+            lv_label_set_text_fmt(lbl_weekly_pct, "%d", data->reset_credits);
+            lv_label_set_text(lbl_weekly_label, "Resets");
+            if (data->reset_credits_exp[0]) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "Expires %s", data->reset_credits_exp);
+                lv_label_set_text(lbl_weekly_reset, buf);
+            } else {
+                lv_label_set_text(lbl_weekly_reset, "Available");
+            }
+            // With no bar, the detail line would otherwise sit below a gap
+            // where one used to be, which reads as something failing to load.
+            // Close the gap by putting it in the bar's row.
+            if (bar_weekly) lv_obj_add_flag(bar_weekly, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(lbl_weekly_reset, 0, L.usage_bar_y);
+        } else {
+            if (bar_weekly) lv_obj_clear_flag(bar_weekly, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(lbl_weekly_reset, 0, L.usage_reset_y);
         }
     }
 
@@ -786,7 +812,10 @@ void ui_update(const UsageData* data) {
         snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Resets %s#",
                  pace_hex, pace_text, data->reset_date);
         lv_label_set_text(lbl_weekly_reset, buf);
-    } else {
+    } else if (!(!data->has_weekly && data->reset_credits > 0)) {
+        // render_weekly_face() owns these same labels and runs after the
+        // branch above, so it has to stand down when that branch has filled
+        // the card with reset credits instead of a quota.
         render_weekly_face(true);
     }
 }

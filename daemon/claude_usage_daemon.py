@@ -7,6 +7,7 @@ bleak (CoreBluetooth backend on macOS).
 """
 
 import asyncio
+import datetime
 import getpass
 import json
 import os
@@ -853,6 +854,15 @@ def codex_payload() -> dict | None:
         "has_s": s_pct is not None,
         "has_w": w_pct is not None,
     }
+    # Reset credits: grants that restore a spent quota. Count plus the soonest
+    # expiry, formatted host-side -- the device has no date handling and its
+    # fonts are ASCII-only.
+    if snap.reset_credits:
+        payload["rc"] = snap.reset_credits
+        if snap.reset_credits_expire:
+            payload["rx"] = datetime.datetime.fromtimestamp(
+                snap.reset_credits_expire).strftime("%b %-d")
+
     # Pill overrides. Short form only -- the pill is a few characters wide, so
     # "GPT-5.3-Codex-Spark" would never fit and "Spark" is the distinguishing
     # part. Absent means the device keeps its default label.

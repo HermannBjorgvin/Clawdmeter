@@ -133,6 +133,8 @@ static void parse_provider(JsonObjectConst doc, UsageData* out) {
     out->has_weekly  = doc["has_w"] | true;
     strlcpy(out->session_model, doc["sm"] | "", sizeof(out->session_model));
     strlcpy(out->weekly_model,  doc["wm"] | "", sizeof(out->weekly_model));
+    out->reset_credits = doc["rc"] | 0;
+    strlcpy(out->reset_credits_exp, doc["rx"] | "", sizeof(out->reset_credits_exp));
     out->ok = doc["ok"] | false;
     out->valid = true;
 }
