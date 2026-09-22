@@ -24,16 +24,32 @@ switch is instant rather than waiting for the next poll.
 | Provider | Source | Screen |
 |----------|--------|--------|
 | **Claude** | Claude Code's OAuth token → `anthropic-ratelimit-unified-*` response headers | Warm palette, serif title, Clawd. The Weekly card flips between all-models and any scoped-model allowance (e.g. Fable). |
-| **Codex** | Codex CLI's OAuth token → `chatgpt.com/backend-api/wham/usage`, with the session rollout logs as an offline fallback | Neutral palette, sans throughout, and any of the eight ChatGPT pets. Shows the model's weekly quota above the account's. |
+| **Codex** | Codex CLI's OAuth token → `chatgpt.com/backend-api/wham/usage`, with the session rollout logs as an offline fallback | Neutral palette, sans throughout, and any of the eight ChatGPT pets. Weekly quota on top; the second card carries reset credits when the plan meters only one window. |
 
 |                    Claude                     |                   Codex                    |
 | :-------------------------------------------: | :----------------------------------------: |
 | ![Claude](screenshots/petmeter-claude.png)     | ![Codex](screenshots/petmeter-codex.png)   |
-| Serif display face, warm palette, Clawd. The Weekly card flips between all-models and any scoped-model allowance. | Sans throughout, neutral palette, your chosen pet. Model weekly above account weekly. |
+| Serif display face, warm palette, Clawd. The Weekly card flips between all-models and any scoped-model allowance. | Sans throughout, neutral palette, your chosen pet. Weekly quota above, reset credits below. |
 
 Tap the left button to change pet — eight ship with the firmware:
 
 ![Pets](screenshots/petmeter-pets.png)
+
+### Reset credits
+
+A plan that meters only one window leaves the second card with no quota to
+show. Where the provider hands out grants that wipe a spent limit — Codex
+calls them full resets — the card carries those instead, and reads exactly
+like the quota card above it: the number is how many you hold, the bar is how
+much of a window has elapsed, the line counts down to the moment it ends.
+
+|                          Holding three                           |                             About to lapse                             |
+| :--------------------------------------------------------------: | :--------------------------------------------------------------------: |
+| ![Reset credits](screenshots/petmeter-credits.png)                | ![Expiring credit](screenshots/petmeter-credits-expiring.png)          |
+| The window is the soonest-expiring credit's granted life — the one you spend first | Past 90% elapsed it goes red, the same threshold a quota bar uses. A credit is lost by *not* spending it |
+
+With neither a second quota nor credits, the card is hidden rather than drawn
+with a dash in it.
 
 Adding a provider means writing one collector against the interface in
 [`daemon/collectors/`](daemon/collectors/__init__.py) — a normalized

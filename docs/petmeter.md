@@ -170,6 +170,8 @@ second card carries reset credits instead — count where the percentage goes,
 credits, the card is hidden outright: a card whose only content is a dash
 reads as a fault, not as "this plan has no such limit".
 
+![The Codex screen on a single-quota plan: one weekly quota, reset credits below](../screenshots/petmeter-codex.png)
+
 **The credit card (`render_credit_card`).** The card keeps a quota card's exact
 anatomy and, more importantly, a quota card's *reading*: the number is how many
 you hold, the bar is how much of a window has elapsed, the line under it counts
@@ -179,6 +181,8 @@ so the bar fills toward its expiry exactly as the quota bar above fills toward
 its limit, and shares `pct_color()`'s amber/red thresholds (75% / 90% elapsed,
 about a week and about three days on a 30-day grant). A credit is lost by not
 spending it, so a red bar means the same thing on both cards: act now.
+
+![A credit about to lapse](../screenshots/petmeter-credits-expiring.png)
 
 The line reads `Next expires in 11d` (or `Expires in 2d` when only one is held;
 hours and minutes only inside the last day). Whole days, not `11d 3h`: a
