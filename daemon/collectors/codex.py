@@ -42,6 +42,7 @@ from . import UsageSnapshot, Window, WINDOW_5H, WINDOW_7D
 
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+HISTORY_URL = CREDITS_URL + "/history"
 DEFAULT_CODEX_DIR = Path(os.path.expanduser("~/.codex"))
 # The endpoint is slow even when healthy -- successful calls measured at 3-4s,
 # and during a degraded spell 6 of 8 attempts exceeded 10s. A short timeout
@@ -76,25 +77,53 @@ def _read_auth(codex_dir: Path) -> tuple[str, str | None] | None:
     return (token, tokens.get("account_id")) if token else None
 
 
-# The usage endpoint reports how MANY reset credits exist but not when they
-# were granted or when they expire; only the detail endpoint carries
-# granted_at/expires_at. That is a second slow request, and neither stamp ever
-# moves once a credit is issued, so the pair is cached -- the RAW stamps, not
-# anything derived from them, because the device wants how much of each
-# credit's life is left and that has to be recomputed against the clock every
-# poll or it would freeze for an hour at a time.
+# The usage endpoint reports how MANY reset credits are available but nothing
+# about them. Two more endpoints fill the card in:
+#
+#   .../rate-limit-reset-credits          granted_at/expires_at per credit
+#   .../rate-limit-reset-credits/history  granted and used events, inside a
+#                                         server-defined trailing window
+#                                         (window_start..as_of, 30 days today)
+#
+# Together they give the ledger the device draws: what you still hold, plus
+# what you spent in the window, which is how many resets the window gave you
+# to work with. A credit used inside the window was often granted before it,
+# so "granted in window" does NOT reconcile with what you hold -- available
+# plus used is the only arithmetic that does.
+#
+# Both are slow, and neither moves on its own, so they are cached for an hour.
 _CREDITS_TTL_S = 3600
-_credits_cache: dict[str, object] = {"at": 0.0, "stamps": ()}
+_credits_cache: dict[str, object] = {"at": 0.0, "stamps": (), "used": 0,
+                                     "available": None}
 
 
-def _credit_stamps(token: str,
-                   account_id: str | None) -> tuple[tuple[float, float], ...]:
-    """(granted, expires) epochs per available credit, soonest expiry first."""
+def _credit_state(token: str, account_id: str | None,
+                  available: int) -> tuple[tuple[tuple[float, float], ...], int]:
+    """((granted, expires) per held credit, soonest first), credits spent.
+
+    `available` is the live count from wham/usage, and a change in it busts the
+    cache early: spending a credit moves it from one side of the ledger to the
+    other, and letting the "available" side drop an hour before the "used" side
+    ticks up would leave the card briefly disagreeing with itself.
+    """
     now = time.time()
-    if now - float(_credits_cache["at"]) < _CREDITS_TTL_S:
-        return _credits_cache["stamps"]
+    fresh = now - float(_credits_cache["at"]) < _CREDITS_TTL_S
+    if fresh and _credits_cache["available"] == available:
+        return _credits_cache["stamps"], int(_credits_cache["used"])
 
-    req = urllib.request.Request(CREDITS_URL, method="GET")
+    stamps = _fetch_stamps(token, account_id)
+    if stamps is None:                       # endpoint down: keep what we had
+        return _credits_cache["stamps"], int(_credits_cache["used"])
+    used = _fetch_used(token, account_id)
+    if used is None:
+        used = int(_credits_cache["used"])
+
+    _credits_cache.update(at=now, stamps=stamps, used=used, available=available)
+    return stamps, used
+
+
+def _get_json(url: str, token: str, account_id: str | None) -> dict | None:
+    req = urllib.request.Request(url, method="GET")
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Accept", "application/json")
     req.add_header("User-Agent", "petmeter")
@@ -104,41 +133,41 @@ def _credit_stamps(token: str,
         req.add_header("ChatGPT-Account-Id", account_id)
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-            raw = json.loads(resp.read().decode())
+            return json.loads(resp.read().decode())
     except (urllib.error.URLError, json.JSONDecodeError, TimeoutError):
-        return _credits_cache["stamps"]     # keep the last known stamps
+        return None
 
+
+def _fetch_stamps(token: str,
+                  account_id: str | None) -> tuple[tuple[float, float], ...] | None:
+    """(granted, expires) epochs per available credit, soonest expiry first."""
+    raw = _get_json(CREDITS_URL, token, account_id)
+    if raw is None:
+        return None
     out = []
     for c in raw.get("credits") or []:
         if c.get("status") != "available":
             continue
         try:
-            granted = _iso_epoch(c["granted_at"])
-            expires = _iso_epoch(c["expires_at"])
+            out.append((_iso_epoch(c["granted_at"]), _iso_epoch(c["expires_at"])))
         except (KeyError, TypeError, ValueError):
             continue
-        out.append((granted, expires))
     out.sort(key=lambda pair: pair[1])
-    _credits_cache["at"] = now
-    _credits_cache["stamps"] = tuple(out)
-    return _credits_cache["stamps"]
+    return tuple(out)
+
+
+def _fetch_used(token: str, account_id: str | None) -> int | None:
+    """Credits spent inside the provider's own trailing window."""
+    raw = _get_json(HISTORY_URL, token, account_id)
+    if raw is None:
+        return None
+    return sum(1 for e in raw.get("events") or []
+               if isinstance(e, dict) and e.get("kind") == "used")
 
 
 def _iso_epoch(stamp: str) -> float:
     return datetime.datetime.fromisoformat(
         stamp.replace("Z", "+00:00")).timestamp()
-
-
-def _credit_life(stamps: tuple[tuple[float, float], ...],
-                 now: float | None = None) -> tuple[int, ...]:
-    """Percent of each credit's granted lifetime still left, 0-100."""
-    now = time.time() if now is None else now
-    out = []
-    for granted, expires in stamps:
-        span = expires - granted
-        pct = 100.0 if span <= 0 else (expires - now) / span * 100.0
-        out.append(max(0, min(100, int(round(pct)))))
-    return tuple(out)
 
 
 def _windows_from_endpoint(rate_limit: dict) -> dict[str, Window]:
@@ -200,7 +229,7 @@ def collect_via_oauth(codex_dir: Path = DEFAULT_CODEX_DIR) -> UsageSnapshot | No
 
     credits = raw.get("rate_limit_reset_credits") or {}
     count = int(credits.get("available_count") or 0)
-    stamps = _credit_stamps(token, account_id) if count else ()
+    stamps, used = _credit_state(token, account_id, count)
 
     return UsageSnapshot(
         provider="codex",
@@ -208,8 +237,8 @@ def collect_via_oauth(codex_dir: Path = DEFAULT_CODEX_DIR) -> UsageSnapshot | No
         windows=windows,
         model_windows=model_windows,
         reset_credits=count,
+        reset_credits_used=used,
         reset_credits_expire=stamps[0][1] if stamps else None,
-        reset_credit_life=_credit_life(stamps),
         source="oauth:wham/usage",
         live=True,
         stale_seconds=0,

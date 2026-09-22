@@ -854,18 +854,19 @@ def codex_payload() -> dict | None:
         "has_s": s_pct is not None,
         "has_w": w_pct is not None,
     }
-    # Reset credits: grants that restore a spent quota. Count, minutes until
-    # the soonest expiry (a duration, like sr/wr, so the device formats it with
-    # the same "in 4d 21h" line as a quota reset -- it has no date handling),
-    # and how much of that credit's granted life is left, which the card draws
-    # as a bar filling toward the expiry. Only the head of the queue is sent:
-    # it is the one you spend first, and it is the only clock the card shows.
-    if snap.reset_credits:
+    # Reset credits: grants that restore a spent quota, as a ledger over the
+    # provider's own trailing window -- "rc" still held, "ru" already spent.
+    # The device draws one cell per credit and puts rc+ru in the number, so
+    # the card answers "how many did this window give me, and how many are
+    # left" in one read. "rm" is minutes until the soonest expiry: a duration
+    # like sr/wr, so the device formats it with the same "in 4d 21h" line as a
+    # quota reset rather than needing date handling it does not have.
+    if snap.reset_credits or snap.reset_credits_used:
         payload["rc"] = snap.reset_credits
+        if snap.reset_credits_used:
+            payload["ru"] = snap.reset_credits_used
         if snap.reset_credits_expire:
             payload["rm"] = max(0, int(snap.reset_credits_expire - time.time()) // 60)
-        if snap.reset_credit_life:
-            payload["rl"] = snap.reset_credit_life[0]
 
     # Pill overrides. Short form only -- the pill is a few characters wide, so
     # "GPT-5.3-Codex-Spark" would never fit and "Spark" is the distinguishing

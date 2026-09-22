@@ -228,6 +228,7 @@ static lv_obj_t* lbl_session_pct;
 static lv_obj_t* lbl_session_label;
 static lv_obj_t* lbl_session_reset;
 static lv_obj_t* bar_weekly;
+static lv_obj_t* credit_cells[MAX_CREDIT_CELLS];
 static lv_obj_t* lbl_weekly_pct;
 static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
@@ -579,6 +580,14 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
 
+    // Reset-credit cells occupy the bar's row on a card showing grants. Built
+    // up front and hidden; render_credit_card() sizes them once the count is
+    // known, and only a provider that grants credits ever shows them.
+    for (int i = 0; i < MAX_CREDIT_CELLS; i++) {
+        credit_cells[i] = make_bar(panel_weekly, 0, L.usage_bar_y, L.bar_h, L.bar_h);
+        lv_obj_add_flag(credit_cells[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
     build_pair_group(usage_container);
     build_idle_group(usage_container);
 
@@ -594,35 +603,70 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
 }
 
-// Reset credits on the Weekly card. Same anatomy as a quota card, read the
-// same way: the number is how many you hold, the bar is how much of a window
-// has elapsed, the line under it counts down to the moment it ends. The
-// window here is the soonest-expiring credit's granted life -- the head of
-// the queue, the one you will spend first -- and the bar fills toward its
-// expiry exactly as the quota bar above fills toward its limit, sharing the
-// amber/red thresholds (about a week and about three days on a 30-day grant).
-// A credit is lost by not spending it, so a red bar means the same thing on
-// both cards: act now.
+// Reset credits on the Weekly card, as a ledger of the provider's own
+// trailing window rather than a live count: one cell per credit the window
+// handed out, filled while you still hold it and hollow once it is spent,
+// headed by the total. So the card answers both questions a use-it-or-lose-it
+// grant raises -- how many did I get, how many are left -- in one read, and
+// the answer to the second is just the length of the lit run.
+//
+// Cells are binary on purpose. An earlier version filled each one by how much
+// of its lifetime remained, which made every cell a percentage nobody thinks
+// in and, worse, drained toward red while the quota bar directly above filled
+// toward red. The clock that matters -- when the next one lapses -- is one
+// line down, in the same "in 4d 21h" form the quota card uses.
 static void render_credit_card(const UsageData* data) {
-    lv_label_set_text_fmt(lbl_weekly_pct, "%d", data->reset_credits);
+    const int held = data->reset_credits;
+    const int used = data->reset_credits_used;
+    int total = held + used;
+    if (total > MAX_CREDIT_CELLS) total = MAX_CREDIT_CELLS;
+
+    lv_label_set_text_fmt(lbl_weekly_pct, "%d", held + used);
     lv_label_set_text(lbl_weekly_label, "Resets");
+    if (bar_weekly) lv_obj_add_flag(bar_weekly, LV_OBJ_FLAG_HIDDEN);
 
-    // Life left of the soonest expiry; absent when the daemon could not read
-    // the detail endpoint, in which case the track stays empty rather than
-    // asserting a freshness nothing measured.
-    const bool known = data->reset_credit_life >= 0;
-    const int elapsed = known ? 100 - data->reset_credit_life : 0;
-    lv_bar_set_value(bar_weekly, elapsed, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_weekly, pct_color((float)elapsed), LV_PART_INDICATOR);
+    const int row_w = L.content_w - 2 * L.panel_pad_x;
+    const int gap   = L.small_icons ? 4 : 8;
+    const int span  = row_w - gap * (total - 1);
+    const int base  = (total > 0) ? span / total : 0;
+    // Integer division would leave up to total-1 px of slack and the row would
+    // stop short of the bar on the card above. Hand the remainder out a pixel
+    // at a time instead.
+    const int extra = (total > 0) ? span - base * total : 0;
 
-    char buf[40];
+    int x = 0;
+    for (int i = 0; i < MAX_CREDIT_CELLS; i++) {
+        lv_obj_t* cell = credit_cells[i];
+        if (!cell) continue;
+        if (i >= total) {
+            lv_obj_add_flag(cell, LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        const int w = base + (i < extra ? 1 : 0);
+        lv_obj_invalidate(cell);           // PARTIAL mode: clear the old cell
+        lv_obj_set_pos(cell, x, L.usage_bar_y);
+        lv_obj_set_size(cell, w, L.bar_h);
+        x += w + gap;
+
+        // Held first, so the lit run reads as "what I can still spend"; spent
+        // ones fall in behind it as empty slots.
+        lv_bar_set_value(cell, i < held ? 100 : 0, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(cell, COL_BAR_BG, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(cell, COL_PROGRESS, LV_PART_INDICATOR);
+        lv_obj_clear_flag(cell, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_invalidate(cell);
+    }
+
+    char buf[48];
     const int mins = data->reset_credits_exp_mins;
-    if (mins >= 0) {
-        // With more than one held, the countdown belongs to a specific credit.
-        const char* verb = data->reset_credits > 1 ? "Next expires" : "Expires";
-        // Whole days once there is at least one: a 30-day grant is spent on a
-        // scale of days, and "11d 3h" is both noise and too wide for the
-        // 368 px boards. The last day counts down in hours and minutes.
+    if (held == 0) {
+        // Nothing to spend and nothing to count down to. Say so rather than
+        // leaving the line blank, which reads as a value that failed to load.
+        lv_label_set_text(lbl_weekly_reset, "All used");
+    } else if (mins >= 0) {
+        const char* verb = held > 1 ? "Next expires" : "Expires";
+        // Whole days above a day: a 30-day grant is spent on a scale of days,
+        // and "11d 3h" is both noise and too wide for the 368 px boards.
         if (mins >= 1440) snprintf(buf, sizeof(buf), "%s in %dd", verb, mins / 1440);
         else              format_countdown(verb, mins, buf, sizeof(buf));
         lv_label_set_text(lbl_weekly_reset, buf);
@@ -630,6 +674,19 @@ static void render_credit_card(const UsageData* data) {
         lv_label_set_text(lbl_weekly_reset, "Available");
     }
     lv_obj_set_pos(lbl_weekly_reset, 0, L.usage_reset_y);
+}
+
+// The Weekly card carries credits only when there is no second quota to draw
+// and the window actually handed some out -- spent ones included, since "2,
+// both used" is a real state worth showing.
+static bool has_credits(const UsageData* data) {
+    return !data->has_weekly &&
+           (data->reset_credits > 0 || data->reset_credits_used > 0);
+}
+
+static void hide_credit_cells(void) {
+    for (int i = 0; i < MAX_CREDIT_CELLS; i++)
+        if (credit_cells[i]) lv_obj_add_flag(credit_cells[i], LV_OBJ_FLAG_HIDDEN);
 }
 
 // Draw the Weekly card's current face from the cached payload values. Face 0
@@ -745,6 +802,8 @@ void ui_update(const UsageData* data) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
         lv_obj_set_style_text_font(lbl_session_pct, L.ent_pct_font, 0);
         lv_label_set_text(lbl_session_label, "Spending");
+        hide_credit_cells();         // the Weekly card is a period box here
+        if (bar_weekly) lv_obj_clear_flag(bar_weekly, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
@@ -768,7 +827,7 @@ void ui_update(const UsageData* data) {
         // show. Rather than draw a card whose only content is a dash -- which
         // reads as a fault -- give the space to reset credits when the provider
         // grants them, and drop the card entirely when it does not.
-        const bool show_credits = !data->has_weekly && data->reset_credits > 0;
+        const bool show_credits = has_credits(data);
         if (panel_weekly) {
             if (data->has_weekly || show_credits)
                 lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
@@ -778,6 +837,8 @@ void ui_update(const UsageData* data) {
         if (show_credits) {
             render_credit_card(data);
         } else {
+            hide_credit_cells();
+            if (bar_weekly) lv_obj_clear_flag(bar_weekly, LV_OBJ_FLAG_HIDDEN);
             lv_obj_set_pos(lbl_weekly_reset, 0, L.usage_reset_y);
         }
     }
@@ -839,7 +900,7 @@ void ui_update(const UsageData* data) {
         snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Resets %s#",
                  pace_hex, pace_text, data->reset_date);
         lv_label_set_text(lbl_weekly_reset, buf);
-    } else if (!(!data->has_weekly && data->reset_credits > 0)) {
+    } else if (!has_credits(data)) {
         // render_weekly_face() owns these same labels and runs after the
         // branch above, so it has to stand down when that branch has filled
         // the card with reset credits instead of a quota.
@@ -1026,6 +1087,9 @@ void ui_apply_theme(void) {
     lv_obj_t* bars[] = { bar_session, bar_weekly };
     for (unsigned i = 0; i < sizeof(bars) / sizeof(bars[0]); i++)
         if (bars[i]) lv_obj_set_style_bg_color(bars[i], COL_BAR_BG, LV_PART_MAIN);
+    for (int i = 0; i < MAX_CREDIT_CELLS; i++)
+        if (credit_cells[i])
+            lv_obj_set_style_bg_color(credit_cells[i], COL_BAR_BG, LV_PART_MAIN);
 
     // Pills: text over the track color.
     lv_obj_t* pills[] = { lbl_session_label, lbl_weekly_label };

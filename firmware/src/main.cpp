@@ -134,12 +134,8 @@ static void parse_provider(JsonObjectConst doc, UsageData* out) {
     strlcpy(out->session_model, doc["sm"] | "", sizeof(out->session_model));
     strlcpy(out->weekly_model,  doc["wm"] | "", sizeof(out->weekly_model));
     out->reset_credits = doc["rc"] | 0;
+    out->reset_credits_used = doc["ru"] | 0;
     out->reset_credits_exp_mins = doc["rm"] | -1;
-    // Life left of the soonest expiry. Absent (older daemon, or the detail
-    // endpoint was down) draws an empty track rather than claiming the credit
-    // is fresh.
-    out->reset_credit_life = doc["rl"] | -1;
-    if (out->reset_credit_life > 100) out->reset_credit_life = 100;
     out->ok = doc["ok"] | false;
     out->valid = true;
 }

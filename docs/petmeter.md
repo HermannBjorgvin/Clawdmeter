@@ -124,29 +124,42 @@ live daemon log caught it. `test_poll_active_itself_merges_codex` guards this.
 
 ### Reset credits
 
-`wham/usage` reports how many reset credits exist (`rate_limit_reset_credits.
-available_count`) but **not when they were granted or when they expire** — only
-`GET .../wham/rate-limit-reset-credits` carries `granted_at`/`expires_at` per
-credit. That is a second slow request against an endpoint already measured at
-3–4s, and neither stamp ever moves once a credit is issued, so the collector
-caches the pair for an hour and keeps the last known value when the call fails.
+`wham/usage` reports how many reset credits are available but nothing about
+them. Two more endpoints fill the card in:
 
-**The cache holds the raw stamps, never anything derived from them.** The
-device draws how much of the soonest credit's life has elapsed and counts down
-to its expiry, and both have to be recomputed against the clock on every poll —
-caching the derived values instead would freeze the card for an hour at a time,
-which is the one thing the visual exists to show. `test_cached_credits_still_age`
+| Endpoint | Carries |
+|----------|---------|
+| `GET .../wham/rate-limit-reset-credits` | `granted_at` / `expires_at` / `status` per credit |
+| `GET .../wham/rate-limit-reset-credits/history` | `granted` and `used` events inside a server-defined trailing window (`window_start`..`as_of`, 30 days today), plus a `next_cursor` |
+
+Together they give the ledger the device draws: what you still hold, plus what
+you spent inside the window. **Held plus spent is the only arithmetic that
+reconciles.** A credit used inside the window was often granted *before* it —
+on the account this was built against, the window held three `granted` events
+and one `used` whose grant predated it — so counting `granted` events would
+report three while four resets actually passed through your hands.
+
+The window length is the provider's, not ours: it comes back as
+`as_of - window_start` and is never hardcoded.
+
+Both endpoints are slow and neither moves on its own, so the pair is cached for
+an hour — but **the live `available_count` from `wham/usage` busts that cache
+early whenever it changes.** Spending a credit moves it from one side of the
+ledger to the other; letting the held side drop while the spent side waited out
+the hour would show a cell vanishing instead of going hollow, and the card
+would briefly disagree with itself. `test_spending_a_credit_busts_the_cache_early`
 guards this.
 
-They reach the device as `rc` (count), `rm` (minutes until the soonest expiry —
-a duration like `sr`/`wr`, because the firmware has no date handling and
-formats every countdown with the same `"in 4d 21h"` line) and `rl` (percent of
-the soonest-expiring credit's granted life still left — the head of the queue
-is the one you spend first, and it is the only clock the card shows, so the
-others are not sent). `rl`/`rm` absent means the
-detail endpoint was unreadable; the device then leaves the track empty and the
-line reads `Available` rather than inventing a lifetime. The count is never
-capped.
+**The cache holds raw stamps, never anything derived from them**, so the
+countdown to the next expiry recomputes against the clock on every poll rather
+than freezing for an hour at a time.
+
+They reach the device as `rc` (held), `ru` (spent inside the window) and `rm`
+(minutes until the soonest expiry — a duration like `sr`/`wr`, because the
+firmware has no date handling and formats every countdown with the same
+`"in 4d 21h"` line). All three absent means the provider has no such thing and
+the card is never drawn; `rc: 0` with a non-zero `ru` is a real state — a
+window whose resets were all spent — and still draws.
 
 ### Codex panel mapping
 
@@ -172,26 +185,33 @@ reads as a fault, not as "this plan has no such limit".
 
 ![The Codex screen on a single-quota plan: one weekly quota, reset credits below](../screenshots/petmeter-codex.png)
 
-**The credit card (`render_credit_card`).** The card keeps a quota card's exact
-anatomy and, more importantly, a quota card's *reading*: the number is how many
-you hold, the bar is how much of a window has elapsed, the line under it counts
-down to the moment that window ends. The window is the soonest-expiring
-credit's granted life — the head of the queue, the one you will spend first —
-so the bar fills toward its expiry exactly as the quota bar above fills toward
-its limit, and shares `pct_color()`'s amber/red thresholds (75% / 90% elapsed,
-about a week and about three days on a 30-day grant). A credit is lost by not
-spending it, so a red bar means the same thing on both cards: act now.
+**The credit card (`render_credit_card`).** One cell per credit the window
+handed out, in the row the bar would occupy, filled while the credit is held
+and hollow once spent, held ones first so the lit run's length reads as "what
+I can still spend". The number above is the total, so the card answers both
+questions a use-it-or-lose-it grant raises — how many did I get, how many are
+left — in a single read. Cells are capped at `MAX_CREDIT_CELLS`; past that the
+number still tells the truth, and a window handing out that many is not one
+you are rationing.
 
-![A credit about to lapse](../screenshots/petmeter-credits-expiring.png)
+![A window whose resets are nearly spent](../screenshots/petmeter-credits-spent.png)
 
-The line reads `Next expires in 11d` (or `Expires in 2d` when only one is held;
-hours and minutes only inside the last day). Whole days, not `11d 3h`: a
-30-day grant is spent on a scale of days, and the longer form did not fit the
-368 px boards. Earlier attempts — one pip per credit, each filled by its own
-life left — drew the count twice, put the actionable number (days) off screen
-behind a date, and with one credit collapsed into a bar that read as "8%
-used"; worse, the pips drained toward bad while the bar above filled toward
-bad, so the same shape carried opposite semantics on the two cards.
+**Cells are binary on purpose.** The first version of this row filled each cell
+by how much of that credit's lifetime remained, which made every cell a
+percentage nobody thinks in, stated the count twice (as a number and as a row
+length), and — worst — drained toward red while the quota bar directly above it
+filled toward red, so one shape carried opposite meanings on two stacked cards.
+The second version dropped to a single bar in the quota card's own grammar,
+which read cleanly but could only describe the head of the queue. The ledger
+keeps that grammar for the countdown line and gives the row back its discrete
+job.
+
+The line underneath reads `Next expires in 11d` (or `Expires in 2d` when one is
+held; hours and minutes inside the last day, from the shared
+`format_countdown()`), and `All used` when the row is entirely hollow — a blank
+line there reads as a value that failed to load. Whole days above a day: a
+30-day grant is spent on a scale of days, and `11d 3h` is both noise and too
+wide for the 368 px boards.
 
 `render_weekly_face()` owns those labels and runs after that branch, so it
 stands down when the card is showing credits.

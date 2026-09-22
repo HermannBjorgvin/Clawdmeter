@@ -61,12 +61,12 @@ class UsageSnapshot:
     # Grants that restore a spent quota, where the provider offers them.
     # Codex hands these out as "full resets"; Claude has no equivalent, so the
     # fields stay at their defaults and the device shows nothing.
-    reset_credits: int = 0
+    reset_credits: int = 0                      # held right now
+    reset_credits_used: int = 0                 # spent inside the provider's
+                                                # own trailing window (30d on
+                                                # Codex); held + spent is how
+                                                # many that window gave you
     reset_credits_expire: float | None = None   # soonest expiry, epoch seconds
-    # Percent of each credit's granted lifetime still left, soonest expiry
-    # first. A count says how many you hold; this says how long you hold them
-    # for, which is what makes a use-it-or-lose-it grant legible at a glance.
-    reset_credit_life: tuple[int, ...] = ()
 
     source: str = "unknown"
 

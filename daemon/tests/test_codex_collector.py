@@ -403,117 +403,137 @@ def test_no_credits_means_no_keys(monkeypatch):
     assert "rc" not in p and "rm" not in p
 
 
-# --- reset-credit lifetimes -------------------------------------------------
+# --- reset-credit ledger -----------------------------------------------------
 
-def test_credit_life_is_percent_of_granted_lifetime_left():
-    """The card draws each credit draining, so the collector reports life left.
-
-    A 30-day grant a quarter of the way through has three quarters of its life
-    left -- not "75% used", the inverse of the quota bars above it.
-    """
-    from daemon.collectors.codex import _credit_life
-
-    day = 86400.0
-    now = 1_000_000.0
-    # granted 10 days ago, expires in 20 -> 2/3 of a 30-day life left.
-    assert _credit_life(((now - 10 * day, now + 20 * day),), now) == (67,)
-    # Already lapsed, and a degenerate zero-length span: both clamp rather
-    # than going negative or dividing by zero.
-    assert _credit_life(((now - 30 * day, now - day),), now) == (0,)
-    assert _credit_life(((now, now),), now) == (100,)
+_HELD = {"status": "available", "granted_at": "2026-09-05T04:19:53Z",
+         "expires_at": "2026-10-05T04:19:53Z"}
+_HELD_SOONER = {"status": "available", "granted_at": "2026-09-04T02:29:58Z",
+                "expires_at": "2026-10-04T02:29:58Z"}
+_SPENT = {"status": "redeemed", "granted_at": "2026-08-01T00:00:00Z",
+          "expires_at": "2026-08-31T00:00:00Z"}
 
 
-def test_credit_stamps_are_sorted_soonest_expiry_first(tmp_path, monkeypatch):
-    """Leftmost pip is the next credit to lapse, so order is not incidental."""
+def _json_response(payload):
+    m = patch("urllib.request.urlopen")
+    u = m.start()
+    u.return_value.__enter__.return_value.read.return_value = \
+        json.dumps(payload).encode()
+    return m
+
+
+def test_stamps_are_sorted_soonest_expiry_first(monkeypatch):
+    """The countdown belongs to the credit that lapses first, so order is not
+    incidental -- the collector reports that one, whatever order it arrived."""
     import daemon.collectors.codex as cx
 
-    payload = {"credits": [
-        {"status": "available", "granted_at": "2026-09-05T04:19:53.865558Z",
-         "expires_at": "2026-10-05T04:19:53.865558Z"},
-        {"status": "available", "granted_at": "2026-09-04T02:29:58.238421Z",
-         "expires_at": "2026-10-04T02:29:58.238421Z"},
-        {"status": "redeemed", "granted_at": "2026-08-01T00:00:00Z",
-         "expires_at": "2026-08-31T00:00:00Z"},   # spent -- not a holding
-    ]}
-    monkeypatch.setattr(cx, "_credits_cache", {"at": 0.0, "stamps": ()})
-    with patch("urllib.request.urlopen") as u:
-        u.return_value.__enter__.return_value.read.return_value = \
-            json.dumps(payload).encode()
-        stamps = cx._credit_stamps("tok", "acct")
+    m = _json_response({"credits": [_HELD, _HELD_SOONER, _SPENT]})
+    try:
+        stamps = cx._fetch_stamps("tok", "acct")
+    finally:
+        m.stop()
 
-    assert len(stamps) == 2                       # the redeemed one is gone
+    assert len(stamps) == 2                       # the spent one is not held
     assert stamps[0][1] < stamps[1][1]            # Oct 4 before Oct 5
 
 
-def test_cached_credits_still_age(tmp_path, monkeypatch):
-    """The cache holds raw stamps, so life left keeps moving between fetches.
+def test_used_counts_only_spends_inside_the_window(monkeypatch):
+    """The history endpoint reports grants too; only spends are the ledger's
+    other side."""
+    import daemon.collectors.codex as cx
 
-    Caching the derived percentage instead would freeze the pips for a whole
-    hour at a time -- the one thing the visual is there to show.
+    m = _json_response({"events": [
+        {"kind": "granted", "occurred_at": "2026-09-22T20:49:48Z"},
+        {"kind": "granted", "occurred_at": "2026-09-05T04:19:53Z"},
+        {"kind": "used", "occurred_at": "2026-09-01T18:14:11Z"},
+    ], "window_start": "2026-08-23T21:06:08Z"})
+    try:
+        assert cx._fetch_used("tok", None) == 1
+    finally:
+        m.stop()
+
+
+def test_spending_a_credit_busts_the_cache_early(monkeypatch):
+    """Held and spent have to move together.
+
+    Both endpoints are slow and cached for an hour, but the available count
+    comes live from wham/usage every poll. Letting the held side drop while
+    the spent side waited out the hour would leave the card disagreeing with
+    itself -- a cell vanishing instead of going hollow.
     """
     import daemon.collectors.codex as cx
 
-    day = 86400.0
-    granted, expires = 1_000_000.0, 1_000_000.0 + 30 * day
     monkeypatch.setattr(cx, "_credits_cache",
-                        {"at": 9e18, "stamps": ((granted, expires),)})  # fresh
+                        {"at": 9e18, "stamps": ((1.0, 2.0), (3.0, 4.0)),
+                         "used": 0, "available": 2})     # fresh for an hour
 
+    # Same count: no request at all.
     with patch("urllib.request.urlopen", side_effect=AssertionError("no HTTP")):
-        early = cx._credit_life(cx._credit_stamps("tok", None), granted + day)
-        late = cx._credit_life(cx._credit_stamps("tok", None), granted + 29 * day)
-    assert early == (97,) and late == (3,)
+        assert cx._credit_state("tok", None, 2) == (((1.0, 2.0), (3.0, 4.0)), 0)
+
+    # One spent: refetch, and both sides land together.
+    calls = []
+
+    def fake(url, token, account_id):
+        calls.append(url)
+        return ({"credits": [_HELD]} if url == cx.CREDITS_URL
+                else {"events": [{"kind": "used"}]})
+
+    monkeypatch.setattr(cx, "_get_json", fake)
+    stamps, used = cx._credit_state("tok", None, 1)
+    assert len(stamps) == 1 and used == 1
+    assert calls == [cx.CREDITS_URL, cx.HISTORY_URL]
 
 
-def test_credit_stamps_keep_last_known_value_when_endpoint_fails(monkeypatch):
-    """A slow endpoint must not erase pips that are still genuinely held."""
+def test_ledger_keeps_last_known_value_when_endpoint_fails(monkeypatch):
+    """A slow endpoint must not empty a card that is still genuinely held."""
     import daemon.collectors.codex as cx
 
     known = ((1.0, 2.0),)
-    monkeypatch.setattr(cx, "_credits_cache", {"at": 0.0, "stamps": known})
+    monkeypatch.setattr(cx, "_credits_cache",
+                        {"at": 0.0, "stamps": known, "used": 3, "available": 1})
     with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("x")):
-        assert cx._credit_stamps("tok", None) == known
+        assert cx._credit_state("tok", None, 1) == (known, 3)
 
 
-def test_payload_sends_the_head_of_the_queue(monkeypatch):
-    """"rl" is the soonest-expiring credit's life left -- the only clock the
-    card shows, because it is the one you spend first."""
+def test_payload_carries_both_sides_of_the_ledger(monkeypatch):
+    """The device draws one cell per credit and heads the card with the total,
+    so it needs held and spent separately."""
     from daemon.collectors import UsageSnapshot, Window
     import daemon.claude_usage_daemon as mod
 
     snap = UsageSnapshot(provider="codex", plan="pro",
                          windows={WINDOW_7D: Window(31.0, resets_in=600)},
-                         reset_credits=2, reset_credits_expire=1.0,
-                         reset_credit_life=(37, 71))
-    monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: snap)
-
-    assert mod.codex_payload()["rl"] == 37
-
-
-def test_payload_count_is_never_capped(monkeypatch):
-    """However many are held, the number reports the true count."""
-    from daemon.collectors import UsageSnapshot, Window
-    import daemon.claude_usage_daemon as mod
-
-    snap = UsageSnapshot(provider="codex", plan="pro",
-                         windows={WINDOW_7D: Window(31.0, resets_in=600)},
-                         reset_credits=9,
-                         reset_credit_life=tuple(range(10, 100, 10)))
+                         reset_credits=3, reset_credits_used=1,
+                         reset_credits_expire=1.0)
     monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: snap)
 
     p = mod.codex_payload()
-    assert p["rc"] == 9 and p["rl"] == 10
+    assert p["rc"] == 3 and p["ru"] == 1
 
 
-def test_unknown_lifetimes_send_no_rl_key(monkeypatch):
-    """Detail endpoint down: send the count, and let the device leave the
-    track empty rather than inventing a life for the credit."""
+def test_a_fully_spent_window_still_reports(monkeypatch):
+    """Nothing held but something spent is a real state -- "2, both used" --
+    not the absence of credits, which is what an omitted rc would mean."""
     from daemon.collectors import UsageSnapshot, Window
     import daemon.claude_usage_daemon as mod
 
     snap = UsageSnapshot(provider="codex", plan="pro",
                          windows={WINDOW_7D: Window(31.0, resets_in=600)},
-                         reset_credits=2)
+                         reset_credits=0, reset_credits_used=2)
     monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: snap)
 
     p = mod.codex_payload()
-    assert p["rc"] == 2 and "rl" not in p and "rm" not in p
+    assert p["rc"] == 0 and p["ru"] == 2
+
+
+def test_no_credits_at_all_sends_nothing(monkeypatch):
+    """A provider without reset credits sends no keys, so the card stays gone."""
+    from daemon.collectors import UsageSnapshot, Window
+    import daemon.claude_usage_daemon as mod
+
+    snap = UsageSnapshot(provider="codex", plan="pro",
+                         windows={WINDOW_7D: Window(31.0, resets_in=600)})
+    monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: snap)
+
+    p = mod.codex_payload()
+    assert "rc" not in p and "ru" not in p and "rm" not in p

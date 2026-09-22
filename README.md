@@ -39,17 +39,19 @@ Tap the left button to change pet — eight ship with the firmware:
 
 A plan that meters only one window leaves the second card with no quota to
 show. Where the provider hands out grants that wipe a spent limit — Codex
-calls them full resets — the card carries those instead, and reads exactly
-like the quota card above it: the number is how many you hold, the bar is how
-much of a window has elapsed, the line counts down to the moment it ends.
+calls them full resets — the card carries those instead, as a ledger of the
+provider's own trailing window: one cell per reset the window handed out, lit
+while you still hold it and hollow once it is spent, headed by the total. The
+length of the lit run is how many you have left.
 
-|                          Holding three                           |                             About to lapse                             |
-| :--------------------------------------------------------------: | :--------------------------------------------------------------------: |
-| ![Reset credits](screenshots/petmeter-credits.png)                | ![Expiring credit](screenshots/petmeter-credits-expiring.png)          |
-| The window is the soonest-expiring credit's granted life — the one you spend first | Past 90% elapsed it goes red, the same threshold a quota bar uses. A credit is lost by *not* spending it |
+|                       Three of four left                        |                        One of four left                         |
+| :--------------------------------------------------------------: | :--------------------------------------------------------------: |
+| ![Reset credits](screenshots/petmeter-credits.png)               | ![Mostly spent](screenshots/petmeter-credits-spent.png)          |
+| Four resets in the last 30 days, three still held                | Three spent, one left, expiring inside a day                     |
 
-With neither a second quota nor credits, the card is hidden rather than drawn
-with a dash in it.
+The line underneath counts down to the next expiry in the same form the quota
+card uses, because a reset is lost by *not* spending it. With neither a second
+quota nor any credits, the card is hidden rather than drawn with a dash in it.
 
 Adding a provider means writing one collector against the interface in
 [`daemon/collectors/`](daemon/collectors/__init__.py) — a normalized
