@@ -228,6 +228,7 @@ static lv_obj_t* lbl_session_pct;
 static lv_obj_t* lbl_session_label;
 static lv_obj_t* lbl_session_reset;
 static lv_obj_t* bar_weekly;
+static lv_obj_t* credit_pips[MAX_CREDIT_PIPS];
 static lv_obj_t* lbl_weekly_pct;
 static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
@@ -336,6 +337,13 @@ static const char* const anim_messages[] = {
 // 50%% cut fired halfway through a session, which trained you to ignore it.
 #define WARN_PCT 75.0f
 #define CRIT_PCT 90.0f
+
+// Urgency for a reset credit runs the other way from a quota: the number that
+// matters is how much of its granted life is LEFT, and a credit is lost by not
+// spending it. On the 30-day grants Codex issues these land at about a week
+// and about three days.
+#define CREDIT_WARN_LIFE 25
+#define CREDIT_CRIT_LIFE 10
 
 static lv_color_t pct_color(float pct) {
     if (pct >= CRIT_PCT) return COL_RED;
@@ -573,6 +581,15 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
 
+    // Reset-credit pips share the bar's row, height and corner radius, so a
+    // card showing grants keeps a quota card's silhouette. Built up front and
+    // hidden; only a provider that grants credits ever shows them, and
+    // render_credit_pips() sizes them once the count is known.
+    for (int i = 0; i < MAX_CREDIT_PIPS; i++) {
+        credit_pips[i] = make_bar(panel_weekly, 0, L.usage_bar_y, L.bar_h, L.bar_h);
+        lv_obj_add_flag(credit_pips[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
     build_pair_group(usage_container);
     build_idle_group(usage_container);
 
@@ -586,6 +603,58 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_color(lbl_anim,
                                 theme().quiet_status ? COL_DIM : COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
+}
+
+// Reset credits, drawn rather than counted. One pip per grant across the bar's
+// row, each filled by how much of its granted life is left, soonest expiry
+// leftmost -- so the row reads as a lifecycle (issued, draining, gone) and not
+// as a tally, and the pip about to lapse is the one your eye lands on first.
+static void render_credit_pips(const UsageData* data) {
+    int n = data->reset_credits;
+    if (n > MAX_CREDIT_PIPS) n = MAX_CREDIT_PIPS;
+
+    const int row_w = L.content_w - 2 * L.panel_pad_x;
+    const int gap   = L.small_icons ? 4 : 8;
+    const int span  = row_w - gap * (n - 1);
+    const int base  = (n > 0) ? span / n : 0;
+    // Integer division would leave up to n-1 px of slack at the right edge and
+    // the row would stop short of the bar above it. Hand the remainder out a
+    // pixel at a time instead.
+    const int extra = (n > 0) ? span - base * n : 0;
+
+    int x = 0;
+    for (int i = 0; i < MAX_CREDIT_PIPS; i++) {
+        lv_obj_t* pip = credit_pips[i];
+        if (!pip) continue;
+        if (i >= n) {
+            lv_obj_add_flag(pip, LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        const int w = base + (i < extra ? 1 : 0);
+        lv_obj_invalidate(pip);            // PARTIAL mode: clear the old cell
+        lv_obj_set_pos(pip, x, L.usage_bar_y);
+        lv_obj_set_size(pip, w, L.bar_h);
+        x += w + gap;
+
+        // A life the daemon could not read draws full but grey: a green pip
+        // would assert freshness nothing measured.
+        const bool known = i < data->reset_credit_life_count;
+        const int  life  = known ? data->reset_credit_life[i] : 100;
+        lv_bar_set_value(pip, life, LV_ANIM_OFF);
+        lv_color_t fill = !known                     ? COL_DIM
+                        : life <= CREDIT_CRIT_LIFE   ? COL_RED
+                        : life <= CREDIT_WARN_LIFE   ? COL_AMBER
+                                                     : COL_PROGRESS;
+        lv_obj_set_style_bg_color(pip, COL_BAR_BG, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(pip, fill, LV_PART_INDICATOR);
+        lv_obj_clear_flag(pip, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_invalidate(pip);
+    }
+}
+
+static void hide_credit_pips(void) {
+    for (int i = 0; i < MAX_CREDIT_PIPS; i++)
+        if (credit_pips[i]) lv_obj_add_flag(credit_pips[i], LV_OBJ_FLAG_HIDDEN);
 }
 
 // Draw the Weekly card's current face from the cached payload values. Face 0
@@ -701,6 +770,7 @@ void ui_update(const UsageData* data) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
         lv_obj_set_style_text_font(lbl_session_pct, L.ent_pct_font, 0);
         lv_label_set_text(lbl_session_label, "Spending");
+        hide_credit_pips();          // the Weekly card is a period box here
         lv_obj_add_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
@@ -732,24 +802,30 @@ void ui_update(const UsageData* data) {
                 lv_obj_add_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
         }
         if (show_credits) {
-            // Same card anatomy as a quota -- count where the percentage goes,
-            // pill naming it, detail line underneath -- minus the bar, since
-            // there is no proportion to draw.
+            // Exactly a quota card's anatomy -- count where the percentage
+            // goes, pill naming it, a filled row where the bar goes, detail
+            // line underneath -- so the two cards read as one system. The one
+            // continuous bar is swapped for one pip per credit, because what
+            // is being shown is countable things with lifetimes, not a
+            // proportion of a whole.
             lv_label_set_text_fmt(lbl_weekly_pct, "%d", data->reset_credits);
             lv_label_set_text(lbl_weekly_label, "Resets");
             if (data->reset_credits_exp[0]) {
                 char buf[32];
-                snprintf(buf, sizeof(buf), "Expires %s", data->reset_credits_exp);
+                // With several pips on screen the date belongs to a specific
+                // one -- the leftmost. Say which.
+                snprintf(buf, sizeof(buf), "%s %s",
+                         data->reset_credits > 1 ? "Next expires" : "Expires",
+                         data->reset_credits_exp);
                 lv_label_set_text(lbl_weekly_reset, buf);
             } else {
                 lv_label_set_text(lbl_weekly_reset, "Available");
             }
-            // With no bar, the detail line would otherwise sit below a gap
-            // where one used to be, which reads as something failing to load.
-            // Close the gap by putting it in the bar's row.
             if (bar_weekly) lv_obj_add_flag(bar_weekly, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_pos(lbl_weekly_reset, 0, L.usage_bar_y);
+            lv_obj_set_pos(lbl_weekly_reset, 0, L.usage_reset_y);
+            render_credit_pips(data);
         } else {
+            hide_credit_pips();
             if (bar_weekly) lv_obj_clear_flag(bar_weekly, LV_OBJ_FLAG_HIDDEN);
             lv_obj_set_pos(lbl_weekly_reset, 0, L.usage_reset_y);
         }
@@ -999,6 +1075,9 @@ void ui_apply_theme(void) {
     lv_obj_t* bars[] = { bar_session, bar_weekly };
     for (unsigned i = 0; i < sizeof(bars) / sizeof(bars[0]); i++)
         if (bars[i]) lv_obj_set_style_bg_color(bars[i], COL_BAR_BG, LV_PART_MAIN);
+    for (int i = 0; i < MAX_CREDIT_PIPS; i++)
+        if (credit_pips[i])
+            lv_obj_set_style_bg_color(credit_pips[i], COL_BAR_BG, LV_PART_MAIN);
 
     // Pills: text over the track color.
     lv_obj_t* pills[] = { lbl_session_label, lbl_weekly_label };

@@ -77,17 +77,22 @@ def _read_auth(codex_dir: Path) -> tuple[str, str | None] | None:
 
 
 # The usage endpoint reports how MANY reset credits exist but not when they
-# expire; only the detail endpoint carries expires_at. That is a second slow
-# request, and an expiry date moves at most once a day, so it is cached.
+# were granted or when they expire; only the detail endpoint carries
+# granted_at/expires_at. That is a second slow request, and neither stamp ever
+# moves once a credit is issued, so the pair is cached -- the RAW stamps, not
+# anything derived from them, because the device wants how much of each
+# credit's life is left and that has to be recomputed against the clock every
+# poll or it would freeze for an hour at a time.
 _CREDITS_TTL_S = 3600
-_credits_cache: dict[str, object] = {"at": 0.0, "soonest": None}
+_credits_cache: dict[str, object] = {"at": 0.0, "stamps": ()}
 
 
-def _soonest_credit_expiry(token: str, account_id: str | None) -> float | None:
-    """Epoch of the first reset credit to expire, or None."""
+def _credit_stamps(token: str,
+                   account_id: str | None) -> tuple[tuple[float, float], ...]:
+    """(granted, expires) epochs per available credit, soonest expiry first."""
     now = time.time()
     if now - float(_credits_cache["at"]) < _CREDITS_TTL_S:
-        return _credits_cache["soonest"]
+        return _credits_cache["stamps"]
 
     req = urllib.request.Request(CREDITS_URL, method="GET")
     req.add_header("Authorization", f"Bearer {token}")
@@ -101,20 +106,39 @@ def _soonest_credit_expiry(token: str, account_id: str | None) -> float | None:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             raw = json.loads(resp.read().decode())
     except (urllib.error.URLError, json.JSONDecodeError, TimeoutError):
-        return _credits_cache["soonest"]     # keep the last known value
+        return _credits_cache["stamps"]     # keep the last known stamps
 
-    stamps = []
+    out = []
     for c in raw.get("credits") or []:
-        if c.get("status") != "available" or not c.get("expires_at"):
+        if c.get("status") != "available":
             continue
         try:
-            stamps.append(datetime.datetime.fromisoformat(
-                c["expires_at"].replace("Z", "+00:00")).timestamp())
-        except ValueError:
+            granted = _iso_epoch(c["granted_at"])
+            expires = _iso_epoch(c["expires_at"])
+        except (KeyError, TypeError, ValueError):
             continue
+        out.append((granted, expires))
+    out.sort(key=lambda pair: pair[1])
     _credits_cache["at"] = now
-    _credits_cache["soonest"] = min(stamps) if stamps else None
-    return _credits_cache["soonest"]
+    _credits_cache["stamps"] = tuple(out)
+    return _credits_cache["stamps"]
+
+
+def _iso_epoch(stamp: str) -> float:
+    return datetime.datetime.fromisoformat(
+        stamp.replace("Z", "+00:00")).timestamp()
+
+
+def _credit_life(stamps: tuple[tuple[float, float], ...],
+                 now: float | None = None) -> tuple[int, ...]:
+    """Percent of each credit's granted lifetime still left, 0-100."""
+    now = time.time() if now is None else now
+    out = []
+    for granted, expires in stamps:
+        span = expires - granted
+        pct = 100.0 if span <= 0 else (expires - now) / span * 100.0
+        out.append(max(0, min(100, int(round(pct)))))
+    return tuple(out)
 
 
 def _windows_from_endpoint(rate_limit: dict) -> dict[str, Window]:
@@ -176,6 +200,7 @@ def collect_via_oauth(codex_dir: Path = DEFAULT_CODEX_DIR) -> UsageSnapshot | No
 
     credits = raw.get("rate_limit_reset_credits") or {}
     count = int(credits.get("available_count") or 0)
+    stamps = _credit_stamps(token, account_id) if count else ()
 
     return UsageSnapshot(
         provider="codex",
@@ -183,7 +208,8 @@ def collect_via_oauth(codex_dir: Path = DEFAULT_CODEX_DIR) -> UsageSnapshot | No
         windows=windows,
         model_windows=model_windows,
         reset_credits=count,
-        reset_credits_expire=_soonest_credit_expiry(token, account_id) if count else None,
+        reset_credits_expire=stamps[0][1] if stamps else None,
+        reset_credit_life=_credit_life(stamps),
         source="oauth:wham/usage",
         live=True,
         stale_seconds=0,

@@ -394,3 +394,119 @@ def test_no_credits_means_no_keys(monkeypatch):
 
     p = mod.codex_payload()
     assert "rc" not in p and "rx" not in p
+
+
+# --- reset-credit lifetimes -------------------------------------------------
+
+def test_credit_life_is_percent_of_granted_lifetime_left():
+    """The card draws each credit draining, so the collector reports life left.
+
+    A 30-day grant a quarter of the way through has three quarters of its life
+    left -- not "75% used", the inverse of the quota bars above it.
+    """
+    from daemon.collectors.codex import _credit_life
+
+    day = 86400.0
+    now = 1_000_000.0
+    # granted 10 days ago, expires in 20 -> 2/3 of a 30-day life left.
+    assert _credit_life(((now - 10 * day, now + 20 * day),), now) == (67,)
+    # Already lapsed, and a degenerate zero-length span: both clamp rather
+    # than going negative or dividing by zero.
+    assert _credit_life(((now - 30 * day, now - day),), now) == (0,)
+    assert _credit_life(((now, now),), now) == (100,)
+
+
+def test_credit_stamps_are_sorted_soonest_expiry_first(tmp_path, monkeypatch):
+    """Leftmost pip is the next credit to lapse, so order is not incidental."""
+    import daemon.collectors.codex as cx
+
+    payload = {"credits": [
+        {"status": "available", "granted_at": "2026-09-05T04:19:53.865558Z",
+         "expires_at": "2026-10-05T04:19:53.865558Z"},
+        {"status": "available", "granted_at": "2026-09-04T02:29:58.238421Z",
+         "expires_at": "2026-10-04T02:29:58.238421Z"},
+        {"status": "redeemed", "granted_at": "2026-08-01T00:00:00Z",
+         "expires_at": "2026-08-31T00:00:00Z"},   # spent -- not a holding
+    ]}
+    monkeypatch.setattr(cx, "_credits_cache", {"at": 0.0, "stamps": ()})
+    with patch("urllib.request.urlopen") as u:
+        u.return_value.__enter__.return_value.read.return_value = \
+            json.dumps(payload).encode()
+        stamps = cx._credit_stamps("tok", "acct")
+
+    assert len(stamps) == 2                       # the redeemed one is gone
+    assert stamps[0][1] < stamps[1][1]            # Oct 4 before Oct 5
+
+
+def test_cached_credits_still_age(tmp_path, monkeypatch):
+    """The cache holds raw stamps, so life left keeps moving between fetches.
+
+    Caching the derived percentage instead would freeze the pips for a whole
+    hour at a time -- the one thing the visual is there to show.
+    """
+    import daemon.collectors.codex as cx
+
+    day = 86400.0
+    granted, expires = 1_000_000.0, 1_000_000.0 + 30 * day
+    monkeypatch.setattr(cx, "_credits_cache",
+                        {"at": 9e18, "stamps": ((granted, expires),)})  # fresh
+
+    with patch("urllib.request.urlopen", side_effect=AssertionError("no HTTP")):
+        early = cx._credit_life(cx._credit_stamps("tok", None), granted + day)
+        late = cx._credit_life(cx._credit_stamps("tok", None), granted + 29 * day)
+    assert early == (97,) and late == (3,)
+
+
+def test_credit_stamps_keep_last_known_value_when_endpoint_fails(monkeypatch):
+    """A slow endpoint must not erase pips that are still genuinely held."""
+    import daemon.collectors.codex as cx
+
+    known = ((1.0, 2.0),)
+    monkeypatch.setattr(cx, "_credits_cache", {"at": 0.0, "stamps": known})
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("x")):
+        assert cx._credit_stamps("tok", None) == known
+
+
+def test_payload_carries_per_credit_life_soonest_first(monkeypatch):
+    """"rl" is what lets the device draw a lifecycle instead of a tally."""
+    from daemon.collectors import UsageSnapshot, Window
+    import daemon.claude_usage_daemon as mod
+
+    snap = UsageSnapshot(provider="codex", plan="pro",
+                         windows={WINDOW_7D: Window(31.0, resets_in=600)},
+                         reset_credits=2, reset_credits_expire=1.0,
+                         reset_credit_life=(37, 71))
+    monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: snap)
+
+    assert mod.codex_payload()["rl"] == [37, 71]
+
+
+def test_payload_caps_pips_but_not_the_count(monkeypatch):
+    """More credits than the card can draw: the number still tells the truth."""
+    from daemon.collectors import UsageSnapshot, Window
+    import daemon.claude_usage_daemon as mod
+
+    snap = UsageSnapshot(provider="codex", plan="pro",
+                         windows={WINDOW_7D: Window(31.0, resets_in=600)},
+                         reset_credits=9,
+                         reset_credit_life=tuple(range(10, 100, 10)))
+    monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: snap)
+
+    p = mod.codex_payload()
+    assert p["rc"] == 9
+    assert len(p["rl"]) == mod.MAX_CREDIT_PIPS
+
+
+def test_unknown_lifetimes_send_no_rl_key(monkeypatch):
+    """Detail endpoint down: send the count, and let the device draw the pips
+    as lifetime-unknown rather than inventing a full life for them."""
+    from daemon.collectors import UsageSnapshot, Window
+    import daemon.claude_usage_daemon as mod
+
+    snap = UsageSnapshot(provider="codex", plan="pro",
+                         windows={WINDOW_7D: Window(31.0, resets_in=600)},
+                         reset_credits=2)
+    monkeypatch.setattr(mod._CODEX, "collect_blocking", lambda: snap)
+
+    p = mod.codex_payload()
+    assert p["rc"] == 2 and "rl" not in p and "rx" not in p

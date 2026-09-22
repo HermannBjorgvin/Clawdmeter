@@ -63,6 +63,10 @@ class UsageSnapshot:
     # fields stay at their defaults and the device shows nothing.
     reset_credits: int = 0
     reset_credits_expire: float | None = None   # soonest expiry, epoch seconds
+    # Percent of each credit's granted lifetime still left, soonest expiry
+    # first. A count says how many you hold; this says how long you hold them
+    # for, which is what makes a use-it-or-lose-it grant legible at a glance.
+    reset_credit_life: tuple[int, ...] = ()
 
     source: str = "unknown"
 

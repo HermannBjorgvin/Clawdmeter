@@ -125,15 +125,25 @@ live daemon log caught it. `test_poll_active_itself_merges_codex` guards this.
 ### Reset credits
 
 `wham/usage` reports how many reset credits exist (`rate_limit_reset_credits.
-available_count`) but **not when they expire** — only
-`GET .../wham/rate-limit-reset-credits` carries `expires_at` per credit. That
-is a second slow request against an endpoint already measured at 3–4s, and an
-expiry date moves at most once a day, so the collector caches it for an hour
-and keeps the last known value when the call fails.
+available_count`) but **not when they were granted or when they expire** — only
+`GET .../wham/rate-limit-reset-credits` carries `granted_at`/`expires_at` per
+credit. That is a second slow request against an endpoint already measured at
+3–4s, and neither stamp ever moves once a credit is issued, so the collector
+caches the pair for an hour and keeps the last known value when the call fails.
 
-They reach the device as `rc` (count) and `rx` (soonest expiry, pre-formatted
-host-side, e.g. `"Oct 3"`) — the firmware has no date handling and its fonts
-are ASCII-only.
+**The cache holds the raw stamps, never anything derived from them.** The
+device draws how much of each credit's life is left, and that has to be
+recomputed against the clock on every poll — caching the percentage instead
+would freeze the pips for an hour at a time, which is the one thing the visual
+exists to show. `test_cached_credits_still_age` guards this.
+
+They reach the device as `rc` (count), `rx` (soonest expiry, pre-formatted
+host-side, e.g. `"Oct 3"` — the firmware has no date handling and its fonts are
+ASCII-only) and `rl` (percent of each credit's granted life still left, soonest
+expiry first, capped at `MAX_CREDIT_PIPS`). `rl` absent means the detail
+endpoint was unreadable; the device then draws the pips grey rather than
+inventing a full life for them. The count is never capped — past six pips the
+big number still carries the truth.
 
 ### Codex panel mapping
 
@@ -153,13 +163,28 @@ accurate, useless screen: `0% / 0%` at the moment the binding limit was at
 `additional_rate_limits` entirely, so the account reports one weekly window and
 nothing else. A lone quota takes the top slot labelled `"Weekly"`, and the
 second card carries reset credits instead — count where the percentage goes,
-`"Resets"` in the pill, expiry underneath, no bar since there is no proportion
-to draw. With neither a second quota nor credits, the card is hidden outright:
-a card whose only content is a dash reads as a fault, not as "this plan has no
-such limit".
+`"Resets"` in the pill, expiry underneath. With neither a second quota nor
+credits, the card is hidden outright: a card whose only content is a dash
+reads as a fault, not as "this plan has no such limit".
+
+**The credit row (`render_credit_pips`).** The card keeps a quota card's exact
+anatomy, so the bar's row is filled rather than left empty — but with one pip
+per credit instead of one continuous bar, because what is being shown is
+countable things with lifetimes, not a proportion of a whole. Each pip is
+filled by how much of that credit's granted life is left and the row is ordered
+soonest-expiry-first, so it reads as a lifecycle — issued, draining, gone — and
+the pip about to lapse is the leftmost, where the eye lands first.
+
+Urgency runs the *other way* from a quota: a credit is lost by not spending it,
+so the colour follows life remaining (`CREDIT_WARN_LIFE` 25%, `CREDIT_CRIT_LIFE`
+10% — about a week and about three days on Codex's 30-day grants), not usage.
+The pips share the bar's row, height and corner radius, and integer division's
+remainder is handed out a pixel at a time so the row ends flush with the bar on
+the card above.
 
 `render_weekly_face()` owns those labels and runs after that branch, so it
-stands down when the card is showing credits.
+stands down when the card is showing credits; the pips hide on the enterprise
+path and whenever a real second quota is present.
 
 ---
 
