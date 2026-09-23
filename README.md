@@ -24,34 +24,48 @@ switch is instant rather than waiting for the next poll.
 | Provider | Source | Screen |
 |----------|--------|--------|
 | **Claude** | Claude Code's OAuth token → `anthropic-ratelimit-unified-*` response headers | Warm palette, serif title, Clawd. The Weekly card flips between all-models and any scoped-model allowance (e.g. Fable). |
-| **Codex** | Codex CLI's OAuth token → `chatgpt.com/backend-api/wham/usage`, with the session rollout logs as an offline fallback | Neutral palette, sans throughout, and any of the eight ChatGPT pets. Weekly quota on top; the second card carries reset credits when the plan meters only one window. |
+| **Codex** | Codex CLI's OAuth token → `chatgpt.com/backend-api/wham/usage`, with the session rollout logs as an offline fallback | Neutral palette, sans throughout, and any of the eight ChatGPT pets. Weekly quota on top; below it, the [reset credits](#reset-credits-codex) the plan has handed out and how many are unspent. |
 
 |                    Claude                     |                   Codex                    |
 | :-------------------------------------------: | :----------------------------------------: |
 | ![Claude](screenshots/petmeter-claude.png)     | ![Codex](screenshots/petmeter-codex.png)   |
-| Serif display face, warm palette, Clawd. The Weekly card flips between all-models and any scoped-model allowance. | Sans throughout, neutral palette, your chosen pet. Weekly quota above, reset credits below. |
+| Serif display face, warm palette, Clawd. The Weekly card flips between all-models and any scoped-model allowance. | Sans throughout, neutral palette, your chosen pet. Weekly quota above; below it, four reset credits granted in the last 30 days, three still unspent. |
 
 Tap the left button to change pet — eight ship with the firmware:
 
 ![Pets](screenshots/petmeter-pets.png)
 
-### Reset credits
+### Reset credits (Codex)
 
-A plan that meters only one window leaves the second card with no quota to
-show. Where the provider hands out grants that wipe a spent limit — Codex
-calls them full resets — the card carries those instead, as a ledger of the
-provider's own trailing window: one cell per reset the window handed out, lit
-while you still hold it and hollow once it is spent, headed by the total. The
-length of the lit run is how many you have left.
+**What they are.** When you exhaust a Codex rate limit you normally wait for
+the window to roll over. A *reset credit* skips that wait: redeeming one clears
+the spent limit and you carry on immediately. OpenAI grants them to Codex
+accounts unprompted — they arrive titled "Full reset" — and ChatGPT lists them
+under its usage-limit-resets settings. **Each one expires 30 days after it is
+granted**, so an unspent credit is simply lost. That deadline is the reason
+they are worth a card: a quota tells you to slow down, a reset credit tells you
+that you don't have to, and the only way to waste one is to forget it exists.
+
+Claude has no equivalent, so this card is Codex-only — and it takes the second
+slot because a Codex plan meters one weekly window and nothing else, leaving
+that slot with no quota to draw (see
+[Codex panel mapping](docs/petmeter.md#codex-panel-mapping)).
+
+**What the card shows.** A ledger of the provider's own trailing window — 30
+days on Codex, read from the API rather than hardcoded. One cell per reset the
+window handed out, lit while you still hold it and hollow once spent, headed by
+the total. The length of the lit run is how many you have left.
 
 |                       Three of four left                        |                        One of four left                         |
 | :--------------------------------------------------------------: | :--------------------------------------------------------------: |
 | ![Reset credits](screenshots/petmeter-credits.png)               | ![Mostly spent](screenshots/petmeter-credits-spent.png)          |
 | Four resets in the last 30 days, three still held                | Three spent, one left, expiring inside a day                     |
 
-The line underneath counts down to the next expiry in the same form the quota
-card uses, because a reset is lost by *not* spending it. With neither a second
-quota nor any credits, the card is hidden rather than drawn with a dash in it.
+The line underneath counts down to the next expiry, in the same form the quota
+card uses — a reset is lost by *not* spending it, so it gets a deadline rather
+than a reading. A window whose resets are all spent reads `All used`; with
+neither a second quota nor any credits, the card is hidden rather than drawn
+with a dash in it.
 
 Adding a provider means writing one collector against the interface in
 [`daemon/collectors/`](daemon/collectors/__init__.py) — a normalized

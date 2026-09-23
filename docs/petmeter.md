@@ -124,6 +124,12 @@ live daemon log caught it. `test_poll_active_itself_merges_codex` guards this.
 
 ### Reset credits
 
+A reset credit is a one-shot rate-limit reversal: redeeming one clears a spent
+Codex limit instead of waiting out the window. OpenAI grants them unprompted
+and **they expire 30 days after they are granted**, so the device's job is less
+"how many do you have" than "how long have you got" — see
+[the README](../README.md#reset-credits-codex) for the user-facing framing.
+
 `wham/usage` reports how many reset credits are available but nothing about
 them. Two more endpoints fill the card in:
 
