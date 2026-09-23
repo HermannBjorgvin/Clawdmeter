@@ -24,10 +24,12 @@ from pathlib import Path
 # `python /path/to/claude_usage_daemon.py`, putting daemon/ on sys.path) and as
 # `daemon.claude_usage_daemon` from the tests.
 try:
+    import sinks
     from collectors import WINDOW_5H, WINDOW_7D
     from collectors.codex import CodexCollector
     from collectors.claude import payload_from_headers
 except ImportError:  # pragma: no cover - depends on invocation, both are exercised
+    from daemon import sinks
     from daemon.collectors import WINDOW_5H, WINDOW_7D
     from daemon.collectors.codex import CodexCollector
     from daemon.collectors.claude import payload_from_headers
@@ -918,14 +920,24 @@ class Session:
             log("Refresh subscription timed out; polling without it")
 
     async def write_payload(self, payload: dict) -> bool:
+        """Send to the device, then mirror to any configured secondary display.
+
+        The return value is the DEVICE's result and nothing else -- callers
+        gate the poll clock on it. Sinks are fanned out here rather than at the
+        three call sites so a new one cannot be half-wired: the bug that cost
+        an afternoon on the Codex merge was exactly that, every test passing
+        while one real path never ran.
+        """
         data = json.dumps(payload, separators=(",", ":")).encode()
         log(f"Sending: {data.decode()}")
         try:
             await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
-            return True
+            ok = True
         except BleakError as e:
             log(f"Write failed: {e}")
-            return False
+            ok = False
+        await sinks.publish(payload, log=log)
+        return ok
 
 
 def _is_encryption_error(exc: BaseException) -> bool:
