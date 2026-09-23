@@ -96,6 +96,76 @@ puts 5h there. Always classify by duration.
 
 ---
 
+## 1b. Secondary displays (`daemon/sinks/`)
+
+`collectors/` is the input seam; `sinks/` is the output one. The device on the
+desk is **not** a sink — it owns the BLE link, the refresh nudge and the poll
+clock. A sink is somewhere the payload gets *mirrored* after the device has
+been told.
+
+Two rules, and they are the same rule the second provider follows:
+
+- **A sink never gates the device.** Its result does not advance `last_poll`.
+  A Busy Bar that has been unplugged must not throttle the meter on your desk,
+  and one that answers instantly must not excuse a failed BLE write.
+  `test_a_dead_sink_does_not_change_what_the_device_write_reports` guards this.
+- **A sink never takes the daemon down.** Exceptions never leave `publish()`.
+  They are logged, not swallowed: a display that has quietly stopped updating
+  is the exact failure this project exists to prevent.
+
+**Where the fan-out lives.** Inside `Session.write_payload()`, not at its three
+call sites — the same reasoning as the Codex merge trap below. One chokepoint
+cannot be half-wired; three call sites can, and the tests would not notice.
+
+Sinks are opt-in via the config file and cost nothing unconfigured.
+
+### BUSY Bar
+
+[busy.app](https://busy.app) — a 72×16 RGB LED matrix with an open HTTP API
+over USB or Wi-Fi, no cloud round trip. Enable it with:
+
+```ini
+# ~/.config/claude-usage-monitor/config
+busybar_url = http://busybar.local
+busybar_token =            # only for the cloud endpoint; local needs none
+```
+
+One `POST /busybar/display/draw` carries a list of elements, so the usage view
+ports across as data rather than pixels — the percentage is a `text`, the bar
+is two `rectangle`s, and the reset is a `countdown`.
+
+Four things about the device drove the layout:
+
+- **72×16 is the whole canvas.** One quota fits, not two. It shows the 5-hour
+  session window, the one that actually stops you.
+- **`countdown` renders on-device.** It takes a Unix timestamp and counts down
+  by itself, so "resets in" stays true between polls — no heartbeat needed, in
+  contrast to the BLE path where the daemon must replay the payload with aged
+  `sr`/`wr` to keep the device's `DATA_FRESH_MS` from lapsing.
+- **Text is printable ASCII only** (`^[\x20-\x7E]+$` in the API spec) — the
+  same constraint the firmware's subset fonts impose, for the same reason.
+- **Priority decides who owns the screen.** Draws are accepted at `>=` the
+  running app's priority, and an active BUSY/CUSTOM focus session sits at 90.
+  We publish at 50, deliberately below it: the device's job is telling people
+  you are busy, and a usage widget must not stomp that. The cost is that the
+  meter is absent exactly while you are heads-down. A `409` is therefore a
+  normal outcome, not a failure, and is not logged as one.
+
+Colour thresholds are the firmware's `pct_color()` values, because two
+displays showing one number must not disagree about whether it is alarming.
+
+**Dry-run without touching the daemon:**
+
+```bash
+python -m daemon.sinks.busybar                       # print the draw request
+python -m daemon.sinks.busybar http://busybar.local  # and send it
+```
+
+If every `/busybar/...` path 404s while the web UI at `/` loads, the device's
+**HTTP API is switched off** — it is gated behind a password/key in the BUSY
+Bar settings. That is a device-side setting; nothing in the daemon can turn it
+on.
+
 ## 2. Wire format
 
 Claude stays at the top level so an older firmware ignores everything new.

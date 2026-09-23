@@ -71,6 +71,23 @@ Adding a provider means writing one collector against the interface in
 [`daemon/collectors/`](daemon/collectors/__init__.py) — a normalized
 `UsageSnapshot` the daemon consumes without knowing which vendor produced it.
 
+### Secondary displays
+
+The same payload can be mirrored to another screen through
+[`daemon/sinks/`](daemon/sinks/__init__.py). A [BUSY Bar](https://busy.app)
+sink ships with it — the 5-hour quota as a bar, with the reset counting down
+on the device itself:
+
+```ini
+# ~/.config/claude-usage-monitor/config
+busybar_url = http://busybar.local
+```
+
+Secondary is literal: a sink can never gate or crash the meter on your desk,
+and the whole path costs nothing when unconfigured. It also publishes *below*
+a focus session's priority, so it will never overwrite the BUSY status the bar
+exists to show.
+
 **[`docs/petmeter.md`](docs/petmeter.md)** documents everything this fork
 adds: the collector interface, the wire format, the theme and art-set systems,
 the pet sprite pipeline, the button and serial controls, and the traps found

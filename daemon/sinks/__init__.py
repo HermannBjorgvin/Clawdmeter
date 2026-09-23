@@ -43,7 +43,8 @@ def active_sinks(reload: bool = False) -> list[Sink]:
     """Every sink the config file enables. Built once, then cached."""
     global _sinks
     if _sinks is None or reload:
-        _sinks = []          # populated as sinks are added
+        from .busybar import from_config as _busybar_from_config
+        _sinks = [s for s in (_busybar_from_config(),) if s is not None]
     return _sinks
 
 
