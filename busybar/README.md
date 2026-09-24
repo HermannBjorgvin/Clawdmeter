@@ -2,10 +2,33 @@
 
 Coding-agent usage on a [BUSY Bar](https://busy.app) — a 72×16 RGB LED matrix — rotating through every quota your plans meter, each with its label and its mascot.
 
-![Petmeter on a BUSY Bar](../screenshots/busybar-cards.png)
+![Petmeter on a BUSY Bar](../screenshots/busybar/card-5.png)
 
-*Three of the five cards, rotating every four seconds. Captured off the device
-itself with [`tools/busybar_shot.py`](../tools/busybar_shot.py).*
+Every screenshot here is the real device: captured with
+[`tools/busybar_shot.py --skin`](../tools/busybar_shot.py), which reads the
+panel over the HTTP API and renders it as LEDs inside the hardware, the same
+way the bar's own web interface does.
+
+## Every screen
+
+The cards rotate every four seconds, each carrying its provider's mascot.
+
+| | |
+|---|---|
+| ![Current](../screenshots/busybar/card-4.png) | **Current** — the 5-hour window |
+| ![Weekly](../screenshots/busybar/card-5.png) | **Weekly** — the 7-day window |
+| ![Fable](../screenshots/busybar/card-1.png) | **Fable** — a scoped model allowance, when the plan meters one |
+| ![Codex weekly](../screenshots/busybar/card-2.png) | **Codex**, with Codey — the same reading for the other provider |
+| ![Reset credits](../screenshots/busybar/card-3.png) | **Resets** — the credit ledger: held solid, spent hollow |
+
+And the states you hope not to see:
+
+| | |
+|---|---|
+| ![No data](../screenshots/busybar/state-nodata.png) | **no data** — the daemon is there, the reading is not. The pet stays: the app is alive |
+| ![No host](../screenshots/busybar/state-nohost.png) | **no host** — the daemon is unreachable. No pet, because the pet lives on the host |
+| ![Paused](../screenshots/busybar/state-paused.png) | **paused** — the 2×2 badge at the top right, the only room there was for one |
+| ![Toast](../screenshots/busybar/state-toast.png) | the **toast** on a press, over the caption row for two seconds |
 
 This is a self-contained corner of [Petmeter](../README.md). The desk meter it belongs to is an ESP32 device; nothing here needs one. All it needs is the Petmeter daemon running on a host the bar can reach.
 
@@ -123,29 +146,50 @@ with one message. Removing that key is the whole fix. Icons
 (`appmeta/icon_front_8x8.png`, `icon_back_11x11.png`) are optional to load but
 are what the menu shows.
 
-## The buttons cannot work on this firmware
+## The buttons
 
-Not a binding bug, and not something an app can code around: `js_input.c` — the
-file that installs the `listen` global — was added on **2026-09-16**, five days
-*after* release **1.2.4** (2026-09-11), the newest tag and what the device
-runs. `raw.githubusercontent.com/.../1.2.4/.../js_input.c` returns 404. That
-firmware's `js_runner.c` sets up exactly `console`, the interval functions,
-`fetch` and `localStorage` — precisely the globals a `for…in` probe enumerates
-on the hardware.
+The bar's own buttons work, but not from inside the app. `js_input.c` — the
+file that installs the `listen` global — was committed on **2026-09-16**, five
+days *after* release **1.2.4** (2026-09-11), which is what the device runs;
+that path 404s at the tag. Its `js_runner.c` sets up exactly `console`, the
+interval functions, `fetch` and `localStorage`, which is precisely what a
+`for…in` probe enumerates on the hardware.
 
-So the app guards `typeof listen === "function"`, rotates without controls
-today, and picks the buttons up on a firmware that includes that commit.
+So the **host** reads them instead. The device's CLI (TCP 23) has an `input
+dump` command that prints one line per physical event, and because it
+subscribes to the same pubsub the GUI does, **it sees presses the canvas has
+already swallowed** — which is every press while our elements are on screen.
 
-**A host-side route exists in the meantime.** The CLI's `input dump` streams
-one line per physical event (`key: InputKeyStart type: InputTypePress`), and
-the telnet server accepts a shell per connection, so a daemon-side reader could
-own the buttons and drive the push sink. Caveat from `canvas.c`: while our
-elements are up the canvas swallows Start/Ok/Up/Down, and a short
-Back/Busy/Custom/Off/Apps/Settings press closes the canvas.
+That puts the control state on the host ([`serve.Control`](../daemon/sinks/serve.py)),
+including the rotation clock, and makes the app a renderer:
+
+```
+button → input dump → daemon control state → gen++ → long poll returns → app draws
+```
+
+`GET /usage.json?since=<gen>&wait=8000` holds open until something changes, so
+a press reaches the screen in one round trip rather than waiting out a polling
+interval — and a return with nothing changed is not wasted, because redrawing
+every 8s also restores the frame after anything else clears the canvas.
+
+| | |
+|---|---|
+| red **Start/Pause** bar | holds and releases the rotation |
+| wheel **scroll** | steps through the cards |
+| wheel press (**OK/Skip**) | skips forward |
+
+**macOS needs to allow it.** The daemon runs under launchd, and connecting out
+to the bar's LAN address is gated by Local Network privacy — a background
+daemon cannot show that prompt, so it is denied silently and the log reads
+`no CLI (OSError: [Errno 65] No route to host)`. Grant the daemon's Python
+binary Local Network access in System Settings → Privacy & Security.
+
+**Push and pull cannot both run.** `canvas_draw_rejected` refuses a *different*
+`application_name` at *equal* priority, so the sink (`petmeter`) and the app
+(`app.petmeter`) fight for the screen at priority 50 — whichever drew first
+wins and the other gets 409s. Set `busybar_url` or `busybar_serve`, not both.
 
 ## Layout
-
-![The rotation](../screenshots/busybar-cards.png)
 
 ```
  0            23 26                                      71

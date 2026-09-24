@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 from typing import Protocol, runtime_checkable
 
-from . import serve
+from . import busybar_buttons, serve
 
 
 @runtime_checkable

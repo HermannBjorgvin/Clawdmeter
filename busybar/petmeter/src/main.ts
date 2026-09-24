@@ -24,9 +24,13 @@ const APP = manifest.id;
 const HOST = import.meta.env.VITE_PETMETER_HOST ?? "http://10.0.4.21:8724";
 const SELF = "http://10.0.4.20";
 
-const POLL_MS = 30_000;
-const CARD_MS = 4_000;
-const TICK_MS = 250;
+// The host holds the request open until something changes, so a press
+// reaches the screen in one round trip. A return with nothing changed is not
+// a failure: redrawing every WAIT_MS also restores the frame after anything
+// else clears the canvas.
+const WAIT_MS = 8_000;
+const RETRY_MS = 1_000;
+const RETRY_MAX_MS = 10_000;
 
 // Clawd is authored on a 12x8 grid, so he renders at exactly 2x -- 24x16,
 // filling the height. Codey is 16 wide and gets centred in the same slot;
@@ -383,10 +387,10 @@ async function draw(elements: Element[]): Promise<void> {
 /** Entry point. The build rewrites the default export into a call. */
 export default function run(): void {
   let cards: Card[] = [];
-  let index = 0;
-  let paused = false;
-  let dwell = 0;
+  let gen = -1;
   let polledAt = 0;
+  let backoff = RETRY_MS;
+  let wasPaused: boolean | null = null;
 
   const report = (err: unknown) =>
     console.error(`${APP}: ${err instanceof Error ? err.message : String(err)}`);
@@ -398,88 +402,64 @@ export default function run(): void {
     return Math.max(0, card.in_s - Math.round((Date.now() - polledAt) / 1000));
   }
 
-  function show(say?: string): void {
-    if (cards.length === 0) return;
-    index = ((index % cards.length) + cards.length) % cards.length;
-    const card = cards[index];
-    void draw(frame(card, remaining(card), paused, say)).catch(report);
-  }
-
-  function step(by: number): void {
-    index += by;
-    dwell = 0;
-    show();
-  }
-
-  async function poll(): Promise<void> {
+  // The controls the case is engraved with are read on the HOST, off the
+  // device's CLI: this firmware gives a JS app no input API at all. If a
+  // future one does, `listen` appears and the app can forward events rather
+  // than growing a second state machine.
+  if (typeof listen === "function") {
     try {
-      const resp = await fetch(`${HOST}/usage.json`);
-      const data = await resp.json();
-      polledAt = Date.now();
-      cards = Array.isArray(data.cards) ? data.cards : [];
-      if (cards.length === 0) await draw(message("no data", null));
+      listen("input", () => {
+        /* reserved: forward to the host once the firmware exposes this */
+      });
     } catch (err) {
-      // Host asleep, unplugged, or the daemon stopped. Say which rather than
-      // leaving the last good frame up, which would quietly go stale.
       report(err);
-      cards = [];
-      await draw(message("no host", null)).catch(report);
     }
   }
 
-  // Controls follow what the case itself is engraved with: the red bar is
-  // Start/Pause, the wheel is Scroll, and the wheel's press says "OK/Skip".
-  // A manual step restarts the dwell, or the card you just asked for would
-  // vanish a moment later.
-  // THE CONTROLS ONLY EXIST FOR A PROPERLY LAUNCHED APP.
-  //
-  // `listen` is installed by js_setup_input_methods(), and a script started
-  // from the CLI never gets it -- that context's globals are exactly console,
-  // setInterval, setTimeout, clearInterval, clearTimeout, Request, fetch and
-  // localStorage. So the handler below is dead code until the app can be
-  // launched as an app, which is the same thing the hardcoded apps menu
-  // blocks. It is written and guarded rather than deleted: the binding is
-  // correct, only the launch path is missing.
-  //
-  // Guarded because an uncaught ReferenceError here takes the whole app down
-  // silently -- for a long time that looked like a dead draw loop and was a
-  // dead control binding. Losing the buttons is survivable; losing the
-  // display is not.
-  if (typeof listen !== "function") {
-    console.info(`${APP}: no input API in this context; controls disabled`);
-  } else try {
-    listen("input", (event: InputEvent) => {
-      if (event.action === "release") return;
-      if (event.key === "start") {
-        paused = !paused;
-        dwell = 0;
-        show();
-      } else if (event.key === "encoder") {
-        step(event.delta ?? (event.action === "clockwise" ? 1 : -1));
-      } else if (event.key === "ok") {
-        step(1);
+  async function loop(): Promise<void> {
+    for (;;) {
+      try {
+        const url = `${HOST}/usage.json?since=${gen}&wait=${WAIT_MS}`;
+        const data = await fetch(url).then((r) => r.json());
+        polledAt = Date.now();
+        backoff = RETRY_MS;
+
+        cards = Array.isArray(data.cards) ? data.cards : [];
+        const control = data.control ?? { index: 0, paused: false, gen: 0 };
+        gen = control.gen;
+
+        if (cards.length === 0) {
+          await draw(message("no data", null));
+        } else {
+          const card = cards[control.index % cards.length];
+          // Toast only on the change, not on every redraw of a paused card.
+          const say =
+            wasPaused === null || wasPaused === control.paused
+              ? undefined
+              : control.paused
+                ? "paused"
+                : "running";
+          wasPaused = control.paused;
+          await draw(frame(card, remaining(card), control.paused, say));
+        }
+      } catch (err) {
+        // Host asleep, unplugged, or the daemon stopped. Say which rather
+        // than leaving the last good frame up to go quietly stale.
+        report(err);
+        await draw(message("no host", null)).catch(report);
+        await new Promise((resolve) => setTimeout(resolve, backoff));
+        backoff = Math.min(backoff * 2, RETRY_MAX_MS);
       }
-    });
-  } catch (err) {
-    console.error(`${APP}: controls unavailable: ${String(err)}`);
+    }
   }
 
-  void clearCanvas()
-    .catch(report)
-    .then(poll)
-    .then(() => show())
-    .catch(report);
-  setInterval(() => void poll().catch(report), POLL_MS);
-  setInterval(() => {
-    if (paused || cards.length === 0) return;
-    dwell += TICK_MS;
-    if (dwell >= CARD_MS) step(1);
-  }, TICK_MS);
+  void clearCanvas().catch(report).then(loop).catch(report);
 }
 
 /**
- * The runtime's input global, installed on the realm by js_input.c -- not an
- * import, so TypeScript has to be told it exists.
+ * The runtime's input global, installed by js_input.c -- which postdates the
+ * firmware this device runs, so it is absent here. Declared for the day a
+ * newer one has it; the buttons are read host-side in the meantime.
  */
 declare function listen(
   type: "input",
@@ -487,9 +467,7 @@ declare function listen(
 ): () => void;
 
 type InputEvent = {
-  /** Which control: the top bar is `start`, the wheel is `encoder`. */
   key: "encoder" | "start" | "ok" | "back";
   action: "press" | "release" | "clockwise" | "counterclockwise";
-  /** Encoder only: +1 clockwise, -1 counterclockwise. */
   delta?: number;
 };

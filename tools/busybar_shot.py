@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Capture a BUSY Bar's screen to a PNG — screenshot.sh for the other display.
 
-    python3 tools/busybar_shot.py out.png [http://10.0.4.20] [--back]
+    python3 tools/busybar_shot.py out.png [http://10.0.4.20] [--back] [--skin]
 
 The same rule the firmware has: QA your own UI changes, don't ask the user.
 A 72x16 layout is too small to design blind, and the bar can hand you exactly
@@ -18,8 +18,9 @@ TWO UNDOCUMENTED THINGS about `GET /api/screen`, both found the hard way:
 import base64
 import sys
 import urllib.request
+from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 # The two panels report in different formats, neither of them the advertised
 # image/bmp. Front: RGB888, 3 bytes a pixel, 72x16. Back: 8-bit greyscale at
@@ -52,11 +53,43 @@ def capture(base_url: str, back: bool = False) -> Image.Image:
     return Image.merge("RGB", (r, g, b))
 
 
+# The device's own web UI draws the panel as a dot matrix inside a photo of
+# the hardware. Same geometry, read off that page: at the frame's natural
+# 768x248 the screen occupies 720x160 at (24, 61) -- ten pixels a dot.
+FRAME = Path(__file__).resolve().parent.parent / "assets" / "busybar" / "device-frame.png"
+SCREEN_AT = (24, 61)
+DOT_PITCH = 10
+DOT_R = 4
+
+
+def skin(panel: Image.Image) -> Image.Image:
+    """Render a captured frame as LEDs inside the device photo."""
+    frame = Image.open(FRAME).convert("RGBA")
+    screen = Image.new("RGBA", (panel.width * DOT_PITCH, panel.height * DOT_PITCH),
+                       (0, 0, 0, 255))
+    draw = ImageDraw.Draw(screen)
+    px = panel.convert("RGB").load()
+    for y in range(panel.height):
+        for x in range(panel.width):
+            r, g, b = px[x, y]
+            if r or g or b:
+                cx = x * DOT_PITCH + DOT_PITCH // 2
+                cy = y * DOT_PITCH + DOT_PITCH // 2
+                draw.ellipse([cx - DOT_R, cy - DOT_R, cx + DOT_R, cy + DOT_R],
+                             fill=(r, g, b, 255))
+    frame.alpha_composite(screen, SCREEN_AT)
+    return frame
+
+
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     out = args[0] if args else "busybar.png"
     url = args[1] if len(args) > 1 else "http://10.0.4.20"
     img = capture(url, back="--back" in sys.argv)
-    scale = SCALE if img.width == FRONT[0] else 4
-    img.resize((img.width * scale, img.height * scale), Image.NEAREST).save(out)
-    print(f"Saved: {out} ({img.width}x{img.height}, scaled {scale}x)")
+    if "--skin" in sys.argv:
+        skin(img).save(out)
+        print(f"Saved: {out} (device skin)")
+    else:
+        scale = SCALE if img.width == FRONT[0] else 4
+        img.resize((img.width * scale, img.height * scale), Image.NEAREST).save(out)
+        print(f"Saved: {out} ({img.width}x{img.height}, scaled {scale}x)")

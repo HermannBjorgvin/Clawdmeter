@@ -1146,9 +1146,14 @@ async def main() -> None:
     serve_bind = read_config_value("busybar_serve", allowed=None)
     if serve_bind:
         host, _, port = serve_bind.partition(":")
-        await sinks.serve.start(host or sinks.serve.DEFAULT_BIND,
-                                int(port) if port.isdigit()
-                                else sinks.serve.DEFAULT_PORT, log=log)
+        if await sinks.serve.start(host or sinks.serve.DEFAULT_BIND,
+                                   int(port) if port.isdigit()
+                                   else sinks.serve.DEFAULT_PORT, log=log):
+            # The bar's buttons, read off its CLI, because its firmware gives
+            # JS apps no input API. A background task with bounded awaits --
+            # nothing here can stall the BLE writer feeding the desk meter.
+            cli = read_config_value("busybar_cli", allowed=None) or "10.0.4.20"
+            loop.create_task(sinks.busybar_buttons.run(cli.split(":")[0], log=log))
     log(f"Poll interval: {POLL_INTERVAL}s")
 
     backoff = 1
