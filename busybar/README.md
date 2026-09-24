@@ -25,6 +25,7 @@ And the states you hope not to see:
 
 | | |
 |---|---|
+| ![Connecting](../screenshots/busybar/state-connecting.png) | **Connecting…** — launch, before the first poll has answered. The caption row alone, the ellipsis cycling; the card lands on top of it |
 | ![No data](../screenshots/busybar/state-nodata.png) | **The host has no data yet.** — the daemon answered, with nothing in it. The same alert, worded so it does not blame the connection |
 | ![No host](../screenshots/busybar/state-nohost.png) | **The host is unreachable.** — a System 7 caution alert, lit-on-dark for the matrix. No pet, because the pet lives on the host; the alert's icon stands in its slot |
 | ![Paused](../screenshots/busybar/state-paused.png) | **paused** — the 2×2 badge at the top right, the only room there was for one |
@@ -260,6 +261,27 @@ loader open js_app_launcher app.petmeter
 
 over the device's telnet CLI (port 23). `js -i app.petmeter <path>` also runs
 the script, but as a CLI job rather than an app.
+
+**Clear the canvas first, or the launch silently does nothing.** The launcher
+opens on a Start/Setup menu and waits for an OK. Our elements are still on
+screen at that moment, and this canvas [swallows
+presses](#the-buttons) — including one injected over the CLI — so the menu
+opens *behind* the old frame and never receives the key. Every launch that
+appeared to do nothing had exactly that in common, and the frame left up makes
+it look like a running app:
+
+```
+curl -X DELETE "http://10.0.4.20/api/display/draw?application_name=app.petmeter"
+loader open js_app_launcher app.petmeter     # then wait ~12s
+input send InputKeyOk InputTypeShort
+```
+
+**Give it about ten seconds before it draws anything.** Measured on the device
+clock: 4.6s passes between `Running script` and the first line of our module —
+that is the JS runtime starting, and no app code can shorten it — then module
+init, the canvas clear and the first POST add roughly 1.7s more. The
+`Connecting…` caption exists to cover that gap honestly rather than leave the
+panel black.
 
 **The apps menu is flag-gated, not hardcoded.** `apps_menu_is_js_apps_enabled()`
 stats a file; without it the menu shows "More apps soon" and lists nothing,

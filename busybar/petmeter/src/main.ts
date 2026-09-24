@@ -442,6 +442,52 @@ function message(value: string, withPet: Card | null): Element[] {
 }
 
 /**
+ * LAUNCH SHOWS THE CAPTION BEFORE IT HAS A CARD.
+ *
+ * Between the startup clear and the first frame the panel is black. The first
+ * poll has to come back before anything can draw, and when the host is not
+ * answering yet the alert holds off for FAILS_BEFORE_ALERT failures and their
+ * backoff -- several seconds of nothing, on a device whose job is to be
+ * glanceable. The gap gets the caption row: "Connecting" in the label's
+ * place, dim, with an ellipsis that cycles. That is what the moment is, a
+ * card whose number has not arrived; when it does, the label lands on the
+ * same row in the draw that tombstones the word, and the handover is the
+ * card appearing above it. No new id, no frame, no mascot: the mascot means
+ * "host present", which is exactly what is not known yet.
+ *
+ * Every tick is a POST to the device, and on the device's own loopback a
+ * one-element draw takes 0.5-0.7s to come back (the sub-100ms figure in the
+ * README is measured from the Mac). So the in-flight guard sets the pace, not
+ * the interval: about a frame every 0.7s, and never a queue. It is short-lived
+ * by construction: the clock is cleared -- and the tick in flight waited out
+ * -- before any real frame is sent, so a tick cannot land on top of a card.
+ *
+ * What it cannot cover, measured off the device log: the runtime takes ~4.6s
+ * from "Running script" to the first line of this file. Then module init is
+ * ~0.5s, the clear ~0.4s and the first POST ~0.7s, so the caption is up about
+ * 1.7s after the app's first line runs -- and the first real frame follows
+ * the data by ~3s, of which ~2s is JerryScript building an 18-element frame
+ * and ~1.2s the device taking it.
+ *
+ * It does not return on a reconnect. After the first frame the last good card
+ * stands until the alert takes over (see FAILS_BEFORE_ALERT): a single missed
+ * poll flicking the screen to "Connecting" is the class of flicker that made
+ * pause break the display, and a card a few seconds stale is a truer reading
+ * than a blank one. The alert is a real frame as well, so from alert back to
+ * card there is nothing to bridge.
+ *
+ * The frame names only `msg`. The canvas was just cleared, and the first real
+ * frame runs `complete()` over whatever is left.
+ */
+const CONNECTING_MS = 500;
+const CONNECTING_DOTS = [".", "..", "..."];
+
+function connecting(tick: number): Element[] {
+  const dots = CONNECTING_DOTS[tick % CONNECTING_DOTS.length];
+  return [text("msg", `Connecting${dots}`, "small", BAND_X, CAPTION_Y, COL_DIM)];
+}
+
+/**
  * Wipe whatever a previous version of this app left on screen.
  *
  * Draws merge by id, and ids this build never names can never be overwritten
@@ -489,6 +535,35 @@ export default function run(): void {
   const report = (err: unknown) =>
     console.error(`${APP}: ${err instanceof Error ? err.message : String(err)}`);
 
+  // The launch caption's clock. `tickDraw` is the POST in flight: a tick that
+  // finds one skips, so a slow link gets fewer frames rather than a queue.
+  let ticker: ReturnType<typeof setInterval> | null = null;
+  let tick = 0;
+  let tickDraw: Promise<void> | null = null;
+
+  function tickConnecting(): void {
+    if (ticker === null || tickDraw !== null) return;
+    tickDraw = draw(connecting(tick++)).catch(report).then(() => {
+      tickDraw = null;
+    });
+  }
+
+  function startConnecting(): void {
+    ticker = setInterval(tickConnecting, CONNECTING_MS);
+    tickConnecting();
+  }
+
+  /** Clears the clock and lets the tick in flight land, so the frame the
+   *  caller sends next is the last thing the device receives. Idempotent, and
+   *  free once the clock is gone, so the loop can call it every time. */
+  async function stopConnecting(): Promise<void> {
+    if (ticker !== null) {
+      clearInterval(ticker);
+      ticker = null;
+    }
+    if (tickDraw !== null) await tickDraw;
+  }
+
   /** Seconds left on this card, aged by our own elapsed time since the poll,
    *  so the countdown never depends on the bar's clock being right. */
   function remaining(card: Card): number | null {
@@ -518,6 +593,7 @@ export default function run(): void {
         polledAt = Date.now();
         backoff = RETRY_MS;
         fails = 0;
+        await stopConnecting();     // the first real frame retires the caption
 
         cards = Array.isArray(data.cards) ? data.cards : [];
         const control = data.control ?? { index: 0, paused: false, gen: 0 };
@@ -542,6 +618,7 @@ export default function run(): void {
         // than leaving the last good frame up to go quietly stale.
         report(err);
         if (++fails >= FAILS_BEFORE_ALERT) {
+          await stopConnecting();   // so is the alert
           await draw(message("no host", null)).catch(report);
         }
         await new Promise((resolve) => setTimeout(resolve, backoff));
@@ -550,7 +627,7 @@ export default function run(): void {
     }
   }
 
-  void clearCanvas().catch(report).then(loop).catch(report);
+  void clearCanvas().catch(report).then(startConnecting).then(loop).catch(report);
 }
 
 /**
