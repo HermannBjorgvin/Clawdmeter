@@ -339,11 +339,23 @@ export default function run(): void {
   // Start/Pause, the wheel is Scroll, and the wheel's press says "OK/Skip".
   // A manual step restarts the dwell, or the card you just asked for would
   // vanish a moment later.
-  // Wrapped: the runtime throws here if a handler is already bound (it
-  // forbids overrides), and an uncaught throw at this point takes the whole
-  // app down silently -- which looked for a long time like a dead draw loop.
-  // Losing the buttons is survivable; losing the display is not.
-  try {
+  // THE CONTROLS ONLY EXIST FOR A PROPERLY LAUNCHED APP.
+  //
+  // `listen` is installed by js_setup_input_methods(), and a script started
+  // from the CLI never gets it -- that context's globals are exactly console,
+  // setInterval, setTimeout, clearInterval, clearTimeout, Request, fetch and
+  // localStorage. So the handler below is dead code until the app can be
+  // launched as an app, which is the same thing the hardcoded apps menu
+  // blocks. It is written and guarded rather than deleted: the binding is
+  // correct, only the launch path is missing.
+  //
+  // Guarded because an uncaught ReferenceError here takes the whole app down
+  // silently -- for a long time that looked like a dead draw loop and was a
+  // dead control binding. Losing the buttons is survivable; losing the
+  // display is not.
+  if (typeof listen !== "function") {
+    console.info(`${APP}: no input API in this context; controls disabled`);
+  } else try {
     listen("input", (event: InputEvent) => {
       if (event.action === "release") return;
       if (event.key === "start") {

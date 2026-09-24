@@ -49,7 +49,7 @@ Then launch it over the bar's CLI (`telnet 10.0.4.20`, port 23):
 js -i app.petmeter /ext/user_assets/app.petmeter/scripts/main.js
 ```
 
-**Controls**, following what the case itself is engraved with: the red **Start/Pause** bar holds and releases the rotation, the wheel **scrolls** through the cards by hand, and the wheel's press — labelled **OK/Skip** — skips forward.
+**Controls are written but cannot run yet.** They follow what the case is engraved with — the red **Start/Pause** bar holds and releases the rotation, the wheel **scrolls** by hand, and its press, labelled **OK/Skip**, skips forward — but a CLI-launched script gets no input API. Its globals are exactly `console`, `setInterval`, `setTimeout`, `clearInterval`, `clearTimeout`, `Request`, `fetch` and `localStorage`; `listen` is installed only for an app launched as an app, which is the same thing [the apps menu blocks](#why-it-is-not-in-the-apps-menu). The binding is guarded and logs that it is disabled, so the display keeps working.
 
 ## Nothing here is hosted
 
