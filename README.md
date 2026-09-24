@@ -1,14 +1,106 @@
-# Clawdmeter
+# Petmeter
 
 > Also check out [Beam](https://github.com/notaharness/beam! A CLI that let's you pair your machines using a passkey and [@Tailscale's tailcat](https://tailscale.com/blog/tailcat).
 
 <img src="assets/readme/waving.gif" width="120" align="right" alt="">
 
-A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
+> **A fork of [HermannBjorgvin/Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter).**
+> Nearly all of this is Hermann's work — the firmware, the HAL, the splash
+> engine, the daemon. This fork adds multi-provider support: usage for more
+> than one coding-agent plan on the same device, switched with a button.
+> Upstream's licensing note below applies here unchanged, and this fork adds a
+> second vendor's assets to it — see [`research/codex-pets/`](research/codex-pets/CLAUDE.md).
 
-It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) as well as a few other alternative boards and pairs over Bluetooth, the splash screen plays pixel-art Clawd animations that get
+A small ESP32 dashboard for your desk that keeps an eye on coding-agent usage.
+
+It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) as well as a few other alternative boards and pairs over Bluetooth, the splash screen plays pixel-art animations that get
 busier when your usage rate climbs. The two side buttons send Space and
 Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
+
+## Providers
+
+Hold the right button to switch which plan the screen is showing. The host
+daemon polls every provider it can read and sends them in one payload, so the
+switch is instant rather than waiting for the next poll.
+
+| Provider | Source | Screen |
+|----------|--------|--------|
+| **Claude** | Claude Code's OAuth token → `anthropic-ratelimit-unified-*` response headers | Warm palette, serif title, Clawd. The Weekly card flips between all-models and any scoped-model allowance (e.g. Fable). |
+| **Codex** | Codex CLI's OAuth token → `chatgpt.com/backend-api/wham/usage`, with the session rollout logs as an offline fallback | Neutral palette, sans throughout, and any of the eight ChatGPT pets. Weekly quota on top; below it, the [reset credits](#reset-credits-codex) the plan has handed out and how many are unspent. |
+
+|                    Claude                     |                   Codex                    |
+| :-------------------------------------------: | :----------------------------------------: |
+| ![Claude](screenshots/petmeter-claude.png)     | ![Codex](screenshots/petmeter-codex.png)   |
+| Serif display face, warm palette, Clawd. The Weekly card flips between all-models and any scoped-model allowance. | Sans throughout, neutral palette, your chosen pet. Weekly quota above; below it, four reset credits granted in the last 30 days, three still unspent. |
+
+Tap the left button to change pet — eight ship with the firmware:
+
+![Pets](screenshots/petmeter-pets.png)
+
+### Reset credits (Codex)
+
+**What they are.** When you exhaust a Codex rate limit you normally wait for
+the window to roll over. A *reset credit* skips that wait: redeeming one clears
+the spent limit and you carry on immediately. OpenAI grants them to Codex
+accounts unprompted — they arrive titled "Full reset" — and ChatGPT lists them
+under its usage-limit-resets settings. **Each one expires 30 days after it is
+granted**, so an unspent credit is simply lost. That deadline is the reason
+they are worth a card: a quota tells you to slow down, a reset credit tells you
+that you don't have to, and the only way to waste one is to forget it exists.
+
+Claude has no equivalent, so this card is Codex-only — and it takes the second
+slot because a Codex plan meters one weekly window and nothing else, leaving
+that slot with no quota to draw (see
+[Codex panel mapping](docs/petmeter.md#codex-panel-mapping)).
+
+**What the card shows.** A ledger of the provider's own trailing window — 30
+days on Codex, read from the API rather than hardcoded. One cell per reset the
+window handed out, lit while you still hold it and hollow once spent, headed by
+the total. The length of the lit run is how many you have left.
+
+|                       Three of four left                        |                        One of four left                         |
+| :--------------------------------------------------------------: | :--------------------------------------------------------------: |
+| ![Reset credits](screenshots/petmeter-credits.png)               | ![Mostly spent](screenshots/petmeter-credits-spent.png)          |
+| Four resets in the last 30 days, three still held                | Three spent, one left, expiring inside a day                     |
+
+The line underneath counts down to the next expiry, in the same form the quota
+card uses — a reset is lost by *not* spending it, so it gets a deadline rather
+than a reading. A window whose resets are all spent reads `All used`; with
+neither a second quota nor any credits, the card is hidden rather than drawn
+with a dash in it.
+
+Adding a provider means writing one collector against the interface in
+[`daemon/collectors/`](daemon/collectors/__init__.py) — a normalized
+`UsageSnapshot` the daemon consumes without knowing which vendor produced it.
+
+### Secondary displays
+
+The same payload can be mirrored to another screen through
+[`daemon/sinks/`](daemon/sinks/__init__.py). A [BUSY Bar](https://busy.app)
+— a 72×16 LED matrix — is supported two ways: the daemon can **push** one
+quota to it, or the bar can run an app that **pulls** and rotates through
+every quota your plans meter, each with its label and mascot, with the bar's
+own Start/Pause bar and wheel driving it.
+
+```ini
+# ~/.config/claude-usage-monitor/config
+busybar_url = http://10.0.4.20      # push; USB, the address on the case
+```
+
+**[`busybar/README.md`](busybar/README.md) is the reference** — how to install
+it on macOS, where every number comes from, every screen, and the device
+quirks. It is self-contained: **you do not need the ESP32 meter.** Set
+`ble = off` and the daemon polls for the bar alone.
+
+Secondary is literal: a sink can never gate, delay or crash the meter on your
+desk, and the whole path costs nothing when unconfigured. It also publishes
+*below* a focus session's priority, so it will never overwrite the BUSY status
+the bar exists to show.
+
+**[`docs/petmeter.md`](docs/petmeter.md)** documents everything this fork
+adds: the collector interface, the wire format, the theme and art-set systems,
+the pet sprite pipeline, the button and serial controls, and the traps found
+building it.
 
 <img width="1179" height="994" alt="Usage meter" src="https://github.com/user-attachments/assets/83e54aea-0932-428f-94aa-b3ede3a360aa" />
 
@@ -233,6 +325,10 @@ JSON payload format (written to RX):
 ```
 
 Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
+
+Optional fields (omitted when not applicable; the firmware treats absence as "feature off"): `ws` = weekly scoped-model limits for plans that meter specific models separately, as `[{"n":"Fable","p":75}, ...]` — one entry per scoped model, labeled with the API's own display name. They share the weekly reset, so no separate reset field is sent. When `ws` is present, `w` is re-based on the same OAuth-usage source as the scoped percentages rather than the rate-limit header, so both weekly numbers carry identical rounding (the header is a 2-decimal fraction, the endpoint a rounded integer — mixing them can render a real 12.6/12.4 pair as 12/12).
+
+`x` = a second provider's usage, same field names nested one level down, for devices showing more than one plan. Claude stays at the top level so an older firmware ignores the key entirely. Within it, `has_s` / `has_w` mark which panels carry a real quota — a Codex Pro account meters one weekly window and no 5-hour one, and a slot with nothing behind it renders blank rather than a convincing 0%. `sm` / `wm` override the panel pills, so a panel showing one model's slice can say which (`"Spark"`, `"Overall"`) instead of `Current` / `Weekly`.
 
 ## Development
 

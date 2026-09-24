@@ -164,7 +164,15 @@ hardware boards, not shared code).
 
 The firmware ships a `screenshot` serial command that dumps the LVGL framebuffer. `./screenshot.sh out.png [port]` captures a PNG sized to the active display (480×480 or 368×448). **Use this on every UI iteration** — Read the PNG with the Read tool, verify the change visually, iterate. Script auto-picks the macOS/Linux default port and falls back to pio's bundled Python if pyserial isn't on the system Python.
 
-The boot screen is `SCREEN_SPLASH` and only advances on a physical button press, so a fresh flash will sit on the splash. To screenshot the screen you're actually editing without asking the user to press a button, **temporarily change the default boot screen** in `main.cpp` (search for `ui_show_screen(SCREEN_SPLASH);`) to `SCREEN_USAGE` / `SCREEN_CONTROLLER` / `SCREEN_BLUETOOTH`, do your iteration, then revert before committing.
+A fresh flash boots to `SCREEN_SPLASH`, which has no data on it, and on the 2.16 the buttons cannot leave it — PWR cycles animations there, and only a **touch** toggles splash ↔ usage. Three more serial commands exist so a UI change can be verified on hardware without touching the device or reflashing:
+
+```bash
+printf 'usage\n'  > /dev/cu.usbmodem101   # switch to the usage screen
+printf 'splash\n' > /dev/cu.usbmodem101   # back to the splash
+printf 'mode\n'   > /dev/cu.usbmodem101   # cycle provider (Claude ↔ Codex)
+```
+
+Send one, then run `./screenshot.sh`. The older workaround — temporarily editing `ui_show_screen(SCREEN_SPLASH)` in `main.cpp` and flashing again — is still what the **simulator** needs, since it has no serial console; there, change the default boot screen, iterate, and revert before committing.
 
 ## Critical gotchas
 
@@ -233,6 +241,14 @@ methodology, including the Lottie sources and the assets-proxy).
 ## User profile / preferences
 
 See `~/.claude/projects/.../memory/` files for persistent context (user is an embedded-beginner senior dev, brand-conscious, prefers iterative UI refinement, dislikes me authoring my own art when third-party assets are intended). Always read those memory files at session start.
+
+## Petmeter fork additions
+
+This tree is a fork that adds multi-provider support — Claude and Codex on one
+device, switched with the right button. **[`docs/petmeter.md`](docs/petmeter.md)
+is the reference**: collector interface, wire format, themes, art sets, the pet
+sprite pipeline, controls, and the non-obvious traps (palette index 0, ASCII-only
+font subsets, per-character gait tables, buffers sized across art sets).
 
 ## Recent session highlights
 

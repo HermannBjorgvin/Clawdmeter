@@ -29,6 +29,10 @@ TICK=5
 SAVED_MAC_FILE="$HOME/.config/claude-usage-monitor/ble-address"
 CONFIG_FILE="$HOME/.config/claude-usage-monitor/config"
 REFRESH_FLAG="/tmp/claude-usage-refresh-$$"
+NUDGE_MIN_INTERVAL=900   # seconds between token-refresh nudges (see nudge_token_refresh)
+NUDGE_TIMEOUT=120        # hard cap on one nudge
+NUDGE_MODEL="claude-haiku-4-5-20251001"
+LAST_NUDGE=0
 LAST_PAYLOAD=""      # last payload written to the device (replayed by the heartbeat)
 LAST_PAYLOAD_TS=0    # epoch when LAST_PAYLOAD's numbers were fetched from the API
 LAST_WRITE_TS=0      # epoch of the last GATT write of any kind (poll or heartbeat)
@@ -158,6 +162,70 @@ heartbeat() {
 
 # Read the `chime` option from the config file. Echoes one of: off|on.
 # Defaults to "off" so the device stays silent until the user opts in.
+# Read the `token_refresh` option. Echoes one of: off|on. Defaults to "off" —
+# the daemon spends none of your quota unless you ask it to.
+read_token_refresh_setting() {
+    local val=""
+    if [ -f "$CONFIG_FILE" ]; then
+        val=$(grep -E '^[[:space:]]*token_refresh[[:space:]]*=' "$CONFIG_FILE" | tail -1 \
+            | tr -d '\r' \
+            | sed -E 's/^[[:space:]]*token_refresh[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//' \
+            | tr '[:upper:]' '[:lower:]')
+    fi
+    case "$val" in
+        on) echo "on" ;;
+        *)  echo "off" ;;
+    esac
+}
+
+# Absolute path to the Claude Code CLI, or empty. systemd hands the daemon a
+# minimal PATH that usually omits ~/.local/bin — exactly where the official
+# installer puts `claude` — so check the config override, then PATH, then the
+# known install locations.
+find_claude_cli() {
+    local override
+    override=$(grep -E '^[[:space:]]*claude_cli[[:space:]]*=' "$CONFIG_FILE" 2>/dev/null | tail -1 \
+        | tr -d '\r' \
+        | sed -E 's/^[[:space:]]*claude_cli[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//')
+    if [ -n "$override" ]; then
+        [ -x "${override/#\~/$HOME}" ] && echo "${override/#\~/$HOME}"
+        return
+    fi
+    local c
+    c=$(command -v claude 2>/dev/null) && { echo "$c"; return; }
+    for c in "$HOME/.local/bin/claude" "$HOME/.claude/local/claude" /usr/local/bin/claude; do
+        [ -x "$c" ] && { echo "$c"; return; }
+    done
+}
+
+# Ask Claude Code to refresh its own OAuth token. Opt-in; see the Python
+# daemons' nudge_token_refresh docstring for the full rationale.
+#
+# The daemon is a pure free-ride: it never mints or refreshes tokens itself.
+# But when every config dir is 401ing, the device sits on "No data" until
+# something runs Claude Code. This runs one deliberately tiny headless call so
+# the CLI that owns the token refreshes it as a side effect. Off by default,
+# rate-limited, timeout-bounded, and never fatal.
+nudge_token_refresh() {
+    [ "$(read_token_refresh_setting)" = "on" ] || return 0
+    local now cli
+    now=$(date +%s)
+    (( now - LAST_NUDGE < NUDGE_MIN_INTERVAL )) && return 0
+    LAST_NUDGE=$now   # stamp before running: a failure must not retry-spam
+    cli=$(find_claude_cli)
+    if [ -z "$cli" ]; then
+        log "token_refresh=on but the \`claude\` CLI wasn't found — set \`claude_cli = /path/to/claude\` in the config"
+        return 0
+    fi
+    log "No live token in any config dir — nudging Claude Code to refresh it"
+    if timeout "$NUDGE_TIMEOUT" "$cli" -p ok --model "$NUDGE_MODEL" --output-format text >/dev/null 2>&1; then
+        log "Nudge finished; the next poll should find a fresh token"
+    else
+        log "Token refresh nudge failed — the refresh token may also be expired; run \`claude login\` once"
+    fi
+    return 0
+}
+
 read_chime_setting() {
     local val=""
     if [ -f "$CONFIG_FILE" ]; then
@@ -426,13 +494,48 @@ build_payload_for_token() {
         s5h_util=${s5h_util:-0}; s5h_reset=${s5h_reset:-0}
         s7d_util=${s7d_util:-0}; s7d_reset=${s7d_reset:-0}
         s5h_status=${s5h_status:-unknown}
-        payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$s5h_status" -v now="$now" -v clk="$clock_fragment" -v chm="$chime_fragment" \
+
+        # Optional weekly scoped-model limits (today: Fable). NOT in the
+        # rate-limit headers above — the scoped 7d_oi headers only appear on
+        # requests made WITH the scoped model, and polling with it would spend
+        # the allowance being measured. The OAuth usage endpoint (what
+        # `/usage` renders) reports them for free as limits[] entries with
+        # kind "weekly_scoped"; their reset equals the 7d reset. Each entry
+        # becomes {"n":<label>,"p":<pct>} in a "ws" array, labeled with the
+        # API's own display name so future scoped models ride along. Accounts
+        # without scoped limits -> "ws" omitted -> firmware keeps today's
+        # layout.
+        local fable_fragment="" usage_json scoped_entries="" weekly_all="" m p n
+        usage_json=$(curl -s "https://api.anthropic.com/api/oauth/usage" \
+            -H "Authorization: Bearer $token" \
+            -H "anthropic-beta: oauth-2025-04-20" \
+            -H "User-Agent: claude-code/2.1.5" 2>/dev/null)
+        while IFS= read -r m; do
+            [ -z "$m" ] && continue
+            p=$(echo "$m" | grep -o '"percent":[0-9]*' | head -1 | cut -d: -f2)
+            n=$(echo "$m" | grep -o '"display_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+            [ -n "$p" ] && [ -n "$n" ] && scoped_entries="$scoped_entries,{\"n\":\"$n\",\"p\":$p}"
+        done < <(echo "$usage_json" | grep -o '"kind":"weekly_scoped"[^{]*{"model":{[^}]*}')
+        if [ -n "$scoped_entries" ]; then
+            fable_fragment=",\"ws\":[${scoped_entries#,}]"
+            # Re-base the all-models % on the same source as the scoped ones.
+            # The header is a 2-decimal fraction and this endpoint a rounded
+            # integer, so mixing them can render a real 12.2/11.7 pair as
+            # 12/12 (and disagree with the settings UI). Header stays the
+            # fallback when this value is missing.
+            weekly_all=$(echo "$usage_json" \
+                | grep -o '"kind":"weekly_all"[^}]*"percent":[0-9]*' | head -1 \
+                | grep -o '[0-9]*$')
+            [ -n "$weekly_all" ] && s7d_util=$(awk -v p="$weekly_all" 'BEGIN { printf "%.4f", p / 100 }')
+        fi
+
+        payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$s5h_status" -v now="$now" -v fbl="$fable_fragment" -v clk="$clock_fragment" -v chm="$chime_fragment" \
             'BEGIN {
                 sp = sprintf("%.0f", u5 * 100);
                 sr = (r5 - now) / 60; sr = sr > 0 ? sprintf("%.0f", sr) : 0;
                 wp = sprintf("%.0f", u7 * 100);
                 wr = (r7 - now) / 60; wr = wr > 0 ? sprintf("%.0f", wr) : 0;
-                printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"acct\":\"pro\"%s%s,\"ok\":true}", sp, sr, wp, wr, st, clk, chm;
+                printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"acct\":\"pro\"%s%s%s,\"ok\":true}", sp, sr, wp, wr, st, fbl, clk, chm;
             }')
     else
         # Enterprise account — spending-limit model
@@ -509,6 +612,8 @@ poll() {
 
     if [ ${#cycle_payload[@]} -eq 0 ]; then
         log "No usable config dir this cycle"
+        # Opt-in, rate-limited, never fatal (see nudge_token_refresh).
+        nudge_token_refresh
         return 1
     fi
 

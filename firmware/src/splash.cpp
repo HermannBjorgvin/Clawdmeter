@@ -1,7 +1,11 @@
 #include "splash.h"
 #include "splash_animations.h"
+#include "pet_animations.h"
+#include "theme.h"
+#include <Preferences.h>
 #include "splash_geometry.h"
 #include "theme.h"
+#include <Preferences.h>
 #include "usage_rate.h"
 #include "hal/board_caps.h"
 #include "hal/display_hal.h"
@@ -24,7 +28,7 @@ static int  cell      = 8;         // recomputed in splash_init()
 static int  canvas_w  = GRID * 8;
 static int  canvas_h  = GRID * 8;
 
-// Splash background: true black (matches THEME_BG and palette index 0
+// Splash background: true black (matches the active theme's bg and palette index 0
 // emitted by tools/convert_official_clawd.js). Used for the stage margins
 // and as palette fallback.
 #define COL_EMPTY    0x0000
@@ -55,7 +59,7 @@ static int8_t  group_lists[GROUP_COUNT][GROUP_MAX];
 static uint8_t group_size[GROUP_COUNT] = {0};
 static uint8_t group_rotation[GROUP_COUNT] = {0};
 
-static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
+static const char* CLAWD_GROUPS[GROUP_COUNT][GROUP_MAX] = {
     // Group 0 — idle / sleepy (calm, investigative). Magnifier first: it's
     // the boot pick, and lurking-first would boot to a near-empty screen.
     { "magnifier", "walking", "pointing", "lurking" },
@@ -67,6 +71,135 @@ static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
     { "racing car", "cloud", "sailing scene", "jumping happy" },
 };
 
+// Codey's sheet has no walkers-with-props, so the groups lean on what it does
+// have: calm poses at low burn through to the laptop and the dizzy faces at
+// high burn. Names that a set lacks are simply skipped by
+// resolve_group_lists(), so a partial match degrades rather than breaking.
+static const char* CODEY_GROUPS[GROUP_COUNT][GROUP_MAX] = {
+    // Group 0 — idle / low
+    { "idle", "happy", "waving", "thinking" },
+    // Group 1 — normal pace
+    { "walking", "laptop", "thinking", "waving" },
+    // Group 2 — active (typing along with you)
+    { "laptop", "running", "jumping", "happy" },
+    // Group 3 — heavy burn
+    { "running", "dizzy", "jumping", "laptop" },
+};
+
+static const char* CLAWD_ACTS[4][4] = {
+    { "pointing", "lurking", NULL,       NULL      },   // idle: sparse, sneaky
+    { "waving",   "lurking", "pointing", NULL      },   // normal
+    { "waving",   "dancing", "lurking",  NULL      },   // active
+    { "dancing",  "waving",  "dancing",  "lurking" },   // heavy: can't sit still
+};
+
+// Codey shares none of those names except "waving", so with one table the
+// corner mascot could reach exactly one of its nine animations. No entry is a
+// walk-off trip: that is "lurking", which needs a peeking-in pose Codey's
+// sheet does not have. Every act below fits the 80px slot at its own cell
+// size -- the tallest, jumping and happy, come to 68px.
+static const char* CODEY_ACTS[4][4] = {
+    // Every band draws on most of the sheet, because the pick is random and a
+    // band you sit at for hours is otherwise a band that shows three poses.
+    // "idle" is not listed: it is the still pose the mascot returns to anyway,
+    // so as an act it reads as nothing happening.
+    { "thinking", "laptop",  "happy",  "trip"   },   // idle: contemplative
+    { "waving",   "laptop",  "trip",   "thinking" }, // normal
+    { "laptop",   "running", "happy",  "waving" },   // active: heads-down
+    { "jumping",  "running", "dizzy",  "laptop" },   // heavy: frazzled
+};
+
+enum WalkKind { WALK_NONE, WALK_CRAB, WALK_FRONT, WALK_EVEN };
+
+// The two art sets. Each was authored on its own stage, so the stage size
+// travels with the art rather than being a constant of the engine: Clawd's
+// crops are placed on a 55x37 stage, Codey's on 35x40.
+struct ArtSet {
+    const splash_anim_def_t *anims;
+    uint8_t count;
+    uint8_t stage_w, stage_h;
+    const char* (*groups)[GROUP_MAX];
+    const char* (*acts)[4];        // corner-mascot acts, by usage-rate group
+    WalkKind walk;                 // gait-step schedule for this set's walk cycle
+    const char* peek;              // pose shown large at the far edge mid-trip
+    uint8_t peek_hang_pct;         // how much of it hangs off the edge (see below)
+};
+
+static const ArtSet CLAWD_SET =
+    { splash_anims, SPLASH_ANIM_COUNT, 55, 37, CLAWD_GROUPS, CLAWD_ACTS, WALK_FRONT, "lurking", 0 };
+
+// The Codex side has a pet per sheet in the pack, all sharing one behaviour
+// profile -- the groups, acts, gait and lack of a drawn peek pose are
+// properties of "a ChatGPT pet", not of any one of them. Only the table, the
+// stage and the name differ, so the set is assembled at runtime from PETS[]
+// rather than duplicated eight times.
+static uint8_t pet_idx = 0;
+static bool    pets_paused = false;
+static ArtSet  pet_set;
+
+// Shares the "clawdmeter" namespace with brightness and theme -- the handful
+// of user-chosen settings that should outlive a reboot.
+#define PET_PREF_NS  "clawdmeter"
+#define PET_PREF_KEY "pet"
+#define PAUSE_PREF_KEY "petpause"
+
+static void build_pet_set(void) {
+    const pet_set_t &p = PETS[pet_idx];
+    pet_set.anims = p.anims;
+    pet_set.count = p.count;
+    pet_set.stage_w = p.stage_w;
+    pet_set.stage_h = p.stage_h;
+    pet_set.groups = CODEY_GROUPS;
+    pet_set.acts = CODEY_ACTS;
+    pet_set.walk = WALK_EVEN;
+    pet_set.peek = nullptr;
+    pet_set.peek_hang_pct = 0;
+}
+
+static void pet_load(void) {
+    Preferences prefs;
+    prefs.begin(PET_PREF_NS, true);
+    uint8_t saved = prefs.getUChar(PET_PREF_KEY, 0);
+    prefs.end();
+    pet_idx = (saved < PET_COUNT) ? saved : 0;
+    build_pet_set();
+
+    prefs.begin(PET_PREF_NS, true);
+    pets_paused = prefs.getUChar(PAUSE_PREF_KEY, 0) != 0;
+    prefs.end();
+}
+
+bool splash_paused(void) { return pets_paused; }
+
+void splash_set_paused(bool paused) {
+    if (paused == pets_paused) return;
+    pets_paused = paused;
+
+    Preferences prefs;
+    prefs.begin(PET_PREF_NS, false);
+    prefs.putUChar(PAUSE_PREF_KEY, pets_paused ? 1 : 0);
+    prefs.end();
+}
+
+const char* splash_pet_name(void) { return PETS[pet_idx].name; }
+
+// Art follows the theme: one mode switch changes palette and mascot together.
+static inline const ArtSet& art(void) {
+    return theme_mode() == THEME_MODE_CLAUDE ? CLAWD_SET : pet_set;
+}
+
+// Every art set the mascot buffers must be able to hold, so a size computed
+// once at create time survives any later mode or pet change.
+static void for_each_set(void (*fn)(const ArtSet&)) {
+    fn(CLAWD_SET);
+    ArtSet tmp = pet_set;
+    for (uint8_t i = 0; i < PET_COUNT; i++) {
+        tmp.anims = PETS[i].anims;
+        tmp.count = PETS[i].count;
+        fn(tmp);
+    }
+}
+
 // Scratch stage: the current animation frame composed centered onto the full
 // 60×60 grid (index 0 = background elsewhere). 3.6 KB of static RAM.
 static uint8_t stage_cells[GRID * GRID];
@@ -76,8 +209,8 @@ static uint8_t stage_cells[GRID * GRID];
 // centered per-animation. All animations share one idle-Clawd position
 // (x 15..38, y 21..36 in stage cells), so transitions between them are
 // seamless; centering per-crop would make the still pose jump around.
-#define STAGE_ANCHOR_X ((GRID - 55) / 2)
-#define STAGE_ANCHOR_Y ((GRID - 37) / 2)
+#define STAGE_ANCHOR_X ((GRID - art().stage_w) / 2)
+#define STAGE_ANCHOR_Y ((GRID - art().stage_h) / 2)
 
 // ─── Playback: intro → loop → outro ─────────────────────────────────────────
 // Every animation carries a loop region (converter-detected gait cycles and
@@ -107,7 +240,6 @@ static bool     pending_pick = false;   // rotate requested; honor at completion
 // walking left the frame is mirrored (eyes lead); facing persists standing.
 // DEMO: until the BLE-driven state machine exists, a choreography loops
 // stand → right edge → off-screen left → re-enter home.
-enum WalkKind { WALK_NONE, WALK_CRAB, WALK_FRONT };
 static WalkKind walk_kind = WALK_NONE;
 static bool    walk_active = false;
 static int     walk_x = 0;         // stage x of the frame origin, may be < 0
@@ -129,6 +261,13 @@ static int walk_gait_cells_k(WalkKind kind, uint16_t frame, bool from_loop) {
         if (frame == 2 && !from_loop) return 0;       // first plant
         return (frame == 6) ? 2 : 1;
     }
+    if (kind == WALK_EVEN) {
+        // No measured foot-plant schedule for this art, so travel evenly: one
+        // cell per gait frame. The WALK_CRAB/WALK_FRONT tables above were
+        // derived from Clawd's own frames, and applying them to another
+        // character locks travel to feet that are not there.
+        return from_loop ? 1 : 0;
+    }
     return 0;
 }
 static int walk_gait_cells(uint16_t frame, bool from_loop) {
@@ -143,7 +282,7 @@ static void anim_reset(const splash_anim_def_t *a) {
     walk_active = false;
     walk_kind = WALK_NONE;
     if (strcmp(a->name, "crab walking") == 0) walk_kind = WALK_CRAB;
-    else if (strcmp(a->name, "walking") == 0) walk_kind = WALK_FRONT;
+    else if (strcmp(a->name, "walking") == 0) walk_kind = art().walk;
     else return;
     walk_active = true;
     walk_home_x = STAGE_ANCHOR_X + a->ox;
@@ -206,7 +345,7 @@ static const uint8_t* compose_stage(const splash_anim_def_t *a, uint16_t frame) 
     // vertical placement should stay anchored (rounded panel corners).
     int ax = STAGE_ANCHOR_X + a->ox;
     if (a->ox == 0)           ax = 0;
-    if (a->ox + a->w == 55)   ax = GRID - a->w;
+    if (a->ox + a->w == art().stage_w) ax = GRID - a->w;
     if (walk_active)          ax = walk_x;
     const bool mirror = walk_active && walk_face < 0;
     const int ay = STAGE_ANCHOR_Y + a->oy;
@@ -233,10 +372,10 @@ static void resolve_group_lists(void) {
         group_size[g] = 0;
         for (int s = 0; s < GROUP_MAX; s++) {
             group_lists[g][s] = -1;
-            const char* want = GROUP_NAMES[g][s];
+            const char* want = art().groups[g][s];
             if (!want) continue;
-            for (int i = 0; i < SPLASH_ANIM_COUNT; i++) {
-                if (strcmp(splash_anims[i].name, want) == 0) {
+            for (int i = 0; i < art().count; i++) {
+                if (strcmp(art().anims[i].name, want) == 0) {
                     group_lists[g][group_size[g]++] = (int8_t)i;
                     break;
                 }
@@ -375,8 +514,8 @@ static void mini_render(void) {
 
 lv_obj_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px) {
     mini_anim = NULL;
-    for (int i = 0; i < SPLASH_ANIM_COUNT; i++) {
-        if (strcmp(splash_anims[i].name, anim_name) == 0) { mini_anim = &splash_anims[i]; break; }
+    for (int i = 0; i < art().count; i++) {
+        if (strcmp(art().anims[i].name, anim_name) == 0) { mini_anim = &art().anims[i]; break; }
     }
     if (!mini_anim) return NULL;
     const int amax = (mini_anim->w > mini_anim->h) ? mini_anim->w : mini_anim->h;
@@ -415,6 +554,8 @@ void splash_mini_tick(void) {
 // static clawd_still.h icon on the C6); driven by splash_mascot_tick() from
 // the main loop, independent of the splash screen itself.
 static lv_obj_t *mas_img = NULL;
+static int mas_slot_px = 0;    // height available in the corner slot
+static int mas_max_cell = 3;   // largest px-per-cell worth using there
 static lv_obj_t *mas_lurk_img = NULL;
 static uint8_t  *mas_buf = NULL;       // planar RGB565A8, sized for largest act
 static uint8_t  *mas_lurk_buf = NULL;
@@ -435,23 +576,38 @@ static uint32_t mas_mode_started = 0;
 static int  mas_x = 0;                 // widget x, px (may be off-screen)
 static int  mas_face = +1;
 static uint8_t mas_act_idx = 0;
+static int8_t  mas_last_act = -1;
+
+// Small xorshift rather than rand(): the Arduino and native builds disagree
+// about what rand() is seeded with, and this only needs to look unplanned.
+static uint32_t mas_rng_state = 0;
+static uint8_t mas_pick_act(uint8_t count) {
+    if (count <= 1) return 0;
+    if (!mas_rng_state) mas_rng_state = millis() | 1u;
+    mas_rng_state ^= mas_rng_state << 13;
+    mas_rng_state ^= mas_rng_state >> 17;
+    mas_rng_state ^= mas_rng_state << 5;
+    // High bits: xorshift32's low bits are much weaker, and a modulo by a
+    // small power of two takes exactly those -- picking on `state % 4` cycled
+    // between two acts.
+    uint8_t pick = (uint8_t)((mas_rng_state >> 16) % count);
+    // A repeat reads as the animation being stuck, so step off it.
+    if ((int8_t)pick == mas_last_act) pick = (pick + 1) % count;
+    mas_last_act = (int8_t)pick;
+    return pick;
+}
+static uint32_t mas_peek_started = 0;
 static bool mas_from_loop = false;
 
 // The corner mascot mirrors the splash's excitement: per usage-rate group,
 // how long he idles between acts and which acts he does. "lurking" means the
 // walk-off / full-size-lurk / walk-back trip. Acts must fit the 28×21-cell
 // buffer (jumps are too tall for the corner).
-static const char* MAS_ACTS_BY_RATE[4][4] = {
-    { "pointing", "lurking", NULL,       NULL      },   // idle: sparse, sneaky
-    { "waving",   "lurking", "pointing", NULL      },   // normal
-    { "waving",   "dancing", "lurking",  NULL      },   // active
-    { "dancing",  "waving",  "dancing",  "lurking" },   // heavy: can't sit still
-};
 static const uint16_t MAS_STILL_MS_BY_RATE[4] = { 10000, 7000, 5000, 3500 };
 
 static const splash_anim_def_t* anim_by_name(const char *n) {
-    for (int i = 0; i < SPLASH_ANIM_COUNT; i++)
-        if (strcmp(splash_anims[i].name, n) == 0) return &splash_anims[i];
+    for (int i = 0; i < art().count; i++)
+        if (strcmp(art().anims[i].name, n) == 0) return &art().anims[i];
     return NULL;
 }
 
@@ -460,6 +616,13 @@ static const splash_anim_def_t* anim_by_name(const char *n) {
 static void mas_render(const splash_anim_def_t *a, uint16_t frame, bool mirror,
                        lv_image_dsc_t *dsc, uint8_t *buf, lv_obj_t *img,
                        int cell, int x, int feet_y) {
+    // Invalidate where the sprite IS before moving or resizing it. The call at
+    // the end only marks the new area dirty, so under partial rendering the
+    // vacated pixels are never repainted and the mascot leaves a trail behind
+    // it -- visible on the panel, invisible in the simulator, which redraws
+    // the whole frame every time.
+    lv_obj_invalidate(img);
+
     const int w = a->w * cell, h = a->h * cell;
     uint16_t *color = (uint16_t*)buf;
     uint8_t  *alpha = buf + (size_t)w * h * 2;
@@ -487,32 +650,128 @@ static void mas_render(const splash_anim_def_t *a, uint16_t frame, bool mirror,
     lv_obj_invalidate(img);
 }
 
+// Largest cell at which the active set's still pose fits the slot.
+// Clawd's "lurking" is a cropped lean-in pose, 13x17 cells, and at the base
+// cell it lands 104x136px with its feet at 4/5 screen height. Codey's borrowed
+// "waving" is a full 24x30 figure, so the SAME cell size rendered it 192x240 --
+// nearly half the panel, starting mid-screen. Match the on-screen height
+// instead of the cell size, and anchor both to the same bottom line, so any
+// set's peek reads at the size Clawd's was drawn for.
+#define PEEK_TARGET_CELLS 17
+
+// Minimum time the peek stays on screen. Clawd's "lurking" is 24 authored
+// frames and dwells naturally; Codey's borrowed "waving" is 4 frames totalling
+// 600ms, which flashes a large sprite on and off before it reads as anything.
+// A short peek loops until this elapses.
+#define PEEK_MIN_MS 2600
+
+static int mas_peek_cell(const splash_anim_def_t *a) {
+    const BoardCaps& c = board_caps();
+    const int mind = (c.width < c.height) ? c.width : c.height;
+    const int base = mind / SPLASH_GRID;
+    if (!a || a->h <= 0) return base < 1 ? 1 : base;
+    int cell = (PEEK_TARGET_CELLS * base) / a->h;
+    return cell < 1 ? 1 : cell;
+}
+
+// Clawd's "lurking" is drawn already cropped -- a head and shoulder leaning in
+// from off-stage -- so placing it flush to the edge reads as a peek. A
+// borrowed full-body pose placed the same way just looks like the character
+// teleported there. peek_hang_pct pushes such a pose partly off the edge so
+// the screen border does the cropping the art does not.
+static int mas_peek_x(const splash_anim_def_t *a, int cell) {
+    const int w = a->w * cell;
+    return mas_screen_w - w + (w * art().peek_hang_pct) / 100;
+}
+
+// The peek sits low, but not so low that arriving there reads as a jump down
+// the whole panel. A cropped pose can sit deeper because less of it shows.
+static int mas_peek_feet_y(void) {
+    const BoardCaps& c = board_caps();
+    const int mind = (c.width < c.height) ? c.width : c.height;
+    return art().peek_hang_pct ? mind * 2 / 3 : mind * 4 / 5;
+}
+
+static int mas_fit_cell(void) {
+    const splash_anim_def_t *still = anim_by_name("walking");
+    if (!still || still->h <= 0) return mas_max_cell;
+    int cell = mas_slot_px / still->h;
+    if (cell > mas_max_cell) cell = mas_max_cell;
+    return cell < 1 ? 1 : cell;
+}
+
 static void mas_show_still(void) {
     mas_anim = anim_by_name("walking");     // frame 0 == the official still pose
+    mas_cell = mas_fit_cell();              // refit: the sets differ in height
     mas_frame = 0;
     mas_mode = MAS_STILL;
     mas_mode_started = millis();
     mas_x = mas_slot_x;
     mas_face = +1;
+
+    // Return to base means BOTH widgets back to their resting visibility. The
+    // trip hides the corner sprite while the peek shows and swaps them back on
+    // the way out -- but a mode or pet change lands here directly, so without
+    // this a switch mid-trip strands the previous set's peek on screen. Caught
+    // on hardware: Clawd was still peeking over a Codex screen.
+    // ...but only back to the visibility the SCREEN wants. mas_visible is
+    // false while the splash is up, and un-hiding unconditionally here put a
+    // stray corner mascot on the splash canvas: this runs on every act
+    // completion, mode change and pet change, so it overrode
+    // splash_mascot_set_visible(false) within seconds of switching screens.
+    if (mas_lurk_img) lv_obj_add_flag(mas_lurk_img, LV_OBJ_FLAG_HIDDEN);
+    if (mas_img && mas_visible) lv_obj_clear_flag(mas_img, LV_OBJ_FLAG_HIDDEN);
     if (mas_anim)
         mas_render(mas_anim, 0, false, &mas_dsc, mas_buf, mas_img,
                    mas_cell, mas_x, mas_feet_y);
 }
 
-lv_obj_t* splash_mascot_create(lv_obj_t *parent, int slot_x, int feet_y, int cell) {
-    mas_cell = cell;
+// Largest frame across EVERY art set, not just the active one. The mascot
+// buffer is allocated once, at create time, but the mode can switch at any
+// point afterwards -- and the sets are not close in size: Clawd's biggest act
+// bbox is 28x21 cells while Codey's frames reach 29x34, nearly 1.7x the
+// area. Sizing to the active set overflows mas_buf on the first mode switch.
+static int mfc_w = 0, mfc_h = 0;
+static void mfc_visit(const ArtSet &set) {
+    for (int i = 0; i < set.count; i++) {
+        if (set.anims[i].w > mfc_w) mfc_w = set.anims[i].w;
+        if (set.anims[i].h > mfc_h) mfc_h = set.anims[i].h;
+    }
+}
+
+static void max_frame_cells(int *out_w, int *out_h) {
+    mfc_w = mfc_h = 0;
+    for_each_set(mfc_visit);
+    *out_w = mfc_w;
+    *out_h = mfc_h;
+}
+
+lv_obj_t* splash_mascot_create(lv_obj_t *parent, int slot_x, int feet_y,
+                               int slot_px, int max_cell) {
+    mas_slot_px = slot_px;
+    mas_max_cell = max_cell;
+    mas_cell = mas_fit_cell();
     mas_slot_x = slot_x;
     mas_feet_y = feet_y;
     mas_screen_w = board_caps().width;
-    // Buffer for the largest act bbox (pointing, 28×21 cells).
-    const size_t mas_bytes = (size_t)(28 * cell) * (21 * cell) * 3;
-    const splash_anim_def_t *lurk = anim_by_name("lurking");
+    int max_w, max_h;
+    max_frame_cells(&max_w, &max_h);
+    const size_t mas_bytes = (size_t)(max_w * cell) * (max_h * cell) * 3;
     const BoardCaps& c = board_caps();
     int mind = (c.width < c.height) ? c.width : c.height;
     mas_lurk_cell = mind / SPLASH_GRID;
     if (mas_lurk_cell < 1) mas_lurk_cell = 1;
-    const size_t lurk_bytes = lurk ?
-        (size_t)(lurk->w * mas_lurk_cell) * (lurk->h * mas_lurk_cell) * 3 : 0;
+    // Largest peek pose across every set, for the same reason mas_buf is
+    // sized across every set: allocated once, and the mode can change later.
+    // Only Clawd has a drawn peek pose; the pets cross without one.
+    size_t lurk_bytes = 0;
+    for (int i = 0; i < CLAWD_SET.count; i++) {
+        if (!CLAWD_SET.peek ||
+            strcmp(CLAWD_SET.anims[i].name, CLAWD_SET.peek) != 0) continue;
+        const int pc = mas_peek_cell(&CLAWD_SET.anims[i]);
+        lurk_bytes = (size_t)(CLAWD_SET.anims[i].w * pc) *
+                     (CLAWD_SET.anims[i].h * pc) * 3;
+    }
     mas_buf      = (uint8_t*)heap_caps_malloc(mas_bytes,  MALLOC_CAP_SPIRAM);
     mas_lurk_buf = lurk_bytes ? (uint8_t*)heap_caps_malloc(lurk_bytes, MALLOC_CAP_SPIRAM) : NULL;
     if (!mas_buf) return NULL;
@@ -542,6 +801,7 @@ void splash_mascot_set_visible(bool v) {
 }
 
 void splash_mascot_tick(void) {
+    if (pets_paused) return;   // frozen: hold the current frame
     if (!mas_img || !mas_visible || !mas_anim) return;
     const uint32_t now = millis();
 
@@ -550,14 +810,20 @@ void splash_mascot_tick(void) {
         if (g < 0 || g > 3) g = 0;
         if (now - mas_mode_started < MAS_STILL_MS_BY_RATE[g]) return;
         uint8_t count = 0;
-        while (count < 4 && MAS_ACTS_BY_RATE[g][count]) count++;
+        while (count < 4 && art().acts[g][count]) count++;
         if (count == 0) { mas_mode_started = now; return; }
-        const char *act = MAS_ACTS_BY_RATE[g][mas_act_idx++ % count];
+        const char *act = art().acts[g][mas_pick_act(count)];
+        Serial.printf("mascot: %s\n", act);
         mas_frame = 0;
         mas_frame_started = now;
         mas_from_loop = false;
-        if (strcmp(act, "lurking") == 0 && mas_lurk_img) {   // the lurk trip
+        // The trip: walk off stage left, appear large at the right edge, then
+        // walk the whole width back to the corner. Each art set names its own
+        // far-edge pose -- Clawd has a purpose-drawn "lurking", Codey borrows
+        // "waving", which reads the same at that size.
+        if (strcmp(act, "trip") == 0 || strcmp(act, "lurking") == 0) {
             mas_anim = anim_by_name("walking");
+            if (!mas_anim) { mas_mode_started = now; return; }
             mas_face = -1;
             mas_mode = MAS_WALK_OFF;
         } else {
@@ -581,6 +847,14 @@ void splash_mascot_tick(void) {
 
     if (next >= a->frame_count) {                   // act / lurk finished
         if (mas_mode == MAS_LURK) {
+            if (now - mas_peek_started < PEEK_MIN_MS) {
+                mas_frame = 0;                  // replay until the dwell is up
+                mas_render(a, 0, true, &mas_lurk_dsc, mas_lurk_buf,
+                           mas_lurk_img, mas_lurk_cell,
+                           mas_peek_x(a, mas_lurk_cell),
+                           mas_peek_feet_y());
+                return;
+            }
             lv_obj_add_flag(mas_lurk_img, LV_OBJ_FLAG_HIDDEN);
             mas_anim = anim_by_name("walking");
             mas_frame = 0;
@@ -601,7 +875,7 @@ void splash_mascot_tick(void) {
         mas_frame >= a->loop_start && mas_frame <= a->loop_end;
 
     if (walking_mode && mas_from_loop) {
-        const int step = walk_gait_cells_k(WALK_FRONT, mas_frame, from_loop) * mas_cell;
+        const int step = walk_gait_cells_k(art().walk, mas_frame, from_loop) * mas_cell;
         // Walk-off always exits left; walk-in heads toward the slot from
         // whichever side he's on (right, after the lurk trip).
         const int dir = (mas_mode == MAS_WALK_OFF) ? -1
@@ -610,20 +884,33 @@ void splash_mascot_tick(void) {
         mas_x += dir * step;
         if (mas_mode == MAS_WALK_OFF && mas_x <= -a->w * mas_cell) {
             // Fully off: hide the corner sprite, run the full-size lurk.
+            const splash_anim_def_t *lurk = art().peek ? anim_by_name(art().peek) : nullptr;
+            if (!lurk || !mas_lurk_img || !mas_lurk_buf) {
+                // No peek pose: cross anyway. Re-enter from the RIGHT, like
+                // the post-peek leg does, so the walk still spans the screen
+                // instead of doubling back on itself at the left edge.
+                mas_frame = 0;
+                mas_from_loop = false;
+                mas_face = -1;
+                mas_x = mas_screen_w;
+                mas_mode = MAS_WALK_IN;
+                return;
+            }
             lv_obj_add_flag(mas_img, LV_OBJ_FLAG_HIDDEN);
-            const splash_anim_def_t *lurk = anim_by_name("lurking");
-            if (lurk && mas_lurk_img && mas_lurk_buf) {
+            if (true) {
                 mas_anim = lurk;
                 mas_frame = 0;
                 mas_mode = MAS_LURK;
+                mas_peek_started = now;
                 lv_obj_clear_flag(mas_lurk_img, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_move_foreground(mas_lurk_img);
                 // He left stage left, so he peeks in from the RIGHT edge —
                 // mirrored at render time (the art is authored left-edge).
+                mas_lurk_cell = mas_peek_cell(lurk);
                 mas_render(lurk, 0, true, &mas_lurk_dsc, mas_lurk_buf,
                            mas_lurk_img, mas_lurk_cell,
-                           mas_screen_w - lurk->w * mas_lurk_cell,
-                           (STAGE_ANCHOR_Y + lurk->oy + lurk->h) * mas_lurk_cell);
+                           mas_peek_x(lurk, mas_lurk_cell),
+                           mas_peek_feet_y());
             } else {
                 mas_mode = MAS_WALK_IN;             // no lurk asset: turn back
                 mas_face = +1;
@@ -661,13 +948,14 @@ static void show_placeholder() {
 }
 
 void splash_init(lv_obj_t *parent) {
+    pet_load();      // before anything reads art(): it builds the pet set
     const BoardCaps& c = board_caps();
 
     // Shared full-screen black container — the splash background.
     splash_container = lv_obj_create(parent);
     lv_obj_set_size(splash_container, c.width, c.height);
     lv_obj_set_pos(splash_container, 0, 0);
-    lv_obj_set_style_bg_color(splash_container, THEME_BG, 0);
+    lv_obj_set_style_bg_color(splash_container, lv_color_hex(theme().bg), 0);
     lv_obj_set_style_bg_opa(splash_container, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(splash_container, 0, 0);
     lv_obj_set_style_pad_all(splash_container, 0, 0);
@@ -726,7 +1014,7 @@ void splash_init(lv_obj_t *parent) {
 
     resolve_group_lists();
 
-    if (SPLASH_ANIM_COUNT == 0) {
+    if (art().count == 0) {
         show_placeholder();
     } else {
         lv_obj_add_flag(label_status, LV_OBJ_FLAG_HIDDEN);
@@ -734,7 +1022,7 @@ void splash_init(lv_obj_t *parent) {
         // PSRAM path pre-renders frame 0 into the canvas buffer. The direct
         // path draws nothing here — render_frame() bails while inactive, so the
         // splash never paints to the panel before it's actually shown.
-        const splash_anim_def_t *a = &splash_anims[0];
+        const splash_anim_def_t *a = &art().anims[0];
         render_frame(compose_stage(a, 0), a->palette);
 #endif
         frame_started_ms = millis();
@@ -744,19 +1032,20 @@ void splash_init(lv_obj_t *parent) {
 }
 
 void splash_tick(void) {
-    if (!active || SPLASH_ANIM_COUNT == 0) return;
+    if (pets_paused) return;   // frozen: hold the current frame
+    if (!active || art().count == 0) return;
     const uint32_t now = millis();
 
 #if SPLASH_DIRECT_DRAW
     // Deferred full repaint after a (re)show — runs now that LVGL has drawn the
     // black background this loop iteration.
     if (force_full) {
-        const splash_anim_def_t *fa = &splash_anims[cur_anim];
+        const splash_anim_def_t *fa = &art().anims[cur_anim];
         if (fa->frame_count) render_frame(compose_stage(fa, cur_frame), fa->palette);
     }
 #endif
 
-    const splash_anim_def_t *a = &splash_anims[cur_anim];
+    const splash_anim_def_t *a = &art().anims[cur_anim];
     if (a->frame_count == 0) return;
 
     if (walk_active) walk_choreo(a);
@@ -825,20 +1114,53 @@ void splash_tick(void) {
     render_frame(compose_stage(a, cur_frame), a->palette);
 }
 
-void splash_next(void) {
-    if (SPLASH_ANIM_COUNT == 0) return;
-    cur_anim = (cur_anim + 1) % SPLASH_ANIM_COUNT;
+void splash_pet_next(void) {
+    pet_idx = (pet_idx + 1) % PET_COUNT;
+    build_pet_set();
+
+    Preferences prefs;
+    prefs.begin(PET_PREF_NS, false);
+    prefs.putUChar(PET_PREF_KEY, pet_idx);
+    prefs.end();
+
+    Serial.printf("pet: -> %s\n", PETS[pet_idx].name);
+    splash_reload_art();
+}
+
+void splash_reload_art(void) {
+    // Group lists hold indices into the previous set's table, and cur_anim
+    // may point past the end of a smaller one.
+    resolve_group_lists();
+    if (art().count == 0) return;
+    if (cur_anim >= art().count) cur_anim = 0;
     cur_frame = 0;
     frame_started_ms = millis();
     last_pick_ms = frame_started_ms;
-    const splash_anim_def_t *a = &splash_anims[cur_anim];
+    const splash_anim_def_t *a = &art().anims[cur_anim];
+    anim_reset(a);
+    if (active) render_frame(compose_stage(a, 0), a->palette);
+
+    // The corner mascot holds its own pointer into the previous set's table
+    // and keeps rendering from it -- Clawd carried on walking across a Codex
+    // screen. Re-resolving through mas_show_still() rebinds it by name against
+    // the new set and drops any trip in progress.
+    if (mas_img) mas_show_still();
+}
+
+void splash_next(void) {
+    if (art().count == 0) return;
+    cur_anim = (cur_anim + 1) % art().count;
+    cur_frame = 0;
+    frame_started_ms = millis();
+    last_pick_ms = frame_started_ms;
+    const splash_anim_def_t *a = &art().anims[cur_anim];
     anim_reset(a);
     render_frame(compose_stage(a, 0), a->palette);
     Serial.printf("splash: -> %s\n", a->name);
 }
 
 void splash_pick_for_current_rate(void) {
-    if (SPLASH_ANIM_COUNT == 0) return;
+    if (art().count == 0) return;
     int g = usage_rate_group();
     if (g < 0 || g >= GROUP_COUNT) g = 0;
     if (group_size[g] == 0) return;
@@ -852,7 +1174,7 @@ void splash_pick_for_current_rate(void) {
     cur_frame = 0;
     frame_started_ms = millis();
     last_pick_ms = frame_started_ms;
-    const splash_anim_def_t *a = &splash_anims[cur_anim];
+    const splash_anim_def_t *a = &art().anims[cur_anim];
     anim_reset(a);
     render_frame(compose_stage(a, 0), a->palette);
 }
