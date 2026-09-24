@@ -2,7 +2,7 @@
 
 Coding-agent usage on a [BUSY Bar](https://busy.app) — a 72×16 RGB LED matrix — rotating through every quota your plans meter, each with its label and its mascot.
 
-![Petmeter on a BUSY Bar](../screenshots/busybar/card-5.png)
+![Petmeter on a BUSY Bar](../screenshots/busybar/card-1.png)
 
 Every screenshot here is the real device: captured with
 [`tools/busybar_shot.py --skin`](../tools/busybar_shot.py), which reads the
@@ -15,11 +15,11 @@ The cards rotate every four seconds, each carrying its provider's mascot.
 
 | | |
 |---|---|
-| ![Current](../screenshots/busybar/card-4.png) | **Current** — the 5-hour window |
-| ![Weekly](../screenshots/busybar/card-5.png) | **Weekly** — the 7-day window |
-| ![Fable](../screenshots/busybar/card-1.png) | **Fable** — a scoped model allowance, when the plan meters one |
-| ![Codex weekly](../screenshots/busybar/card-2.png) | **Codex**, with Codey — the same reading for the other provider |
-| ![Reset credits](../screenshots/busybar/card-3.png) | **Resets** — the credit ledger: held solid, spent hollow |
+| ![Current](../screenshots/busybar/card-1.png) | **Current** — the 5-hour window |
+| ![Weekly](../screenshots/busybar/card-2.png) | **Weekly** — the 7-day window |
+| ![Fable](../screenshots/busybar/card-3.png) | **Fable** — a scoped model allowance, when the plan meters one |
+| ![Codex](../screenshots/busybar/card-4.png) | **Codex**, with Codey — the same reading for the other provider |
+| ![Reset credits](../screenshots/busybar/card-5.png) | **Resets** — the credit ledger: held solid, spent hollow |
 
 And the states you hope not to see:
 
@@ -28,7 +28,7 @@ And the states you hope not to see:
 | ![No data](../screenshots/busybar/state-nodata.png) | **no data** — the daemon is there, the reading is not. The pet stays: the app is alive |
 | ![No host](../screenshots/busybar/state-nohost.png) | **no host** — the daemon is unreachable. No pet, because the pet lives on the host |
 | ![Paused](../screenshots/busybar/state-paused.png) | **paused** — the 2×2 badge at the top right, the only room there was for one |
-| ![Toast](../screenshots/busybar/state-toast.png) | the **toast** on a press, over the caption row for two seconds |
+| ![Toast](../screenshots/busybar/state-toast-running.png) | the **toast** on a press — the word replaces the caption for two seconds, then the device removes it itself |
 
 This is a self-contained corner of [Petmeter](../README.md). The desk meter it belongs to is an ESP32 device; nothing here needs one. All it needs is the Petmeter daemon running on a host the bar can reach.
 
@@ -193,9 +193,17 @@ wins and the other gets 409s. Set `busybar_url` or `busybar_serve`, not both.
 
 ```
  0            23 26                                      71
-├─── mascot ────┤├─ 21%  (large, rows 0..8) ─────────────┤
-                ├─ Current ················· 1h25 ───────┤  rows 11..15
+├─── mascot ────┤├─ 17% (large, rows 0..8) ──── 3h40m ───┤
+                ├─ Current ──────────────────────────────┤  rows 11..15
 ```
+
+**The countdown sits beside the number, not beside the label.** "Current" and
+"3h40m" want 52px of a 46px row, so one of them has to give: first the time
+gave (`3h40` — a duration nobody writes, and the one number on the card worth
+acting on), then the label gave (`Curre`). Both were wrong. The top row has
+free space on every quota card, so the time went there and the label got the
+caption row to itself. At 100% the percent sign gives way instead, so three
+digits never reach the countdown.
 
 **There is no bar.** In a 46px pane a `large` number cannot share a row with
 any label, and label + 9px number + a bar do not stack in 16 rows — something

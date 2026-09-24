@@ -25,6 +25,7 @@ import time
 DEFAULT_BIND = "10.0.4.21"       # this host, on the bar's USB network
 DEFAULT_PORT = 8724
 PATH = "/usage.json"
+CONTROL_PATH = "/control"
 
 _latest: dict = {"ok": False}
 _server: asyncio.AbstractServer | None = None
@@ -175,7 +176,30 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
     try:
         request = await asyncio.wait_for(reader.readline(), timeout=5)
         parts = request.decode("latin-1").split()
-        ok = len(parts) >= 2 and parts[0] == "GET" and parts[1].split("?")[0] == PATH
+        target = parts[1] if len(parts) >= 2 else ""
+        path = target.split("?")[0]
+        ok = len(parts) >= 2 and parts[0] == "GET" and path == PATH
+
+        # A button, from whoever can see one. The in-process reader uses the
+        # Control object directly; this is for a reader running outside the
+        # daemon -- which on macOS is the only place it can run until the
+        # daemon is granted Local Network access, since a launchd job cannot
+        # raise that prompt.
+        if len(parts) >= 2 and path == CONTROL_PATH:
+            action = _query(target).get("do", "")
+            if action == "pause":
+                control.toggle_pause()
+            elif action == "next":
+                control.step(1)
+            elif action == "prev":
+                control.step(-1)
+            body = json.dumps(control.as_dict()).encode()
+            writer.write(
+                f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
+                .encode() + body)
+            await writer.drain()
+            return
 
         if ok:
             q = _query(parts[1])

@@ -159,24 +159,15 @@ function colorFor(pct: number): string {
 }
 
 /**
- * Fit the reset string beside the label in 46px, shortening it rather than
- * letting it collide: "1h25m" loses its minutes before it loses its hours.
+ * THE TIME AND THE LABEL DO NOT SHARE A ROW.
+ *
+ * "Current" and "3h48m" want 52px of a 46px one, so something gave: first the
+ * time (which produced "3h48", a duration nobody writes and the one number on
+ * the card worth acting on), then the label (which produced "Curre"). Both
+ * were wrong. The time goes up beside the number instead, where the space is
+ * free on every quota card, and the label gets the caption row to itself.
  */
-function fitReset(label: string, full: string): string | null {
-  const room = PANE_W - smallWidth(label) - 2;
-  // Dropping the trailing "m" only reads as a time when the minutes are two
-  // digits: "1h25m" -> "1h25" is fine, "4h3m" -> "4h3" is not a duration
-  // anyone recognises, so that case falls straight to the hour.
-  const ladder = [
-    full,
-    full.replace(/^(\d+h\d\d)m$/, "$1"),
-    full.replace(/^(\d+[dh]).*$/, "$1"),
-  ];
-  for (const candidate of ladder) {
-    if (candidate && smallWidth(candidate) <= room) return candidate;
-  }
-  return null;
-}
+const RESET_Y = 2;      // small text beside the number, optically centred
 
 function text(
   id: string,
@@ -250,18 +241,17 @@ function petOf(card: Card): Element {
  */
 function quota(card: Card, left: number | null): Element[] {
   const pct = Math.round(card.pct ?? 0);
-  const shown = `${Math.min(pct, 100)}%`;
+  // Three digits and a "%" would reach the countdown above; the sign is the
+  // part that can go, since the bar-less card has nothing else to be.
+  const shown = pct >= 100 ? "100" : `${pct}%`;
+  const reset = left === null ? null : until(left);
   const out: Element[] = [
     petOf(card),
     text("num", shown, "large", NUM_X, -2, colorFor(pct)),
     text("label", card.label, "small", NUM_X, CAPTION_Y, COL_DIM, PANE_W),
   ];
-  if (left !== null) {
-    const fitted = fitReset(card.label, until(left));
-    if (fitted !== null) {
-      out.push(text("reset", fitted, "small", rightAlign(fitted),
-                    CAPTION_Y, COL_DIM));
-    }
+  if (reset !== null) {
+    out.push(text("reset", reset, "small", rightAlign(reset), RESET_Y, COL_DIM));
   }
   return out;
 }
@@ -283,11 +273,8 @@ function credits(card: Card, left: number | null): Element[] {
 
   const detail = held === 0 ? "spent" : left !== null ? until(left) : null;
   if (detail !== null) {
-    const fitted = fitReset(card.label, detail);
-    if (fitted !== null) {
-      out.push(text("reset", fitted, "small", rightAlign(fitted),
-                    CAPTION_Y, COL_DIM));
-    }
+    out.push(text("reset", detail, "small", rightAlign(detail),
+                  CAPTION_Y, COL_DIM));
   }
 
   const n = Math.min(total, MAX_CELLS);
