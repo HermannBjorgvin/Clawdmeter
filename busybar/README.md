@@ -51,6 +51,21 @@ js -i app.petmeter /ext/user_assets/app.petmeter/scripts/main.js
 
 **Controls**, following what the case itself is engraved with: the red **Start/Pause** bar holds and releases the rotation, the wheel **scrolls** through the cards by hand, and the wheel's press — labelled **OK/Skip** — skips forward.
 
+## Nothing here is hosted
+
+Both halves run on hardware you own: the daemon on your machine, the app on the
+bar, talking over the USB link (`10.0.4.21` ↔ `10.0.4.20`). The pull endpoint
+binds to that interface alone, not `0.0.0.0`.
+
+There is one case where a server would help — reading your usage while away
+from the machine — and it is the case to avoid. The numbers come from OAuth
+tokens that Claude Code and the Codex CLI keep locally, and this project's rule
+is that it only ever reads tokens it does not own. Relaying them through a
+hosted service would mean shipping someone else's credentials off the laptop.
+
+Distribution is a GitHub Release, not a deploy: `.github/workflows/release.yml`
+turns a version tag into the `.tgz` device package, built by `busy-cli`.
+
 ## What we learned the hard way
 
 Everything here was found against real hardware, and none of it is in the published API spec.
@@ -82,11 +97,31 @@ The rest of the path exists: `@busy-app/cli` builds a device package, and a `js_
 ## Layout
 
 ```
-0        16 18                                  72
-├─ mascot ─┤├─ label ······················ pct ─┤
-            ├─ bar track, fill = proportion ─────┤
+ 0        15 18                    44 45        71
+├── mascot ──┤├─ 21%  (large) ─┤    │ Current  │  rows 0..4
+             │                      │ 1h25m    │  rows 6..10
+             ├──── bar: track + fill, 54x3 ────┤  rows 12..14
 ```
 
-16×16 mascot (Clawd for Claude cards, Codey for Codex), 54px for the reading. Colour thresholds are the firmware's `pct_color()` — green under 75%, amber to 90%, red above — because two displays showing one number must not disagree about whether it is alarming.
+16×16 mascot (Clawd for Claude cards, Codey for Codex), the number in `large`,
+and a fixed column at x=45 holding the label over the reset time. The column is
+fixed rather than following the number's width, or the label would jump between
+cards.
 
-Reset credits are a count, not a proportion, so that card shows `held/total` and a countdown instead of a bar.
+Colour thresholds are the firmware's `pct_color()` — green under 75%, amber to
+90%, red above — because two displays showing one number must not disagree
+about whether it is alarming. The number itself stays white: the firmware
+colours bar indicators, never text.
+
+Reset times are formatted on the app side (`5d17h`, `1h25m`), **not** with the
+device's `countdown` element. That one renders `HH:MM:SS` in a wide font, ticks
+every 100 ms, and takes hours modulo 60 — a five-day reset would display as 21
+hours.
+
+Reset credits are a count, not a proportion, so that card keeps the desk
+device's ledger instead of a bar: one cell per credit the window handed out,
+solid while held and hollow once spent.
+
+Every frame names every element id, unused ones as tombstones. Draws merge by
+id, so anything left unnamed stays on screen — including elements from an older
+build of the app, which is why it clears its canvas once at startup.
