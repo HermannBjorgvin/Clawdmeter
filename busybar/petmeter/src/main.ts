@@ -384,10 +384,13 @@ function frame(card: Card, left: number | null, paused: boolean,
  * inside lit LEDs blooms shut, so the body would not read. The matrix
  * decides the tonality; the structure is what reads as a Mac dialog.
  *
- * The icon is the System 7 caution icon redrawn at 12x12 from the 32x32
- * original -- 2px apex and bar, sides stepping one column every two rows, a
- * solid tip, the dot a row clear of the base -- a rendering at a size Apple
- * never shipped, not a copy of their bitmap.
+ * The icon is the System 7 caution icon redrawn at 13x12 from the 32x32
+ * original -- sides stepping one column every two rows, a solid tip, the dot
+ * a row clear of the base -- a rendering at a size Apple never shipped, not a
+ * copy of their bitmap. The original's stem is two pixels wide on an
+ * even-width triangle; at this size two lit columns read as "!!", so the stem
+ * and dot are one column, and the width is odd so that column sits on the
+ * triangle's axis.
  *
  * The box is solid black on purpose. An image tombstone does not destroy the
  * element -- the previous card's mascot survives it -- so the dialog covers
