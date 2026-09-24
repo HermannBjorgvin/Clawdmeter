@@ -194,6 +194,42 @@ them to sit against, so the track colour that reads as "secondary" on the
 AMOLED read as "off" on the bar and the countdown simply was not there. The
 countdown uses the firmware's `dim` (`0xB0AEA5`) instead.
 
+#### An on-device app, and why it is not in the menu yet
+
+The bar can also *pull* instead of being pushed to, as an app you pick from its
+apps menu. Everything that needs is already on the device, undocumented:
+`apps_assets/js_runner` is a JavaScript runtime, and `user_assets/` holds apps
+as plain directories — the firmware ships `app.busy.js_example` as a working
+template:
+
+```
+/ext/user_assets/app.petmeter/
+  appmeta/manifest.json       {format_version, id, name, version, ...}
+  appmeta/icon_front_8x8.png
+  appmeta/icon_back_11x11.png
+  scripts/main.js
+```
+
+The runtime's own `fetch.js` example fetches `https://qdiv.dev`, so app code
+can reach the network, not just the bar's API. That makes a pull design work:
+`busybar/app.petmeter/scripts/main.js` fetches the daemon and draws, and
+`daemon/sinks/serve.py` answers `GET /usage.json` with the latest payload.
+Over USB both addresses are fixed — the bar is **10.0.4.20** and the host
+**10.0.4.21** — so there is nothing to discover and no Wi-Fi involved. Enable
+it with `busybar_serve = 10.0.4.21:8724` and install with
+`tools/busybar_install_app.py`.
+
+**It installs, and it will not appear.** On this firmware the apps menu is a
+placeholder reading *"More apps soon — keep your device up to date for
+upcoming apps"*, and nothing in `user_assets/` is listed, including the
+vendor's own example. The JS SDK is documented as "coming soon"; this is what
+that looks like from the device side. The app is inert until the menu opens
+up — `tools/busybar_install_app.py --remove` takes it off.
+
+Push (`daemon/sinks/busybar.py`) is therefore the path that works today, and
+the two are complementary rather than alternatives: push keeps the bar current
+while you are not looking, pull makes it right the moment you select it.
+
 **QA it the way the firmware is QA'd** — don't design a 72×16 layout blind:
 
 ```bash

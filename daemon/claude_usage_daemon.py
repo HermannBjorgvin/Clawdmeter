@@ -1139,6 +1139,16 @@ async def main() -> None:
             signal.signal(sig, _stop)
 
     log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
+
+    # The pull endpoint for a device-side app (see daemon/sinks/serve.py).
+    # Opt-in, and a failure to bind is logged, never fatal -- the BLE meter on
+    # the desk does not care whether a secondary display can reach us.
+    serve_bind = read_config_value("busybar_serve", allowed=None)
+    if serve_bind:
+        host, _, port = serve_bind.partition(":")
+        await sinks.serve.start(host or sinks.serve.DEFAULT_BIND,
+                                int(port) if port.isdigit()
+                                else sinks.serve.DEFAULT_PORT, log=log)
     log(f"Poll interval: {POLL_INTERVAL}s")
 
     backoff = 1

@@ -31,6 +31,8 @@ from __future__ import annotations
 import asyncio
 from typing import Protocol, runtime_checkable
 
+from . import serve
+
 
 @runtime_checkable
 class Sink(Protocol):
@@ -62,6 +64,7 @@ def publish_soon(payload: dict, log=print) -> None:
     """Start the fan-out and return. Never raises, never blocks the caller."""
     global _inflight
     if not active_sinks():
+        serve.update(payload)      # the pull path runs with no sink configured
         return
     if _inflight is not None and not _inflight.done():
         log("sinks: previous update still in flight, skipping this one")
@@ -82,6 +85,7 @@ async def publish(payload: dict, log=print) -> None:
     a display that has quietly stopped updating is the whole failure mode this
     project exists to avoid.
     """
+    serve.update(payload)          # cheap, in-memory; for the device-side app
     for sink in active_sinks():
         try:
             if not await sink.show(payload):

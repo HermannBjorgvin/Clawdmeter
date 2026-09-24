@@ -21,20 +21,34 @@ import urllib.request
 
 from PIL import Image
 
-WIDTH, HEIGHT = 72, 16
+# The two panels report in different formats, neither of them the advertised
+# image/bmp. Front: RGB888, 3 bytes a pixel, 72x16. Back: 8-bit greyscale at
+# 80x80 (6400 bytes) even though the panel is 160x80 -- the capture is half
+# width, so it is doubled horizontally to restore the aspect. Rendering the
+# 6400 bytes as 4bpp across 160 columns also "works" and is wrong: it doubles
+# every pixel by accident and happens to look right.
+FRONT = (72, 16)
+BACK = (80, 80)
+BACK_PANEL = (160, 80)
 SCALE = 10
 
 
 def capture(base_url: str, back: bool = False) -> Image.Image:
+    w, h = BACK if back else FRONT
     url = f"{base_url.rstrip('/')}/api/screen?display={1 if back else 0}"
     with urllib.request.urlopen(url, timeout=25) as resp:
         raw = base64.b64decode(resp.read())
-    expected = WIDTH * HEIGHT * 3
-    if len(raw) != expected:
-        raise SystemExit(f"expected {expected} bytes, got {len(raw)} — the "
+
+    if back:
+        if len(raw) != w * h:
+            raise SystemExit(f"expected {w * h} bytes for the back screen, "
+                             f"got {len(raw)}")
+        return Image.frombytes("L", (w, h), raw).resize(BACK_PANEL, Image.NEAREST)
+
+    if len(raw) != w * h * 3:
+        raise SystemExit(f"expected {w * h * 3} bytes, got {len(raw)} — the "
                          "frame format may have changed")
-    img = Image.frombytes("RGB", (WIDTH, HEIGHT), raw)
-    b, g, r = img.split()
+    b, g, r = Image.frombytes("RGB", (w, h), raw).split()
     return Image.merge("RGB", (r, g, b))
 
 
@@ -43,5 +57,6 @@ if __name__ == "__main__":
     out = args[0] if args else "busybar.png"
     url = args[1] if len(args) > 1 else "http://10.0.4.20"
     img = capture(url, back="--back" in sys.argv)
-    img.resize((WIDTH * SCALE, HEIGHT * SCALE), Image.NEAREST).save(out)
-    print(f"Saved: {out} ({WIDTH}x{HEIGHT}, scaled {SCALE}x)")
+    scale = SCALE if img.width == FRONT[0] else 4
+    img.resize((img.width * scale, img.height * scale), Image.NEAREST).save(out)
+    print(f"Saved: {out} ({img.width}x{img.height}, scaled {scale}x)")
