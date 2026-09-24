@@ -168,3 +168,85 @@ def test_from_config_is_off_unless_a_url_is_set(monkeypatch):
     sink = busybar.from_config()
     assert sink.base_url == "http://bar.local"      # trailing slash trimmed
     assert sink.token == "tok"
+
+
+# --- a sink must not delay the device either --------------------------------
+
+def test_a_slow_sink_does_not_hold_up_the_device_write(monkeypatch):
+    """Not hypothetical: the Busy Bar answers a draw in ~5s. Awaited inline
+    that would have put five seconds on every poll of the primary device."""
+    import daemon.claude_usage_daemon as mod
+
+    started = asyncio.Event()
+
+    class _Slow:
+        name = "slow"
+
+        async def show(self, payload):
+            started.set()
+            await asyncio.sleep(30)
+            return True
+
+    class _Client:
+        async def write_gatt_char(self, *a, **k):
+            return None
+
+    monkeypatch.setattr(sinks, "_sinks", [_Slow()])
+    monkeypatch.setattr(sinks, "_inflight", None)
+
+    async def scenario():
+        session = mod.Session(_Client())
+        ok = await asyncio.wait_for(session.write_payload(LIVE), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=1)   # it really did start
+        sinks._inflight.cancel()
+        return ok
+
+    assert asyncio.run(scenario()) is True
+
+
+def test_an_update_still_in_flight_skips_rather_than_queues(monkeypatch):
+    """These are current-state displays. A backlog of stale frames helps
+    nobody, and an unreachable sink would grow one every poll."""
+    calls = []
+
+    class _Slow:
+        name = "slow"
+
+        async def show(self, payload):
+            calls.append(payload)
+            await asyncio.sleep(30)
+            return True
+
+    monkeypatch.setattr(sinks, "_sinks", [_Slow()])
+    monkeypatch.setattr(sinks, "_inflight", None)
+    lines = []
+
+    async def scenario():
+        sinks.publish_soon(LIVE, log=lines.append)
+        await asyncio.sleep(0)
+        sinks.publish_soon(LIVE, log=lines.append)
+        await asyncio.sleep(0)
+        sinks._inflight.cancel()
+
+    asyncio.run(scenario())
+    assert len(calls) == 1
+    assert any("skipping" in l for l in lines)
+
+
+def test_the_busy_bar_timeout_clears_its_measured_response_time():
+    """The first live attempt died on a 5s ConnectTimeout against a device
+    that answers in 5.0s. A timeout at the response time is a coin flip."""
+    from daemon.sinks import busybar
+
+    assert busybar.HTTP_TIMEOUT >= 15.0
+
+
+def test_the_draw_path_is_the_devices_prefix_not_the_clouds():
+    """api.busy.app documents /busybar/...; that is the CLOUD relay's
+    namespace. The bar itself serves /api/..., and posting to the spec's path
+    reaches its web-UI file server, which answers 405 Allow: GET -- an error
+    that reads like "wrong method" and actually means "wrong prefix"."""
+    from daemon.sinks import busybar
+
+    assert busybar.DRAW_PATH == "/api/display/draw"
+    assert not busybar.DRAW_PATH.startswith("/busybar/")

@@ -936,7 +936,7 @@ class Session:
         except BleakError as e:
             log(f"Write failed: {e}")
             ok = False
-        await sinks.publish(payload, log=log)
+        sinks.publish_soon(payload, log=log)
         return ok
 
 

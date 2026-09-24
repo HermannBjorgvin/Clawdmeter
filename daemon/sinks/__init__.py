@@ -6,12 +6,18 @@ shown. The device on your desk is the primary one and is NOT a sink; it owns
 the BLE link, the refresh nudge, and the poll clock. Everything here is a
 secondary display that gets told what the device was just told.
 
-Two rules, and they are the same rule the second *provider* follows: a sink
-never gates the device, and a sink never takes the daemon down.
+Three rules, and they are the same rule the second *provider* follows: a sink
+never gates the device, never delays it, and never takes the daemon down.
 
   * Its result does not advance `last_poll`. A Busy Bar that has been unplugged
     must not throttle the meter on your desk, and one that answers instantly
     must not excuse a failed BLE write.
+  * It runs off the write path. `publish_soon()` schedules the fan-out and
+    returns, because a slow sink is not a hypothetical: the Busy Bar answers
+    in ~5s, which awaited inline would have added five seconds to every poll
+    of the primary device. An update still in flight when the next one is
+    ready is skipped rather than queued -- these are current-state displays,
+    and a backlog of stale frames helps nobody.
   * Its exceptions never leave `publish()`. A sink is someone else's HTTP
     server on someone else's network; it will time out, 404 after a firmware
     update, and vanish when the Wi-Fi drops.
@@ -22,6 +28,7 @@ Sinks are opt-in through the config file and cost nothing when unconfigured --
 
 from __future__ import annotations
 
+import asyncio
 from typing import Protocol, runtime_checkable
 
 
@@ -46,6 +53,26 @@ def active_sinks(reload: bool = False) -> list[Sink]:
         from .busybar import from_config as _busybar_from_config
         _sinks = [s for s in (_busybar_from_config(),) if s is not None]
     return _sinks
+
+
+_inflight: "asyncio.Task | None" = None
+
+
+def publish_soon(payload: dict, log=print) -> None:
+    """Start the fan-out and return. Never raises, never blocks the caller."""
+    global _inflight
+    if not active_sinks():
+        return
+    if _inflight is not None and not _inflight.done():
+        log("sinks: previous update still in flight, skipping this one")
+        return
+    _inflight = asyncio.create_task(publish(payload, log=log))
+    # publish() swallows per-sink failures, so a task exception means the
+    # fan-out itself broke. Surface it rather than letting asyncio report an
+    # unretrieved exception at some unrelated moment.
+    _inflight.add_done_callback(
+        lambda t: t.cancelled() or t.exception() is None
+        or log(f"sinks: publish crashed: {t.exception()!r}"))
 
 
 async def publish(payload: dict, log=print) -> None:

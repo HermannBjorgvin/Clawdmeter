@@ -33,9 +33,23 @@ import time
 import httpx
 
 APP_NAME = "petmeter"
-DRAW_PATH = "/busybar/display/draw"
+
+# THE DEVICE AND THE CLOUD MOUNT THE SAME API AT DIFFERENT PREFIXES. The
+# published OpenAPI spec at api.busy.app documents `/busybar/...`, which is the
+# cloud relay's namespace; the bar itself serves `/api/...` (blog.busy.app's
+# widget guide, confirmed against hardware). Posting to the spec's path hits
+# the device's web-UI file server instead, which answers `405 Allow: GET` --
+# an error that reads like "wrong method" and is really "wrong prefix".
+DRAW_PATH = "/api/display/draw"
+ACCESS_PATH = "/api/access"
 PRIORITY = 50                  # below a BUSY session's 90 -- see module docstring
-HTTP_TIMEOUT = 5.0
+# The bar answers a draw in ~5.0s, measured repeatedly over Wi-Fi, and stops
+# answering entirely for ~20s stretches after a burst of requests. A timeout
+# set at the response time is not a safety margin, it is a coin flip -- the
+# first live attempt died on a 5s ConnectTimeout against a device that was
+# about to answer. This does not block the poll loop (see sinks/__init__.py),
+# so it can afford to wait.
+HTTP_TIMEOUT = 20.0
 
 WIDTH, HEIGHT = 72, 16         # front panel, in pixels
 BAR_Y, BAR_H = 13, 3           # a thin rule along the bottom edge
@@ -170,6 +184,57 @@ if __name__ == "__main__":                    # pragma: no cover
 
     sample = {"s": 34.0, "sr": 281, "ok": True, "has_s": True}
     print(_json.dumps(elements_for(sample), indent=2))
-    if len(sys.argv) > 1:
-        sink = BusyBarSink(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "")
-        print("sent:", asyncio.run(sink.show(sample)))
+    if len(sys.argv) <= 1:
+        sys.exit(0)
+
+    url = sys.argv[1]
+    token = sys.argv[2] if len(sys.argv) > 2 else ""
+
+    async def _probe() -> int:
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            resp = await client.post(url.rstrip("/") + DRAW_PATH,
+                                     json=elements_for(sample), headers=headers)
+        print(f"HTTP {resp.status_code} in {resp.elapsed.total_seconds():.1f}s")
+        if resp.status_code == 200:
+            print("drawn")
+        elif resp.status_code == 409:
+            print("a higher-priority app owns the screen (a focus session?) -- "
+                  "expected, and not a failure")
+        elif resp.status_code in (401, 403):
+            # Ask the device rather than inferring. GET /api/access is itself
+            # ungated and answers {"mode": disabled|enabled|key, "key_valid":}.
+            try:
+                async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as c2:
+                    access = (await c2.get(url.rstrip("/") + ACCESS_PATH)).json()
+            except (httpx.HTTPError, ValueError):
+                access = {}
+            mode = access.get("mode", "?")
+            print(f"access denied; the device reports mode={mode!r}")
+            if mode == "disabled":
+                print("Turn on HTTP API access over Wi-Fi in the BUSY Bar "
+                      "settings ('enabled' for open on your LAN, or 'key' with "
+                      "a 4-10 digit key you then pass as the second argument). "
+                      "Over USB the bar is 10.0.4.20 and this Wi-Fi gate does "
+                      "not apply.")
+            elif mode == "key":
+                print("It is in key mode -- pass the 4-10 digit key as the "
+                      "second argument.")
+        elif resp.status_code == 405 and resp.headers.get("Allow") == "GET":
+            print(f"{url} answered from its web UI, not its API -- check the "
+                  f"path prefix (the device serves /api/..., not /busybar/...).")
+        else:
+            print(resp.text[:300])
+        return 0 if resp.status_code in (200, 409) else 1
+
+    try:
+        sys.exit(asyncio.run(_probe()))
+    except httpx.TimeoutException:
+        # Worth naming: the bar goes unresponsive for ~20s stretches after a
+        # burst, which looks exactly like it has fallen off the network.
+        print(f"no answer within {HTTP_TIMEOUT:.0f}s. The bar goes quiet for "
+              "~20s after a burst of requests -- wait, then retry once.")
+        sys.exit(1)
+    except httpx.HTTPError as exc:
+        print(f"{type(exc).__name__}: {exc}")
+        sys.exit(1)

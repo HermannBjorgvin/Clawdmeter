@@ -109,6 +109,11 @@ Two rules, and they are the same rule the second provider follows:
   A Busy Bar that has been unplugged must not throttle the meter on your desk,
   and one that answers instantly must not excuse a failed BLE write.
   `test_a_dead_sink_does_not_change_what_the_device_write_reports` guards this.
+- **A sink never delays the device.** `publish_soon()` schedules the fan-out
+  and returns. Not hypothetical: the Busy Bar answers in ~5s, which awaited
+  inline would have put five seconds on every poll of the primary device. An
+  update still in flight when the next is ready is skipped, not queued — these
+  are current-state displays and a backlog of stale frames helps nobody.
 - **A sink never takes the daemon down.** Exceptions never leave `publish()`.
   They are logged, not swallowed: a display that has quietly stopped updating
   is the exact failure this project exists to prevent.
@@ -161,10 +166,29 @@ python -m daemon.sinks.busybar                       # print the draw request
 python -m daemon.sinks.busybar http://busybar.local  # and send it
 ```
 
-If every `/busybar/...` path 404s while the web UI at `/` loads, the device's
-**HTTP API is switched off** — it is gated behind a password/key in the BUSY
-Bar settings. That is a device-side setting; nothing in the daemon can turn it
-on.
+**Two traps, both of which cost an hour:**
+
+*The device and the cloud mount the same API at different prefixes.* The
+published spec at `api.busy.app` documents `/busybar/...` — that is the **cloud
+relay's** namespace. The bar itself serves **`/api/...`**. Posting to the spec's
+path reaches the device's web-UI file server instead, which answers
+`405 Method Not Allowed` with `Allow: GET`: an error that reads like "wrong
+method" and actually means "wrong prefix". The on-device paths are documented
+at `http://<bar>/docs` and in [the widget guide](https://blog.busy.app/how-to-make-a-busy-bar-widget-without-coding/).
+
+*Access over Wi-Fi is off by default.* On the right prefix an ungated request
+returns `403`. Do not infer why — `GET /api/access` is itself ungated and
+answers `{"mode": "disabled" | "enabled" | "key", "key_valid": bool}`. Turn it
+on in the BUSY Bar settings; `key` mode takes a 4–10 digit key, which goes in
+`busybar_token`. Over USB the bar is always **10.0.4.20** and the Wi-Fi gate
+does not apply.
+
+**The bar is slow, and goes quiet.** A draw answers in ~5.0s over Wi-Fi,
+consistently, and after a burst of requests it stops answering for ~20s. The
+first live attempt failed on a 5s `ConnectTimeout` against a device that was
+about to answer — the same trap as the Codex endpoint, where a timeout set at
+the measured response time is a coin flip rather than a margin. `HTTP_TIMEOUT`
+is 20s, which it can afford because the fan-out does not block the poll loop.
 
 ## 2. Wire format
 
