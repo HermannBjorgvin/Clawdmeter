@@ -145,45 +145,42 @@ Back/Busy/Custom/Off/Apps/Settings press closes the canvas.
 
 ## Layout
 
+![The rotation](../screenshots/busybar-cards.png)
+
 ```
- 0            23 26                    44 45        71
-├─── mascot ────┤├─ 16 (large) ─┤        │ Fable    │  rows 0..4
-                │                        │ 5d16h    │  rows 6..10
-                ├──── bar: track + fill, 46x3 ──────┤  rows 12..14
+ 0            23 26                                      71
+├─── mascot ────┤├─ 21%  (large, rows 0..8) ─────────────┤
+                ├─ Current ················· 1h25 ───────┤  rows 11..15
 ```
 
-![Clawd and Codey](../screenshots/busybar-mascots.png)
+**There is no bar.** In a 46px pane a `large` number cannot share a row with
+any label, and label + 9px number + a bar do not stack in 16 rows — something
+had to give. The bar was earning least: its track (`#2A2A28`) is invisible on
+an LED matrix, so it never showed headroom, and its one real job, carrying the
+alarm, a 9px number does better than a 2px stripe. **The number is the alarm
+now** — white below 75%, amber to 90%, red above. White rather than green at
+rest: with nothing else tinted, permanent green is wallpaper.
 
 **The mascots.** Clawd is authored on a 12×8 grid at 100px a cell, so he
-renders at exactly 2× — 24×16, filling the height with no resampling. That
-matters more than it sounds: averaging him down blends orange into
-transparency, and on an unlit matrix that blend reads as *brown*, while his
-square eyes smear into diagonal marks. Sample the grid instead and he comes
-back exactly as drawn. Codey is 16 wide and sits centred in the same slot;
-both stand 16 tall, which is what reads as "the same size".
+renders at exactly 2× — 24×16 — with no resampling. That matters: averaging
+him down blends orange into transparency, and on an unlit matrix that blend
+reads as *brown*, while his square eyes smear into diagonal marks. Codey is 16
+wide, centred in the same slot; both stand 16 tall, which is what reads as the
+same size.
 
-**No percent sign.** With a 24px mascot there is no room for one beside three
-digits, and a small sign set after the number ran straight into the reset line
-— `18` and `%5d16h` sharing a row. The label names the quota and the bar shows
-the proportion, so the sign was the least load-bearing thing on the card.
+**The reset time shortens rather than collides**: `1h25m → 1h25 → 1h`,
+`5d21h → 5d`. Formatted in-app, never with the device's `countdown` element —
+that renders `HH:MM:SS` in a wide font, ticks every 100 ms, and takes hours
+modulo 60, so a five-day reset would read as 21 hours.
 
-**The column is fixed at x=45** rather than following the number's width, or
-the label would jump between cards.
+**Reset credits** keep the desk device's ledger beside the number: one cell per
+credit the window handed out, solid while held, hollow once spent. Below 3px a
+hollow cell has no hole left, so the cells are dropped rather than lie.
 
-Colour thresholds are the firmware's `pct_color()` — green under 75%, amber to
-90%, red above — because two displays showing one number must not disagree
-about whether it is alarming. The number itself stays white: the firmware
-colours bar indicators, never text.
-
-**Reset times are formatted on the app side** (`5d16h`, `1h25m`), *not* with
-the device's `countdown` element. That one renders `HH:MM:SS` in a wide font,
-ticks every 100 ms, and takes hours modulo 60 — a five-day reset would display
-as 21 hours.
-
-**Reset credits are a count, not a proportion**, so that card keeps the desk
-device's ledger instead of a bar: one cell per credit the window handed out,
-solid while held and hollow once spent.
+**A press gets a toast.** Pause and resume put the word over the caption row
+for two seconds with `timeout: 2`, and the device deletes it itself — no second
+request and no state to unwind.
 
 **Every frame names every element id**, unused ones as tombstones. Draws merge
 by id, so anything left unnamed stays on screen — including elements from an
-older build of the app, which is why it clears its canvas once at startup.
+older build, which is why the app clears its canvas once at startup.

@@ -31,17 +31,19 @@ const TICK_MS = 250;
 // Clawd is authored on a 12x8 grid, so he renders at exactly 2x -- 24x16,
 // filling the height. Codey is 16 wide and gets centred in the same slot;
 // both stand 16 tall, which is what reads as "the same size".
-const PET_SLOT = 24;
 const PET_X: Record<string, number> = { claude: 0, codex: 4 };
-const NUM_X = 26;       // the big number, right of the mascot
-const COL_X = 45;       // the label-over-reset column
-const COL_W = 27;       // clipped, so a long label cannot overflow
-const BAR_X = 26;
-const BAR_Y = 12;
-const BAR_W = 46;
-
-const BAR_H = 3;
+const NUM_X = 26;       // the pane: everything right of the mascot
+const PANE_W = 46;
+const CELL_Y = 4;       // credit cells sit on the number's row
+const CELL_H = 5;
+const CAPTION_Y = 9;    // label and reset share the second row
 const MAX_CELLS = 8;
+
+// Measured against the device's own font files, not guessed: large digits and
+// "/" are 7px, "%" is 10px, small advances ~4px.
+const LARGE_DIGIT = 7;
+const LARGE_PCT = 10;
+const SMALL_ADV = 4;
 
 // Thresholds and colours from the firmware's pct_color(), so the bar and the
 // meter on the desk never disagree about whether a number is alarming. The
@@ -93,6 +95,8 @@ const IDS: Array<[string, "text" | "rectangle"]> = [
   ["track", "rectangle"],
   ["fill", "rectangle"],
   ["paused", "rectangle"],
+  ["tmask", "rectangle"],
+  ["ttext", "text"],
 ];
 for (let i = 0; i < MAX_CELLS; i++) IDS.push([`cell${i}`, "rectangle"]);
 
@@ -109,14 +113,45 @@ function complete(used: Element[]): Element[] {
   const seen: Record<string, boolean> = {};
   for (const el of used) seen[el.id as string] = true;
   const out = used.slice();
-  for (const pair of IDS) if (!seen[pair[0]]) out.push(tombstone(pair[0], pair[1]));
+  for (const pair of IDS) {
+    if (pair[0] === "tmask" || pair[0] === "ttext") continue;  // transient
+    if (!seen[pair[0]]) out.push(tombstone(pair[0], pair[1]));
+  }
   return out;
 }
 
+function largeWidth(text: string): number {
+  let w = 0;
+  for (const ch of text) w += ch === "%" ? LARGE_PCT : LARGE_DIGIT;
+  return w;
+}
+
+const smallWidth = (text: string) => text.length * SMALL_ADV;
+
+/**
+ * The number carries the alarm now that there is no bar to colour. White
+ * below the warn threshold rather than green: with nothing else tinted, a
+ * permanent green becomes wallpaper, and colour should mean something. The
+ * desk device's numbers are white for the same reason.
+ */
 function colorFor(pct: number): string {
   if (pct >= CRIT_PCT) return COL_CRIT;
   if (pct >= WARN_PCT) return COL_WARN;
-  return COL_OK;
+  return COL_TEXT;
+}
+
+/**
+ * Fit the reset string beside the label in 46px, shortening it rather than
+ * letting it collide: "1h25m" loses its minutes before it loses its hours.
+ */
+function fitReset(label: string, full: string): string | null {
+  const room = PANE_W - smallWidth(label) - 2;
+  const ladder = [full, full.replace(/m$/, ""), full.replace(/^(\d+d).*/, "$1"),
+                  full.replace(/^(\d+h).*/, "$1")];
+  for (const candidate of ladder) {
+    if (candidate && smallWidth(candidate) <= room) return candidate;
+  }
+  return null;
 }
 
 function text(
@@ -177,84 +212,115 @@ function petOf(card: Card): Element {
 }
 
 /**
- * A quota. Big number left of the pane, label over reset time in a fixed
- * column, bar across the bottom. The column sits at a fixed x rather than
- * following the number's width, or the label would jump between cards.
+ * A quota. The number owns the top row at full height; the label and the
+ * reset time share the row below, label left and reset right-aligned.
+ *
+ * THERE IS NO BAR. In a 46px pane a `large` number cannot share a row with
+ * any label, and label + 9px number + a bar do not stack in 16 rows, so
+ * something had to give. The bar was earning least: its track is invisible
+ * on an LED matrix, so it never showed headroom, and its one real job --
+ * carrying the alarm -- a 9px number does better than a 2px stripe.
  *
  * Text `y` is the top of the line box and goes negative so the caps land on
- * the intended rows: the number's ink on 1..9, the column's on 0..4 and 6..10.
+ * the intended rows: the number's ink on 0..8, the caption's on 11..15.
  */
 function quota(card: Card, left: number | null): Element[] {
   const pct = Math.round(card.pct ?? 0);
-  const filled =
-    pct > 0 ? Math.max(1, Math.round((BAR_W * Math.min(pct, 100)) / 100)) : 0;
-
+  const shown = `${Math.min(pct, 100)}%`;
   const out: Element[] = [
     petOf(card),
-    text("label", card.label, "small", COL_X, -2, COL_DIM, COL_W),
-    rect("track", BAR_X, BAR_Y, BAR_W, BAR_H, COL_TRACK),
+    text("num", shown, "large", NUM_X, -2, colorFor(pct)),
+    text("label", card.label, "small", NUM_X, CAPTION_Y, COL_DIM, PANE_W),
   ];
-  // No percent sign. With a 24px mascot there is not room for one beside
-  // three digits, and a small one set after the number ran straight into the
-  // reset line -- "18" and "%5d16h" on the same row. The label names the
-  // quota and the bar underneath shows the proportion, so the sign was the
-  // least load-bearing thing on the card.
-  out.push(text("num", `${Math.min(pct, 100)}`, "large", NUM_X, -1, COL_TEXT));
   if (left !== null) {
-    out.push(text("reset", until(left), "small", COL_X, 4, COL_DIM, COL_W));
+    const fitted = fitReset(card.label, until(left));
+    if (fitted !== null) {
+      out.push(text("reset", fitted, "small", 72 - smallWidth(fitted),
+                    CAPTION_Y, COL_DIM));
+    }
   }
-  if (filled > 0) out.push(rect("fill", BAR_X, BAR_Y, filled, BAR_H, colorFor(pct)));
   return out;
 }
 
 /**
- * Reset credits are a count, not a proportion, so the bar row becomes the desk
- * device's ledger: one cell per credit the window handed out, solid while held
- * and hollow once spent. Same grammar, different shape.
+ * Reset credits are a count, not a proportion, so the ledger sits beside the
+ * number instead of a bar: one cell per credit the window handed out, solid
+ * while held and hollow once spent.
  */
 function credits(card: Card, left: number | null): Element[] {
   const held = card.held ?? 0;
   const total = held + (card.used ?? 0);
+  const shown = `${held}/${total}`;
   const out: Element[] = [
     petOf(card),
-    text("num", `${held}/${total}`, "large", NUM_X, -1, COL_TEXT),
-    text("label", card.label, "small", COL_X, -2, COL_DIM, COL_W),
-    text(
-      "reset",
-      held === 0 ? "all used" : left !== null ? until(left) : " ",
-      "small", COL_X, 4, COL_DIM, COL_W,
-    ),
+    text("num", shown, "large", NUM_X, -2, COL_TEXT),
+    text("label", card.label, "small", NUM_X, CAPTION_Y, COL_DIM, PANE_W),
   ];
 
+  const detail = held === 0 ? "spent" : left !== null ? until(left) : null;
+  if (detail !== null) {
+    const fitted = fitReset(card.label, detail);
+    if (fitted !== null) {
+      out.push(text("reset", fitted, "small", 72 - smallWidth(fitted),
+                    CAPTION_Y, COL_DIM));
+    }
+  }
+
   const n = Math.min(total, MAX_CELLS);
-  if (n > 0) {
-    const cellW = Math.floor((BAR_W - 2 * (n - 1)) / n);
+  const x0 = NUM_X + largeWidth(shown) + 3;
+  const cellW = n > 0 ? Math.floor((72 - x0 - (n - 1)) / n) : 0;
+  // Below 3px a hollow cell has no hole left and reads as a solid one, which
+  // would say "held" about a credit that is spent.
+  if (cellW >= 3) {
     for (let i = 0; i < n; i++) {
-      const x = BAR_X + i * (cellW + 2);
+      const x = x0 + i * (cellW + 1);
       out.push(
         i < held
-          ? rect(`cell${i}`, x, BAR_Y, cellW, BAR_H, COL_OK)
-          : rect(`cell${i}`, x, BAR_Y, cellW, BAR_H, null, COL_DIM),
+          ? rect(`cell${i}`, x, CELL_Y, cellW, CELL_H, COL_OK)
+          : rect(`cell${i}`, x, CELL_Y, cellW, CELL_H, null, COL_DIM),
       );
     }
   }
   return out;
 }
 
-function frame(card: Card, left: number | null, paused: boolean): Element[] {
+/**
+ * A two-second word over the caption row, for a press that would otherwise
+ * have nothing to show for itself. The device deletes both elements when the
+ * timeout expires, so there is no second request and no state to unwind; the
+ * mask is what stops the label and reset showing through underneath.
+ */
+function toast(word: string): Element[] {
+  return [
+    {
+      id: "tmask", type: "rectangle", x: NUM_X, y: CAPTION_Y + 1,
+      width: PANE_W, height: 6, radius: 0,
+      fill: "solid", fill_colors: ["#000000FF"], border_width: 0,
+      display: "front", timeout: 2, z_index: 100,
+    },
+    {
+      id: "ttext", type: "text", text: word, font: "small",
+      x: 72 - smallWidth(word), y: CAPTION_Y, align: "top_left",
+      color: COL_TEXT, display: "front", timeout: 2, z_index: 110,
+    },
+  ];
+}
+
+function frame(card: Card, left: number | null, paused: boolean,
+               say?: string): Element[] {
   const body = card.pct === undefined ? credits(card, left) : quota(card, left);
-  // The badge sits in the pet box's top-right corner, clear of ink on both
-  // mascots, so it never collides with the label the way a screen-corner dot
-  // does.
-  if (paused) body.push(rect("paused", PET_SLOT - 2, 0, 2, 2, COL_DIM));
-  return complete(body);
+  // The badge sits at the pane's top right, which is empty on every card --
+  // the number ends by x=54 at worst and the cells sit two rows below.
+  if (paused) body.push(rect("paused", 70, 0, 2, 2, COL_DIM));
+  const out = complete(body);
+  return say ? out.concat(toast(say)) : out;
 }
 
 /** The pet says "app alive, host present, reading missing". Without a host
  *  there is nothing of ours to show, so that state is text alone. */
 function message(value: string, withPet: Card | null): Element[] {
   const out: Element[] = withPet ? [petOf(withPet)] : [];
-  out.push(text("msg", value, "normal", withPet ? NUM_X : 18, 3, COL_DIM));
+  out.push(text("msg", value, "normal", withPet ? 31 : 18, 3, COL_DIM));
   return complete(out);
 }
 
@@ -262,10 +328,9 @@ function message(value: string, withPet: Card | null): Element[] {
  * Wipe whatever a previous version of this app left on screen.
  *
  * Draws merge by id, and ids this build never names can never be overwritten
- * -- an older layout's elements simply stay there forever, which is exactly
- * what a stale "27%" sitting under the new label column turned out to be.
- * Once, at startup: clearing between cards would close the canvas and let the
- * bar's own UI flash through.
+ * -- an older layout's bar sat under the new caption row indefinitely. Once,
+ * at startup: clearing between cards closes the canvas and the bar's own UI
+ * flashes through.
  */
 async function clearCanvas(): Promise<void> {
   await fetch(
@@ -313,11 +378,11 @@ export default function run(): void {
     return Math.max(0, card.in_s - Math.round((Date.now() - polledAt) / 1000));
   }
 
-  function show(): void {
+  function show(say?: string): void {
     if (cards.length === 0) return;
     index = ((index % cards.length) + cards.length) % cards.length;
     const card = cards[index];
-    void draw(frame(card, remaining(card), paused)).catch(report);
+    void draw(frame(card, remaining(card), paused, say)).catch(report);
   }
 
   function step(by: number): void {
@@ -382,7 +447,7 @@ export default function run(): void {
   void clearCanvas()
     .catch(report)
     .then(poll)
-    .then(show)
+    .then(() => show())
     .catch(report);
   setInterval(() => void poll().catch(report), POLL_MS);
   setInterval(() => {
