@@ -34,7 +34,25 @@ _server: asyncio.AbstractServer | None = None
 # rotation clock is checked.
 CARD_S = 4.0
 TICK_S = 0.25
-MAX_WAIT_MS = 10_000
+
+# The longest we will hold a poll open, and the number that matters most in
+# this file.
+#
+# The device's HTTP client gives up somewhere under 8s. While rotation is
+# RUNNING nothing notices: `gen` moves every CARD_S, so a poll is answered in
+# well under a second. Pause it and `gen` freezes -- so every poll ran the
+# full 8s the app asked for, the client timed out on all of them, and the app
+# concluded the host was gone and drew "no host". Pausing was therefore a
+# button that broke the screen, and unpausing was the only cure, which is a
+# miserable thing to discover with no host in sight.
+#
+# The cap lives on THIS side on purpose. The app sends its own `wait`, and an
+# app is already installed on a device out there asking for 8000; capping
+# server-side fixes that build where changing the app's constant cannot.
+# Anything comfortably under the client's patience works -- the cost of a
+# lower number is only idle requests, and a press still returns instantly
+# because it moves `gen`.
+MAX_WAIT_MS = 3_500
 
 
 class Control:
