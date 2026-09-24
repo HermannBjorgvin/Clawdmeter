@@ -126,6 +126,8 @@ Sinks are opt-in via the config file and cost nothing unconfigured.
 
 ### BUSY Bar
 
+> **[`busybar/README.md`](../busybar/README.md) is the reference** for this — setup both ways, the device quirks, and why the app is not in the apps menu. It is self-contained so it can be published on its own.
+
 [busy.app](https://busy.app) — a 72×16 RGB LED matrix with an open HTTP API
 over USB or Wi-Fi, no cloud round trip. Enable it with:
 

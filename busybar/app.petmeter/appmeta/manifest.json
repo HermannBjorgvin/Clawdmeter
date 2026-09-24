@@ -1,9 +1,0 @@
-{
-    "format_version": 1,
-    "id": "app.petmeter",
-    "name": "Petmeter",
-    "version": "0.1.0",
-    "description": "Coding-agent usage from the Petmeter daemon",
-    "author": "nathanjohnpayne",
-    "debug": false
-}

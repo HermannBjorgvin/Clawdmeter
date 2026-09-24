@@ -30,21 +30,59 @@ _latest: dict = {"ok": False}
 _server: asyncio.AbstractServer | None = None
 
 
+def _cards(payload: dict, provider: str, now: float) -> list[dict]:
+    """Every quota one provider is metering, in the order it should be shown.
+
+    One card per bar, each carrying its own label, because a percentage with
+    no name on a 72x16 screen is just a number -- the device's own UI has the
+    same problem and solves it with the pill.
+    """
+    out: list[dict] = []
+
+    def add(label: str, pct, resets_in) -> None:
+        if pct is None:
+            return
+        card = {"provider": provider, "label": label, "pct": float(pct)}
+        if isinstance(resets_in, int) and resets_in >= 0:
+            # An instant, not a duration: the device counts it down itself and
+            # stays true between refreshes.
+            card["resets_at"] = int(now + resets_in * 60)
+        out.append(card)
+
+    session_label = payload.get("sm") or "Current"
+    weekly_label = payload.get("wm") or "Weekly"
+    if payload.get("has_s", True):
+        add(session_label, payload.get("s"), payload.get("sr"))
+    if payload.get("has_w", True):
+        add(weekly_label, payload.get("w"), payload.get("wr"))
+
+    # Scoped model allowances share the weekly reset instant.
+    for scoped in payload.get("ws") or []:
+        if isinstance(scoped, dict) and scoped.get("n"):
+            add(scoped["n"], scoped.get("p"), payload.get("wr"))
+
+    # Reset credits are a count, not a proportion, so they ride as their own
+    # shape rather than being forced into a bar.
+    held, used = payload.get("rc"), payload.get("ru")
+    if held or used:
+        card = {"provider": provider, "label": "Resets",
+                "held": int(held or 0), "used": int(used or 0)}
+        if isinstance(payload.get("rm"), int) and payload["rm"] >= 0:
+            card["expires_at"] = int(now + payload["rm"] * 60)
+        out.append(card)
+    return out
+
+
 def update(payload: dict) -> None:
     """Remember what the device was last told. Cheap; called every poll."""
     global _latest
-    s_pct = payload.get("s")
-    resets_in = payload.get("sr")
-    body: dict = {
-        "ok": bool(payload.get("ok")) and payload.get("has_s", True),
-        "pct": float(s_pct or 0.0),
-    }
-    # An absolute instant, not a duration: the app hands it straight to the
-    # device's countdown element, which then stays true without being told
-    # again. Converted here because the host is the one that knows the clock.
-    if isinstance(resets_in, int) and resets_in >= 0:
-        body["resets_at"] = int(time.time() + resets_in * 60)
-    _latest = body
+    now = time.time()
+    cards = _cards(payload, "claude", now)
+    codex = payload.get("x")
+    if isinstance(codex, dict) and codex.get("ok"):
+        cards += _cards(codex, "codex", now)
+
+    _latest = {"ok": bool(payload.get("ok")) or bool(cards), "cards": cards}
 
 
 async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
