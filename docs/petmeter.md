@@ -183,8 +183,32 @@ on in the BUSY Bar settings; `key` mode takes a 4–10 digit key, which goes in
 `busybar_token`. Over USB the bar is always **10.0.4.20** and the Wi-Fi gate
 does not apply.
 
-**The bar is slow, and goes quiet.** A draw answers in ~5.0s over Wi-Fi,
-consistently, and after a burst of requests it stops answering for ~20s. The
+**A rectangle has no `color`.** It has a `fill` (default `none`) and a border
+(default 1px, white). Pass a colour and nothing else and the device draws a
+white outline — which is what the first version put on the hardware, two white
+rules where the bar should have been. Every rectangle needs
+`fill: "solid"`, `fill_colors: [...]` and `border_width: 0`.
+
+**Panel greys are invisible on an LED matrix.** There is no lit background for
+them to sit against, so the track colour that reads as "secondary" on the
+AMOLED read as "off" on the bar and the countdown simply was not there. The
+countdown uses the firmware's `dim` (`0xB0AEA5`) instead.
+
+**QA it the way the firmware is QA'd** — don't design a 72×16 layout blind:
+
+```bash
+python3 tools/busybar_shot.py out.png http://10.0.4.20
+```
+
+`GET /api/screen` is documented as `image/bmp` and is neither: it returns
+**base64 text** which decodes to 3456 bytes (72×16×3), and those bytes are
+**BGR**. Sending `#8FA76B` (143,167,107) and reading back (107,167,143) is what
+proves it — render without the swap and amber looks blue.
+
+**The bar is slow over Wi-Fi, and goes quiet.** A draw answers in ~5.0s over Wi-Fi,
+consistently, and after a burst of requests it stops answering for ~20s. **Over
+USB the same draw returns in under 0.1s** — if you are iterating on a layout,
+use USB. The
 first live attempt failed on a 5s `ConnectTimeout` against a device that was
 about to answer — the same trap as the Codex endpoint, where a timeout set at
 the measured response time is a coin flip rather than a margin. `HTTP_TIMEOUT`

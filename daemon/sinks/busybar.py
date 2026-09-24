@@ -60,6 +60,11 @@ COL_OK = "#8FA76BFF"           # THEME_GREEN
 COL_WARN = "#D97757FF"         # THEME_AMBER
 COL_CRIT = "#C0392BFF"         # THEME_RED
 COL_TEXT = "#FAF9F5FF"
+# The firmware's dim (0xb0aea5) for the countdown. An LED matrix has no lit
+# background to sit against, so the panel greys that read as "secondary" on
+# an AMOLED read as "off" here -- the first version used the track colour and
+# the countdown was invisible on hardware.
+COL_DIM = "#B0AEA5FF"
 COL_TRACK = "#2A2A28FF"
 
 _PRINTABLE = re.compile(r"[^\x20-\x7E]")
@@ -112,21 +117,27 @@ def elements_for(payload: dict, now: float | None = None) -> dict:
             "id": "reset", "type": "countdown",
             "timestamp": str(int(now + resets_in * 60)),
             "direction": "time_left", "show_hours": "when_non_zero",
-            "color": COL_TRACK, "x": 34, "y": 2,
+            "color": COL_DIM, "x": 34, "y": 2,
             "align": "top_left", "display": "front", "timeout": 0,
         })
 
     body["elements"].append({
         "id": "track", "type": "rectangle", "x": 0, "y": BAR_Y,
-        "width": WIDTH, "height": BAR_H, "radius": 1,
-        "color": COL_TRACK, "display": "front", "timeout": 0,
+        "width": WIDTH, "height": BAR_H, "radius": 0,
+        # A rectangle has no `color`. It has a fill (default "none") and a
+        # border (default 1px, white) -- pass a colour and nothing else and
+        # you get a white outline, which is exactly what the first version
+        # drew on hardware.
+        "fill": "solid", "fill_colors": [COL_TRACK], "border_width": 0,
+        "display": "front", "timeout": 0,
     })
     filled = max(1, round(WIDTH * min(pct, 100.0) / 100.0)) if pct > 0 else 0
     if filled:
         body["elements"].append({
             "id": "fill", "type": "rectangle", "x": 0, "y": BAR_Y,
-            "width": filled, "height": BAR_H, "radius": 1,
-            "color": _color(pct), "display": "front", "timeout": 0,
+            "width": filled, "height": BAR_H, "radius": 0,
+            "fill": "solid", "fill_colors": [_color(pct)], "border_width": 0,
+            "display": "front", "timeout": 0,
         })
 
     # The status LED only blinks where a glance at the bar would not be enough.

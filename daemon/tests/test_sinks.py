@@ -28,9 +28,12 @@ def _by_id(body):
 def test_bar_fill_is_proportional_and_colored_like_the_firmware():
     """One meter, two displays: the thresholds have to agree or the bar and the
     device disagree about the same number."""
-    assert _by_id(elements_for({**LIVE, "s": 50.0}))["fill"]["color"] == "#8FA76BFF"
-    assert _by_id(elements_for({**LIVE, "s": 80.0}))["fill"]["color"] == "#D97757FF"
-    assert _by_id(elements_for({**LIVE, "s": 95.0}))["fill"]["color"] == "#C0392BFF"
+    def fill_color(pct):
+        return _by_id(elements_for({**LIVE, "s": pct}))["fill"]["fill_colors"][0]
+
+    assert fill_color(50.0) == "#8FA76BFF"
+    assert fill_color(80.0) == "#D97757FF"
+    assert fill_color(95.0) == "#C0392BFF"
 
     fill = _by_id(elements_for({**LIVE, "s": 50.0}))["fill"]
     assert fill["width"] == 36                      # half of 72
@@ -250,3 +253,23 @@ def test_the_draw_path_is_the_devices_prefix_not_the_clouds():
 
     assert busybar.DRAW_PATH == "/api/display/draw"
     assert not busybar.DRAW_PATH.startswith("/busybar/")
+
+
+def test_rectangles_ask_for_a_fill_and_no_border():
+    """A rectangle has no `color`. It has a fill (default "none") and a border
+    (default 1px white), so passing a colour and nothing else draws a white
+    outline -- which is exactly what the first version put on the hardware."""
+    for key in ("track", "fill"):
+        rect = _by_id(elements_for(LIVE))[key]
+        assert rect["fill"] == "solid"
+        assert rect["fill_colors"] and rect["border_width"] == 0
+        assert "color" not in rect          # silently ignored by the device
+
+
+def test_the_countdown_is_not_drawn_in_the_track_colour():
+    """An LED matrix has no lit background. Panel greys that read as
+    "secondary" on an AMOLED read as "off" here, and the first version's
+    countdown was invisible on hardware."""
+    from daemon.sinks import busybar
+
+    assert _by_id(elements_for(LIVE))["reset"]["color"] != busybar.COL_TRACK
