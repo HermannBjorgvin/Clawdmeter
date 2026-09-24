@@ -1,6 +1,6 @@
 # Clawdmeter
 
-> I built [Beam](https://github.com/notaharness/beam), a CLI that's more convenient than SSH. Pair your machines using a passkey and [@Tailscale's tailcat](https://tailscale.com/blog/tailcat); your information is encrypted client-side, so the pairing service can't read it.
+> Also check out [Beam](https://github.com/notaharness/beam! A CLI that let's you pair your machines using a passkey and [@Tailscale's tailcat](https://tailscale.com/blog/tailcat).
 
 <img src="assets/readme/waving.gif" width="120" align="right" alt="">
 
