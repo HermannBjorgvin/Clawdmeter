@@ -37,7 +37,6 @@ const RETRY_MAX_MS = 10_000;
 // both stand 16 tall, which is what reads as "the same size".
 const PET_X: Record<string, number> = { claude: 0, codex: 4 };
 const NUM_X = 26;       // the pane: everything right of the mascot
-const PANE_W = 46;
 const CELL_Y = 4;       // credit cells sit on the number's row
 const CELL_H = 5;
 // The caption row. At y=9 the baseline lands on row 16 -- one below the last
@@ -52,6 +51,7 @@ const LARGE_DIGIT = 7;
 const LARGE_PCT = 10;
 const SMALL_ADV = 4;
 const SMALL_WIDE = 6;   // "m" and "w"
+const NORMAL_ADV = 6;
 const WIDTH = 72;
 
 // Thresholds and colours from the firmware's pct_color(), so the bar and the
@@ -74,6 +74,8 @@ type Card = {
   used?: number;
   /** Seconds left as of the poll; aged locally, never from the bar's clock. */
   in_s?: number;
+  /** Which window this is, which decides the countdown's precision. */
+  kind?: string;
 };
 
 const PET_IMAGE: Record<string, string> = {
@@ -96,7 +98,11 @@ const PET_IMAGE: Record<string, string> = {
  * An id must also keep its **type** across draws or the entire batch 400s,
  * which is why `reset` is always text and never a countdown.
  */
-const IDS: Array<[string, "text" | "rectangle"]> = [
+const IDS: Array<[string, "text" | "rectangle" | "image"]> = [
+  // The mascot is tombstoned like everything else. Leaving it out is how the
+  // "no host" screen ended up with the previous card's Clawd still under the
+  // words: an id this frame does not name is an id the canvas keeps.
+  ["pet", "image"],
   ["num", "text"],
   ["label", "text"],
   ["reset", "text"],
@@ -109,12 +115,19 @@ const IDS: Array<[string, "text" | "rectangle"]> = [
 ];
 for (let i = 0; i < MAX_CELLS; i++) IDS.push([`cell${i}`, "rectangle"]);
 
-function tombstone(id: string, type: "text" | "rectangle"): Element {
+function tombstone(id: string, type: "text" | "rectangle" | "image"): Element {
   const base = { id, type, x: 0, y: 0, display: "front", display_until: "1" };
-  return type === "text"
-    ? { ...base, text: " ", font: "small", color: COL_DIM, align: "top_left" }
-    : { ...base, width: 1, height: 1, fill: "solid",
-        fill_colors: [COL_TRACK], border_width: 0 };
+  if (type === "text") {
+    return { ...base, text: " ", font: "small", color: COL_DIM,
+             align: "top_left" };
+  }
+  if (type === "image") {
+    // Must name a real asset: an unreadable path rejects the whole batch,
+    // tombstone or not.
+    return { ...base, path: PET_IMAGE.claude };
+  }
+  return { ...base, width: 1, height: 1, fill: "solid",
+           fill_colors: [COL_TRACK], border_width: 0 };
 }
 
 /** Fills in whatever the frame left out, so nothing lingers from the last card. */
@@ -167,7 +180,12 @@ function colorFor(pct: number): string {
  * were wrong. The time goes up beside the number instead, where the space is
  * free on every quota card, and the label gets the caption row to itself.
  */
-const RESET_Y = 2;      // small text beside the number, optically centred
+// The caption band starts LEFT of the pane. Only Clawd's arms reach x=23,
+// and they occupy rows 4..7; on rows 9..15 both mascots stop at column 19, so
+// the band can begin at 22 with the same 2px clearance. Those four pixels are
+// what make "Current" and "3h40m" fit on one row without shortening either.
+const BAND_X = 22;
+const BAND_W = 50;
 
 function text(
   id: string,
@@ -203,18 +221,28 @@ function rect(
 }
 
 /**
- * "1h25m", "5d21h", "10d" -- no spaces, because "23h 59m" is 28px and would
- * clip the 27px column. Deliberately not the device's `countdown` element:
- * that renders HH:MM:SS in a wide font, ticks every 100ms, and takes hours
- * modulo 60, so a five-day reset would show as 21 hours.
+ * PRECISION IS A PROPERTY OF THE WINDOW, NOT OF WHAT FITS.
+ *
+ * A 5-hour window is worth minutes, so it always shows them: "3h40m". A 7-day
+ * one is not -- "Weekly" plus "23h59m" is 52px of a 50px row and always would
+ * be -- so those carry days and hours, and hours alone inside the last day.
+ * Nothing is ever shortened to make it fit; the unit is chosen once, by what
+ * the number means.
+ *
+ * Never the device's `countdown` element: that renders HH:MM:SS in a wide
+ * font, ticks every 100ms, and takes hours modulo 60, so a five-day reset
+ * would show as 21 hours.
  */
-function until(seconds: number): string {
+function until(seconds: number, kind?: string): string {
   if (seconds <= 0) return "now";
   const d = Math.floor(seconds / 86400);
   const h = Math.floor((seconds % 86400) / 3600);
   const m = Math.floor((seconds % 3600) / 60);
+  if (kind === "session") {
+    return h >= 1 ? `${h}h${String(m).padStart(2, "0")}m` : `${m}m`;
+  }
   if (d >= 1) return `${d}d${h}h`;
-  if (h >= 1) return `${h}h${m}m`;
+  if (h >= 1) return `${h}h`;
   return `${m}m`;
 }
 
@@ -244,14 +272,14 @@ function quota(card: Card, left: number | null): Element[] {
   // Three digits and a "%" would reach the countdown above; the sign is the
   // part that can go, since the bar-less card has nothing else to be.
   const shown = pct >= 100 ? "100" : `${pct}%`;
-  const reset = left === null ? null : until(left);
+  const reset = left === null ? null : until(left, card.kind);
   const out: Element[] = [
     petOf(card),
     text("num", shown, "large", NUM_X, -2, colorFor(pct)),
-    text("label", card.label, "small", NUM_X, CAPTION_Y, COL_DIM, PANE_W),
+    text("label", card.label, "small", BAND_X, CAPTION_Y, COL_DIM, BAND_W),
   ];
   if (reset !== null) {
-    out.push(text("reset", reset, "small", rightAlign(reset), RESET_Y, COL_DIM));
+    out.push(text("reset", reset, "small", rightAlign(reset), CAPTION_Y, COL_DIM));
   }
   return out;
 }
@@ -268,10 +296,10 @@ function credits(card: Card, left: number | null): Element[] {
   const out: Element[] = [
     petOf(card),
     text("num", shown, "large", NUM_X, -2, COL_TEXT),
-    text("label", card.label, "small", NUM_X, CAPTION_Y, COL_DIM, PANE_W),
+    text("label", card.label, "small", BAND_X, CAPTION_Y, COL_DIM, BAND_W),
   ];
 
-  const detail = held === 0 ? "spent" : left !== null ? until(left) : null;
+  const detail = held === 0 ? "spent" : left !== null ? until(left, card.kind) : null;
   if (detail !== null) {
     out.push(text("reset", detail, "small", rightAlign(detail),
                   CAPTION_Y, COL_DIM));
@@ -304,8 +332,8 @@ function credits(card: Card, left: number | null): Element[] {
 function toast(word: string): Element[] {
   return [
     {
-      id: "tmask", type: "rectangle", x: NUM_X, y: CAPTION_Y + 1,
-      width: PANE_W, height: 6, radius: 0,
+      id: "tmask", type: "rectangle", x: BAND_X, y: CAPTION_Y + 1,
+      width: BAND_W, height: 7, radius: 0,
       fill: "solid", fill_colors: ["#000000FF"], border_width: 0,
       display: "front", timeout: 2, z_index: 100,
     },
@@ -327,12 +355,21 @@ function frame(card: Card, left: number | null, paused: boolean,
   return say ? out.concat(toast(say)) : out;
 }
 
-/** The pet says "app alive, host present, reading missing". Without a host
- *  there is nothing of ours to show, so that state is text alone. */
+/**
+ * The pet says "app alive, host present, reading missing", so `no data` keeps
+ * it and centres the words in the pane beside it. `no host` drops it -- the
+ * pet lives on the host -- and centres on the whole screen, which only works
+ * because `pet` is tombstoned above.
+ */
 function message(value: string, withPet: Card | null): Element[] {
-  const out: Element[] = withPet ? [petOf(withPet)] : [];
-  out.push(text("msg", value, "normal", withPet ? 31 : 18, 3, COL_DIM));
-  return complete(out);
+  const width = value.length * NORMAL_ADV;
+  if (withPet) {
+    const x = NUM_X + Math.round((WIDTH - NUM_X - width) / 2);
+    return complete([petOf(withPet), text("msg", value, "normal", x, 3, COL_DIM)]);
+  }
+  return complete([
+    text("msg", value, "normal", Math.round((WIDTH - width) / 2), 3, COL_DIM),
+  ]);
 }
 
 /**

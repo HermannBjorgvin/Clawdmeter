@@ -114,10 +114,14 @@ def _cards(payload: dict, provider: str, now: float) -> list[dict]:
     """
     out: list[dict] = []
 
-    def add(label: str, pct, resets_in) -> None:
+    def add(label: str, pct, resets_in, kind: str) -> None:
         if pct is None:
             return
-        card = {"provider": provider, "label": label, "pct": float(pct)}
+        # The device formats the countdown by WINDOW, not by label: a 5-hour
+        # window is worth minutes, a 7-day one is not, and "Weekly" plus
+        # "23h59m" does not fit the caption row anyway.
+        card = {"provider": provider, "label": label, "pct": float(pct),
+                "kind": kind}
         if isinstance(resets_in, int) and resets_in >= 0:
             # Seconds remaining at the moment of this poll, not an absolute
             # instant. The app ages it with its own elapsed time, so the
@@ -128,20 +132,24 @@ def _cards(payload: dict, provider: str, now: float) -> list[dict]:
     session_label = payload.get("sm") or "Current"
     weekly_label = payload.get("wm") or "Weekly"
     if payload.get("has_s", True):
-        add(session_label, payload.get("s"), payload.get("sr"))
+        # A provider that meters only one window sends it in the session slot;
+        # "sk" says when that slot is really a week, so the countdown is not
+        # timed to the minute for something seven days long.
+        add(session_label, payload.get("s"), payload.get("sr"),
+            payload.get("sk") or "session")
     if payload.get("has_w", True):
-        add(weekly_label, payload.get("w"), payload.get("wr"))
+        add(weekly_label, payload.get("w"), payload.get("wr"), "weekly")
 
     # Scoped model allowances share the weekly reset instant.
     for scoped in payload.get("ws") or []:
         if isinstance(scoped, dict) and scoped.get("n"):
-            add(scoped["n"], scoped.get("p"), payload.get("wr"))
+            add(scoped["n"], scoped.get("p"), payload.get("wr"), "weekly")
 
     # Reset credits are a count, not a proportion, so they ride as their own
     # shape rather than being forced into a bar.
     held, used = payload.get("rc"), payload.get("ru")
     if held or used:
-        card = {"provider": provider, "label": "Resets",
+        card = {"provider": provider, "label": "Resets", "kind": "credits",
                 "held": int(held or 0), "used": int(used or 0)}
         if isinstance(payload.get("rm"), int) and payload["rm"] >= 0:
             card["in_s"] = payload["rm"] * 60

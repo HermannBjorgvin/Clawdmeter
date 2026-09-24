@@ -193,25 +193,24 @@ wins and the other gets 409s. Set `busybar_url` or `busybar_serve`, not both.
 
 ```
  0            23 26                                      71
-├─── mascot ────┤├─ 17% (large, rows 0..8) ──── 3h40m ───┤
-                ├─ Current ──────────────────────────────┤  rows 11..15
+├─── mascot ────┤├─ 21% (large, rows 0..8) ──────────────┤
+              ├─ Current ···················· 3h29m ─────┤  rows 10..15
+              ^ x=22
 ```
 
-**The countdown sits beside the number, not beside the label.** "Current" and
-"3h40m" want 52px of a 46px row, so one of them has to give: first the time
-gave (`3h40` — a duration nobody writes, and the one number on the card worth
-acting on), then the label gave (`Curre`). Both were wrong. The top row has
-free space on every quota card, so the time went there and the label got the
-caption row to itself. At 100% the percent sign gives way instead, so three
-digits never reach the countdown.
+**The caption band starts left of the pane, at x=22.** Only Clawd's *arms*
+reach x=23, and they occupy rows 4..7; on rows 9..15 both mascots stop at
+column 19. Those four pixels are the difference between fitting "Current" and
+"3h29m" on one row and having to shorten one of them — which is what the two
+previous versions did, first to the time ("3h29", a duration nobody writes)
+and then to the label ("Curre").
 
-**There is no bar.** In a 46px pane a `large` number cannot share a row with
-any label, and label + 9px number + a bar do not stack in 16 rows — something
-had to give. The bar was earning least: its track (`#2A2A28`) is invisible on
-an LED matrix, so it never showed headroom, and its one real job, carrying the
-alarm, a 9px number does better than a 2px stripe. **The number is the alarm
-now** — white below 75%, amber to 90%, red above. White rather than green at
-rest: with nothing else tinted, permanent green is wallpaper.
+**Countdown precision is a property of the window, never of what fits.** A
+5-hour window is worth minutes and always shows them; a 7-day one is not, so
+it carries days and hours, and hours alone inside the last day. The daemon
+tags each card with its `kind` — including when a provider sends a *weekly*
+window in the session slot, which Codex does, and which otherwise renders
+"Weekly13h50m" with no room for the space.
 
 **The mascots.** Clawd is authored on a 12×8 grid at 100px a cell, so he
 renders at exactly 2× — 24×16 — with no resampling. That matters: averaging

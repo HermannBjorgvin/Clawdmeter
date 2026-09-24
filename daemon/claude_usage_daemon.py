@@ -806,8 +806,10 @@ def codex_payload() -> dict | None:
             model_name, model_week = name, windows[WINDOW_7D]
             break
 
+    top_kind: str | None = None
     if account_week is not None and model_week is not None:
         top, top_label = model_week, model_name.rsplit("-", 1)[-1][:12]
+        top_kind = "weekly"
         bottom, bottom_label = account_week, "Overall"
     else:
         # No model weekly to pair with: fall back to the plain window mapping,
@@ -831,6 +833,10 @@ def codex_payload() -> dict | None:
             # drops the empty card rather than drawing a dash in it.
             top, top_label = week, "Weekly"
             bottom, bottom_label = None, None
+            # The top slot is where a 5-hour window normally sits, and the
+            # device times those to the minute. This one is a WEEK. Say so, or
+            # the card reads "Weekly13h50m" with no room for a space.
+            top_kind = "weekly"
         else:
             top, top_label = five, None
             bottom, bottom_label = week, None
@@ -873,6 +879,8 @@ def codex_payload() -> dict | None:
     # Pill overrides. Short form only -- the pill is a few characters wide, so
     # "GPT-5.3-Codex-Spark" would never fit and "Spark" is the distinguishing
     # part. Absent means the device keeps its default label.
+    if top_kind:
+        payload["sk"] = top_kind
     if top_label:
         payload["sm"] = top_label
     if bottom_label:
