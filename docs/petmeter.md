@@ -621,6 +621,10 @@ applies: temporarily change the default boot screen, iterate, revert.
   where it *is* before it moves, not only where it lands — otherwise it drags
   a trail of its own leftovers across the screen.
 
+### CI
+
+`.github/workflows/build.yml` runs on every push to `main` and every PR: it builds all seven hardware envs, builds the simulator and boots it headless for a 6 s autoshot (the BMP is uploaded as the `sim-autoshot` artifact), and runs `daemon/tests` plus the splash-geometry host test. Its main job is catching a board env that an upstream merge broke. It says nothing about panels, touch, or anything on the list above — those still need a real board.
+
 ---
 
 ## 8. Fonts are subset to ASCII

@@ -1,0 +1,95 @@
+# Build every firmware env, run the host-side tests, and smoke-test the
+# simulator. Catches the regression an upstream merge is most likely to cause:
+# a board env that no longer compiles. Hardware checks (panel offsets, touch,
+# rotation) still happen on a real board — nothing here replaces them.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  PLATFORMIO_VERSION: "6.1.19"
+
+jobs:
+  firmware:
+    name: firmware (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env:
+          - waveshare_amoled_216
+          - waveshare_amoled_18
+          - waveshare_amoled_216_c6
+          - waveshare_amoled_18_c6
+          - waveshare_amoled_206
+          - waveshare_lcd_154
+          - waveshare_lcd_4
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # The pioarduino platform and its toolchains are ~1 GB per SoC family;
+      # key on platformio.ini so a platform or lib_deps bump refetches.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-${{ matrix.env }}-${{ hashFiles('firmware/platformio.ini') }}
+          restore-keys: pio-${{ matrix.env }}-
+      - run: pip install "platformio==${PLATFORMIO_VERSION}"
+      - run: pio run -d firmware -e ${{ matrix.env }}
+
+  sim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
+      - run: pip install "platformio==${PLATFORMIO_VERSION}"
+      - run: pio run -d firmware -e sim
+      # Boots the full firmware loop headless, plays the default scenario,
+      # screenshots after 6 s and exits. A crash or hang fails the job.
+      - name: headless smoke test
+        working-directory: firmware
+        env:
+          SDL_VIDEODRIVER: dummy
+          SIM_AUTOSHOT_MS: "6000"
+          SIM_AUTOSHOT_PATH: sim-autoshot.bmp
+        run: |
+          timeout 60 .pio/build/sim/program
+          test -s sim-autoshot.bmp
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sim-autoshot
+          path: firmware/sim-autoshot.bmp
+
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install pytest -r daemon/requirements-windows.txt
+      # daemon/test_macos_connect.py is a manual hardware script, not a test.
+      - name: daemon tests
+        run: python -m pytest -q daemon/tests
+      - name: splash geometry test
+        working-directory: firmware/test/test_splash_geometry
+        run: g++ -std=c++17 -Wall -I ../../src test_main.cpp -o "$RUNNER_TEMP/splash_geometry" && "$RUNNER_TEMP/splash_geometry"
