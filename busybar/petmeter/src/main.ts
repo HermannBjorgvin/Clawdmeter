@@ -36,7 +36,10 @@ const NUM_X = 26;       // the pane: everything right of the mascot
 const PANE_W = 46;
 const CELL_Y = 4;       // credit cells sit on the number's row
 const CELL_H = 5;
-const CAPTION_Y = 9;    // label and reset share the second row
+// The caption row. At y=9 the baseline lands on row 16 -- one below the last
+// pixel row -- so "Weekly" lost the tail of its y. Up one: baseline 15, caps
+// on 10..14, and a row left for descenders.
+const CAPTION_Y = 8;
 const MAX_CELLS = 8;
 
 // Measured against the device's own font files, not guessed: large digits and
@@ -44,6 +47,8 @@ const MAX_CELLS = 8;
 const LARGE_DIGIT = 7;
 const LARGE_PCT = 10;
 const SMALL_ADV = 4;
+const SMALL_WIDE = 6;   // "m" and "w"
+const WIDTH = 72;
 
 // Thresholds and colours from the firmware's pct_color(), so the bar and the
 // meter on the desk never disagree about whether a number is alarming. The
@@ -126,7 +131,16 @@ function largeWidth(text: string): number {
   return w;
 }
 
-const smallWidth = (text: string) => text.length * SMALL_ADV;
+// Not every small glyph is 4px: "m" and "w" are wider, and assuming otherwise
+// pushed the right-aligned reset past the screen edge -- "4h5m" lost its m.
+function smallWidth(text: string): number {
+  let w = 0;
+  for (const ch of text) w += ch === "m" || ch === "w" ? SMALL_WIDE : SMALL_ADV;
+  return w;
+}
+
+/** Right edge for a right-aligned string, never left of the pane. */
+const rightAlign = (text: string) => Math.max(NUM_X, WIDTH - smallWidth(text));
 
 /**
  * The number carries the alarm now that there is no bar to colour. White
@@ -146,8 +160,14 @@ function colorFor(pct: number): string {
  */
 function fitReset(label: string, full: string): string | null {
   const room = PANE_W - smallWidth(label) - 2;
-  const ladder = [full, full.replace(/m$/, ""), full.replace(/^(\d+d).*/, "$1"),
-                  full.replace(/^(\d+h).*/, "$1")];
+  // Dropping the trailing "m" only reads as a time when the minutes are two
+  // digits: "1h25m" -> "1h25" is fine, "4h3m" -> "4h3" is not a duration
+  // anyone recognises, so that case falls straight to the hour.
+  const ladder = [
+    full,
+    full.replace(/^(\d+h\d\d)m$/, "$1"),
+    full.replace(/^(\d+[dh]).*$/, "$1"),
+  ];
   for (const candidate of ladder) {
     if (candidate && smallWidth(candidate) <= room) return candidate;
   }
@@ -235,7 +255,7 @@ function quota(card: Card, left: number | null): Element[] {
   if (left !== null) {
     const fitted = fitReset(card.label, until(left));
     if (fitted !== null) {
-      out.push(text("reset", fitted, "small", 72 - smallWidth(fitted),
+      out.push(text("reset", fitted, "small", rightAlign(fitted),
                     CAPTION_Y, COL_DIM));
     }
   }
@@ -261,14 +281,14 @@ function credits(card: Card, left: number | null): Element[] {
   if (detail !== null) {
     const fitted = fitReset(card.label, detail);
     if (fitted !== null) {
-      out.push(text("reset", fitted, "small", 72 - smallWidth(fitted),
+      out.push(text("reset", fitted, "small", rightAlign(fitted),
                     CAPTION_Y, COL_DIM));
     }
   }
 
   const n = Math.min(total, MAX_CELLS);
   const x0 = NUM_X + largeWidth(shown) + 3;
-  const cellW = n > 0 ? Math.floor((72 - x0 - (n - 1)) / n) : 0;
+  const cellW = n > 0 ? Math.floor((WIDTH - x0 - (n - 1)) / n) : 0;
   // Below 3px a hollow cell has no hole left and reads as a solid one, which
   // would say "held" about a credit that is spent.
   if (cellW >= 3) {
@@ -300,7 +320,7 @@ function toast(word: string): Element[] {
     },
     {
       id: "ttext", type: "text", text: word, font: "small",
-      x: 72 - smallWidth(word), y: CAPTION_Y, align: "top_left",
+      x: rightAlign(word), y: CAPTION_Y, align: "top_left",
       color: COL_TEXT, display: "front", timeout: 2, z_index: 110,
     },
   ];
