@@ -191,9 +191,12 @@ sends it as `Authorization: Bearer <token>`, and against a bar reporting
 a query parameter, a bare `Authorization`, `X-Key`, and Basic. The device's
 own `/docs` documents no authentication, and the cloud API at `api.busy.app`
 publishes only `/timer/v1/*` with bearer auth, no display endpoints at all.
-So the key is probably bound to a session established in the BUSY app rather
-than to a header a daemon can send. If you need Wi-Fi, expect to work the
-scheme out first; do not assume this key is the answer.
+The reason is visible in the device's own settings: what `key` mode asks for
+is a **password** — "from 4 to 10 digits", changed in the web UI and, it
+warns, resettable only over a wired connection. It gates a browser session,
+not an API call, so there is no header a daemon can send that satisfies it.
+If you need Wi-Fi, expect to work the scheme out first; this password is not
+the answer.
 
 **A rectangle has no `color`.** It has a `fill` (default `none`) and a border
 (default 1px, white). Pass a colour and nothing else and the device draws a
