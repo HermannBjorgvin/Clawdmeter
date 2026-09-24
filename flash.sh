@@ -9,7 +9,10 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BOARD="$1"
-PORT="${2:-/dev/ttyACM0}"
+# Native-USB boards (S3/C6) enumerate as /dev/ttyACM*; boards behind a
+# USB-UART bridge (the CYD's CH340) as /dev/ttyUSB*.
+PORT="${2:-$(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null | head -1)}"
+PORT="${PORT:-/dev/ttyACM0}"
 
 if [ -z "$BOARD" ]; then
     echo "Error: board env name is required."
