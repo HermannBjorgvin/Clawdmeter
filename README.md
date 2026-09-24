@@ -1,5 +1,7 @@
 # Clawdmeter
 
+> I built [Beam](https://github.com/notaharness/beam), a CLI that's more convenient than SSH. Pair your machines using a passkey and [@Tailscale's tailcat](https://tailscale.com/blog/tailcat); your information is encrypted client-side, so the pairing service can't read it.
+
 <img src="assets/readme/waving.gif" width="120" align="right" alt="">
 
 A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
