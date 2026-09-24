@@ -28,13 +28,18 @@ const POLL_MS = 30_000;
 const CARD_MS = 4_000;
 const TICK_MS = 250;
 
-const PET = 16;
-const NUM_X = 18;       // the big number, right of the mascot
+// Clawd is authored on a 12x8 grid, so he renders at exactly 2x -- 24x16,
+// filling the height. Codey is 16 wide and gets centred in the same slot;
+// both stand 16 tall, which is what reads as "the same size".
+const PET_SLOT = 24;
+const PET_X: Record<string, number> = { claude: 0, codex: 4 };
+const NUM_X = 26;       // the big number, right of the mascot
 const COL_X = 45;       // the label-over-reset column
 const COL_W = 27;       // clipped, so a long label cannot overflow
-const BAR_X = 18;
+const BAR_X = 26;
 const BAR_Y = 12;
-const BAR_W = 54;
+const BAR_W = 46;
+
 const BAR_H = 3;
 const MAX_CELLS = 8;
 
@@ -167,7 +172,7 @@ function petOf(card: Card): Element {
   return {
     id: "pet", type: "image",
     path: PET_IMAGE[card.provider] ?? PET_IMAGE.claude,
-    x: 0, y: 0, display: "front", timeout: 0,
+    x: PET_X[card.provider] ?? 0, y: 0, display: "front", timeout: 0,
   };
 }
 
@@ -181,18 +186,20 @@ function petOf(card: Card): Element {
  */
 function quota(card: Card, left: number | null): Element[] {
   const pct = Math.round(card.pct ?? 0);
-  // At 100 the "%" no longer fits beside three digits, and shrinking the font
-  // at the moment the number matters most is the wrong trade.
-  const shown = pct >= 100 ? "100" : `${pct}%`;
   const filled =
     pct > 0 ? Math.max(1, Math.round((BAR_W * Math.min(pct, 100)) / 100)) : 0;
 
   const out: Element[] = [
     petOf(card),
-    text("num", shown, "large", NUM_X, -1, COL_TEXT),
     text("label", card.label, "small", COL_X, -2, COL_DIM, COL_W),
     rect("track", BAR_X, BAR_Y, BAR_W, BAR_H, COL_TRACK),
   ];
+  // No percent sign. With a 24px mascot there is not room for one beside
+  // three digits, and a small one set after the number ran straight into the
+  // reset line -- "18" and "%5d16h" on the same row. The label names the
+  // quota and the bar underneath shows the proportion, so the sign was the
+  // least load-bearing thing on the card.
+  out.push(text("num", `${Math.min(pct, 100)}`, "large", NUM_X, -1, COL_TEXT));
   if (left !== null) {
     out.push(text("reset", until(left), "small", COL_X, 4, COL_DIM, COL_W));
   }
@@ -239,7 +246,7 @@ function frame(card: Card, left: number | null, paused: boolean): Element[] {
   // The badge sits in the pet box's top-right corner, clear of ink on both
   // mascots, so it never collides with the label the way a screen-corner dot
   // does.
-  if (paused) body.push(rect("paused", PET - 2, 0, 2, 2, COL_DIM));
+  if (paused) body.push(rect("paused", PET_SLOT - 2, 0, 2, 2, COL_DIM));
   return complete(body);
 }
 
@@ -247,7 +254,7 @@ function frame(card: Card, left: number | null, paused: boolean): Element[] {
  *  there is nothing of ours to show, so that state is text alone. */
 function message(value: string, withPet: Card | null): Element[] {
   const out: Element[] = withPet ? [petOf(withPet)] : [];
-  out.push(text("msg", value, "normal", withPet ? 27 : 18, 3, COL_DIM));
+  out.push(text("msg", value, "normal", withPet ? NUM_X : 18, 3, COL_DIM));
   return complete(out);
 }
 

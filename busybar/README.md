@@ -2,7 +2,10 @@
 
 Coding-agent usage on a [BUSY Bar](https://busy.app) — a 72×16 RGB LED matrix — rotating through every quota your plans meter, each with its label and its mascot.
 
-![Petmeter on a BUSY Bar](../screenshots/busybar-card.png)
+![Petmeter on a BUSY Bar](../screenshots/busybar-cards.png)
+
+*Three of the five cards, rotating every four seconds. Captured off the device
+itself with [`tools/busybar_shot.py`](../tools/busybar_shot.py).*
 
 This is a self-contained corner of [Petmeter](../README.md). The desk meter it belongs to is an ESP32 device; nothing here needs one. All it needs is the Petmeter daemon running on a host the bar can reach.
 
@@ -97,31 +100,44 @@ The rest of the path exists: `@busy-app/cli` builds a device package, and a `js_
 ## Layout
 
 ```
- 0        15 18                    44 45        71
-├── mascot ──┤├─ 21%  (large) ─┤    │ Current  │  rows 0..4
-             │                      │ 1h25m    │  rows 6..10
-             ├──── bar: track + fill, 54x3 ────┤  rows 12..14
+ 0            23 26                    44 45        71
+├─── mascot ────┤├─ 16 (large) ─┤        │ Fable    │  rows 0..4
+                │                        │ 5d16h    │  rows 6..10
+                ├──── bar: track + fill, 46x3 ──────┤  rows 12..14
 ```
 
-16×16 mascot (Clawd for Claude cards, Codey for Codex), the number in `large`,
-and a fixed column at x=45 holding the label over the reset time. The column is
-fixed rather than following the number's width, or the label would jump between
-cards.
+![Clawd and Codey](../screenshots/busybar-mascots.png)
+
+**The mascots.** Clawd is authored on a 12×8 grid at 100px a cell, so he
+renders at exactly 2× — 24×16, filling the height with no resampling. That
+matters more than it sounds: averaging him down blends orange into
+transparency, and on an unlit matrix that blend reads as *brown*, while his
+square eyes smear into diagonal marks. Sample the grid instead and he comes
+back exactly as drawn. Codey is 16 wide and sits centred in the same slot;
+both stand 16 tall, which is what reads as "the same size".
+
+**No percent sign.** With a 24px mascot there is no room for one beside three
+digits, and a small sign set after the number ran straight into the reset line
+— `18` and `%5d16h` sharing a row. The label names the quota and the bar shows
+the proportion, so the sign was the least load-bearing thing on the card.
+
+**The column is fixed at x=45** rather than following the number's width, or
+the label would jump between cards.
 
 Colour thresholds are the firmware's `pct_color()` — green under 75%, amber to
 90%, red above — because two displays showing one number must not disagree
 about whether it is alarming. The number itself stays white: the firmware
 colours bar indicators, never text.
 
-Reset times are formatted on the app side (`5d17h`, `1h25m`), **not** with the
-device's `countdown` element. That one renders `HH:MM:SS` in a wide font, ticks
-every 100 ms, and takes hours modulo 60 — a five-day reset would display as 21
-hours.
+**Reset times are formatted on the app side** (`5d16h`, `1h25m`), *not* with
+the device's `countdown` element. That one renders `HH:MM:SS` in a wide font,
+ticks every 100 ms, and takes hours modulo 60 — a five-day reset would display
+as 21 hours.
 
-Reset credits are a count, not a proportion, so that card keeps the desk
+**Reset credits are a count, not a proportion**, so that card keeps the desk
 device's ledger instead of a bar: one cell per credit the window handed out,
 solid while held and hollow once spent.
 
-Every frame names every element id, unused ones as tombstones. Draws merge by
-id, so anything left unnamed stays on screen — including elements from an older
-build of the app, which is why it clears its canvas once at startup.
+**Every frame names every element id**, unused ones as tombstones. Draws merge
+by id, so anything left unnamed stays on screen — including elements from an
+older build of the app, which is why it clears its canvas once at startup.
