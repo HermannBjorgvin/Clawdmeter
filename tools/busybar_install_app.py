@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install the Petmeter app onto a BUSY Bar, so it appears in the apps menu.
 
-    python3 tools/busybar_install_app.py [http://10.0.4.20] [--remove]
+    python3 tools/busybar_install_app.py [http://10.0.4.20] [--remove] [--enable-menu]
 
 There is no app-installation API. Apps are directories under
 `/ext/user_assets/`, each holding `appmeta/manifest.json`, an 8x8 front icon,
@@ -71,6 +71,23 @@ def stop_running(host: str) -> None:
         print(f"  (could not reach the CLI to stop a running app: {exc})")
 
 
+MENU_FLAG = "/ext/apps_data/apps_menu/js_apps_enabled"
+
+
+def enable_menu(base: str) -> int:
+    """Switch the apps menu from its placeholder to the real app list.
+
+    `apps_menu_is_js_apps_enabled()` stats this file; without it the menu shows
+    "More apps soon" and lists nothing, which reads exactly like a firmware
+    that cannot list user apps at all. It can, once asked. Separate from
+    install because it changes a device-wide setting, not just our app.
+    """
+    code, body = _call(base, "/api/storage/write", {"path": MENU_FLAG},
+                       data=b"1", method="POST")
+    print(f"menu flag {MENU_FLAG}: {code} {body.strip()}")
+    return 0 if code == 200 else 1
+
+
 def install(base: str) -> int:
     if not SRC.is_dir():
         print(f"missing source tree: {SRC}")
@@ -112,10 +129,11 @@ def install(base: str) -> int:
     if failures:
         print(f"\n{failures} file(s) failed.")
         return 1
-    print("\nInstalled. The apps menu is a hardcoded list in this firmware and "
-          "will not\nshow it (see docs/busybar.md), so launch it over the "
-          "device's telnet CLI:\n\n"
-          f"  js -i {APP_ID} {REMOTE_ROOT}/scripts/main.js\n\n"
+    print("\nInstalled. Launch it as a real app over the device's telnet CLI "
+          "(port 23):\n\n"
+          f"  loader open js_app_launcher {APP_ID}\n\n"
+          "To have it listed in the Apps menu, run this once with "
+          "--enable-menu.\n"
           "It pulls from the daemon, so set `busybar_serve = 10.0.4.21:8724` "
           "in\n~/.config/claude-usage-monitor/config and restart the daemon.")
     return 0
@@ -131,4 +149,8 @@ def remove(base: str) -> int:
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     url = args[0] if args else "http://10.0.4.20"
-    sys.exit(remove(url) if "--remove" in sys.argv else install(url))
+    if "--remove" in sys.argv:
+        sys.exit(remove(url))
+    if "--enable-menu" in sys.argv:
+        sys.exit(enable_menu(url))
+    sys.exit(install(url))

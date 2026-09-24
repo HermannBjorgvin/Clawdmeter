@@ -17,7 +17,7 @@ This is a self-contained corner of [Petmeter](../README.md). The desk meter it b
 | **Where** | [`daemon/sinks/busybar.py`](../daemon/sinks/busybar.py) | [`petmeter/`](petmeter) — a TypeScript app built with `busy-cli` |
 | **Shows** | one quota | every quota, rotating, with mascots |
 | **Needs** | a config line | installing the app and launching it |
-| **Works today** | yes | yes, but it cannot be launched from the apps menu — see below |
+| **Works today** | yes | yes — launch it from the apps menu, or the CLI |
 
 They are complementary: push keeps the bar current while you are not looking; pull makes it right the moment you select it.
 
@@ -91,11 +91,57 @@ Everything here was found against real hardware, and none of it is in the publis
 
 **The bar is slow over Wi-Fi and goes quiet.** A draw answers in ~5.0s, consistently, and after a burst of requests it stops answering for ~20s. Over USB the same draw returns in under 0.1s. A timeout set at the measured response time is a coin flip, not a margin.
 
-## Why it is not in the apps menu
+## Launching it, and the apps menu
 
-It installs, and the menu will not list it. That menu is a hardcoded C array in the open-source firmware — [`applications/system/apps_menu/app_list.c`](https://github.com/busy-app/busybar-firmware/blob/dev/applications/system/apps_menu/app_list.c) — with exactly two entries: `Clock`, and a literal `"Coming soon..."`. Nothing scans `user_assets/`, so no arrangement of files can add a third, and the vendor's own `app.busy.js_example` is not listed either.
+**Launch it as a real app**, not as a loose script:
 
-The rest of the path exists: `@busy-app/cli` builds a device package, and a `js_app_installer` service stages and installs a `.tgz`. The menu is the unfinished seam. Until it ships, the CLI launch above is how the app runs.
+```
+loader open js_app_launcher app.petmeter
+```
+
+over the device's telnet CLI (port 23). `js -i app.petmeter <path>` also runs
+the script, but as a CLI job rather than an app.
+
+**The apps menu is flag-gated, not hardcoded.** `apps_menu_is_js_apps_enabled()`
+stats a file; without it the menu shows "More apps soon" and lists nothing,
+which reads exactly like a firmware that cannot list user apps. It can, once
+asked:
+
+```bash
+python3 tools/busybar_install_app.py http://10.0.4.20 --enable-menu
+```
+
+That writes `/ext/apps_data/apps_menu/js_apps_enabled`, and the placeholder is
+replaced by the real list.
+
+**A manifest key can stop the app loading.** `busy-cli` scaffolds
+`heap_size_kib`, which firmware 1.2.4 does not know, and the launcher answers
+`App loading failed, reinstall it.` The loader checks only three things —
+`appmeta/manifest.json` parses, the directory name equals the manifest `id`,
+and `scripts/main.js` exists — so a manifest it cannot parse fails all of it
+with one message. Removing that key is the whole fix. Icons
+(`appmeta/icon_front_8x8.png`, `icon_back_11x11.png`) are optional to load but
+are what the menu shows.
+
+## The buttons cannot work on this firmware
+
+Not a binding bug, and not something an app can code around: `js_input.c` — the
+file that installs the `listen` global — was added on **2026-09-16**, five days
+*after* release **1.2.4** (2026-09-11), the newest tag and what the device
+runs. `raw.githubusercontent.com/.../1.2.4/.../js_input.c` returns 404. That
+firmware's `js_runner.c` sets up exactly `console`, the interval functions,
+`fetch` and `localStorage` — precisely the globals a `for…in` probe enumerates
+on the hardware.
+
+So the app guards `typeof listen === "function"`, rotates without controls
+today, and picks the buttons up on a firmware that includes that commit.
+
+**A host-side route exists in the meantime.** The CLI's `input dump` streams
+one line per physical event (`key: InputKeyStart type: InputTypePress`), and
+the telnet server accepts a shell per connection, so a daemon-side reader could
+own the buttons and drive the push sink. Caveat from `canvas.c`: while our
+elements are up the canvas swallows Start/Ok/Up/Down, and a short
+Back/Busy/Custom/Off/Apps/Settings press closes the canvas.
 
 ## Layout
 
