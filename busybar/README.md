@@ -26,11 +26,109 @@ And the states you hope not to see:
 | | |
 |---|---|
 | ![No data](../screenshots/busybar/state-nodata.png) | **no data** — the daemon is there, the reading is not. The pet stays: the app is alive |
-| ![No host](../screenshots/busybar/state-nohost.png) | **no host** — the daemon is unreachable. No pet, because the pet lives on the host |
+| ![No host](../screenshots/busybar/state-nohost.png) | **The host is unreachable.** — a System 7 caution alert, lit-on-dark for the matrix. No pet, because the pet lives on the host; the alert's icon stands in its slot |
 | ![Paused](../screenshots/busybar/state-paused.png) | **paused** — the 2×2 badge at the top right, the only room there was for one |
 | ![Toast](../screenshots/busybar/state-toast-running.png) | the **toast** on a press — the word replaces the caption for two seconds, then the device removes it itself |
 
 This is a self-contained corner of [Petmeter](../README.md). The desk meter it belongs to is an ESP32 device; nothing here needs one. All it needs is the Petmeter daemon running on a host the bar can reach.
+
+## Install it yourself
+
+**What you need:** a BUSY Bar, and Claude Code and/or the Codex CLI already
+installed and signed in on the same machine. There are no API keys to create
+and nothing to paste — see [where each number comes
+from](#where-each-number-comes-from) below.
+
+**You do not need the ESP32 meter the rest of this repo is about.** Petmeter
+began as firmware, so the poll loop used to live inside a Bluetooth
+connection; `ble = off` skips looking for a meter and polls for the bar alone.
+
+### macOS
+
+```bash
+git clone https://github.com/nathanjohnpayne/Petmeter.git
+cd Petmeter
+./install-mac.sh
+```
+
+That builds a virtualenv under `daemon/`, installs dependencies and loads a
+LaunchAgent. Then tell it what you have:
+
+```ini
+# ~/.config/claude-usage-monitor/config
+ble = off                        # no ESP32 meter on this machine
+busybar_url = http://10.0.4.20   # push. USB; or http://busybar.local over Wi-Fi
+```
+
+Over USB the bar is always `10.0.4.20` and your machine is `10.0.4.21`, both
+printed on the case. That is enough for the push path. For the on-device app
+and the physical buttons, add `busybar_serve` as under [Pull](#pull) and then
+grant the daemon LAN access — **this step is not optional on Sequoia or
+later**, and [the buttons](#the-buttons) explains the fairly hostile way it
+fails if you skip it:
+
+```bash
+python3 tools/busybar_lan_access.py
+```
+
+Restart it and watch it come up:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.user.claude-usage-daemon
+tail -f ~/Library/Logs/claude-usage-daemon.out.log
+```
+
+### Linux — expect to do a little wiring
+
+`./install.sh` installs the **bash** daemon, and that one has no sink support
+at all, so it will not drive a bar. The Python daemon is the one with the
+BUSY Bar code in it, and its platform-specific paths are guarded
+(`sys.platform == "darwin"` for Keychain and CoreBluetooth), so it should run
+under systemd on Linux with the config above — but **I have only run it on
+macOS**, so treat this as the shape of the answer rather than a tested recipe:
+
+```bash
+python3 -m venv daemon/.venv && daemon/.venv/bin/pip install bleak
+daemon/.venv/bin/python daemon/claude_usage_daemon.py
+```
+
+With `ble = off` there is no Bluetooth in the path, which removes most of what
+would otherwise differ between the two platforms. If you get it working under
+systemd, that is a welcome pull request.
+
+## Where each number comes from
+
+Nothing here asks you for a credential. Both providers are read with tokens
+the tools you already run have put on disk, and the daemon **never refreshes
+either of them** — the CLI that owns a token does all of its rotation, and a
+401 means "no data", never "get a new one". Refreshing would race that
+rotation and burn the OAuth endpoint's rate limit for the tool you actually
+work in. `daemon/tests/test_freeride.py` exists to keep that honest.
+
+| | Claude | Codex |
+|---|---|---|
+| **Token** | macOS Keychain, service `Claude Code-credentials`; Linux `~/.claude/.credentials.json` | `~/.codex/auth.json` |
+| **Put there by** | `claude login` | signing in to the Codex CLI |
+| **Read from** | response headers on one 1-token API call | `GET /backend-api/wham/usage` |
+| **Fallback** | none | `rate_limits` in the session logs under `~/.codex/sessions` |
+
+**Claude** has no usage endpoint. The numbers ride along as
+`anthropic-ratelimit-unified-*` headers on any API call, so the daemon makes
+the cheapest one that exists — one token to Haiku — and reads the headers off
+the response. Pro and Max report a 5-hour and a 7-day window; Enterprise
+reports a single spending window plus a derived fraction of the billing
+period.
+
+**Codex** is read from an endpoint the CLI itself uses, which is undocumented
+and can change without notice — hence the fallback, which needs no network but
+is only as fresh as your last Codex session and says so via `stale_seconds`.
+The trap worth knowing: the account limit and the per-model buckets sit side
+by side in that data and are unrelated numbers. Reading the newest record
+blindly once reported 0% off a per-model bucket while the account was at 78%,
+so both readers select the account limit explicitly.
+
+If a provider is not signed in, its cards simply do not appear; the other one
+carries on.
 
 ## Two ways in
 
@@ -75,7 +173,7 @@ Then launch it over the bar's CLI (`telnet 10.0.4.20`, port 23):
 js -i app.petmeter /ext/user_assets/app.petmeter/scripts/main.js
 ```
 
-**Controls are written but cannot run yet.** They follow what the case is engraved with — the red **Start/Pause** bar holds and releases the rotation, the wheel **scrolls** by hand, and its press, labelled **OK/Skip**, skips forward — but a CLI-launched script gets no input API. Its globals are exactly `console`, `setInterval`, `setTimeout`, `clearInterval`, `clearTimeout`, `Request`, `fetch` and `localStorage`; `listen` is installed only for an app launched as an app, which is the same thing [the apps menu blocks](#why-it-is-not-in-the-apps-menu). The binding is guarded and logs that it is disabled, so the display keeps working.
+**The controls work, but not from inside the app.** They follow what the case is engraved with — the red **Start/Pause** bar holds and releases the rotation, the wheel **scrolls** by hand, and its press, labelled **OK/Skip**, skips forward. This firmware gives a JS app no input API at all, so the presses are read on the **host** off the bar's CLI and the app renders what it is told. [The buttons](#the-buttons) has the detail, including the macOS permission it needs.
 
 ## Nothing here is hosted
 
