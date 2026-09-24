@@ -1,5 +1,7 @@
 # Clawdmeter
 
+> Also check out [Beam](https://github.com/notaharness/beam! A CLI that let's you pair your machines using a passkey and [@Tailscale's tailcat](https://tailscale.com/blog/tailcat).
+
 <img src="assets/readme/waving.gif" width="120" align="right" alt="">
 
 A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
