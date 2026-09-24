@@ -1033,6 +1033,35 @@ def unpair_macos() -> bool:
     return True
 
 
+class _NoMeter:
+    """Stands in for the BLE meter when there deliberately is not one.
+
+    This project began as firmware, so the poll loop lives INSIDE a BLE
+    connection -- no device, no poll, and therefore no sinks either. That is
+    invisible until someone wants only the secondary display: a BUSY Bar then
+    silently depends on an ESP32 nobody told them to buy, and the bar just
+    reads "no data" forever while every credential is perfectly good.
+
+    A client that is always connected and whose write always succeeds keeps
+    that as one poll loop instead of two that would drift apart. Only the
+    three members the loop actually touches are implemented; anything else is
+    a bug in the caller, not a member worth faking.
+    """
+
+    is_connected = True
+
+    async def start_notify(self, *_args, **_kwargs) -> None:
+        # There is no device to nudge us. setup_refresh_subscription treats
+        # this as "unavailable" and polls on the timer, which is correct.
+        raise BleakError("no meter configured")
+
+    async def write_gatt_char(self, *_args, **_kwargs) -> None:
+        return None
+
+    async def disconnect(self) -> None:
+        return None
+
+
 async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     """Connect to a target and poll until disconnected or stopped.
 
@@ -1041,6 +1070,11 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     used successfully (so the caller keeps the cached address), False if the
     connection failed and the cache should be invalidated.
     """
+    if target is None:
+        log("No meter configured; polling for secondary displays only")
+        client = _NoMeter()
+        return await _poll_until_done(client, stop_event)
+
     display = target if isinstance(target, str) else target.address
     log(f"Connecting to {display}...")
     client = BleakClient(target)
@@ -1067,6 +1101,15 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
         return False
 
     log("Connected")
+    return await _poll_until_done(client, stop_event)
+
+
+async def _poll_until_done(client, stop_event: asyncio.Event) -> bool:
+    """Poll and publish until the link drops or the daemon stops.
+
+    Split out so the meter and the no-meter case cannot diverge: this is the
+    only place that decides when to poll and what to do with the result.
+    """
     session = Session(client)
     await session.setup_refresh_subscription()
 
@@ -1163,6 +1206,13 @@ async def main() -> None:
             cli = read_config_value("busybar_cli", allowed=None) or "10.0.4.20"
             loop.create_task(sinks.busybar_buttons.run(cli.split(":")[0], log=log))
     log(f"Poll interval: {POLL_INTERVAL}s")
+
+    # A bar-only install has no meter to look for. Without this the loop below
+    # scans for an ESP32 forever, never polls, and every secondary display
+    # reads "no data" while the credentials behind it are perfectly good.
+    if read_config_value("ble", allowed=("on", "off"), default="on") == "off":
+        await connect_and_run(None, stop_event)
+        return
 
     backoff = 1
     skip_addr: str | None = None  # macOS: a peripheral to skip for one cycle
