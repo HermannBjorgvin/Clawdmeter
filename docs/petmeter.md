@@ -178,12 +178,22 @@ path reaches the device's web-UI file server instead, which answers
 method" and actually means "wrong prefix". The on-device paths are documented
 at `http://<bar>/docs` and in [the widget guide](https://blog.busy.app/how-to-make-a-busy-bar-widget-without-coding/).
 
-*Access over Wi-Fi is off by default.* On the right prefix an ungated request
-returns `403`. Do not infer why — `GET /api/access` is itself ungated and
-answers `{"mode": "disabled" | "enabled" | "key", "key_valid": bool}`. Turn it
-on in the BUSY Bar settings; `key` mode takes a 4–10 digit key, which goes in
-`busybar_token`. Over USB the bar is always **10.0.4.20** and the Wi-Fi gate
-does not apply.
+*Access over Wi-Fi is off by default, and USB is the path that is known to
+work.* On the right prefix an ungated request returns `403`. Do not infer why
+— `GET /api/access` is itself ungated and answers
+`{"mode": "disabled" | "enabled" | "key", "key_valid": bool}`. Over USB the
+bar is always **10.0.4.20** and the gate does not apply at all, which is why
+everything here is built and tested over USB.
+
+**`busybar_token` is unproven, and the evidence is against it.** The sink
+sends it as `Authorization: Bearer <token>`, and against a bar reporting
+`{"mode": "key", "key_valid": true}` that returned `403` — as did the key as
+a query parameter, a bare `Authorization`, `X-Key`, and Basic. The device's
+own `/docs` documents no authentication, and the cloud API at `api.busy.app`
+publishes only `/timer/v1/*` with bearer auth, no display endpoints at all.
+So the key is probably bound to a session established in the BUSY app rather
+than to a header a daemon can send. If you need Wi-Fi, expect to work the
+scheme out first; do not assume this key is the answer.
 
 **A rectangle has no `color`.** It has a `fill` (default `none`) and a border
 (default 1px, white). Pass a colour and nothing else and the device draws a

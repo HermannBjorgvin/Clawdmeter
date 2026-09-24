@@ -77,7 +77,10 @@ token_refresh = off
 # 10.0.4.20 (it is printed on the case); busybar.local works over Wi-Fi, where
 # access is off by default and a key may be needed.
 # busybar_url = http://10.0.4.20
-# busybar_token =                    # only for Wi-Fi "key" mode / the cloud relay
+# busybar_token =                  # UNPROVEN -- sent as "Authorization: Bearer".
+#                                  A bar in Wi-Fi "key" mode rejected it, and every
+#                                  other obvious scheme, with 403. USB needs no key
+#                                  and is the tested path. See docs/petmeter.md.
 
 # Serve the payload for the on-device app to PULL instead, which is what makes
 # the rotating cards and the bar's physical buttons work. This is the host's
