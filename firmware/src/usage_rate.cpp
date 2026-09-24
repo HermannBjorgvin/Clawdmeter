@@ -58,17 +58,22 @@ bool usage_rate_sample(float session_pct) {
     return was_reset;
 }
 
-int usage_rate_group(void) {
-    if (count < 2) return 0;
+float usage_rate_pct_per_min(void) {
+    if (count < 2) return -1.0f;
 
     uint8_t o = oldest_idx();
     uint8_t l = (head + RING_SIZE - 1) % RING_SIZE;
     uint32_t dt = ring[l].ms - ring[o].ms;
-    if (dt < MIN_WINDOW_MS) return 0;
+    if (dt < MIN_WINDOW_MS) return -1.0f;
 
     float dp = ring[l].pct - ring[o].pct;
     if (dp < 0.0f) dp = 0.0f;
-    float rate = dp * 60000.0f / (float)dt;
+    return dp * 60000.0f / (float)dt;
+}
+
+int usage_rate_group(void) {
+    float rate = usage_rate_pct_per_min();
+    if (rate < 0.0f) return 0;
 
     if (rate < RATE_THRESH_NORMAL) return 0;
     if (rate < RATE_THRESH_ACTIVE) return 1;

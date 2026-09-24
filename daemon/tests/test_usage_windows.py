@@ -1,0 +1,650 @@
+#!/usr/bin/env python3
+"""Tests for 5-hour window reconstruction and the maxing grid.
+
+Windows are first-use anchored: the first turn opens a window that runs
+exactly 5h; the next turn after it expires opens the next one. Verified
+against the live API on a real account (reconstructed open time matched the
+header-derived one to within minutes).
+
+Run: python -m pytest daemon/tests/test_usage_windows.py -x -q
+"""
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from daemon.usage_history import (FIT_WINDOWS, OBSERVE_MIN_PCT, STATE_VERSION,
+                                  UsageHistory, WINDOW_HOURS)
+
+UTC = timezone.utc
+NOW = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+
+
+def _turn(ts: str, out: int = 100, req: str = "r", mid: str = "m") -> str:
+    return json.dumps({
+        "type": "assistant", "timestamp": ts, "requestId": req,
+        "message": {"id": mid, "model": "claude-opus-5",
+                    "usage": {"output_tokens": out, "input_tokens": 1,
+                              "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}},
+    })
+
+
+def _write(path: Path, *lines: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _append(path: Path, *lines: str) -> None:
+    """Grow a transcript mid-test, the way a live session does."""
+    with path.open("a") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+def _seed_ratio(h: UsageHistory, *ratios: float) -> None:
+    """Pin the calibration to these tokens-per-percent values.
+
+    Samples are keyed by window, so each seeded ratio needs its own synthetic
+    window: a fully-used one (100%) whose tokens divide out exactly.
+    """
+    h._fits = {i: [int(r * 100), 100] for i, r in enumerate(ratios)}
+
+
+def _moving(cfg, start: datetime, days: int = 14) -> tuple[UsageHistory, list]:
+    """A history whose clock the test can advance — needed to observe more than
+    one window, since observe() only ever sees the window that is open *now*."""
+    clock = [start]
+    return UsageHistory([cfg], days=days, tz=UTC, now=lambda: clock[0]), clock
+
+
+@pytest.fixture
+def cfg(tmp_path: Path) -> Path:
+    d = tmp_path / ".claude"
+    (d / "projects" / "p").mkdir(parents=True)
+    return d
+
+
+def _hist(cfg, tz=UTC, state=None, now=NOW, days=14):
+    return UsageHistory([cfg], days=days, tz=tz, state_file=state, now=lambda: now)
+
+
+# ---------------------------------------------------------------------------
+# reconstruction
+# ---------------------------------------------------------------------------
+
+def test_single_burst_is_one_window(cfg):
+    _write(cfg / "projects/p/s.jsonl",
+           _turn("2026-09-06T01:00:00Z", 10, "r1", "m1"),
+           _turn("2026-09-06T02:00:00Z", 20, "r2", "m2"),
+           _turn("2026-09-06T05:30:00Z", 30, "r3", "m3"))
+    h = _hist(cfg); h.scan()
+    w = h.windows()
+    assert len(w) == 1
+    assert w[0].start == datetime(2026, 9, 6, 1, 0, tzinfo=UTC)
+    assert w[0].out == 60 and w[0].turns == 3
+
+
+def test_turn_after_expiry_opens_a_new_window(cfg):
+    # 01:00 opens a window closing at 06:00; 06:00 is outside it.
+    _write(cfg / "projects/p/s.jsonl",
+           _turn("2026-09-06T01:00:00Z", 10, "r1", "m1"),
+           _turn("2026-09-06T06:00:00Z", 20, "r2", "m2"))
+    h = _hist(cfg); h.scan()
+    w = h.windows()
+    assert len(w) == 2
+    assert w[1].start == datetime(2026, 9, 6, 6, 0, tzinfo=UTC)
+
+
+def test_turn_just_inside_expiry_stays_in_window(cfg):
+    _write(cfg / "projects/p/s.jsonl",
+           _turn("2026-09-06T01:00:00Z", 10, "r1", "m1"),
+           _turn("2026-09-06T05:59:00Z", 20, "r2", "m2"))
+    h = _hist(cfg); h.scan()
+    assert len(h.windows()) == 1
+
+
+def test_windows_are_chronological_across_unordered_files(cfg):
+    # Two projects scanned in arbitrary order must still yield ordered windows.
+    _write(cfg / "projects/p/b.jsonl", _turn("2026-09-06T09:00:00Z", 5, "r3", "m3"))
+    _write(cfg / "projects/p/a.jsonl", _turn("2026-09-06T01:00:00Z", 5, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    w = h.windows()
+    assert [x.start.hour for x in w] == [1, 9]
+
+
+def test_window_length_is_five_hours(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T01:00:00Z"))
+    h = _hist(cfg); h.scan()
+    assert h.windows()[0].end - h.windows()[0].start == timedelta(hours=WINDOW_HOURS)
+
+
+def test_minute_granularity_merges_turns_in_the_same_minute(cfg):
+    _write(cfg / "projects/p/s.jsonl",
+           _turn("2026-09-06T01:00:10Z", 10, "r1", "m1"),
+           _turn("2026-09-06T01:00:50Z", 20, "r2", "m2"))
+    h = _hist(cfg); h.scan()
+    w = h.windows()
+    assert len(w) == 1 and w[0].out == 30
+
+
+# ---------------------------------------------------------------------------
+# calibration: tokens per 1% of the 5h limit, learned from observations
+# ---------------------------------------------------------------------------
+
+def test_default_ratio_until_an_observation_lands(cfg):
+    h = _hist(cfg)
+    assert h.tokens_per_pct() == pytest.approx(h.DEFAULT_TOKENS_PER_PCT)
+
+
+def test_observation_sets_the_ratio(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 220_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    # Live poll: the window opened at 08:00 ends at 13:00 — 60 min from NOW.
+    h.observe(session_pct=55, reset_minutes=60)
+    assert h.tokens_per_pct() == pytest.approx(4000, rel=0.01)   # 220000 / 55
+
+
+def test_ratio_is_the_median_of_observations(cfg):
+    h = _hist(cfg)
+    _seed_ratio(h, 3000.0, 4000.0, 11000.0)
+    assert h.tokens_per_pct() == 4000.0
+
+
+def test_low_percentages_are_ignored_as_noise(cfg):
+    # A window at 2% divides by almost nothing — one stray turn skews it wildly.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 5_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=2, reset_minutes=60)
+    assert h._fits == {}
+
+
+def test_repeated_polls_of_one_window_contribute_one_sample(cfg):
+    """observe() runs every 60 s; a long window must not stuff the median."""
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 200_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    for _ in range(10):
+        h.observe(session_pct=50, reset_minutes=60)
+    assert len(h._fits) == 1
+    assert h.tokens_per_pct() == pytest.approx(4000)      # 200000 / 50
+
+
+def test_a_more_mature_reading_supersedes_an_earlier_one(cfg):
+    # Tokens and percent both climb as a window fills, so the later quotient is
+    # better conditioned — it replaces the earlier sample rather than adding one.
+    src = cfg / "projects/p/s.jsonl"
+    _write(src, _turn("2026-09-06T08:00:00Z", 160_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=40, reset_minutes=60)           # 160k / 40 = 4000
+    assert h.tokens_per_pct() == pytest.approx(4000)
+
+    _append(src, _turn("2026-09-06T09:00:00Z", 240_000, "r2", "m2"))
+    h.scan()
+    h.observe(session_pct=80, reset_minutes=60)           # 400k / 80 = 5000
+    assert len(h._fits) == 1
+    assert h.tokens_per_pct() == pytest.approx(5000)
+
+
+def test_a_less_mature_reading_does_not_overwrite(cfg):
+    # A reset landing mid-poll can report a lower percentage against the same
+    # matched window; the peak reading has to survive it.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 400_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=80, reset_minutes=60)           # 400k / 80 = 5000
+    h.observe(session_pct=40, reset_minutes=60)           # would fit 10000
+    assert h.tokens_per_pct() == pytest.approx(5000)
+
+
+def test_immature_window_is_measured_but_not_calibrated(cfg):
+    """Below OBSERVE_MIN_PCT the quotient is noise — but the peak is still real."""
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 5_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=OBSERVE_MIN_PCT - 1, reset_minutes=60)
+    assert h._fits == {}
+    assert h.tokens_per_pct() == pytest.approx(h.DEFAULT_TOKENS_PER_PCT)
+    seen = [w for w in h.windows() if w.observed]
+    assert len(seen) == 1 and seen[0].pct == OBSERVE_MIN_PCT - 1
+    assert h.grid_field(days=7)[-1] == ".B..."            # 08:00 → band 1, measured (partial)
+
+
+def test_median_is_taken_across_windows_not_polls(cfg):
+    """The live-install regression.
+
+    The observed ratios were [5610, 5619, 5666, 5678, 5763, 5846, 1199, 1090,
+    999]: the first six are one window polled six times, the last three a second
+    window. Per-poll sampling let the polled-most window own the median.
+    """
+    _write(cfg / "projects/p/s.jsonl",
+           _turn("2026-09-06T00:00:00Z", 500_000, "r1", "m1"),   # A: ends 05:00 → 5000
+           _turn("2026-09-06T06:00:00Z", 100_000, "r2", "m2"),   # B: ends 11:00 → 1000
+           _turn("2026-09-06T12:00:00Z", 900_000, "r3", "m3"))   # C: ends 17:00 → 9000
+    h, clock = _moving(cfg, datetime(2026, 9, 6, 4, 0, tzinfo=UTC))
+    h.scan()
+    for pct in (40, 55, 70, 85, 95, 100):                        # six polls, one window
+        h.observe(session_pct=pct, reset_minutes=60)
+    clock[0] = datetime(2026, 9, 6, 10, 0, tzinfo=UTC)
+    h.observe(session_pct=100, reset_minutes=60)
+    clock[0] = datetime(2026, 9, 6, 16, 0, tzinfo=UTC)
+    h.observe(session_pct=100, reset_minutes=60)
+    assert len(h._fits) == 3
+    assert h.tokens_per_pct() == pytest.approx(5000)             # not A's early 12500
+
+
+def test_calibration_keeps_a_bounded_number_of_windows(cfg):
+    # 18 windows, one every 6 h, each observed once at its peak.
+    start = datetime(2026, 9, 1, tzinfo=UTC)
+    stamps = [start + timedelta(hours=6 * i) for i in range(18)]
+    _write(cfg / "projects/p/s.jsonl",
+           *[_turn(t.isoformat().replace("+00:00", "Z"), 100_000, f"r{i}", f"m{i}")
+             for i, t in enumerate(stamps)])
+    h, clock = _moving(cfg, start)
+    h.scan()
+    for t in stamps:
+        clock[0] = t + timedelta(hours=WINDOW_HOURS - 1)
+        h.observe(session_pct=100, reset_minutes=60)
+    assert len(h._fits) == FIT_WINDOWS
+    # What is dropped is the oldest window, so the newest reading survives.
+    assert max(h._fits) == h._window_key(stamps[-1] + timedelta(hours=WINDOW_HOURS))
+
+
+def test_observation_records_peak_not_last(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 1000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=80, reset_minutes=60)
+    h.observe(session_pct=42, reset_minutes=60)       # same window, lower reading
+    key = h._window_key(datetime(2026, 9, 6, 13, 0, tzinfo=UTC))
+    assert h._observed[key][0] == 80          # peak, not the later lower reading
+
+
+def test_observed_peak_wins_over_the_estimate(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=97, reset_minutes=60)       # tiny tokens, but really maxed
+    w = [x for x in h.windows() if x.observed]
+    assert len(w) == 1 and w[0].pct == 97
+
+
+def test_estimate_used_when_no_observation(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T01:00:00Z", 200_000, "r1", "m1"))
+    h = _hist(cfg)
+    _seed_ratio(h, 4000.0)
+    h.scan()
+    w = h.windows()[0]
+    assert not w.observed
+    assert w.pct == 50                                # 200000 / 4000
+
+
+def test_estimate_is_capped_at_100(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T01:00:00Z", 10_000_000, "r1", "m1"))
+    h = _hist(cfg); _seed_ratio(h, 4000.0); h.scan()
+    assert h.windows()[0].pct == 100
+
+
+# ---------------------------------------------------------------------------
+# payload encoding
+# ---------------------------------------------------------------------------
+
+def test_grid_payload_groups_windows_by_local_day(cfg):
+    _write(cfg / "projects/p/s.jsonl",
+           _turn("2026-09-05T01:00:00Z", 100, "r1", "m1"),
+           _turn("2026-09-05T09:00:00Z", 100, "r2", "m2"),
+           _turn("2026-09-06T01:00:00Z", 100, "r3", "m3"))
+    h = _hist(cfg); h.scan()
+    g = h.grid_field(days=7)
+    assert len(g) == 7
+    assert all(len(row) == 5 for row in g)          # fixed-width: one cell per band
+    # 5th: windows at 01:00 (band 0) and 09:00 (band 1); 6th: 01:00 (band 0)
+    assert [c != "." for c in g[-2]] == [True, True, False, False, False]
+    assert [c != "." for c in g[-1]] == [True, False, False, False, False]
+
+
+def test_grid_levels_are_digits_when_estimated(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T01:00:00Z", 200_000, "r1", "m1"))
+    h = _hist(cfg); _seed_ratio(h, 4000.0); h.scan()
+    assert h.grid_field(days=7)[-1] == "2...."      # 01:00 → band 0; 50% → level 2
+
+
+def test_grid_levels_are_letters_when_observed(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    # Observed an hour from the reset: measured, but we never saw it close, so
+    # the level is a floor — uppercase rather than lowercase.
+    h.observe(session_pct=97, reset_minutes=60)
+    assert h.grid_field(days=7)[-1] == ".D..."      # 08:00 → band 1; maxed, partial
+    # …and watching it to the close promotes it to exact.
+    h.observe(session_pct=97, reset_minutes=1)
+    assert h.grid_field(days=7)[-1] == ".d..."
+
+
+@pytest.mark.parametrize("pct,ch", [(0, "0"), (5, "0"), (24, "0"), (25, "1"),
+                                    (49, "1"), (50, "2"), (84, "2"), (85, "3"), (100, "3")])
+def test_level_thresholds(cfg, pct, ch):
+    h = _hist(cfg)
+    assert h._level_char(pct, observed=False) == ch
+
+
+def test_grid_is_empty_string_for_days_with_no_windows(cfg):
+    h = _hist(cfg); h.scan()
+    assert h.grid_field(days=7) == ["....."] * 7
+
+
+def test_payload_includes_grid_and_maxed_count(cfg):
+    _write(cfg / "projects/p/s.jsonl",
+           _turn("2026-09-05T01:00:00Z", 400_000, "r1", "m1"),
+           _turn("2026-09-06T01:00:00Z", 100, "r2", "m2"))
+    h = _hist(cfg); _seed_ratio(h, 4000.0); h.scan()
+    p = h.payload_fields()
+    assert "wg" in p and len(p["wg"]) == 7
+    assert p["wg"][-2] == "3...."                    # 400k/4000 = 100% → maxed, band 0
+    assert p["wn"] == 2                              # windows this week
+    assert p["wx"] == 1                              # maxed
+
+
+def test_grid_payload_stays_small(cfg):
+    # A heavy week: 5 windows a day for 7 days.
+    lines = []
+    for d in range(7):
+        for w in range(5):
+            ts = f"2026-08-3{d} {w*5:02d}:00:00".replace(" ", "T") + "Z"
+            lines.append(_turn(ts, 300_000, f"r{d}{w}", f"m{d}{w}"))
+    _write(cfg / "projects/p/s.jsonl", *lines)
+    h = _hist(cfg, now=datetime(2026, 9, 5, 12, 0, tzinfo=UTC)); h.scan()
+    encoded = json.dumps(h.payload_fields(), separators=(",", ":")).encode()
+    assert len(encoded) < 260, len(encoded)
+
+
+# ---------------------------------------------------------------------------
+# persistence
+# ---------------------------------------------------------------------------
+
+def test_observations_and_calibration_survive_a_restart(cfg, tmp_path):
+    state = tmp_path / "s.json"
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 220_000, "r1", "m1"))
+    h1 = _hist(cfg, state=state); h1.scan(); h1.observe(55, 60); h1.save()
+
+    h2 = _hist(cfg, state=state); h2.load(); h2.scan()
+    assert h2.tokens_per_pct() == pytest.approx(4000, rel=0.01)
+    assert [w.pct for w in h2.windows() if w.observed] == [55]
+
+
+def test_calibration_samples_round_trip_through_the_state_file(cfg, tmp_path):
+    state = tmp_path / "s.json"
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 220_000, "r1", "m1"))
+    h1 = _hist(cfg, state=state); h1.scan(); h1.observe(55, 60); h1.save()
+    assert json.loads(state.read_text())["v"] == STATE_VERSION
+
+    h2 = _hist(cfg, state=state); h2.load(); h2.scan()
+    assert h2._fits == h1._fits
+    assert h2.tokens_per_pct() == pytest.approx(4000, rel=0.01)
+
+
+def test_state_from_the_per_poll_era_is_discarded_not_misread(cfg, tmp_path):
+    """v2 stored "ratios" as a flat per-poll list; v3 stores per-window samples.
+
+    Loading the old shape must neither crash nor smuggle the skewed per-poll
+    ratios in — the version gate drops it and forces one full re-read.
+    """
+    state = tmp_path / "s.json"
+    src = cfg / "projects/p/s.jsonl"
+    _write(src, _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+    state.write_text(json.dumps({
+        "v": 2,
+        "files": {str(src): src.stat().st_size},
+        "days": {"2026-09-06": {"t": 1, "o": 100_000, "i": 0, "cr": 0, "cw": 0,
+                                "m": {"Opus": 100_000}}},
+        "seen": {"2026-09-06": ["r1|m1"]},
+        "minutes": {"29520480": [100_000, 1]},
+        "observed": {"98401": 55},
+        "ratios": [5610.0, 5619.0, 1199.0, 1090.0],
+    }))
+    h = _hist(cfg, state=state)
+    h.load()
+    h.scan()
+    assert h._fits == {}
+    assert h.tokens_per_pct() == pytest.approx(h.DEFAULT_TOKENS_PER_PCT)
+    assert len(h.windows()) == 1                  # transcript re-read from scratch
+    assert h.day("2026-09-06").out == 100_000     # and not double-counted
+
+
+def test_observation_tolerates_a_large_reconstruction_drift(cfg):
+    # Measured in the wild: the API's window ended 54 min after the
+    # reconstructed one. Overlap is still ~4h, so it must match.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=50, reset_minutes=114)       # api window ends 13:54 vs 13:00
+    assert [w.pct for w in h.windows() if w.observed] == [50]
+
+
+def test_observation_rejects_a_window_overlapping_less_than_half(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    # api window [11:00, 16:00) vs local [08:00, 13:00) → 2h overlap, under 2.5h
+    h.observe(session_pct=50, reset_minutes=240)
+    assert not any(w.observed for w in h.windows())
+
+
+def test_observation_tolerates_the_reconstruction_skew(cfg):
+    # Reconstruction lags the true window start by a few minutes (the window is
+    # anchored on the request, the transcript records the response), so the API
+    # reset and the reconstructed end differ. A small skew must still match.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=50, reset_minutes=55)        # 5 min off → same window
+    assert [w.pct for w in h.windows() if w.observed] == [50]
+
+
+def test_observation_ignores_a_window_it_cannot_place(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=50, reset_minutes=240)       # 3 h off → no match
+    assert not any(w.observed for w in h.windows())
+    assert h._fits == {}
+
+
+def test_old_state_schema_forces_a_full_rescan(cfg, tmp_path):
+    """A state file from before a field existed must not leave it empty forever.
+
+    The per-file offsets sit at EOF, so an incremental scan reads nothing and
+    any newly-derived field (here: the minute stream behind the window grid)
+    would stay blank until the file aged out.
+    """
+    import json as _json
+    state = tmp_path / "s.json"
+    src = cfg / "projects/p/s.jsonl"
+    _write(src, _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+
+    # A v1-era state: offsets at EOF, day totals present, no minute stream.
+    state.write_text(_json.dumps({
+        "files": {str(src): src.stat().st_size},
+        "days": {"2026-09-06": {"t": 1, "o": 100_000, "i": 0, "cr": 0, "cw": 0, "m": {"Opus": 100_000}}},
+        "seen": {"2026-09-06": ["r1|m1"]},
+    }))
+
+    h = _hist(cfg, state=state)
+    h.load()
+    h.scan()
+    assert h.windows(), "old state must trigger a re-read so windows can be built"
+    assert h.day("2026-09-06").out == 100_000     # and not double-counted
+
+
+def test_current_state_schema_is_reused_incrementally(cfg, tmp_path):
+    state = tmp_path / "s.json"
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+    h1 = _hist(cfg, state=state); h1.scan(); h1.save()
+    h2 = _hist(cfg, state=state); h2.load(); h2.scan()
+    assert h2.last_scan_bytes == 0
+    assert len(h2.windows()) == 1
+
+
+# ---------------------------------------------------------------------------
+# time-of-day bands
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("hour,band", [(0, 0), (4, 0), (5, 1), (9, 1), (10, 2),
+                                       (14, 2), (15, 3), (19, 3), (20, 4), (23, 4)])
+def test_window_lands_in_its_time_band(cfg, hour, band):
+    _write(cfg / "projects/p/s.jsonl", _turn(f"2026-09-06T{hour:02d}:30:00Z", 200_000, "r1", "m1"))
+    h = _hist(cfg); _seed_ratio(h, 4000.0); h.scan()
+    row = h.grid_field(days=7)[-1]
+    assert row[band] != "." and row.count(".") == 4
+
+
+def test_bands_use_local_time_not_utc(cfg):
+    # 23:30 UTC is 09:30 next day at UTC+10 → band 1 of the *following* day.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-05T23:30:00Z", 200_000, "r1", "m1"))
+    h = UsageHistory([cfg], days=14, tz=timezone(timedelta(hours=10)), now=lambda: NOW)
+    _seed_ratio(h, 4000.0); h.scan()
+    assert h.grid_field(days=7)[-1] == ".2..."
+
+
+def test_columns_align_across_days(cfg):
+    # Both days used the 10-15 band and nothing else; the grid must show that
+    # in the same column, regardless of how many windows each day had.
+    _write(cfg / "projects/p/s.jsonl",
+           _turn("2026-09-05T11:00:00Z", 200_000, "r1", "m1"),
+           _turn("2026-09-05T02:00:00Z", 200_000, "r2", "m2"),
+           _turn("2026-09-06T12:00:00Z", 200_000, "r3", "m3"))
+    h = _hist(cfg); _seed_ratio(h, 4000.0); h.scan()
+    g = h.grid_field(days=7)
+    assert g[-2][2] != "." and g[-1][2] != "."      # same column on both days
+    assert g[-2][0] != "." and g[-1][0] == "."      # only the 5th used band 0
+
+
+def test_window_count_ignores_empty_bands(cfg):
+    _write(cfg / "projects/p/s.jsonl",
+           _turn("2026-09-05T11:00:00Z", 200_000, "r1", "m1"),
+           _turn("2026-09-06T12:00:00Z", 200_000, "r2", "m2"))
+    h = _hist(cfg); _seed_ratio(h, 4000.0); h.scan()
+    p = h.payload_fields()
+    assert p["wn"] == 2
+
+
+# ---------------------------------------------------------------------------
+# current (still-open) window — the cell the device highlights
+# ---------------------------------------------------------------------------
+
+def test_current_cell_points_at_the_open_window(cfg):
+    # NOW is Sun 12:00Z. A window opened 08:00 (band 1) closes at 13:00.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    # day index 6 (today, last of 7) * 5 bands + band 1
+    assert h.current_cell(60) == 6 * 5 + 1
+
+
+def test_current_cell_handles_a_window_opened_yesterday(cfg):
+    # Opened 22:00 on the 5th (band 4), still open at 12:00 on the 6th... a 5h
+    # window from 22:00 closes at 03:00, so use one that genuinely spans: the
+    # device must not assume "current" is always in today's row.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-05T23:00:00Z", 100_000, "r1", "m1"))
+    h = UsageHistory([cfg], days=14, tz=UTC, now=lambda: datetime(2026, 9, 6, 2, 0, tzinfo=UTC))
+    h.scan()
+    # Window 23:00 → 04:00; at 02:00 it has 120 min left. Row is the 5th, not the 6th.
+    cell = h.current_cell(120)
+    assert cell is not None
+    assert cell // 5 == 5           # second-to-last row (the 5th)
+    assert cell % 5 == 4            # band 20-24
+
+
+def test_current_cell_absent_without_a_reset(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    assert h.current_cell(0) is None
+    assert h.current_cell(None) is None
+
+
+def test_current_cell_absent_when_no_local_window_matches(cfg):
+    # Usage on another machine: the API reports a window we can't place locally.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    assert h.current_cell(240) is None
+
+
+def test_current_cell_absent_when_the_window_aged_out_of_the_grid(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-08-20T08:00:00Z", 100_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    assert h.current_cell(60) is None
+
+
+# ---------------------------------------------------------------------------
+# partial vs final observation — "measured" must mean the peak we hold is the
+# window's *final* value, not just the highest we happened to see
+# ---------------------------------------------------------------------------
+
+def test_window_watched_to_its_close_is_final(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 200_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=40, reset_minutes=60)   # mid-window
+    h.observe(session_pct=90, reset_minutes=1)    # caught it just before reset
+    w = [x for x in h.windows() if x.observed][0]
+    assert w.pct == 90 and w.final
+
+
+def test_window_abandoned_mid_flight_is_not_final(cfg):
+    # Device unplugged an hour in: we hold a peak, but it is a floor, not the
+    # window's final value.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 200_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=40, reset_minutes=120)
+    w = [x for x in h.windows() if x.observed][0]
+    assert w.pct == 40 and not w.final
+
+
+def test_final_flag_uses_the_closest_approach_to_the_reset(cfg):
+    # Order must not matter: a late reading makes it final even if a distant
+    # reading arrives afterwards (a new poll matched to the same window).
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 200_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=90, reset_minutes=2)
+    h.observe(session_pct=91, reset_minutes=45)
+    assert [x for x in h.windows() if x.observed][0].final
+
+
+@pytest.mark.parametrize("pct,final,ch", [
+    (90, True,  "d"),    # measured to the close  → exact
+    (90, False, "D"),    # measured but abandoned → at least this much
+    (60, True,  "c"),
+    (60, False, "C"),
+])
+def test_grid_encodes_final_separately_from_partial(cfg, pct, final, ch):
+    h = _hist(cfg)
+    assert h._level_char(pct, observed=True, final=final) == ch
+
+
+def test_estimated_windows_still_use_digits(cfg):
+    h = _hist(cfg)
+    assert h._level_char(90, observed=False, final=False) == "3"
+
+
+def test_maxed_count_includes_partial_and_exact(cfg):
+    _write(cfg / "projects/p/s.jsonl",
+           _turn("2026-09-05T01:00:00Z", 400_000, "r1", "m1"),
+           _turn("2026-09-06T08:00:00Z", 100, "r2", "m2"))
+    h = _hist(cfg); h._fits = {}; h.scan()
+    h.observe(session_pct=95, reset_minutes=120)      # partial, maxed
+    p = h.payload_fields()
+    assert p["wx"] >= 1
+    assert any(c in "Dd" for row in p["wg"] for c in row)
+
+
+def test_window_count_still_counts_partial_windows(cfg):
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 100, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=40, reset_minutes=120)
+    assert h.payload_fields()["wn"] == 1
+
+
+def test_partial_observation_still_calibrates(cfg):
+    # The fit stores tokens and pct captured at the SAME moment, so a partial
+    # observation is still a valid pair — only the displayed peak is a floor.
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 200_000, "r1", "m1"))
+    h = _hist(cfg); h.scan()
+    h.observe(session_pct=50, reset_minutes=120)
+    assert h.tokens_per_pct() == pytest.approx(4000, rel=0.01)
+
+
+def test_final_state_survives_a_restart(cfg, tmp_path):
+    state = tmp_path / "s.json"
+    _write(cfg / "projects/p/s.jsonl", _turn("2026-09-06T08:00:00Z", 200_000, "r1", "m1"))
+    h1 = _hist(cfg, state=state); h1.scan(); h1.observe(90, 1); h1.save()
+    h2 = _hist(cfg, state=state); h2.load(); h2.scan()
+    w = [x for x in h2.windows() if x.observed][0]
+    assert w.pct == 90 and w.final

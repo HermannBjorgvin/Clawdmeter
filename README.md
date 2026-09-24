@@ -21,7 +21,7 @@ The device boots into the splash. Tap the screen anywhere to switch to the Usage
 | ![Splash](screenshots/splash.gif) | ![Usage](screenshots/usage.png) |
 |   Splash; touch-toggle anytime    | Session and weekly utilization  |
 
-While the splash is up, the middle (PWR) button cycles animations. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
+Tapping the screen cycles splash → usage → **history** → **maxing** (a 14-day chart of your output tokens with this week's running total, today vs. your 7-day average, a pace projection for the current 5-hour window, and the model mix — all from your local Claude Code transcripts, no extra API access). The maxing view grids your 5-hour limit windows across the week by time of day — which ones you barely touched, which you ran to the wall, and whether you do it in the mornings or after midnight. While the splash is up, the middle (PWR) button cycles animations. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
 
 ## Hardware
 

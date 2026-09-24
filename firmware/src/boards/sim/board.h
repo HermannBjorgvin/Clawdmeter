@@ -25,6 +25,12 @@
 // screenshot (SIM_AUTOSHOT_PATH, default sim-autoshot.bmp) after <ms> and
 // exits.
 
-#define BOARD_NAME  "Simulator 480x480"
+// Geometry is overridable from the env so one sim tree can stand in for any
+// panel size — see [env:sim_cyd] for a 240x320 portrait build.
+#ifndef LCD_WIDTH
 #define LCD_WIDTH   480
+#endif
+#ifndef LCD_HEIGHT
 #define LCD_HEIGHT  480
+#endif
+#define BOARD_NAME  "Simulator"
