@@ -7,19 +7,28 @@ later plans.
 """
 
 import asyncio
-import calendar
 import datetime
 import json
 import logging
 import logging.handlers
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+
+# Header parsing is shared with the Windows daemon and the collector layer.
+# Import works both ways this file is loaded: as a script (launchd runs
+# `python /path/to/claude_usage_daemon.py`, putting daemon/ on sys.path) and as
+# `daemon.claude_usage_daemon` from the tests.
+try:
+    from collectors.claude import payload_from_headers
+except ImportError:  # pragma: no cover - depends on invocation, both are exercised
+    from daemon.collectors.claude import payload_from_headers
 
 import httpx
 from bleak import BleakClient
@@ -46,7 +55,17 @@ RECONNECT_BACKOFF_CAP = 8  # D-05: fast-reconnect cap (seconds); keeps stacked r
 # Config lives under the same Clawdmeter dir as daemon.log.
 CONFIG_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "config"
 
+# Opt-in token self-heal (see nudge_token_refresh). The interval is deliberately
+# far longer than POLL_INTERVAL: if a nudge doesn't fix things, the refresh token
+# itself is dead and only `claude login` will help — retrying faster just burns
+# quota against a wall.
+NUDGE_MIN_INTERVAL = 900     # seconds between nudge attempts
+NUDGE_TIMEOUT = 120          # hard cap on one nudge subprocess
+NUDGE_MODEL = "claude-haiku-4-5-20251001"
+_last_nudge_ms: float | None = None
+
 API_URL = "https://api.anthropic.com/v1/messages"
+OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
     "anthropic-beta": "oauth-2025-04-20",
@@ -111,6 +130,130 @@ class AuthError(Exception):
     which means a TRANSIENT failure (network/DNS, timeout, rate-limit, 5xx) that
     must NOT be mislabeled as a token problem (SC#5: a boot-time `getaddrinfo
     failed` DNS blip wrongly fired the 'token expired' toast)."""
+
+def read_config_value(key: str, allowed: tuple[str, ...] | None = None,
+                      default: str = "") -> str:
+    """Read one lowercase-keyed option from the config file, or ``default``.
+
+    ``allowed`` restricts the value to a known set (lowercased); anything else
+    falls back to ``default``. Pass None to accept any value verbatim (e.g. a
+    filesystem path, where case matters).
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                k, val = line.split("=", 1)
+                if k.strip().lower() != key:
+                    continue
+                val = val.strip()
+                if allowed is None:
+                    return val or default
+                if val.lower() in allowed:
+                    return val.lower()
+    except OSError:
+        pass
+    return default
+
+
+def read_token_refresh_setting() -> str:
+    """Read the `token_refresh` option. One of: off|on.
+
+    Defaults to "off" — the daemon spends none of your quota unless you ask it
+    to. See :func:`nudge_token_refresh` for what "on" actually does.
+    """
+    return read_config_value("token_refresh", ("off", "on"), "off")
+
+
+def find_claude_cli() -> str | None:
+    """Absolute path to the Claude Code CLI, or None if it can't be found.
+
+    PATH is unreliable here: a service-launched daemon inherits a minimal
+    environment that often omits the installer's bin dir. So check the explicit
+    config override first, then PATH, then the known install locations.
+    """
+    override = read_config_value("claude_cli")
+    if override:
+        p = Path(override).expanduser()
+        return str(p) if p.is_file() and os.access(p, os.X_OK) else None
+    found = shutil.which("claude")
+    if found:
+        return found
+    local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    appdata = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    for cand in (
+        Path.home() / ".local" / "bin" / "claude.exe",
+        Path.home() / ".local" / "bin" / "claude.cmd",
+        local / "Programs" / "claude" / "claude.exe",
+        appdata / "npm" / "claude.cmd",
+    ):
+        if cand.is_file():
+            return str(cand)
+    return None
+
+
+async def nudge_token_refresh() -> bool:
+    """Ask Claude Code to refresh its own OAuth token. Opt-in; returns True if
+    the nudge ran to completion.
+
+    The daemon is a pure free-ride: it never mints or refreshes tokens itself
+    (that would race Claude Code's own rotation and hammer the OAuth endpoint).
+    But when EVERY configured config dir is 401ing, the device is stuck showing
+    "No data" until something runs Claude Code — which, if you aren't at the
+    keyboard, may be hours. This runs one deliberately tiny headless call so the
+    CLI that owns the token refreshes it as a side effect; the next poll then
+    finds a live token.
+
+    Guard rails, because this spends your quota:
+      * off by default — set `token_refresh = on` in the config to enable
+      * only fires when no config dir has a usable token at all
+      * rate-limited to one attempt per NUDGE_MIN_INTERVAL
+      * pinned to the cheapest model with max output, so the cost is negligible
+      * hard timeout, and never raises into the poll loop
+    """
+    global _last_nudge_ms
+    if read_token_refresh_setting() != "on":
+        return False
+    now_ms = time.monotonic()
+    if _last_nudge_ms is not None and now_ms - _last_nudge_ms < NUDGE_MIN_INTERVAL:
+        return False
+    _last_nudge_ms = now_ms   # stamp before running: a failure must not retry-spam
+
+    cli = find_claude_cli()
+    if not cli:
+        log("token_refresh=on but the `claude` CLI wasn't found — set "
+            "`claude_cli = /path/to/claude` in the config")
+        return False
+
+    log("No live token in any config dir — nudging Claude Code to refresh it")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            cli, "-p", "ok", "--model", NUDGE_MODEL, "--output-format", "text",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            cwd=str(Path.home()),
+        )
+    except OSError as e:
+        log(f"Token refresh nudge could not start: {e}")
+        return False
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=NUDGE_TIMEOUT)
+    except asyncio.TimeoutError:
+        log(f"Token refresh nudge exceeded {NUDGE_TIMEOUT}s; killing it")
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return False
+    if proc.returncode == 0:
+        log("Nudge finished; the next poll should find a fresh token")
+        return True
+    log(f"Token refresh nudge exited {proc.returncode} — the refresh token may "
+        "also be expired; run `claude login` once to re-seed it")
+    return False
+
 
 def read_chime_setting() -> str:
     """Read the `chime` option from the config file. One of: off|on.
@@ -183,6 +326,98 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
+async def fetch_weekly_limits(token: str) -> dict | None:
+    """The weekly window as the usage endpoint reports it, or None on failure:
+
+        {"all": <0-100>|None, "scoped": [{"n": <label>, "p": <0-100>}, ...]}
+
+    Both numbers come from this ONE source on purpose. The rate-limit headers
+    quantize differently (a 2-decimal fraction, e.g. "0.12") than this
+    endpoint (a rounded integer), so taking all-models from the header and
+    scoped from here can show the same underlying pair as 12/12 when it is
+    really 12.2/11.7 — or disagree with the settings UI, which renders these
+    same integers. poll_api therefore prefers "all" over the header value and
+    only falls back to the header when this lookup fails.
+
+    These numbers are NOT in the /v1/messages rate-limit headers the poll
+    reads: the scoped headers (anthropic-ratelimit-unified-7d_oi-*) only
+    appear on requests made WITH the scoped model, and polling with that model
+    would spend the very allowance being measured — and fail outright for
+    accounts without it. The OAuth usage endpoint (the same data `/usage`
+    renders) reports them for free as limits[] entries with kind
+    "weekly_scoped" and a model scope. Their reset equals the 7d reset, so no
+    separate reset is sent. The label is the API's own display name (today
+    only "Fable" exists; a future scoped model — e.g. a returning Sonnet
+    bucket — rides along automatically). Accounts without scoped limits have
+    no such entries -> None -> the "ws" key is omitted and the firmware keeps
+    today's layout.
+    """
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": API_HEADERS_TEMPLATE["anthropic-beta"],
+        "User-Agent": API_HEADERS_TEMPLATE["User-Agent"],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.get(OAUTH_USAGE_URL, headers=headers)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+    limits = data.get("limits") if isinstance(data, dict) else None
+    if not isinstance(limits, list):
+        return None
+
+    def _pct(value):
+        try:
+            return max(0, min(100, int(round(float(value)))))
+        except (TypeError, ValueError):
+            return None
+
+    weekly_all = None
+    scoped = []
+    for lim in limits:
+        if not isinstance(lim, dict):
+            continue
+        if lim.get("kind") == "weekly_all" and lim.get("scope") is None:
+            weekly_all = _pct(lim.get("percent"))
+            continue
+        if lim.get("kind") != "weekly_scoped" or not isinstance(lim.get("scope"), dict):
+            continue
+        model = lim["scope"].get("model")
+        if not isinstance(model, dict):
+            continue
+        name = model.get("display_name") or model.get("id")
+        if not isinstance(name, str) or not name:
+            continue
+        pct = _pct(lim.get("percent"))
+        if pct is None:
+            continue
+        scoped.append({"n": name, "p": pct})
+    return {"all": weekly_all, "scoped": scoped}
+
+
+async def apply_weekly_limits(payload: dict, token: str) -> None:
+    """Fold the usage endpoint's weekly window into a Pro/Max payload.
+
+    Adds "ws":[{"n","p"},...] when the account has weekly scoped-model limits
+    (omitted entirely otherwise — the firmware treats an absent key as "no
+    scoped limits" and renders the classic layout), and overrides "w" with the
+    endpoint's all-models percent so both weekly numbers share one source and
+    one rounding. A failed lookup leaves the header-derived "w" in place.
+    """
+    limits = await fetch_weekly_limits(token)
+    if not limits:
+        return
+    if limits["scoped"]:
+        payload["ws"] = limits["scoped"]
+        # Only worth re-basing "w" when a scoped number sits beside it; on
+        # plans without one the header value is already self-consistent.
+        if limits["all"] is not None:
+            payload["w"] = limits["all"]
+
+
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
@@ -203,94 +438,17 @@ async def poll_api(token: str) -> dict | None:
         log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
         return None
 
-    def hdr(name: str, default: str = "0") -> str:
-        return resp.headers.get(name, default)
 
-    now = time.time()
+    payload = payload_from_headers(resp.headers)
 
-    def reset_minutes(reset_ts: str) -> int:
-        try:
-            r = float(reset_ts)
-        except ValueError:
-            return 0
-        mins = (r - now) / 60.0
-        return int(round(mins)) if mins > 0 else 0
-
-    def pct(util: str) -> int:
-        try:
-            return int(round(float(util) * 100))
-        except ValueError:
-            return 0
-
-    if resp.headers.get("anthropic-ratelimit-unified-5h-utilization"):
-        payload = {
-            "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
-            "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
-            "w": pct(hdr("anthropic-ratelimit-unified-7d-utilization")),
-            "wr": reset_minutes(hdr("anthropic-ratelimit-unified-7d-reset")),
-            "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
-            "acct": "pro",
-            "ok": True,
-        }
-    else:
-        reset_ts = hdr("anthropic-ratelimit-unified-overage-reset")
-        payload = {
-            "s": pct(hdr("anthropic-ratelimit-unified-overage-utilization")),
-            "sr": reset_minutes(reset_ts),
-            "w": 0,
-            "wr": 0,
-            "st": hdr("anthropic-ratelimit-unified-status", "unknown"),
-            "acct": "ent",
-            **_billing_period_info(now, reset_ts),
-            "ok": True,
-        }
+    # Scoped weekly limits (e.g. a Fable allowance) only exist on Pro/Max
+    # plans; Enterprise meters a spending limit with no per-model breakdown.
+    if payload.get("acct") == "pro":
+        await apply_weekly_limits(payload, token)   # adds "ws" iff any exist
     add_chime_field(payload)   # adds "c":1 iff the config opts in
     add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
     return payload
 
-
-def _billing_period_info(now: float, reset_ts: str) -> dict:
-    """Fraction of billing period elapsed (tp, 0-100) and period length in days (pd).
-
-    Monthly window is assumed (headers expose only reset_ts, not period). Per the
-    Claude Enterprise Admin API reference, spend-limit period's "only value today
-    is monthly" — see the macOS daemon for the full note.
-    """
-    try:
-        period_end = float(reset_ts)
-    except ValueError:
-        return {"tp": 0, "pd": 30, "rd": ""}
-    if period_end <= 0:
-        # reset_ts defaults to "0" whenever the overage-reset header is absent
-        # (e.g. a 200 that simply carries no billing headers). fromtimestamp(0)
-        # is 1970; stepping one month back lands in 1969, and datetime.timestamp()
-        # raises OSError for pre-1970 dates on Windows — taking the whole poll
-        # loop down. Bail out to the neutral default instead.
-        return {"tp": 0, "pd": 30, "rd": ""}
-    try:
-        dt_end = datetime.datetime.fromtimestamp(period_end)
-        prev_month = dt_end.month - 1 or 12
-        prev_year = dt_end.year if dt_end.month > 1 else dt_end.year - 1
-        prev_day = min(dt_end.day, calendar.monthrange(prev_year, prev_month)[1])
-        dt_start = dt_end.replace(year=prev_year, month=prev_month, day=prev_day)
-        period_start = dt_start.timestamp()
-    except (OSError, OverflowError, ValueError):
-        # Belt-and-braces beyond the <= 0 guard above (#104): Windows
-        # datetime.timestamp()/fromtimestamp() also raise OSError(22)/
-        # OverflowError/ValueError for out-of-range NON-zero values (e.g. a
-        # far-future "99999999999999" header, which overflows fromtimestamp).
-        # Garbage must never crash the daemon thread — degrade to the safe
-        # default instead (field report: OSError(22) killed the poll loop).
-        return {"tp": 0, "pd": 30, "rd": ""}
-    period_len = period_end - period_start
-    if period_len <= 0:
-        return {"tp": 0, "pd": 30, "rd": ""}
-    pct_val = (now - period_start) / period_len * 100
-    return {
-        "tp": max(0, min(100, int(round(pct_val)))),
-        "pd": int(round(period_len / 86400)),
-        "rd": f"{dt_end.strftime('%b')} {dt_end.day}",
-    }
 
 
 def _mac_from_pnp_instance_id(instance_id: str) -> str | None:
@@ -622,6 +780,7 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                 token = read_token()  # D-09: fresh each cycle
                 if not token:
                     log("No token; signalling no-data to device")
+                    await nudge_token_refresh()
                     if tray_state:
                         tray_state.set_error("token expired — run claude login")
                     if await session.write_payload({"ok": False}):
@@ -655,6 +814,8 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                         # Token genuinely dead -> show "No data" now instead of stale numbers.
                         # Transient poll failures (payload None without expiry) stay silent.
                         log("No data (token dead); signalling idle to device")
+                        # Opt-in, rate-limited, never fatal (see nudge_token_refresh).
+                        await nudge_token_refresh()
                         if await session.write_payload({"ok": False}):
                             last_poll = time.time()
                             consecutive_failures = 0  # D-03: healthy link

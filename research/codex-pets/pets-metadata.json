@@ -1,0 +1,250 @@
+{
+  "bsod": {
+    "original_size": [
+      1536,
+      1872
+    ],
+    "grid": [
+      8,
+      9
+    ],
+    "source_frame": [
+      192,
+      208
+    ],
+    "scale": 2,
+    "scaled_frame": [
+      384,
+      416
+    ],
+    "cell": [
+      480,
+      480
+    ],
+    "sheet": [
+      3840,
+      4320
+    ],
+    "offset_in_cell": [
+      48,
+      32
+    ]
+  },
+  "codex": {
+    "original_size": [
+      1536,
+      1872
+    ],
+    "grid": [
+      8,
+      9
+    ],
+    "source_frame": [
+      192,
+      208
+    ],
+    "scale": 2,
+    "scaled_frame": [
+      384,
+      416
+    ],
+    "cell": [
+      480,
+      480
+    ],
+    "sheet": [
+      3840,
+      4320
+    ],
+    "offset_in_cell": [
+      48,
+      32
+    ]
+  },
+  "dewey": {
+    "original_size": [
+      1536,
+      1872
+    ],
+    "grid": [
+      8,
+      9
+    ],
+    "source_frame": [
+      192,
+      208
+    ],
+    "scale": 2,
+    "scaled_frame": [
+      384,
+      416
+    ],
+    "cell": [
+      480,
+      480
+    ],
+    "sheet": [
+      3840,
+      4320
+    ],
+    "offset_in_cell": [
+      48,
+      32
+    ]
+  },
+  "fireball": {
+    "original_size": [
+      1536,
+      1872
+    ],
+    "grid": [
+      8,
+      9
+    ],
+    "source_frame": [
+      192,
+      208
+    ],
+    "scale": 2,
+    "scaled_frame": [
+      384,
+      416
+    ],
+    "cell": [
+      480,
+      480
+    ],
+    "sheet": [
+      3840,
+      4320
+    ],
+    "offset_in_cell": [
+      48,
+      32
+    ]
+  },
+  "null-signal": {
+    "original_size": [
+      1536,
+      1872
+    ],
+    "grid": [
+      8,
+      9
+    ],
+    "source_frame": [
+      192,
+      208
+    ],
+    "scale": 2,
+    "scaled_frame": [
+      384,
+      416
+    ],
+    "cell": [
+      480,
+      480
+    ],
+    "sheet": [
+      3840,
+      4320
+    ],
+    "offset_in_cell": [
+      48,
+      32
+    ]
+  },
+  "rocky": {
+    "original_size": [
+      1536,
+      1872
+    ],
+    "grid": [
+      8,
+      9
+    ],
+    "source_frame": [
+      192,
+      208
+    ],
+    "scale": 2,
+    "scaled_frame": [
+      384,
+      416
+    ],
+    "cell": [
+      480,
+      480
+    ],
+    "sheet": [
+      3840,
+      4320
+    ],
+    "offset_in_cell": [
+      48,
+      32
+    ]
+  },
+  "seedy": {
+    "original_size": [
+      1536,
+      1872
+    ],
+    "grid": [
+      8,
+      9
+    ],
+    "source_frame": [
+      192,
+      208
+    ],
+    "scale": 2,
+    "scaled_frame": [
+      384,
+      416
+    ],
+    "cell": [
+      480,
+      480
+    ],
+    "sheet": [
+      3840,
+      4320
+    ],
+    "offset_in_cell": [
+      48,
+      32
+    ]
+  },
+  "stacky": {
+    "original_size": [
+      1536,
+      1872
+    ],
+    "grid": [
+      8,
+      9
+    ],
+    "source_frame": [
+      192,
+      208
+    ],
+    "scale": 2,
+    "scaled_frame": [
+      384,
+      416
+    ],
+    "cell": [
+      480,
+      480
+    ],
+    "sheet": [
+      3840,
+      4320
+    ],
+    "offset_in_cell": [
+      48,
+      32
+    ]
+  }
+}
