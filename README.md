@@ -75,18 +75,25 @@ Adding a provider means writing one collector against the interface in
 
 The same payload can be mirrored to another screen through
 [`daemon/sinks/`](daemon/sinks/__init__.py). A [BUSY Bar](https://busy.app)
-sink ships with it — the 5-hour quota as a bar, with the reset counting down
-on the device itself:
+— a 72×16 LED matrix — is supported two ways: the daemon can **push** one
+quota to it, or the bar can run an app that **pulls** and rotates through
+every quota your plans meter, each with its label and mascot, with the bar's
+own Start/Pause bar and wheel driving it.
 
 ```ini
 # ~/.config/claude-usage-monitor/config
-busybar_url = http://busybar.local
+busybar_url = http://10.0.4.20      # push; USB, the address on the case
 ```
 
-Secondary is literal: a sink can never gate or crash the meter on your desk,
-and the whole path costs nothing when unconfigured. It also publishes *below*
-a focus session's priority, so it will never overwrite the BUSY status the bar
-exists to show.
+**[`busybar/README.md`](busybar/README.md) is the reference** — how to install
+it on macOS, where every number comes from, every screen, and the device
+quirks. It is self-contained: **you do not need the ESP32 meter.** Set
+`ble = off` and the daemon polls for the bar alone.
+
+Secondary is literal: a sink can never gate, delay or crash the meter on your
+desk, and the whole path costs nothing when unconfigured. It also publishes
+*below* a focus session's priority, so it will never overwrite the BUSY status
+the bar exists to show.
 
 **[`docs/petmeter.md`](docs/petmeter.md)** documents everything this fork
 adds: the collector interface, the wire format, the theme and art-set systems,

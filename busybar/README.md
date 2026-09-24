@@ -25,7 +25,7 @@ And the states you hope not to see:
 
 | | |
 |---|---|
-| ![No data](../screenshots/busybar/state-nodata.png) | **no data** — the daemon is there, the reading is not. The pet stays: the app is alive |
+| ![No data](../screenshots/busybar/state-nodata.png) | **The host has no data yet.** — the daemon answered, with nothing in it. The same alert, worded so it does not blame the connection |
 | ![No host](../screenshots/busybar/state-nohost.png) | **The host is unreachable.** — a System 7 caution alert, lit-on-dark for the matrix. No pet, because the pet lives on the host; the alert's icon stands in its slot |
 | ![Paused](../screenshots/busybar/state-paused.png) | **paused** — the 2×2 badge at the top right, the only room there was for one |
 | ![Toast](../screenshots/busybar/state-toast-running.png) | the **toast** on a press — the word replaces the caption for two seconds, then the device removes it itself |

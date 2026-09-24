@@ -65,3 +65,35 @@ token_refresh = off
 # ~/.local/bin, where the official installer puts `claude`. Only needed if the
 # log says the CLI wasn't found.
 # claude_cli = ~/.local/bin/claude
+
+# ---------------------------------------------------------------------------
+# Secondary displays (sinks)
+#
+# The payload can be mirrored to another screen after the desk meter has been
+# told. A sink can never gate, delay or crash the meter — see
+# busybar/README.md for the whole picture.
+
+# Push the current quota to a BUSY Bar every poll. Over USB the bar is always
+# 10.0.4.20 (it is printed on the case); busybar.local works over Wi-Fi, where
+# access is off by default and a key may be needed.
+# busybar_url = http://10.0.4.20
+# busybar_token =                    # only for Wi-Fi "key" mode / the cloud relay
+
+# Serve the payload for the on-device app to PULL instead, which is what makes
+# the rotating cards and the bar's physical buttons work. This is the host's
+# own address on the bar's USB network.
+#   Push and pull cannot both run: the device refuses a second application
+#   name at equal priority, so set one or the other, never both.
+# busybar_serve = 10.0.4.21:8724
+
+# Where to read the bar's buttons from. Only needed if the bar is not at its
+# default address.
+# busybar_cli = 10.0.4.20
+
+# Bluetooth, for the ESP32 desk meter. Turn it OFF if you have a BUSY Bar and
+# no meter: the poll loop lives inside a BLE connection, so without this the
+# daemon searches for a device that is not there, never polls, and every
+# secondary display reads "no data" while your credentials are perfectly good.
+#   on  = look for the meter (default)
+#   off = no meter on this machine; poll for the sinks alone
+# ble = on
