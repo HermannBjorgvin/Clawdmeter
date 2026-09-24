@@ -28,7 +28,19 @@ const SELF = "http://10.0.4.20";
 // reaches the screen in one round trip. A return with nothing changed is not
 // a failure: redrawing every WAIT_MS also restores the frame after anything
 // else clears the canvas.
-const WAIT_MS = 8_000;
+//
+// It must stay under the device's HTTP client timeout, which is somewhere
+// short of 8s. At 8000 this was invisible while the rotation ran -- `gen`
+// moves every few seconds, so polls came back at once -- and fatal the
+// moment it was paused: `gen` froze, every poll ran the full wait, every one
+// timed out, and the app sat on the alert insisting the host was gone.
+// Pause was a button that broke the screen. The daemon caps its own side too
+// (sinks/serve.py), which is what rescues a build already installed on a bar.
+const WAIT_MS = 3_000;
+// One failed poll is not a missing host. The alert is a big claim to put on
+// screen -- it covers everything -- so it waits for a few failures in a row
+// and the last good frame stands until then.
+const FAILS_BEFORE_ALERT = 3;
 const RETRY_MS = 1_000;
 const RETRY_MAX_MS = 10_000;
 
@@ -53,6 +65,7 @@ const SMALL_ADV = 4;
 const SMALL_WIDE = 6;   // "m" and "w"
 const NORMAL_ADV = 6;
 const WIDTH = 72;
+const HEIGHT = 16;
 
 // Thresholds and colours from the firmware's pct_color(), so the bar and the
 // meter on the desk never disagree about whether a number is alarming. The
@@ -99,14 +112,17 @@ const PET_IMAGE: Record<string, string> = {
  * which is why `reset` is always text and never a countdown.
  */
 const IDS: Array<[string, "text" | "rectangle" | "image"]> = [
-  // The mascot is tombstoned like everything else. Leaving it out is how the
-  // "no host" screen ended up with the previous card's Clawd still under the
-  // words: an id this frame does not name is an id the canvas keeps.
+  // The mascot is named every frame like everything else -- but an image
+  // tombstone does not destroy the element the way a text or rectangle one
+  // does; the sprite stays on screen. So no screen relies on it leaving: the
+  // alert reuses this id for its icon and covers the slot with an opaque box.
   ["pet", "image"],
   ["num", "text"],
   ["label", "text"],
   ["reset", "text"],
   ["msg", "text"],
+  ["msg2", "text"],
+  ["box", "rectangle"],
   ["track", "rectangle"],
   ["fill", "rectangle"],
   ["paused", "rectangle"],
@@ -356,20 +372,70 @@ function frame(card: Card, left: number | null, paused: boolean,
 }
 
 /**
+ * THE HOST ALERT IS A SYSTEM 7 CAUTION ALERT, INVERTED.
+ *
+ * Structure from the original: a frame, the caution icon at left, a
+ * sentence-case body at right with its first line on the icon's top row, no
+ * button. Two things gave. The frame is one pixel, not the dialog's five
+ * (black, white, a two-pixel band, black): sixteen rows cannot pay for that
+ * twice and still hold two lines. And it is lit-on-dark, not black-on-white.
+ * A 72x16 white slab is the brightest thing this device can show, in the
+ * state that mostly means the Mac is asleep; and a one-pixel dark stroke
+ * inside lit LEDs blooms shut, so the body would not read. The matrix
+ * decides the tonality; the structure is what reads as a Mac dialog.
+ *
+ * The icon is the System 7 caution icon redrawn at 12x12 from the 32x32
+ * original -- 2px apex and bar, sides stepping one column every two rows, a
+ * solid tip, the dot a row clear of the base -- a rendering at a size Apple
+ * never shipped, not a copy of their bitmap.
+ *
+ * The box is solid black on purpose. An image tombstone does not destroy the
+ * element -- the previous card's mascot survives it -- so the dialog covers
+ * the mascot's slot with an opaque fill rather than trusting it to leave. And
+ * the icon takes the mascot's id: `pet` is the app's one image, so the icon
+ * replaces the sprite and the next card's sprite replaces the icon, and
+ * neither can linger under the other. Above the toast's z so a word already
+ * on its two-second timer cannot sit on top of the dialog.
+ */
+const ALERT_ICON = "appmeta/assets/caution_12.png";
+const ALERT_ICON_X = 4;                 // three lit columns of margin
+const ALERT_ICON_Y = 2;                 // rows 2..13, the text block's height
+const ALERT_TEXT_X = 20;                // twelve `small` characters to the frame
+const ALERT_LINE_Y: [number, number] = [0, 7];   // caps on rows 2..6 and 9..13
+const ALERT_Z = 200;
+
+// Sentence case and a full stop, the way a Mac alert's body reads. A line is
+// twelve characters: "The host could not be reached." wants fifteen on its
+// second line and never fits, so the sentence is chosen to the width.
+const ALERT_BODY: Record<string, [string, string]> = {
+  "no host": ["The host is", "unreachable."],
+  "no data": ["The host has", "no data yet."],
+};
+
+function macAlert(lines: [string, string]): Element[] {
+  const z = ALERT_Z + 10;
+  return complete([
+    { ...rect("box", 0, 0, WIDTH, HEIGHT, "#000000FF", COL_TEXT), z_index: ALERT_Z },
+    { id: "pet", type: "image", path: ALERT_ICON, x: ALERT_ICON_X, y: ALERT_ICON_Y,
+      display: "front", timeout: 0, z_index: z },
+    { ...text("msg", lines[0], "small", ALERT_TEXT_X, ALERT_LINE_Y[0], COL_TEXT), z_index: z },
+    { ...text("msg2", lines[1], "small", ALERT_TEXT_X, ALERT_LINE_Y[1], COL_TEXT), z_index: z },
+  ]);
+}
+
+/**
  * The pet says "app alive, host present, reading missing", so `no data` keeps
- * it and centres the words in the pane beside it. `no host` drops it -- the
- * pet lives on the host -- and centres on the whole screen, which only works
- * because `pet` is tombstoned above.
+ * it and centres the words in the pane beside it. Without a pet the message
+ * is the alert -- `no host` above all, since the pet lives on the host and
+ * the dialog stands where it stood.
  */
 function message(value: string, withPet: Card | null): Element[] {
-  const width = value.length * NORMAL_ADV;
   if (withPet) {
+    const width = value.length * NORMAL_ADV;
     const x = NUM_X + Math.round((WIDTH - NUM_X - width) / 2);
     return complete([petOf(withPet), text("msg", value, "normal", x, 3, COL_DIM)]);
   }
-  return complete([
-    text("msg", value, "normal", Math.round((WIDTH - width) / 2), 3, COL_DIM),
-  ]);
+  return macAlert(ALERT_BODY[value] ?? [value, " "]);
 }
 
 /**
@@ -414,6 +480,7 @@ export default function run(): void {
   let gen = -1;
   let polledAt = 0;
   let backoff = RETRY_MS;
+  let fails = 0;
   let wasPaused: boolean | null = null;
 
   const report = (err: unknown) =>
@@ -447,6 +514,7 @@ export default function run(): void {
         const data = await fetch(url).then((r) => r.json());
         polledAt = Date.now();
         backoff = RETRY_MS;
+        fails = 0;
 
         cards = Array.isArray(data.cards) ? data.cards : [];
         const control = data.control ?? { index: 0, paused: false, gen: 0 };
@@ -470,7 +538,9 @@ export default function run(): void {
         // Host asleep, unplugged, or the daemon stopped. Say which rather
         // than leaving the last good frame up to go quietly stale.
         report(err);
-        await draw(message("no host", null)).catch(report);
+        if (++fails >= FAILS_BEFORE_ALERT) {
+          await draw(message("no host", null)).catch(report);
+        }
         await new Promise((resolve) => setTimeout(resolve, backoff));
         backoff = Math.min(backoff * 2, RETRY_MAX_MS);
       }
