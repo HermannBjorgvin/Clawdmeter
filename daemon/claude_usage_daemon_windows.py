@@ -13,24 +13,35 @@ import logging
 import logging.handlers
 import os
 import re
+import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
 
+# Header parsing is shared with the Windows daemon and the collector layer.
+# Import works both ways this file is loaded: as a script (launchd runs
+# `python /path/to/claude_usage_daemon.py`, putting daemon/ on sys.path) and as
+# `daemon.claude_usage_daemon` from the tests.
+try:
+    from collectors.claude import payload_from_headers
+except ImportError:  # pragma: no cover - depends on invocation, both are exercised
+    from daemon.collectors.claude import payload_from_headers
+
 import httpx
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient
+from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 
-DEVICE_NAME = "Claude Controller"
+DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 
 POLL_INTERVAL = 60
 TICK = 5
-SCAN_TIMEOUT = 8.0
 CONNECT_RETRIES = 3        # D-01: attempts before giving up on a device
 CONNECT_RETRY_DELAY = 2.0  # D-01: seconds between failed connect attempts
 ZOMBIE_BREAK_LIMIT = 1     # D-03: consecutive write failures before abandoning a half-open link
@@ -39,7 +50,22 @@ ZOMBIE_BREAK_LIMIT = 1     # D-03: consecutive write failures before abandoning 
 RECONNECT_BACKOFF_CAP = 8  # D-05: fast-reconnect cap (seconds); keeps stacked retries inside 120s SLA
                            # ~5–10s band per CONTEXT.md Claude's Discretion; 8 chosen as middle ground
 
+# Optional reset chime.
+# Optional clock display. 
+# Config lives under the same Clawdmeter dir as daemon.log.
+CONFIG_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "config"
+
+# Opt-in token self-heal (see nudge_token_refresh). The interval is deliberately
+# far longer than POLL_INTERVAL: if a nudge doesn't fix things, the refresh token
+# itself is dead and only `claude login` will help — retrying faster just burns
+# quota against a wall.
+NUDGE_MIN_INTERVAL = 900     # seconds between nudge attempts
+NUDGE_TIMEOUT = 120          # hard cap on one nudge subprocess
+NUDGE_MODEL = "claude-haiku-4-5-20251001"
+_last_nudge_ms: float | None = None
+
 API_URL = "https://api.anthropic.com/v1/messages"
+OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
     "anthropic-beta": "oauth-2025-04-20",
@@ -105,6 +131,292 @@ class AuthError(Exception):
     must NOT be mislabeled as a token problem (SC#5: a boot-time `getaddrinfo
     failed` DNS blip wrongly fired the 'token expired' toast)."""
 
+def read_config_value(key: str, allowed: tuple[str, ...] | None = None,
+                      default: str = "") -> str:
+    """Read one lowercase-keyed option from the config file, or ``default``.
+
+    ``allowed`` restricts the value to a known set (lowercased); anything else
+    falls back to ``default``. Pass None to accept any value verbatim (e.g. a
+    filesystem path, where case matters).
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                k, val = line.split("=", 1)
+                if k.strip().lower() != key:
+                    continue
+                val = val.strip()
+                if allowed is None:
+                    return val or default
+                if val.lower() in allowed:
+                    return val.lower()
+    except OSError:
+        pass
+    return default
+
+
+def read_token_refresh_setting() -> str:
+    """Read the `token_refresh` option. One of: off|on.
+
+    Defaults to "off" — the daemon spends none of your quota unless you ask it
+    to. See :func:`nudge_token_refresh` for what "on" actually does.
+    """
+    return read_config_value("token_refresh", ("off", "on"), "off")
+
+
+def find_claude_cli() -> str | None:
+    """Absolute path to the Claude Code CLI, or None if it can't be found.
+
+    PATH is unreliable here: a service-launched daemon inherits a minimal
+    environment that often omits the installer's bin dir. So check the explicit
+    config override first, then PATH, then the known install locations.
+    """
+    override = read_config_value("claude_cli")
+    if override:
+        p = Path(override).expanduser()
+        return str(p) if p.is_file() and os.access(p, os.X_OK) else None
+    found = shutil.which("claude")
+    if found:
+        return found
+    local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    appdata = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    for cand in (
+        Path.home() / ".local" / "bin" / "claude.exe",
+        Path.home() / ".local" / "bin" / "claude.cmd",
+        local / "Programs" / "claude" / "claude.exe",
+        appdata / "npm" / "claude.cmd",
+    ):
+        if cand.is_file():
+            return str(cand)
+    return None
+
+
+async def nudge_token_refresh() -> bool:
+    """Ask Claude Code to refresh its own OAuth token. Opt-in; returns True if
+    the nudge ran to completion.
+
+    The daemon is a pure free-ride: it never mints or refreshes tokens itself
+    (that would race Claude Code's own rotation and hammer the OAuth endpoint).
+    But when EVERY configured config dir is 401ing, the device is stuck showing
+    "No data" until something runs Claude Code — which, if you aren't at the
+    keyboard, may be hours. This runs one deliberately tiny headless call so the
+    CLI that owns the token refreshes it as a side effect; the next poll then
+    finds a live token.
+
+    Guard rails, because this spends your quota:
+      * off by default — set `token_refresh = on` in the config to enable
+      * only fires when no config dir has a usable token at all
+      * rate-limited to one attempt per NUDGE_MIN_INTERVAL
+      * pinned to the cheapest model with max output, so the cost is negligible
+      * hard timeout, and never raises into the poll loop
+    """
+    global _last_nudge_ms
+    if read_token_refresh_setting() != "on":
+        return False
+    now_ms = time.monotonic()
+    if _last_nudge_ms is not None and now_ms - _last_nudge_ms < NUDGE_MIN_INTERVAL:
+        return False
+    _last_nudge_ms = now_ms   # stamp before running: a failure must not retry-spam
+
+    cli = find_claude_cli()
+    if not cli:
+        log("token_refresh=on but the `claude` CLI wasn't found — set "
+            "`claude_cli = /path/to/claude` in the config")
+        return False
+
+    log("No live token in any config dir — nudging Claude Code to refresh it")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            cli, "-p", "ok", "--model", NUDGE_MODEL, "--output-format", "text",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            cwd=str(Path.home()),
+        )
+    except OSError as e:
+        log(f"Token refresh nudge could not start: {e}")
+        return False
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=NUDGE_TIMEOUT)
+    except asyncio.TimeoutError:
+        log(f"Token refresh nudge exceeded {NUDGE_TIMEOUT}s; killing it")
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return False
+    if proc.returncode == 0:
+        log("Nudge finished; the next poll should find a fresh token")
+        return True
+    log(f"Token refresh nudge exited {proc.returncode} — the refresh token may "
+        "also be expired; run `claude login` once to re-seed it")
+    return False
+
+
+def read_chime_setting() -> str:
+    """Read the `chime` option from the config file. One of: off|on.
+
+    Defaults to "off" so the device stays silent until the user opts in.
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "chime":
+                    val = val.strip().lower()
+                    if val in ("off", "on"):
+                        return val
+    except OSError:
+        pass
+    return "off"
+
+
+def read_clock_setting() -> str:
+    """Read the `clock` option from the config file. One of: off|auto|12|24.
+
+    Defaults to "off" so existing setups keep showing "Usage" until opted in.
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "clock":
+                    val = val.strip().lower()
+                    if val in ("off", "auto", "12", "24"):
+                        return val
+    except OSError:
+        pass
+    return "off"
+
+
+def add_chime_field(payload: dict) -> None:
+    """Add "c":1 to the payload when the config opts in, so the firmware may
+    sound the session-reset chime. Omitted entirely when chime is off."""
+    if read_chime_setting() == "on":
+        payload["c"] = 1
+
+
+def detect_hour_format() -> int:
+    """Best-effort 12h/24h detection on Windows via the registry. Returns 12 or 24."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\International") as k:
+            # iTime: "1" = 24-hour, "0" = 12-hour.
+            val, _ = winreg.QueryValueEx(k, "iTime")
+            return 24 if str(val).strip() == "1" else 12
+    except (ImportError, OSError):
+        return 24
+
+
+def add_clock_fields(payload: dict) -> None:
+    """Add "t" (local wall-clock epoch) + "tf" (12|24) when the config opts in."""
+    clock = read_clock_setting()
+    if clock == "off":
+        return
+    tf = 24 if clock == "24" else 12 if clock == "12" else detect_hour_format()
+    payload["t"] = int(time.time()) + time.localtime().tm_gmtoff
+    payload["tf"] = tf
+
+
+async def fetch_weekly_limits(token: str) -> dict | None:
+    """The weekly window as the usage endpoint reports it, or None on failure:
+
+        {"all": <0-100>|None, "scoped": [{"n": <label>, "p": <0-100>}, ...]}
+
+    Both numbers come from this ONE source on purpose. The rate-limit headers
+    quantize differently (a 2-decimal fraction, e.g. "0.12") than this
+    endpoint (a rounded integer), so taking all-models from the header and
+    scoped from here can show the same underlying pair as 12/12 when it is
+    really 12.2/11.7 — or disagree with the settings UI, which renders these
+    same integers. poll_api therefore prefers "all" over the header value and
+    only falls back to the header when this lookup fails.
+
+    These numbers are NOT in the /v1/messages rate-limit headers the poll
+    reads: the scoped headers (anthropic-ratelimit-unified-7d_oi-*) only
+    appear on requests made WITH the scoped model, and polling with that model
+    would spend the very allowance being measured — and fail outright for
+    accounts without it. The OAuth usage endpoint (the same data `/usage`
+    renders) reports them for free as limits[] entries with kind
+    "weekly_scoped" and a model scope. Their reset equals the 7d reset, so no
+    separate reset is sent. The label is the API's own display name (today
+    only "Fable" exists; a future scoped model — e.g. a returning Sonnet
+    bucket — rides along automatically). Accounts without scoped limits have
+    no such entries -> None -> the "ws" key is omitted and the firmware keeps
+    today's layout.
+    """
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": API_HEADERS_TEMPLATE["anthropic-beta"],
+        "User-Agent": API_HEADERS_TEMPLATE["User-Agent"],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.get(OAUTH_USAGE_URL, headers=headers)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+    limits = data.get("limits") if isinstance(data, dict) else None
+    if not isinstance(limits, list):
+        return None
+
+    def _pct(value):
+        try:
+            return max(0, min(100, int(round(float(value)))))
+        except (TypeError, ValueError):
+            return None
+
+    weekly_all = None
+    scoped = []
+    for lim in limits:
+        if not isinstance(lim, dict):
+            continue
+        if lim.get("kind") == "weekly_all" and lim.get("scope") is None:
+            weekly_all = _pct(lim.get("percent"))
+            continue
+        if lim.get("kind") != "weekly_scoped" or not isinstance(lim.get("scope"), dict):
+            continue
+        model = lim["scope"].get("model")
+        if not isinstance(model, dict):
+            continue
+        name = model.get("display_name") or model.get("id")
+        if not isinstance(name, str) or not name:
+            continue
+        pct = _pct(lim.get("percent"))
+        if pct is None:
+            continue
+        scoped.append({"n": name, "p": pct})
+    return {"all": weekly_all, "scoped": scoped}
+
+
+async def apply_weekly_limits(payload: dict, token: str) -> None:
+    """Fold the usage endpoint's weekly window into a Pro/Max payload.
+
+    Adds "ws":[{"n","p"},...] when the account has weekly scoped-model limits
+    (omitted entirely otherwise — the firmware treats an absent key as "no
+    scoped limits" and renders the classic layout), and overrides "w" with the
+    endpoint's all-models percent so both weekly numbers share one source and
+    one rounding. A failed lookup leaves the header-derived "w" in place.
+    """
+    limits = await fetch_weekly_limits(token)
+    if not limits:
+        return
+    if limits["scoped"]:
+        payload["ws"] = limits["scoped"]
+        # Only worth re-basing "w" when a scoped number sits beside it; on
+        # plans without one the header value is already self-consistent.
+        if limits["all"] is not None:
+            payload["w"] = limits["all"]
+
 
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
@@ -126,43 +438,94 @@ async def poll_api(token: str) -> dict | None:
         log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
         return None
 
-    def hdr(name: str, default: str = "0") -> str:
-        return resp.headers.get(name, default)
 
-    now = time.time()
+    payload = payload_from_headers(resp.headers)
 
-    def reset_minutes(reset_ts: str) -> int:
-        try:
-            r = float(reset_ts)
-        except ValueError:
-            return 0
-        mins = (r - now) / 60.0
-        return int(round(mins)) if mins > 0 else 0
-
-    def pct(util: str) -> int:
-        try:
-            return int(round(float(util) * 100))
-        except ValueError:
-            return 0
-
-    payload = {
-        "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
-        "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
-        "w": pct(hdr("anthropic-ratelimit-unified-7d-utilization")),
-        "wr": reset_minutes(hdr("anthropic-ratelimit-unified-7d-reset")),
-        "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
-        "ok": True,
-    }
+    # Scoped weekly limits (e.g. a Fable allowance) only exist on Pro/Max
+    # plans; Enterprise meters a spending limit with no per-model breakdown.
+    if payload.get("acct") == "pro":
+        await apply_weekly_limits(payload, token)   # adds "ws" iff any exist
+    add_chime_field(payload)   # adds "c":1 iff the config opts in
+    add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
     return payload
 
 
-async def scan_for_device():
-    """Scan for DEVICE_NAME and return the BLEDevice, or None."""
-    log(f"Scanning for '{DEVICE_NAME}' ({SCAN_TIMEOUT}s)...")
-    device = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=SCAN_TIMEOUT)
-    if device:
-        log(f"Found: {device.address}")
-    return device  # BLEDevice or None — NOT an address string
+
+def _mac_from_pnp_instance_id(instance_id: str) -> str | None:
+    """Recover a canonical BLE MAC ("AA:BB:CC:DD:EE:FF") from a PnP instance id.
+
+    Windows encodes a paired BLE device's address in its PnP instance id as a
+    12-hex run after a ``DEV_`` token, e.g.::
+
+        BTHLE\\DEV_98A316A5D706\\7&B8081D1&0&98A316A5D706  ->  98:A3:16:A5:D7:06
+
+    Returns None when no ``DEV_<12 hex>`` token is present. Pure — the
+    subprocess that produces the instance id lives in discover_bonded_address().
+    """
+    m = re.search(r"DEV_([0-9A-Fa-f]{12})(?![0-9A-Fa-f])", instance_id)
+    if not m:
+        return None
+    h = m.group(1).upper()
+    return ":".join(h[i:i + 2] for i in range(0, 12, 2))
+
+
+def discover_bonded_address() -> str | None:
+    """Return the BLE address of the bonded Clawdmeter, or None.
+
+    A device that is paired AND connected to Windows stops advertising, so
+    BleakScanner can't see it (the steady state once paired — see
+    README-windows.md). WinRT can still connect to it directly by address, so
+    we recover that address from the OS:
+
+    1. CLAWDMETER_BLE_ADDRESS env override (skips discovery — testing / pinning).
+    2. Windows PnP table, filtered to the device's FriendlyName.
+
+    Non-Windows or any failure returns None.
+    """
+    if override := os.environ.get("CLAWDMETER_BLE_ADDRESS"):
+        return override.strip().upper()
+    if sys.platform != "win32":
+        return None
+    command = (
+        "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | "
+        f"Where-Object {{ $_.FriendlyName -eq '{DEVICE_NAME}' }} | "
+        "Select-Object -ExpandProperty InstanceId"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"Bonded-address lookup failed: {e}")
+        return None
+    for line in result.stdout.splitlines():
+        if mac := _mac_from_pnp_instance_id(line):
+            return mac
+    return None
+
+
+async def acquire_target():
+    """Return a connectable handle for the Clawdmeter, or None.
+
+    Targets only the device bonded to THIS machine (via the PnP table /
+    CLAWDMETER_BLE_ADDRESS) — it never scans for a nearby device by name, so it
+    can't grab a stranger's or the wrong nearby unit. The device must be paired
+    with Windows once first (the documented setup). Returns a BLEDevice or None.
+    """
+    address = discover_bonded_address()
+    if not address:
+        return None
+    log(f"Not advertising; connecting to bonded address {address}")
+    # CRITICAL: hand BleakClient a BLEDevice, not the bare address string. WinRT's
+    # connect() resolves a bare string via an advertisement scan (find_device_by_address)
+    # — which always fails for a bonded device that has stopped advertising, the very
+    # case we are handling. A BLEDevice sets _device_info directly, so WinRT connects
+    # via from_bluetooth_address_with_bluetooth_address_type_async and skips the scan.
+    return BLEDevice(address, DEVICE_NAME, None)
 
 
 class Session:
@@ -323,8 +686,12 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
     """Connect to device and poll until disconnected or stopped.
 
     Returns True if at least one successful write occurred.
+
+    `device` is a BLEDevice — either from an advertisement scan or built from the
+    bonded address by acquire_target(). The getattr keeps the log line robust if a
+    bare address string is ever passed in.
     """
-    log(f"Connecting to {device.address}...")
+    log(f"Connecting to {getattr(device, 'address', device)}...")
     # D-01: retry wrapper — defeats WinRT post-wake failure modes
     # (Could not get GATT services: Unreachable, stale is_connected).
     # Rebuild a fresh BleakClient each attempt (locked D-05 recipe).
@@ -340,8 +707,15 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
         )
         try:
             await client.connect()
-        except (BleakError, asyncio.TimeoutError) as e:
-            log(f"Connection attempt {attempt + 1}/{CONNECT_RETRIES} failed: {e}")
+        except (BleakError, OSError, asyncio.TimeoutError, AssertionError) as e:
+            # WinRT service discovery inside connect() can surface a raw OSError
+            # (WinError) or even a bare AssertionError from bleak's FutureLike
+            # (assert self._result) when the peer drops the link mid-discovery —
+            # neither is wrapped as BleakError. Treat them as a normal failed
+            # attempt so the D-01 retry loop handles them, instead of letting an
+            # uncaught exception kill the daemon thread (the "daemon crashed"
+            # tray toast + silent polling stop, field report).
+            log(f"Connection attempt {attempt + 1}/{CONNECT_RETRIES} failed: {type(e).__name__}: {e}")
             try:
                 await client.disconnect()
             except BleakError:
@@ -373,25 +747,60 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
     last_poll = 0.0  # D-03: poll immediately on first connect
     used_successfully = False
     consecutive_failures = 0  # D-03: zombie-link break counter
+
+    def note_write_failure() -> bool:
+        """Count a failed device write toward the zombie-link breaker.
+
+        Returns True when too many writes have failed in a row and the caller
+        should abandon the (likely zombie) link so the outer loop reconnects.
+        Applies to every device write — data payloads and no-data beats alike —
+        so a dead link still trips the breaker even when the token is also dead.
+        """
+        nonlocal consecutive_failures
+        consecutive_failures += 1
+        if consecutive_failures >= ZOMBIE_BREAK_LIMIT:
+            log(
+                f"Zombie link detected ({consecutive_failures} consecutive"
+                f" write failures); abandoning connection"
+            )
+            return True
+        return False
+
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
+                # Pure free-ride: read whatever access token Claude Code currently
+                # holds and NEVER refresh it ourselves. Claude Code (the token's owner)
+                # does all refreshing; refreshing here would race its rotation and feed
+                # the OAuth endpoint's rate limit (429). When the token is dead we just
+                # show "No data" until the CLI re-seeds it.
                 token = read_token()  # D-09: fresh each cycle
                 if not token:
-                    log("No token; skipping poll")
+                    log("No token; signalling no-data to device")
+                    await nudge_token_refresh()
                     if tray_state:
                         tray_state.set_error("token expired — run claude login")
+                    if await session.write_payload({"ok": False}):
+                        last_poll = time.time()
+                        consecutive_failures = 0  # D-03: healthy link
+                    elif note_write_failure():
+                        break
                 else:
+                    payload = None
+                    expired = False
                     try:
                         payload = await poll_api(token)
                     except AuthError:
-                        # Real 401/403 — token genuinely needs a refresh.
+                        # Pure free-ride: we never refresh. A 401/403 means Claude Code's
+                        # token has expired and only Claude Code (its owner) can re-seed it.
+                        expired = True
+                        log("Token expired/invalid; signalling no-data — run `claude login` "
+                            "or use the CLI to let Claude Code renew it")
                         if tray_state:
                             tray_state.set_error("token expired — run claude login")
-                        payload = None
                     if payload is not None:
                         if await session.write_payload(payload):
                             last_poll = time.time()
@@ -399,14 +808,19 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                             consecutive_failures = 0  # D-03: reset on success
                             if tray_state:
                                 tray_state.set_connected(time.time())
-                        else:
-                            consecutive_failures += 1
-                            if consecutive_failures >= ZOMBIE_BREAK_LIMIT:
-                                log(
-                                    f"Zombie link detected ({consecutive_failures} consecutive"
-                                    f" write failures); abandoning connection"
-                                )
-                                break
+                        elif note_write_failure():
+                            break
+                    elif expired:
+                        # Token genuinely dead -> show "No data" now instead of stale numbers.
+                        # Transient poll failures (payload None without expiry) stay silent.
+                        log("No data (token dead); signalling idle to device")
+                        # Opt-in, rate-limited, never fatal (see nudge_token_refresh).
+                        await nudge_token_refresh()
+                        if await session.write_payload({"ok": False}):
+                            last_poll = time.time()
+                            consecutive_failures = 0  # D-03: healthy link
+                        elif note_write_failure():
+                            break
                     # else: payload is None from a TRANSIENT failure (network/DNS,
                     # timeout, rate-limit, 5xx). poll_api already logged it; do NOT
                     # toast "token expired" — that mislabeled a boot-time DNS blip
@@ -425,7 +839,10 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
         # so swallow both; the link tears down regardless once we exit.
         try:
             await client.disconnect()
-        except (BleakError, OSError):
+        except (BleakError, OSError, AssertionError):
+            # bleak's WinRT disconnect() also has bare asserts (e.g. assert char
+            # while tearing down notifications on an already-gone peer); swallow
+            # it too — the link tears down regardless once we exit.
             pass
 
     log("Device disconnected" if not stop_event.is_set() else "Stopping")
@@ -479,7 +896,7 @@ async def main(tray_state=None) -> None:
     search_backoff = 1     # caps at 60s — gentle, for a device that is genuinely absent/off
     reconnect_backoff = 1  # caps at RECONNECT_BACKOFF_CAP — fast, to clear the 120s SLA after a drop
     while not stop_event.is_set():
-        device = await scan_for_device()
+        device = await acquire_target()
         if not device:
             # Slow-search regime: device was not found by scan — back off gently
             if tray_state:

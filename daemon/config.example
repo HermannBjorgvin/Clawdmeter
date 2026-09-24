@@ -1,0 +1,103 @@
+# Clawdmeter daemon config
+#
+# Copy this file to:
+#   macOS / Linux : ~/.config/claude-usage-monitor/config
+#   Windows       : %LOCALAPPDATA%\Clawdmeter\config
+#
+# The daemon re-reads it on every poll, so edits take effect within ~60s — no restart needed.
+
+# Poll more than one Claude config dir and show whichever plan is currently
+# active. Use this if you run separate plans from different config dirs (e.g. a
+# personal plan in ~/.claude and a work plan in ~/.claude-work, selected via
+# CLAUDE_CONFIG_DIR). Comma-separated; ~ is expanded.
+#   - The daemon polls every listed dir each cycle and displays the plan whose
+#     usage rose most recently (i.e. the one you're actively using). Before any
+#     change is seen it shows the plan with the highest current usage.
+#   - Unset (default) = just ~/.claude, unchanged single-plan behavior.
+#   - install.sh can detect your ~/.claude* dirs and fill this in for you.
+# config_dirs = ~/.claude, ~/.claude-work
+
+# Seconds between Anthropic API polls (Linux daemon). Default 60. Minimum 10.
+# The firmware marks data older than 90s as stale and only updates its "resets
+# in" countdown when a payload lands, so anything above ~80 relies on the
+# heartbeat below to keep the display live.
+# poll_interval = 60
+
+# Seconds between heartbeat replays of the last payload while waiting for the
+# next API poll (Linux daemon). The replay ages the reset countdowns and clock
+# so the display stays accurate without an API call. Default 60. Minimum 10.
+# Set it >= poll_interval to disable.
+# heartbeat_interval = 60
+
+# Play a sound on the device when your 5-hour session limit resets, so you know
+# you can use Claude again without watching the screen.
+#   off = silent (default)
+#   on  = chime through the board speaker (boards with audio: AMOLED-2.16 / 1.8)
+chime = off
+# Show a clock on the Usage screen, in place of the "Usage" title.
+#   off  = no clock; the screen keeps showing "Usage" (default)
+#   auto = show the clock, auto-detecting 12h/24h from this machine's settings
+#          (detection can default to 24h when the daemon runs under launchd/systemd
+#           with no locale — set 12 or 24 explicitly below if auto guesses wrong)
+#   12   = show the clock, forced 12-hour  (e.g. 6:28 PM)
+#   24   = show the clock, forced 24-hour  (e.g. 18:28)
+clock = off
+
+# Let the daemon recover on its own when your Claude Code OAuth token expires.
+#
+# The daemon never mints or refreshes tokens itself — Claude Code owns them.
+# But when no configured config dir has a live token, the device sits on the
+# "No data" screen until something runs Claude Code, which can be hours if
+# you're away. With this on, the daemon runs ONE tiny headless Claude Code call
+# (`claude -p ok`, cheapest model, 1 output token) so the CLI refreshes its own
+# token as a side effect; the next poll then finds it alive.
+#
+# This spends a negligible but non-zero amount of your quota, so it's opt-in.
+# It fires only when every config dir is dead, at most once every 15 minutes,
+# and is bounded by a 120s timeout — a failure just leaves the device idle,
+# exactly as before.
+#   off = never (default)
+#   on  = nudge Claude Code to refresh when all tokens are dead
+token_refresh = off
+
+# Where the Claude Code CLI lives, if token_refresh can't find it. Service
+# managers (launchd/systemd) hand the daemon a minimal PATH that often omits
+# ~/.local/bin, where the official installer puts `claude`. Only needed if the
+# log says the CLI wasn't found.
+# claude_cli = ~/.local/bin/claude
+
+# ---------------------------------------------------------------------------
+# Secondary displays (sinks)
+#
+# The payload can be mirrored to another screen after the desk meter has been
+# told. A sink can never gate, delay or crash the meter — see
+# busybar/README.md for the whole picture.
+
+# Push the current quota to a BUSY Bar every poll. Over USB the bar is always
+# 10.0.4.20 (it is printed on the case); busybar.local works over Wi-Fi, where
+# access is off by default and a key may be needed.
+# busybar_url = http://10.0.4.20
+# busybar_token =                  # UNPROVEN -- sent as "Authorization: Bearer".
+#                                  A bar in Wi-Fi "key" mode rejected it, and every
+#                                  other obvious scheme, with 403 -- that mode wants a
+#                                  web-UI password, which gates a browser session, not
+#                                  an API call. USB needs no key and is the tested path.
+
+# Serve the payload for the on-device app to PULL instead, which is what makes
+# the rotating cards and the bar's physical buttons work. This is the host's
+# own address on the bar's USB network.
+#   Push and pull cannot both run: the device refuses a second application
+#   name at equal priority, so set one or the other, never both.
+# busybar_serve = 10.0.4.21:8724
+
+# Where to read the bar's buttons from. Only needed if the bar is not at its
+# default address.
+# busybar_cli = 10.0.4.20
+
+# Bluetooth, for the ESP32 desk meter. Turn it OFF if you have a BUSY Bar and
+# no meter: the poll loop lives inside a BLE connection, so without this the
+# daemon searches for a device that is not there, never polls, and every
+# secondary display reads "no data" while your credentials are perfectly good.
+#   on  = look for the meter (default)
+#   off = no meter on this machine; poll for the sinks alone
+# ble = on

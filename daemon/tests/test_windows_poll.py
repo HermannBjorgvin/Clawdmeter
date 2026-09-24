@@ -33,8 +33,19 @@ def _make_mock_response(status_code=200, headers=None):
 
 
 def _run(coro):
-    """Run a coroutine synchronously for synchronous test functions."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Run a coroutine synchronously for synchronous test functions.
+
+    Use a fresh event loop per call rather than asyncio.get_event_loop():
+    on Python 3.12 that helper is deprecated and, once another test file
+    runs asyncio.run() (which closes the process-default loop), it returns
+    a closed loop here and every poll test raises RuntimeError. A private
+    loop keeps these tests order-independent in the full suite.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 # ---------------------------------------------------------------------------

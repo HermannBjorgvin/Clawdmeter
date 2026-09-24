@@ -7,18 +7,35 @@ bleak (CoreBluetooth backend on macOS).
 """
 
 import asyncio
+import datetime
 import getpass
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+# Header parsing is shared with the Windows daemon and the collector layer.
+# Import works both ways this file is loaded: as a script (launchd runs
+# `python /path/to/claude_usage_daemon.py`, putting daemon/ on sys.path) and as
+# `daemon.claude_usage_daemon` from the tests.
+try:
+    import sinks
+    from collectors import WINDOW_5H, WINDOW_7D
+    from collectors.codex import CodexCollector
+    from collectors.claude import payload_from_headers
+except ImportError:  # pragma: no cover - depends on invocation, both are exercised
+    from daemon import sinks
+    from daemon.collectors import WINDOW_5H, WINDOW_7D
+    from daemon.collectors.codex import CodexCollector
+    from daemon.collectors.claude import payload_from_headers
+
 import httpx
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient
 from bleak.exc import BleakError
 
 DEVICE_NAME = "Clawdmeter"
@@ -28,15 +45,26 @@ REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 
 POLL_INTERVAL = 60
 TICK = 5
-SCAN_TIMEOUT = 8.0
+CONNECT_TIMEOUT = 20.0
+
+# Opt-in token self-heal (see nudge_token_refresh). The interval is deliberately
+# far longer than POLL_INTERVAL: if a nudge doesn't fix things, the refresh token
+# itself is dead and only `claude login` will help — retrying faster just burns
+# quota against a wall.
+NUDGE_MIN_INTERVAL = 900     # seconds between nudge attempts
+NUDGE_TIMEOUT = 120          # hard cap on one nudge subprocess
+NUDGE_MODEL = "claude-haiku-4-5-20251001"
+_last_nudge_ms: float | None = None
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
 KEYCHAIN_SERVICE = "Claude Code-credentials"
-CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
+DEFAULT_CONFIG_DIR = Path.home() / ".claude"
 SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
+CONFIG_FILE = Path.home() / ".config" / "claude-usage-monitor" / "config"
 
 API_URL = "https://api.anthropic.com/v1/messages"
+OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
     "anthropic-beta": "oauth-2025-04-20",
@@ -48,6 +76,12 @@ API_BODY = {
     "max_tokens": 1,
     "messages": [{"role": "user", "content": "hi"}],
 }
+
+
+class TokenExpired(Exception):
+    """Raised by poll_api on a 401/403 — the access token is dead. The daemon never
+    refreshes (pure free-ride: Claude Code owns refreshing), so the caller just
+    signals "No data" to the device until the CLI re-seeds the token."""
 
 
 def log(msg: str) -> None:
@@ -71,12 +105,15 @@ def _extract_access_token(blob: str) -> str | None:
         data = None
     if isinstance(data, dict):
         # direct: {"accessToken": "..."}
-        if isinstance(data.get("accessToken"), str):
-            return data["accessToken"]
+        tok = data.get("accessToken")
+        if isinstance(tok, str) and tok.strip():
+            return tok
         # nested: {"claudeAiOauth": {"accessToken": "..."}}
         for v in data.values():
-            if isinstance(v, dict) and isinstance(v.get("accessToken"), str):
-                return v["accessToken"]
+            if isinstance(v, dict):
+                tok = v.get("accessToken")
+                if isinstance(tok, str) and tok.strip():
+                    return tok
     m = re.search(r'"accessToken"\s*:\s*"([^"]+)"', blob)
     if m:
         return m.group(1)
@@ -86,7 +123,29 @@ def _extract_access_token(blob: str) -> str | None:
     return None
 
 
+def _decode_keychain_blob(raw: str) -> str:
+    """Transparently decode a hex-dumped Keychain secret back to text.
+
+    ``security … -w`` prints the password as a continuous hex string whenever
+    the stored bytes aren't cleanly printable (e.g. an embedded newline). A
+    normal credentials blob is JSON, which is never valid hex (it contains
+    '{', '"', …), so all-hex detection is unambiguous and safe.
+    """
+    s = raw.strip()
+    if s and len(s) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", s):
+        try:
+            return bytes.fromhex(s).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return raw
+    return raw
+
+
 def _read_token_keychain() -> str | None:
+    """Read the OAuth access token from the macOS Keychain, or None.
+
+    ``security … -w`` may hex-dump the stored secret (see _decode_keychain_blob),
+    so decode before extracting the access token.
+    """
     try:
         out = subprocess.run(
             [
@@ -109,22 +168,52 @@ def _read_token_keychain() -> str | None:
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         log(f"Keychain access error: {e}")
         return None
-    return _extract_access_token(out.stdout)
+    return _extract_access_token(_decode_keychain_blob(out.stdout))
 
 
-def _read_token_file() -> str | None:
+def read_config_dirs() -> list[Path]:
+    """Claude config dirs to poll, from the `config_dirs` option (comma list).
+
+    Defaults to [~/.claude] so existing single-plan setups are unchanged. ~ is
+    expanded. Mirrors the Linux bash daemon's read_config_dirs.
+    """
+    raw = ""
     try:
-        raw = CREDENTIALS_PATH.read_text()
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "config_dirs":
+                    raw = val.strip()
+    except OSError:
+        pass
+    if not raw:
+        return [DEFAULT_CONFIG_DIR]
+    dirs = [Path(p.strip()).expanduser() for p in raw.split(",") if p.strip()]
+    return dirs or [DEFAULT_CONFIG_DIR]
+
+
+def read_token_for(config_dir: Path) -> str | None:
+    """Read the OAuth token for one config dir.
+
+    Linux: each dir keeps its own ``<dir>/.credentials.json``. macOS: the default
+    install stores the token in Keychain with no file, so for the default dir we
+    fall back to Keychain when no file is present — preserving existing
+    single-plan macOS behavior. Additional macOS dirs are read from their files;
+    a work plan whose token lives only in the single Keychain entry can't be told
+    apart there (documented follow-up).
+    """
+    cred = config_dir / ".credentials.json"
+    try:
+        if cred.exists():
+            return _extract_access_token(cred.read_text())
     except OSError as e:
-        log(f"Error reading credentials: {e}")
-        return None
-    return _extract_access_token(raw)
-
-
-def read_token() -> str | None:
-    if sys.platform == "darwin":
+        log(f"Error reading credentials in {config_dir}: {e}")
+    if sys.platform == "darwin" and config_dir == DEFAULT_CONFIG_DIR:
         return _read_token_keychain()
-    return _read_token_file()
+    return None
 
 
 def load_cached_address() -> str | None:
@@ -139,21 +228,6 @@ def load_cached_address() -> str | None:
         return addr
     log("Cached address malformed, discarding")
     SAVED_ADDR_FILE.unlink(missing_ok=True)
-    return None
-
-
-def save_address(addr: str) -> None:
-    SAVED_ADDR_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SAVED_ADDR_FILE.write_text(addr)
-
-
-async def scan_for_device() -> str | None:
-    log(f"Scanning for '{DEVICE_NAME}' ({SCAN_TIMEOUT}s)...")
-    devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
-    for d in devices:
-        if d.name == DEVICE_NAME:
-            log(f"Found: {d.address}")
-            return d.address
     return None
 
 
@@ -188,7 +262,7 @@ async def _get_cb_manager():
 
 
 async def retrieve_connected_macos(skip_addr: str | None = None):
-    """Return a BLEDevice for a system-connected 'Claude Controller', or None.
+    """Return a BLEDevice for a system-connected 'Clawdmeter', or None.
 
     Two-step lookup, strongest signal first:
 
@@ -244,31 +318,329 @@ async def retrieve_connected_macos(skip_addr: str | None = None):
 async def discover_target(skip_addr: str | None = None):
     """Return a connectable target, or None.
 
-    macOS: prefer the system-connected peripheral (HID-grabbed devices are
-    invisible to scans); fall back to a normal scan that yields a BLEDevice
-    so the subsequent connect doesn't have to re-scan. ``skip_addr`` is
-    forwarded so a just-failed peripheral is skipped, making the scan
-    fallback reachable.
-
-    Other platforms: keep the original cached-address / scan-by-name flow.
-    A freshly scanned address is cached here (the only place it's saved).
+    The daemon only ever targets the device this system already holds — it
+    never scans for a nearby device by name, so it can't grab a stranger's or
+    the wrong nearby unit. On macOS that's the system-connected peripheral (the
+    firmware advertises as an HID keyboard, so once paired the OS auto-connects
+    and holds it — HID-grabbed devices are invisible to scans anyway). On other
+    platforms it's a previously-pinned address in the cache file. If the device
+    isn't held/pinned, we log and wait rather than scanning. ``skip_addr`` skips
+    a peripheral whose handle just failed to connect.
     """
     if sys.platform == "darwin":
         dev = await retrieve_connected_macos(skip_addr=skip_addr)
-        if dev is not None:
-            return dev
-        log(f"Not held by OS; scanning for '{DEVICE_NAME}' ({SCAN_TIMEOUT}s)...")
-        dev = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=SCAN_TIMEOUT)
-        if dev:
-            log(f"Found: {dev.address}")
+        if dev is None:
+            log("Device not held by OS; waiting (not scanning by name)")
         return dev
 
     address = load_cached_address()
     if not address:
-        address = await scan_for_device()
-        if address:
-            save_address(address)  # cache only freshly-scanned addresses
+        log("No pinned address cached; waiting (not scanning by name)")
     return address
+
+
+def read_config_value(key: str, allowed: tuple[str, ...] | None = None,
+                      default: str = "") -> str:
+    """Read one lowercase-keyed option from the config file, or ``default``.
+
+    ``allowed`` restricts the value to a known set (lowercased); anything else
+    falls back to ``default``. Pass None to accept any value verbatim (e.g. a
+    filesystem path, where case matters).
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                k, val = line.split("=", 1)
+                if k.strip().lower() != key:
+                    continue
+                val = val.strip()
+                if allowed is None:
+                    return val or default
+                if val.lower() in allowed:
+                    return val.lower()
+    except OSError:
+        pass
+    return default
+
+
+def read_token_refresh_setting() -> str:
+    """Read the `token_refresh` option. One of: off|on.
+
+    Defaults to "off" — the daemon spends none of your quota unless you ask it
+    to. See :func:`nudge_token_refresh` for what "on" actually does.
+    """
+    return read_config_value("token_refresh", ("off", "on"), "off")
+
+
+def find_claude_cli() -> str | None:
+    """Absolute path to the Claude Code CLI, or None if it can't be found.
+
+    PATH is unreliable here: launchd/systemd give the daemon a minimal PATH that
+    usually omits ~/.local/bin, which is exactly where the official installer
+    puts `claude`. So check the explicit config override first, then PATH, then
+    the known install locations.
+    """
+    override = read_config_value("claude_cli")
+    if override:
+        p = Path(override).expanduser()
+        return str(p) if p.is_file() and os.access(p, os.X_OK) else None
+    found = shutil.which("claude")
+    if found:
+        return found
+    for cand in (
+        Path.home() / ".local" / "bin" / "claude",
+        Path.home() / ".claude" / "local" / "claude",
+        Path("/opt/homebrew/bin/claude"),
+        Path("/usr/local/bin/claude"),
+    ):
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
+
+
+async def nudge_token_refresh() -> bool:
+    """Ask Claude Code to refresh its own OAuth token. Opt-in; returns True if
+    the nudge ran to completion.
+
+    The daemon is a pure free-ride: it never mints or refreshes tokens itself
+    (that would race Claude Code's own rotation and hammer the OAuth endpoint).
+    But when EVERY configured config dir is 401ing, the device is stuck showing
+    "No data" until something runs Claude Code — which, if you aren't at the
+    keyboard, may be hours. This runs one deliberately tiny headless call so the
+    CLI that owns the token refreshes it as a side effect; the next poll then
+    finds a live token.
+
+    Guard rails, because this spends your quota:
+      * off by default — set `token_refresh = on` in the config to enable
+      * only fires when no config dir has a usable token at all
+      * rate-limited to one attempt per NUDGE_MIN_INTERVAL
+      * pinned to the cheapest model with max output, so the cost is negligible
+      * hard timeout, and never raises into the poll loop
+    """
+    global _last_nudge_ms
+    if read_token_refresh_setting() != "on":
+        return False
+    now_ms = time.monotonic()
+    if _last_nudge_ms is not None and now_ms - _last_nudge_ms < NUDGE_MIN_INTERVAL:
+        return False
+    _last_nudge_ms = now_ms   # stamp before running: a failure must not retry-spam
+
+    cli = find_claude_cli()
+    if not cli:
+        log("token_refresh=on but the `claude` CLI wasn't found — set "
+            "`claude_cli = /path/to/claude` in the config")
+        return False
+
+    log("No live token in any config dir — nudging Claude Code to refresh it")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            cli, "-p", "ok", "--model", NUDGE_MODEL, "--output-format", "text",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            cwd=str(Path.home()),
+        )
+    except OSError as e:
+        log(f"Token refresh nudge could not start: {e}")
+        return False
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=NUDGE_TIMEOUT)
+    except asyncio.TimeoutError:
+        log(f"Token refresh nudge exceeded {NUDGE_TIMEOUT}s; killing it")
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return False
+    if proc.returncode == 0:
+        log("Nudge finished; the next poll should find a fresh token")
+        return True
+    log(f"Token refresh nudge exited {proc.returncode} — the refresh token may "
+        "also be expired; run `claude login` once to re-seed it")
+    return False
+
+
+def read_chime_setting() -> str:
+    """Read the `chime` option from the config file. One of: off|on.
+
+    Defaults to "off" (the device stays silent) so existing setups are
+    unaffected until the user opts in.
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "chime":
+                    val = val.strip().lower()
+                    if val in ("off", "on"):
+                        return val
+    except OSError:
+        pass
+    return "off"
+
+
+def read_clock_setting() -> str:
+    """Read the `clock` option from the config file. One of: off|auto|12|24.
+
+    Defaults to "off" (no clock; the device keeps showing "Usage") so existing
+    setups are unaffected until the user opts in.
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "clock":
+                    val = val.strip().lower()
+                    if val in ("off", "auto", "12", "24"):
+                        return val
+    except OSError:
+        pass
+    return "off"
+
+
+def add_chime_field(payload: dict) -> None:
+    """Add "c":1 to the payload when the config opts in, so the firmware may
+    sound the session-reset chime. Omitted entirely when chime is off."""
+    if read_chime_setting() == "on":
+        payload["c"] = 1
+
+
+def detect_hour_format() -> int:
+    """Best-effort 12h/24h detection for the host. Returns 12 or 24 (default 24)."""
+    # macOS: the explicit System Settings toggle lives in NSGlobalDomain.
+    for key, result in (("AppleICUForce24HourTime", 24), ("AppleICUForce12HourTime", 12)):
+        try:
+            out = subprocess.run(["defaults", "read", "-g", key],
+                                 capture_output=True, text=True, timeout=3)
+            if out.stdout.strip() == "1":
+                return result
+        except (OSError, subprocess.SubprocessError):
+            pass
+    # Fallback to the C locale's time format (may be C/24h under launchd).
+    try:
+        import locale
+        locale.setlocale(locale.LC_TIME, "")
+        fmt = locale.nl_langinfo(locale.T_FMT)
+        if "%p" in fmt or "%r" in fmt or "%I" in fmt:
+            return 12
+    except (ImportError, locale.Error, AttributeError):
+        pass
+    return 24
+
+
+def add_clock_fields(payload: dict) -> None:
+    """Add wall-clock fields to the payload when the config opts in.
+
+    "t"  = local wall-clock epoch (UTC epoch shifted by the tz offset) so the
+           device can show the time without an RTC.
+    "tf" = 12 or 24, the hour format the device should render.
+    """
+    clock = read_clock_setting()
+    if clock == "off":
+        return
+    tf = 24 if clock == "24" else 12 if clock == "12" else detect_hour_format()
+    payload["t"] = int(time.time()) + time.localtime().tm_gmtoff
+    payload["tf"] = tf
+
+
+async def fetch_weekly_limits(token: str) -> dict | None:
+    """The weekly window as the usage endpoint reports it, or None on failure:
+
+        {"all": <0-100>|None, "scoped": [{"n": <label>, "p": <0-100>}, ...]}
+
+    Both numbers come from this ONE source on purpose. The rate-limit headers
+    quantize differently (a 2-decimal fraction, e.g. "0.12") than this
+    endpoint (a rounded integer), so taking all-models from the header and
+    scoped from here can show the same underlying pair as 12/12 when it is
+    really 12.2/11.7 — or disagree with the settings UI, which renders these
+    same integers. poll_api therefore prefers "all" over the header value and
+    only falls back to the header when this lookup fails.
+
+    These numbers are NOT in the /v1/messages rate-limit headers the poll
+    reads: the scoped headers (anthropic-ratelimit-unified-7d_oi-*) only
+    appear on requests made WITH the scoped model, and polling with that model
+    would spend the very allowance being measured — and fail outright for
+    accounts without it. The OAuth usage endpoint (the same data `/usage`
+    renders) reports them for free as limits[] entries with kind
+    "weekly_scoped" and a model scope. Their reset equals the 7d reset, so no
+    separate reset is sent. The label is the API's own display name (today
+    only "Fable" exists; a future scoped model — e.g. a returning Sonnet
+    bucket — rides along automatically). Accounts without scoped limits have
+    no such entries -> None -> the "ws" key is omitted and the firmware keeps
+    today's layout.
+    """
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": API_HEADERS_TEMPLATE["anthropic-beta"],
+        "User-Agent": API_HEADERS_TEMPLATE["User-Agent"],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.get(OAUTH_USAGE_URL, headers=headers)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+    limits = data.get("limits") if isinstance(data, dict) else None
+    if not isinstance(limits, list):
+        return None
+
+    def _pct(value):
+        try:
+            return max(0, min(100, int(round(float(value)))))
+        except (TypeError, ValueError):
+            return None
+
+    weekly_all = None
+    scoped = []
+    for lim in limits:
+        if not isinstance(lim, dict):
+            continue
+        if lim.get("kind") == "weekly_all" and lim.get("scope") is None:
+            weekly_all = _pct(lim.get("percent"))
+            continue
+        if lim.get("kind") != "weekly_scoped" or not isinstance(lim.get("scope"), dict):
+            continue
+        model = lim["scope"].get("model")
+        if not isinstance(model, dict):
+            continue
+        name = model.get("display_name") or model.get("id")
+        if not isinstance(name, str) or not name:
+            continue
+        pct = _pct(lim.get("percent"))
+        if pct is None:
+            continue
+        scoped.append({"n": name, "p": pct})
+    return {"all": weekly_all, "scoped": scoped}
+
+
+async def apply_weekly_limits(payload: dict, token: str) -> None:
+    """Fold the usage endpoint's weekly window into a Pro/Max payload.
+
+    Adds "ws":[{"n","p"},...] when the account has weekly scoped-model limits
+    (omitted entirely otherwise — the firmware treats an absent key as "no
+    scoped limits" and renders the classic layout), and overrides "w" with the
+    endpoint's all-models percent so both weekly numbers share one source and
+    one rounding. A failed lookup leaves the header-derived "w" in place.
+    """
+    limits = await fetch_weekly_limits(token)
+    if not limits:
+        return
+    if limits["scoped"]:
+        payload["ws"] = limits["scoped"]
+        # Only worth re-basing "w" when a scoped number sits beside it; on
+        # plans without one the header value is already self-consistent.
+        if limits["all"] is not None:
+            payload["w"] = limits["all"]
 
 
 async def poll_api(token: str) -> dict | None:
@@ -280,37 +652,251 @@ async def poll_api(token: str) -> dict | None:
     except httpx.HTTPError as e:
         log(f"API call failed: {e}")
         return None
+    if resp.status_code in (401, 403):
+        log(f"API HTTP {resp.status_code} (token expired/invalid)")
+        raise TokenExpired()
     if resp.status_code >= 400:
         log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
         return None
 
-    def hdr(name: str, default: str = "0") -> str:
-        return resp.headers.get(name, default)
 
-    now = time.time()
+    payload = payload_from_headers(resp.headers)
+    # Scoped weekly limits (e.g. a Fable allowance) only exist on Pro/Max
+    # plans; Enterprise meters a spending limit with no per-model breakdown.
+    if payload.get("acct") == "pro":
+        await apply_weekly_limits(payload, token)   # adds "ws" iff any exist
+    add_chime_field(payload)   # adds "c":1 iff the config opts in
+    add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
+    return payload
 
-    def reset_minutes(reset_ts: str) -> int:
+
+
+class PlanSelector:
+    """Decide which config dir's plan is "active" across polls.
+
+    "Active" = the plan whose session % rose most recently (recent API activity).
+    A rise stamps a monotonic poll counter, so the choice is sticky and a window
+    reset (a drop to 0) isn't mistaken for use. Before any rise is seen (startup)
+    the highest current session % wins. Mirrors the Linux bash daemon.
+    """
+
+    def __init__(self) -> None:
+        self.prev_s: dict[Path, int] = {}
+        self.last_active: dict[Path, int] = {}
+        self.seq = 0
+
+    def choose(self, sessions: dict[Path, int]) -> Path:
+        """Update state from this cycle's {dir: session_pct} and return the active dir."""
+        self.seq += 1
+        for d, s in sessions.items():
+            if d in self.prev_s and s > self.prev_s[d]:
+                self.last_active[d] = self.seq
+            self.prev_s[d] = s
+        # Most recent activity wins; ties (and the startup case) break by highest %.
+        return max(sessions, key=lambda d: (self.last_active.get(d, 0), sessions[d]))
+
+
+# Module-level so the active-plan state survives reconnects.
+_SELECTOR = PlanSelector()
+
+
+async def poll_active(selector: PlanSelector = _SELECTOR) -> tuple[dict | None, bool]:
+    """Poll every configured config dir; return ``(active_payload, all_dead)``.
+
+    ``active_payload`` — the active plan's payload dict, or None when no dir
+    yields a usable payload this cycle. A single configured dir (the default)
+    collapses to exactly the old single-poll path.
+
+    ``all_dead`` — True when *every* configured dir lacked a usable token this
+    cycle (file/Keychain empty, or a 401/expired token), so the caller can
+    signal "No data". False when at least one token authenticated — including a
+    transient non-auth poll failure worth retrying silently rather than idling.
+
+    Pure free-ride: a 401 (TokenExpired) means that dir's token has expired and
+    only Claude Code (its owner) can re-seed it — we never refresh it ourselves.
+    When every dir is dead we may *nudge* Claude Code to do its own refresh, but
+    only if the user opted in (see :func:`nudge_token_refresh`).
+    """
+    dirs = read_config_dirs()
+    payloads: dict[Path, dict] = {}
+    sessions: dict[Path, int] = {}
+    any_live = False
+    for d in dirs:
+        token = read_token_for(d)
+        if not token:
+            log(f"No token in {d}; skipping")
+            continue
         try:
-            r = float(reset_ts)
-        except ValueError:
-            return 0
-        mins = (r - now) / 60.0
-        return int(round(mins)) if mins > 0 else 0
+            payload = await poll_api(token)
+        except TokenExpired:
+            log(f"Token in {d} expired/invalid; skipping")
+            continue
+        # Authenticated: a transient None here isn't an auth failure, so the
+        # dir counts as live and we stay silent rather than idling the device.
+        any_live = True
+        if payload is not None:
+            payloads[d] = payload
+            sessions[d] = int(payload.get("s", 0) or 0)
+    if not payloads:
+        all_dead = not any_live
+        if all_dead:
+            # Opt-in, rate-limited, and never fatal — a failed nudge just leaves
+            # the device on "No data", exactly as before.
+            await nudge_token_refresh()
+        return None, all_dead
+    active = selector.choose(sessions)
+    if len(dirs) > 1:
+        log(f"Active plan: {active} (s={sessions[active]})")
 
-    def pct(util: str) -> int:
-        try:
-            return int(round(float(util) * 100))
-        except ValueError:
-            return 0
+    payload = payloads[active]
+    # Second provider rides along under "x" so the device can switch mode
+    # without waiting for another poll. Merged here rather than in
+    # poll_active_payload because the run loop calls this function directly.
+    try:
+        codex = await asyncio.to_thread(codex_payload)
+    except Exception as exc:            # a second provider must never take
+        log(f"Codex poll failed: {exc}")  # down the primary one
+        codex = None
+    if codex:
+        payload["x"] = codex
+    return payload, False
 
+
+_CODEX = CodexCollector()
+
+
+def codex_payload() -> dict | None:
+    """Codex usage in the device's wire shape, or None when unavailable.
+
+    Plan shapes differ from Anthropic's. A Codex Pro account meters ONE
+    account-wide weekly window and no 5-hour window -- but it also meters
+    specific models separately, and GPT-5.3-Codex-Spark carries its own 5h and
+    weekly buckets. The device has two panels, so the 5h panel falls back to a
+    model's 5h bucket when the account has none. That is what the ChatGPT
+    settings screen shows too: "General usage limits" plus a separate
+    "GPT-5.3-Codex-Spark usage limits" block.
+
+    A slot with no quota behind it at all stays absent (sr/wr = -1) rather than
+    reporting 0% -- an empty panel is honest, a zeroed one is a lie about a
+    limit that does not exist.
+    """
+    snap = _CODEX.collect_blocking()
+    if snap is None:
+        return None
+
+    # Panel mapping for Codex, which meters differently from Anthropic.
+    #
+    # A Codex Pro account has ONE account-wide weekly window, plus per-model
+    # buckets -- GPT-5.3-Codex-Spark carries its own 5h and weekly. There is no
+    # account 5h window at all, so the top panel cannot mirror Claude's
+    # "Current". Instead:
+    #
+    #   top    = the model's weekly quota  (labelled by model, e.g. "Spark")
+    #   bottom = the account weekly quota  ("Overall")
+    #
+    # Both are weekly windows, so the pills name the SCOPE rather than the
+    # window -- "Spark" against "Overall" -- because that is the only thing
+    # that distinguishes them. Showing both matters: Spark can sit at 0% while
+    # the account weekly is nearly spent, and it is the account limit that
+    # actually stops you.
+    account_week = snap.windows.get(WINDOW_7D)
+    model_name, model_week = None, None
+    for name, windows in snap.model_windows.items():
+        if WINDOW_7D in windows:
+            model_name, model_week = name, windows[WINDOW_7D]
+            break
+
+    top_kind: str | None = None
+    if account_week is not None and model_week is not None:
+        top, top_label = model_week, model_name.rsplit("-", 1)[-1][:12]
+        top_kind = "weekly"
+        bottom, bottom_label = account_week, "Overall"
+    else:
+        # No model weekly to pair with: fall back to the plain window mapping,
+        # 5h on top and weekly below, from wherever each is available.
+        def anywhere(label):
+            w = snap.windows.get(label)
+            if w is not None:
+                return w
+            for windows in snap.model_windows.values():
+                if label in windows:
+                    return windows[label]
+            return None
+        five, week = anywhere(WINDOW_5H), anywhere(WINDOW_7D)
+        if five is None and week is not None:
+            # One quota and nothing to pair it with. OpenAI dropped
+            # additional_rate_limits (the GPT-5.3-Codex-Spark bucket) in
+            # September 2026, leaving Pro accounts with a single weekly
+            # window -- so the old 5h-on-top mapping put a dash in the
+            # prominent panel and the only real number underneath it.
+            # Promote the number and leave the second slot absent; the device
+            # drops the empty card rather than drawing a dash in it.
+            top, top_label = week, "Weekly"
+            bottom, bottom_label = None, None
+            # The top slot is where a 5-hour window normally sits, and the
+            # device times those to the minute. This one is a WEEK. Say so, or
+            # the card reads "Weekly13h50m" with no room for a space.
+            top_kind = "weekly"
+        else:
+            top, top_label = five, None
+            bottom, bottom_label = week, None
+
+    def wire(w):
+        if w is None:
+            return None, -1
+        mins = -1 if w.resets_in is None else max(0, int(w.resets_in) // 60)
+        return int(round(w.used_percent)), mins
+
+    s_pct, s_reset = wire(top)
+    w_pct, w_reset = wire(bottom)
     payload = {
-        "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
-        "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
-        "w": pct(hdr("anthropic-ratelimit-unified-7d-utilization")),
-        "wr": reset_minutes(hdr("anthropic-ratelimit-unified-7d-reset")),
-        "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
+        "s": s_pct if s_pct is not None else 0,
+        "sr": s_reset,
+        "w": w_pct if w_pct is not None else 0,
+        "wr": w_reset,
+        "st": "allowed",
+        "acct": "pro",
         "ok": True,
+        # Which panels carry real quotas, so the device can leave the other
+        # blank instead of drawing a convincing 0%.
+        "has_s": s_pct is not None,
+        "has_w": w_pct is not None,
     }
+    # Reset credits: grants that restore a spent quota, as a ledger over the
+    # provider's own trailing window -- "rc" still held, "ru" already spent.
+    # The device draws one cell per credit and puts rc+ru in the number, so
+    # the card answers "how many did this window give me, and how many are
+    # left" in one read. "rm" is minutes until the soonest expiry: a duration
+    # like sr/wr, so the device formats it with the same "in 4d 21h" line as a
+    # quota reset rather than needing date handling it does not have.
+    if snap.reset_credits or snap.reset_credits_used:
+        payload["rc"] = snap.reset_credits
+        if snap.reset_credits_used:
+            payload["ru"] = snap.reset_credits_used
+        if snap.reset_credits_expire:
+            payload["rm"] = max(0, int(snap.reset_credits_expire - time.time()) // 60)
+
+    # Pill overrides. Short form only -- the pill is a few characters wide, so
+    # "GPT-5.3-Codex-Spark" would never fit and "Spark" is the distinguishing
+    # part. Absent means the device keeps its default label.
+    if top_kind:
+        payload["sk"] = top_kind
+    if top_label:
+        payload["sm"] = top_label
+    if bottom_label:
+        payload["wm"] = bottom_label
+    return payload
+
+
+async def poll_active_payload(selector: PlanSelector = _SELECTOR) -> dict | None:
+    """The active plan's payload, or None when no dir yields one this cycle.
+
+    Thin wrapper over :func:`poll_active` for callers that don't need the
+    all-dead flag. The Codex merge lives in poll_active itself -- the run loop
+    calls that directly for the dead flag, so anything merged here would never
+    reach the device.
+    """
+    payload, _dead = await poll_active(selector)
     return payload
 
 
@@ -324,20 +910,156 @@ class Session:
         self.refresh_requested.set()
 
     async def setup_refresh_subscription(self) -> None:
+        # start_notify awaits CoreBluetooth's CCCD-write confirmation, which
+        # never arrives if the peripheral doesn't ACK the subscribe (a
+        # half-open link after the OS auto-connects the HID). Unbounded, that
+        # await wedges the whole daemon between "Connected" and the first poll
+        # — the device then shows nothing until a manual restart. Bound it: the
+        # subscription is only an optional device-initiated refresh nudge (we
+        # poll every POLL_INTERVAL regardless), so on timeout we proceed.
         try:
-            await self.client.start_notify(REQ_CHAR_UUID, self._on_refresh)
+            await asyncio.wait_for(
+                self.client.start_notify(REQ_CHAR_UUID, self._on_refresh),
+                timeout=10,
+            )
         except (BleakError, ValueError) as e:
             log(f"Refresh subscription unavailable: {e}")
+        except asyncio.TimeoutError:
+            log("Refresh subscription timed out; polling without it")
 
     async def write_payload(self, payload: dict) -> bool:
+        """Send to the device, then mirror to any configured secondary display.
+
+        The return value is the DEVICE's result and nothing else -- callers
+        gate the poll clock on it. Sinks are fanned out here rather than at the
+        three call sites so a new one cannot be half-wired: the bug that cost
+        an afternoon on the Codex merge was exactly that, every test passing
+        while one real path never ran.
+        """
         data = json.dumps(payload, separators=(",", ":")).encode()
         log(f"Sending: {data.decode()}")
         try:
             await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
-            return True
+            ok = True
         except BleakError as e:
             log(f"Write failed: {e}")
-            return False
+            ok = False
+        sinks.publish_soon(payload, log=log)
+        return ok
+
+
+def _is_encryption_error(exc: BaseException) -> bool:
+    """True if a connect error is a macOS bonding/encryption mismatch.
+
+    macOS reports a stale bond as CBErrorDomain Code=15 ("Failed to encrypt
+    the connection..."). Match on the message text so we don't depend on how
+    bleak wraps the underlying CoreBluetooth error.
+    """
+    s = str(exc).lower()
+    return "code=15" in s or "encrypt" in s
+
+
+# blueutil talks to Bluetooth via IOBluetooth, which on recent macOS needs its
+# OWN Bluetooth TCC grant (separate from the daemon's CoreBluetooth grant).
+# Without it, blueutil *hangs* instead of erroring — so every call is bounded
+# by a timeout and a hang is reported as a permission problem, not a crash.
+BLUEUTIL_TIMEOUT = 8
+
+
+def _blueutil(*args: str) -> str | None:
+    """Run `blueutil <args>`, returning stdout, or None on failure/timeout.
+
+    A timeout almost always means blueutil lacks Bluetooth permission (it
+    blocks rather than failing), so we surface that cause explicitly.
+    """
+    try:
+        return subprocess.run(
+            ["blueutil", *args],
+            capture_output=True, text=True,
+            timeout=BLUEUTIL_TIMEOUT, check=True,
+        ).stdout
+    except subprocess.TimeoutExpired:
+        log(f"blueutil {' '.join(args)} timed out — it likely lacks Bluetooth "
+            "permission. Grant it under System Settings > Privacy & Security > "
+            "Bluetooth (run `blueutil --paired` once from Terminal to prompt).")
+        return None
+    except (subprocess.SubprocessError, OSError) as e:
+        log(f"blueutil {' '.join(args)} failed: {e}")
+        return None
+
+
+def unpair_macos() -> bool:
+    """Forget a stale macOS bond for DEVICE_NAME so the device can re-pair.
+
+    A Code=15 "failed to encrypt" connect error means macOS holds bonding
+    keys that no longer match the ESP32's (e.g. after a firmware reflash or
+    the on-device bond-clear gesture). The firmware pairs "just works" (no
+    MITM), so once the stale bond is gone the next connect re-bonds silently
+    with no GUI prompt.
+
+    CoreBluetooth exposes no unpair API, so we shell out to `blueutil`. The
+    daemon only knows the peripheral's CoreBluetooth UUID, not the BD_ADDR
+    that blueutil needs, so we map by name via `blueutil --paired`. Returns
+    True if a bond was removed. Mirrors the Linux daemon's `bluetoothctl
+    remove` self-heal.
+    """
+    if not shutil.which("blueutil"):
+        log("Stale bond detected but `blueutil` is not installed; cannot "
+            "auto-recover. Run `brew install blueutil`, or forget "
+            f"'{DEVICE_NAME}' in System Settings > Bluetooth and reconnect.")
+        return False
+
+    out = _blueutil("--paired")
+    if out is None:
+        return False
+
+    # Each line looks like:
+    #   address: 28-84-85-55-5c-3d, ... name: "Clawdmeter", ...
+    addr = None
+    for line in out.splitlines():
+        if f'name: "{DEVICE_NAME}"' in line:
+            m = re.search(r"address:\s*([0-9a-fA-F:-]+)", line)
+            if m:
+                addr = m.group(1)
+                break
+    if not addr:
+        log(f"No paired '{DEVICE_NAME}' found to unpair (already forgotten?)")
+        return False
+
+    if _blueutil("--unpair", addr) is None:
+        return False
+    log(f"Unpaired stale bond for '{DEVICE_NAME}' [{addr}]; re-pairing on "
+        "next connect")
+    return True
+
+
+class _NoMeter:
+    """Stands in for the BLE meter when there deliberately is not one.
+
+    This project began as firmware, so the poll loop lives INSIDE a BLE
+    connection -- no device, no poll, and therefore no sinks either. That is
+    invisible until someone wants only the secondary display: a BUSY Bar then
+    silently depends on an ESP32 nobody told them to buy, and the bar just
+    reads "no data" forever while every credential is perfectly good.
+
+    A client that is always connected and whose write always succeeds keeps
+    that as one poll loop instead of two that would drift apart. Only the
+    three members the loop actually touches are implemented; anything else is
+    a bug in the caller, not a member worth faking.
+    """
+
+    is_connected = True
+
+    async def start_notify(self, *_args, **_kwargs) -> None:
+        # There is no device to nudge us. setup_refresh_subscription treats
+        # this as "unavailable" and polls on the timer, which is correct.
+        raise BleakError("no meter configured")
+
+    async def write_gatt_char(self, *_args, **_kwargs) -> None:
+        return None
+
+    async def disconnect(self) -> None:
+        return None
 
 
 async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
@@ -348,13 +1070,30 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     used successfully (so the caller keeps the cached address), False if the
     connection failed and the cache should be invalidated.
     """
+    if target is None:
+        log("No meter configured; polling for secondary displays only")
+        client = _NoMeter()
+        return await _poll_until_done(client, stop_event)
+
     display = target if isinstance(target, str) else target.address
     log(f"Connecting to {display}...")
     client = BleakClient(target)
     try:
-        await client.connect()
+        # Bound the connect the same way #84 bounded the refresh subscribe.
+        # On macOS the OS auto-connects the firmware's HID link, so
+        # CoreBluetooth can hand us a half-open peripheral whose GATT connect
+        # handshake never completes. BleakClient's own timeout governs
+        # discovery, not connectPeripheral, so an unbounded await here wedges
+        # the single-threaded daemon forever at "Connecting..." (observed ~13h,
+        # device stuck on stale data). wait_for raises TimeoutError, which the
+        # handler below already treats as a connection failure -> drop the
+        # cached address and rescan.
+        await asyncio.wait_for(client.connect(), timeout=CONNECT_TIMEOUT)
     except (BleakError, asyncio.TimeoutError) as e:
         log(f"Connection failed: {e}")
+        if sys.platform == "darwin" and _is_encryption_error(e):
+            log("Encryption failed — likely a stale macOS bond; self-healing")
+            unpair_macos()
         return False
 
     if not client.is_connected:
@@ -362,6 +1101,15 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
         return False
 
     log("Connected")
+    return await _poll_until_done(client, stop_event)
+
+
+async def _poll_until_done(client, stop_event: asyncio.Event) -> bool:
+    """Poll and publish until the link drops or the daemon stops.
+
+    Split out so the meter and the no-meter case cannot diverge: this is the
+    only place that decides when to poll and what to do with the result.
+    """
     session = Session(client)
     await session.setup_refresh_subscription()
 
@@ -373,15 +1121,45 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
-                token = read_token()
-                if not token:
-                    log("No token; skipping poll")
+                # Pure free-ride: read whatever access token(s) Claude Code
+                # currently holds across the configured config dirs and NEVER
+                # refresh them ourselves. Claude Code (the token's owner) does all
+                # refreshing; refreshing here would race its rotation and feed the
+                # OAuth endpoint's rate limit (429). When no dir has a usable token
+                # we signal "No data" so the device idles instead of holding stale
+                # numbers until the CLI re-seeds it.
+                payload, dead = await poll_active()
+                if payload is not None:
+                    if await session.write_payload(payload):
+                        last_poll = time.time()
+                        used_successfully = True
+                elif dead:
+                    # No live token in any config dir (missing, or a 401/expired
+                    # token) -> show "No data" now instead of stale numbers. Guard
+                    # last_poll on the write result (like the data path) so a
+                    # failed beat retries next tick instead of throttling what may
+                    # be a healthy link for a full POLL_INTERVAL.
+                    log("No usable token; signalling no-data to device — run "
+                        "`claude login` or use the CLI to let Claude Code renew it")
+                    # A dead Claude token says nothing about the other
+                    # providers. The device reads Claude's fields from the top
+                    # level, so it still gets ok:false there and shows "No
+                    # data" in Claude mode -- but any provider that IS readable
+                    # rides along and stays live in its own mode.
+                    beat = {"ok": False}
+                    try:
+                        codex = await asyncio.to_thread(codex_payload)
+                    except Exception as exc:
+                        log(f"Codex poll failed: {exc}")
+                        codex = None
+                    if codex:
+                        beat["x"] = codex
+                    if await session.write_payload(beat):
+                        last_poll = time.time()
                 else:
-                    payload = await poll_api(token)
-                    if payload is not None:
-                        if await session.write_payload(payload):
-                            last_poll = time.time()
-                            used_successfully = True
+                    # Transient poll failure (a live token that didn't answer this
+                    # cycle) -> stay silent and retry next tick.
+                    log("No usable config dir this cycle")
 
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
@@ -412,7 +1190,29 @@ async def main() -> None:
             signal.signal(sig, _stop)
 
     log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
+
+    # The pull endpoint for a device-side app (see daemon/sinks/serve.py).
+    # Opt-in, and a failure to bind is logged, never fatal -- the BLE meter on
+    # the desk does not care whether a secondary display can reach us.
+    serve_bind = read_config_value("busybar_serve", allowed=None)
+    if serve_bind:
+        host, _, port = serve_bind.partition(":")
+        if await sinks.serve.start(host or sinks.serve.DEFAULT_BIND,
+                                   int(port) if port.isdigit()
+                                   else sinks.serve.DEFAULT_PORT, log=log):
+            # The bar's buttons, read off its CLI, because its firmware gives
+            # JS apps no input API. A background task with bounded awaits --
+            # nothing here can stall the BLE writer feeding the desk meter.
+            cli = read_config_value("busybar_cli", allowed=None) or "10.0.4.20"
+            loop.create_task(sinks.busybar_buttons.run(cli.split(":")[0], log=log))
     log(f"Poll interval: {POLL_INTERVAL}s")
+
+    # A bar-only install has no meter to look for. Without this the loop below
+    # scans for an ESP32 forever, never polls, and every secondary display
+    # reads "no data" while the credentials behind it are perfectly good.
+    if read_config_value("ble", allowed=("on", "off"), default="on") == "off":
+        await connect_and_run(None, stop_event)
+        return
 
     backoff = 1
     skip_addr: str | None = None  # macOS: a peripheral to skip for one cycle

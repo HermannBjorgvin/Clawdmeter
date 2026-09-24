@@ -2,17 +2,40 @@
 # Claude Usage Tracker Daemon (BLE)
 # Reads Claude Code OAuth token, polls usage via API, sends to ESP32 over BLE GATT.
 # Auto-connects and reconnects to the Clawdmeter BLE device.
-# Dependencies: curl, awk, bluetoothctl
+# Dependencies: curl, awk, bluetoothctl, busctl, dbus-monitor, python3, setsid, stdbuf
 
 DEVICE_NAME="Clawdmeter"
 DEVICE_MAC="${DEVICE_MAC:-}"  # auto-discovered if empty
 SERVICE_UUID="4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID="4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID="4c41555a-4465-7669-6365-000000000004"
-POLL_INTERVAL=60
+# The POLL_INTERVAL env var seeds the default that `poll_interval` in the
+# config file overrides. Validate it the same way as the config value: an
+# integer, clamped to >= 10s; anything else falls back to 60.
+poll_interval_default_from_env() {
+    local val="${POLL_INTERVAL:-}"
+    if [[ "$val" =~ ^[0-9]+$ ]]; then
+        (( val < 10 )) && val=10
+        echo "$val"
+    else
+        [ -n "$val" ] && echo "Ignoring invalid POLL_INTERVAL='$val' (need an integer >= 10); using 60" >&2
+        echo 60
+    fi
+}
+POLL_INTERVAL_DEFAULT=$(poll_interval_default_from_env)
+POLL_INTERVAL=$POLL_INTERVAL_DEFAULT
+HEARTBEAT_INTERVAL_DEFAULT=60
 TICK=5
 SAVED_MAC_FILE="$HOME/.config/claude-usage-monitor/ble-address"
+CONFIG_FILE="$HOME/.config/claude-usage-monitor/config"
 REFRESH_FLAG="/tmp/claude-usage-refresh-$$"
+NUDGE_MIN_INTERVAL=900   # seconds between token-refresh nudges (see nudge_token_refresh)
+NUDGE_TIMEOUT=120        # hard cap on one nudge
+NUDGE_MODEL="claude-haiku-4-5-20251001"
+LAST_NUDGE=0
+LAST_PAYLOAD=""      # last payload written to the device (replayed by the heartbeat)
+LAST_PAYLOAD_TS=0    # epoch when LAST_PAYLOAD's numbers were fetched from the API
+LAST_WRITE_TS=0      # epoch of the last GATT write of any kind (poll or heartbeat)
 DBUS_DEST="org.bluez"
 NOTIFY_PID=""
 
@@ -20,8 +43,227 @@ log() {
     echo "[$(date '+%H:%M:%S')] $1"
 }
 
-read_token() {
-    grep -o '"accessToken":"[^"]*"' "$HOME/.claude/.credentials.json" | cut -d'"' -f4
+# --- Multi config-dir support ---------------------------------------------
+# Claude Code can run against more than one config dir (e.g. ~/.claude for a
+# personal plan and ~/.claude-work for a work plan, selected via
+# CLAUDE_CONFIG_DIR). The daemon polls each configured dir's token every cycle
+# and shows whichever plan is "active" (the one whose usage moved most recently
+# — see poll()). Per-dir state persists across poll() calls for that decision.
+declare -A PREV_S       # last session % seen per dir (detects a rise = activity)
+declare -A LAST_ACTIVE  # poll-sequence number of the last observed rise (0 = never)
+POLL_SEQ=0              # monotonic poll counter — recency ordering that's immune to
+                        # wall-clock resolution and NTP steps (polls are 60s apart, but
+                        # a counter is unambiguous even if two land in the same second)
+
+# Read the `config_dirs` option: a comma-separated list of Claude config dirs.
+# Defaults to "~/.claude" so existing single-plan setups are unchanged. Tildes
+# and $HOME are expanded; blanks trimmed. Echoes one resolved dir per line.
+read_config_dirs() {
+    local raw=""
+    if [ -f "$CONFIG_FILE" ]; then
+        raw=$(grep -E '^[[:space:]]*config_dirs[[:space:]]*=' "$CONFIG_FILE" | tail -1 \
+            | tr -d '\r' \
+            | sed -E 's/^[[:space:]]*config_dirs[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//')
+    fi
+    [ -z "$raw" ] && raw="$HOME/.claude"
+    local IFS=','
+    local d
+    for d in $raw; do
+        d=$(echo "$d" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+        [ -z "$d" ] && continue
+        case "$d" in
+            "~")   d="$HOME" ;;
+            "~/"*) d="$HOME/${d#\~/}" ;;
+        esac
+        echo "$d"
+    done
+}
+
+# Read the OAuth access token from a specific config dir's credentials file.
+# The file can hold many "accessToken" fields — one per OAuth integration (MCP
+# servers, design tools, etc.) — so we must isolate the claudeAiOauth object
+# first and pull ITS accessToken. A bare grep for "accessToken" would return
+# every token concatenated, yielding an invalid Bearer header and constant 401s.
+read_token_for() {
+    local dir="$1"
+    grep -o '"claudeAiOauth"[[:space:]]*:[[:space:]]*{[^}]*}' "$dir/.credentials.json" 2>/dev/null \
+        | grep -o '"accessToken":"[^"]*"' | head -1 | cut -d'"' -f4
+}
+
+# Read the `poll_interval` option (seconds between Anthropic API polls).
+# Falls back to $POLL_INTERVAL_DEFAULT. Clamped to >= 10s. The firmware treats
+# data older than 90s as stale (DATA_FRESH_MS in ui.cpp); polling slower than
+# that is fine as long as the heartbeat below keeps writing in between.
+read_poll_interval() {
+    local val=""
+    if [ -f "$CONFIG_FILE" ]; then
+        val=$(grep -E '^[[:space:]]*poll_interval[[:space:]]*=' "$CONFIG_FILE" | tail -1 \
+            | tr -d '\r' \
+            | sed -E 's/^[[:space:]]*poll_interval[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//')
+    fi
+    if [[ "$val" =~ ^[0-9]+$ ]]; then
+        (( val < 10 )) && val=10
+        echo "$val"
+    else
+        echo "$POLL_INTERVAL_DEFAULT"
+    fi
+}
+
+# Read the `heartbeat_interval` option (seconds between replays of the last
+# payload while waiting for the next API poll). Default 60, clamped to >= 10.
+# The firmware only refreshes its "resets in" labels and its freshness stamp
+# when a payload lands (there is no on-device timer and no tap-to-refresh), so
+# the heartbeat is what keeps the display alive when poll_interval > ~80s.
+# Set it >= poll_interval to disable.
+read_heartbeat_interval() {
+    local val=""
+    if [ -f "$CONFIG_FILE" ]; then
+        val=$(grep -E '^[[:space:]]*heartbeat_interval[[:space:]]*=' "$CONFIG_FILE" | tail -1 \
+            | tr -d '\r' \
+            | sed -E 's/^[[:space:]]*heartbeat_interval[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//')
+    fi
+    if [[ "$val" =~ ^[0-9]+$ ]]; then
+        (( val < 10 )) && val=10
+        echo "$val"
+    else
+        echo "$HEARTBEAT_INTERVAL_DEFAULT"
+    fi
+}
+
+# Age a payload by $2 seconds: "sr"/"wr" reset countdowns (minutes) tick down
+# toward 0 and the optional clock epoch "t" advances. Everything else (usage %,
+# status, chime permission flag) is left as fetched. Echoes the adjusted JSON.
+age_payload() {
+    python3 - "$1" "$2" <<'PYEOF'
+import json, sys
+d = json.loads(sys.argv[1]); secs = int(sys.argv[2]); mins = secs // 60
+for k in ("sr", "wr"):
+    if isinstance(d.get(k), int) and d[k] > 0:
+        d[k] = max(d[k] - mins, 0)
+if isinstance(d.get("t"), int) and d["t"] > 0:
+    d["t"] += secs
+print(json.dumps(d, separators=(",", ":")))
+PYEOF
+}
+
+# Replay the last payload, aged by the time since it was fetched, so the
+# device's freshness window (90s in firmware) never lapses between polls.
+heartbeat() {
+    [ -z "$LAST_PAYLOAD" ] && return 1
+    local now aged
+    now=$(date +%s)
+    aged=$(age_payload "$LAST_PAYLOAD" $(( now - LAST_PAYLOAD_TS ))) || return 1
+    [ -z "$aged" ] && return 1
+    log "Heartbeat: $aged"
+    write_gatt "$RX_CHAR_PATH" "$aged" || { log "Heartbeat write failed"; return 1; }
+    LAST_WRITE_TS=$now
+    return 0
+}
+
+# Read the `chime` option from the config file. Echoes one of: off|on.
+# Defaults to "off" so the device stays silent until the user opts in.
+# Read the `token_refresh` option. Echoes one of: off|on. Defaults to "off" —
+# the daemon spends none of your quota unless you ask it to.
+read_token_refresh_setting() {
+    local val=""
+    if [ -f "$CONFIG_FILE" ]; then
+        val=$(grep -E '^[[:space:]]*token_refresh[[:space:]]*=' "$CONFIG_FILE" | tail -1 \
+            | tr -d '\r' \
+            | sed -E 's/^[[:space:]]*token_refresh[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//' \
+            | tr '[:upper:]' '[:lower:]')
+    fi
+    case "$val" in
+        on) echo "on" ;;
+        *)  echo "off" ;;
+    esac
+}
+
+# Absolute path to the Claude Code CLI, or empty. systemd hands the daemon a
+# minimal PATH that usually omits ~/.local/bin — exactly where the official
+# installer puts `claude` — so check the config override, then PATH, then the
+# known install locations.
+find_claude_cli() {
+    local override
+    override=$(grep -E '^[[:space:]]*claude_cli[[:space:]]*=' "$CONFIG_FILE" 2>/dev/null | tail -1 \
+        | tr -d '\r' \
+        | sed -E 's/^[[:space:]]*claude_cli[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//')
+    if [ -n "$override" ]; then
+        [ -x "${override/#\~/$HOME}" ] && echo "${override/#\~/$HOME}"
+        return
+    fi
+    local c
+    c=$(command -v claude 2>/dev/null) && { echo "$c"; return; }
+    for c in "$HOME/.local/bin/claude" "$HOME/.claude/local/claude" /usr/local/bin/claude; do
+        [ -x "$c" ] && { echo "$c"; return; }
+    done
+}
+
+# Ask Claude Code to refresh its own OAuth token. Opt-in; see the Python
+# daemons' nudge_token_refresh docstring for the full rationale.
+#
+# The daemon is a pure free-ride: it never mints or refreshes tokens itself.
+# But when every config dir is 401ing, the device sits on "No data" until
+# something runs Claude Code. This runs one deliberately tiny headless call so
+# the CLI that owns the token refreshes it as a side effect. Off by default,
+# rate-limited, timeout-bounded, and never fatal.
+nudge_token_refresh() {
+    [ "$(read_token_refresh_setting)" = "on" ] || return 0
+    local now cli
+    now=$(date +%s)
+    (( now - LAST_NUDGE < NUDGE_MIN_INTERVAL )) && return 0
+    LAST_NUDGE=$now   # stamp before running: a failure must not retry-spam
+    cli=$(find_claude_cli)
+    if [ -z "$cli" ]; then
+        log "token_refresh=on but the \`claude\` CLI wasn't found — set \`claude_cli = /path/to/claude\` in the config"
+        return 0
+    fi
+    log "No live token in any config dir — nudging Claude Code to refresh it"
+    if timeout "$NUDGE_TIMEOUT" "$cli" -p ok --model "$NUDGE_MODEL" --output-format text >/dev/null 2>&1; then
+        log "Nudge finished; the next poll should find a fresh token"
+    else
+        log "Token refresh nudge failed — the refresh token may also be expired; run \`claude login\` once"
+    fi
+    return 0
+}
+
+read_chime_setting() {
+    local val=""
+    if [ -f "$CONFIG_FILE" ]; then
+        val=$(grep -E '^[[:space:]]*chime[[:space:]]*=' "$CONFIG_FILE" | tail -1 \
+            | tr -d '\r' \
+            | sed -E 's/^[[:space:]]*chime[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//' \
+            | tr '[:upper:]' '[:lower:]')
+    fi
+    case "$val" in
+        on) echo "on" ;;
+        *)  echo "off" ;;
+    esac
+}
+
+# Read the `clock` option from the config file. Echoes one of: off|auto|12|24.
+# Defaults to "off" so existing setups keep showing "Usage" until opted in.
+read_clock_setting() {
+    local val=""
+    if [ -f "$CONFIG_FILE" ]; then
+        val=$(grep -E '^[[:space:]]*clock[[:space:]]*=' "$CONFIG_FILE" | tail -1 \
+            | tr -d '\r' \
+            | sed -E 's/^[[:space:]]*clock[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//' \
+            | tr '[:upper:]' '[:lower:]')
+    fi
+    case "$val" in
+        off|auto|12|24) echo "$val" ;;
+        *)              echo "off" ;;
+    esac
+}
+
+# Best-effort 12h/24h detection from the locale. Echoes 12 or 24 (default 24).
+detect_hour_format() {
+    local tfmt
+    tfmt=$(locale -k LC_TIME 2>/dev/null | grep -E '^t_fmt=')
+    case "$tfmt" in
+        *%p*|*%r*|*%I*) echo 12 ;;
+        *)              echo 24 ;;
+    esac
 }
 
 # Convert MAC to D-Bus path: AA:BB:CC:DD:EE:FF -> dev_AA_BB_CC_DD_EE_FF
@@ -60,26 +302,22 @@ save_mac() {
     echo "$DEVICE_MAC" > "$SAVED_MAC_FILE"
 }
 
-# Scan for Clawdmeter
-scan_for_device() {
-    log "Scanning for '$DEVICE_NAME'..."
-    # Start LE scan
-    bluetoothctl scan le &>/dev/null &
-    local scan_pid=$!
-    sleep 8
-    kill "$scan_pid" 2>/dev/null
-    wait "$scan_pid" 2>/dev/null
-
-    # Pick the first matching device. Multiple matches happen when bluez
-    # remembers old hardware (e.g. after swapping ESP boards). Stale entries
-    # are removed on connect failure (see connect_device), so a few retry
-    # cycles will converge on the live device.
-    local found
-    found=$(bluetoothctl devices 2>/dev/null | grep "$DEVICE_NAME" | head -1 | awk '{print $2}')
+# Find a Clawdmeter the system already knows about — paired first, then merely
+# connected — WITHOUT an LE advertising scan. bluez only lists devices this host
+# has bonded/connected to, so we can't accidentally grab a stranger's advertising
+# unit. The device is a bonded BLE HID keyboard you pair once anyway, so we never
+# scan by name. Sets DEVICE_MAC + caches it on success; returns non-zero if none.
+find_system_device_mac() {
+    local found=""
+    local mode
+    for mode in Paired Connected; do
+        found=$(bluetoothctl devices "$mode" 2>/dev/null | grep "$DEVICE_NAME" | head -1 | awk '{print $2}')
+        [ -n "$found" ] && break
+    done
     if [ -n "$found" ]; then
         DEVICE_MAC="$found"
         save_mac
-        log "Found: $DEVICE_MAC"
+        log "Using system-known device: $DEVICE_MAC"
         return 0
     fi
     return 1
@@ -101,13 +339,15 @@ connect_device() {
         return 0
     fi
     log "Connection failed"
+    # Drop the cached MAC so the next loop re-derives it from bluez's paired/
+    # connected list (see find_system_device_mac). We deliberately do NOT
+    # `bluetoothctl remove` here: the daemon now only ever connects to a device
+    # the system already knows, so unpairing it on a transient failure would
+    # make it undiscoverable and strand the daemon.
     if [ -f "$SAVED_MAC_FILE" ] && [ "$(cat "$SAVED_MAC_FILE")" = "$DEVICE_MAC" ]; then
-        log "Invalidating cached MAC, will rescan by name"
+        log "Invalidating cached MAC, will re-derive from paired/connected devices"
         rm -f "$SAVED_MAC_FILE"
     fi
-    # Remove from bluez so the next scan won't re-pick this dead MAC.
-    # If the device comes back online it'll re-advertise and be re-discovered.
-    bluetoothctl remove "$DEVICE_MAC" &>/dev/null
     DEVICE_MAC=""
     return 1
 }
@@ -191,48 +431,211 @@ write_gatt() {
         WriteValue "aya{sv}" "$count" $bytes 0 2>/dev/null
 }
 
-poll() {
-    local token
-    token=$(read_token) || { log "Error: could not read token"; return 1; }
+# Build the device payload for one OAuth token. Echoes the JSON payload on
+# success (empty + non-zero return on failure). Pure: no logging, no GATT write
+# — poll() owns picking the active plan and sending it.
+build_payload_for_token() {
+    local token="$1"
+    [ -z "$token" ] && return 1
     local now
     now=$(date +%s)
 
+    # Optional clock. When enabled, send a local wall-clock epoch (UTC epoch shifted
+    # by the timezone offset, so gmtime() on-device reads local) plus the hour format.
+    local clock clock_fragment=""
+    clock=$(read_clock_setting)
+    if [ "$clock" != "off" ]; then
+        local tz off_sec local_epoch tf
+        tz=$(date +%z)            # e.g. +0200 or -0500
+        off_sec=$(( (10#${tz:1:2} * 3600) + (10#${tz:3:2} * 60) ))
+        [ "${tz:0:1}" = "-" ] && off_sec=$(( -off_sec ))
+        local_epoch=$(( now + off_sec ))
+        case "$clock" in
+            12) tf=12 ;;
+            24) tf=24 ;;
+            *)  tf=$(detect_hour_format) ;;
+        esac
+        clock_fragment=",\"t\":$local_epoch,\"tf\":$tf"
+    fi
+
     local headers
-    headers=$(curl -s -D - -o /dev/null \
+    # The bearer token goes in via a curl config on stdin (-K -) so it never
+    # appears in the process argv (visible to any local user via ps/proc).
+    headers=$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -s -D - -o /dev/null -K - \
         "https://api.anthropic.com/v1/messages" \
-        -H "Authorization: Bearer $token" \
         -H "anthropic-version: 2023-06-01" \
         -H "anthropic-beta: oauth-2025-04-20" \
         -H "Content-Type: application/json" \
         -H "User-Agent: claude-code/2.1.5" \
         -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
-        2>/dev/null) || { log "Error: API call failed"; return 1; }
+        2>/dev/null) || return 1
 
-    local s5h_util s5h_reset s7d_util s7d_reset status
+    local s5h_util overage_util overage_reset status
     s5h_util=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-5h-utilization" | tr -d '\r' | awk '{print $2}')
-    s5h_reset=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-5h-reset" | tr -d '\r' | awk '{print $2}')
-    s7d_util=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-7d-utilization" | tr -d '\r' | awk '{print $2}')
-    s7d_reset=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-7d-reset" | tr -d '\r' | awk '{print $2}')
-    status=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-5h-status" | tr -d '\r' | awk '{print $2}')
-
-    s5h_util=${s5h_util:-0}
-    s5h_reset=${s5h_reset:-0}
-    s7d_util=${s7d_util:-0}
-    s7d_reset=${s7d_reset:-0}
+    overage_util=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-overage-utilization" | tr -d '\r' | awk '{print $2}')
+    overage_reset=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-overage-reset" | tr -d '\r' | awk '{print $2}')
+    status=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-status" | tr -d '\r' | awk '{print $2}')
     status=${status:-unknown}
 
-    local payload
-    payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$status" -v now="$now" \
-        'BEGIN {
-            sp = sprintf("%.0f", u5 * 100);
-            sr = (r5 - now) / 60; sr = sr > 0 ? sprintf("%.0f", sr) : 0;
-            wp = sprintf("%.0f", u7 * 100);
-            wr = (r7 - now) / 60; wr = wr > 0 ? sprintf("%.0f", wr) : 0;
-            printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"ok\":true}", sp, sr, wp, wr, st;
-        }')
+    # Optional reset chime. When enabled, tell the firmware it may sound the
+    # session-reset chime by adding "c":1 to the payload (additive, off by default).
+    local chime chime_fragment=""
+    chime=$(read_chime_setting)
+    [ "$chime" = "on" ] && chime_fragment=",\"c\":1"
 
-    log "Sending: $payload"
-    write_gatt "$RX_CHAR_PATH" "$payload" || { log "Write failed"; return 1; }
+    local payload
+    if [ -n "$s5h_util" ]; then
+        # Pro/Max account — 5h/7d windows
+        local s7d_util s5h_reset s7d_reset s5h_status
+        s5h_reset=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-5h-reset" | tr -d '\r' | awk '{print $2}')
+        s7d_util=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-7d-utilization" | tr -d '\r' | awk '{print $2}')
+        s7d_reset=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-7d-reset" | tr -d '\r' | awk '{print $2}')
+        s5h_status=$(echo "$headers" | grep -i "anthropic-ratelimit-unified-5h-status" | tr -d '\r' | awk '{print $2}')
+        s5h_util=${s5h_util:-0}; s5h_reset=${s5h_reset:-0}
+        s7d_util=${s7d_util:-0}; s7d_reset=${s7d_reset:-0}
+        s5h_status=${s5h_status:-unknown}
+
+        # Optional weekly scoped-model limits (today: Fable). NOT in the
+        # rate-limit headers above — the scoped 7d_oi headers only appear on
+        # requests made WITH the scoped model, and polling with it would spend
+        # the allowance being measured. The OAuth usage endpoint (what
+        # `/usage` renders) reports them for free as limits[] entries with
+        # kind "weekly_scoped"; their reset equals the 7d reset. Each entry
+        # becomes {"n":<label>,"p":<pct>} in a "ws" array, labeled with the
+        # API's own display name so future scoped models ride along. Accounts
+        # without scoped limits -> "ws" omitted -> firmware keeps today's
+        # layout.
+        local fable_fragment="" usage_json scoped_entries="" weekly_all="" m p n
+        usage_json=$(curl -s "https://api.anthropic.com/api/oauth/usage" \
+            -H "Authorization: Bearer $token" \
+            -H "anthropic-beta: oauth-2025-04-20" \
+            -H "User-Agent: claude-code/2.1.5" 2>/dev/null)
+        while IFS= read -r m; do
+            [ -z "$m" ] && continue
+            p=$(echo "$m" | grep -o '"percent":[0-9]*' | head -1 | cut -d: -f2)
+            n=$(echo "$m" | grep -o '"display_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+            [ -n "$p" ] && [ -n "$n" ] && scoped_entries="$scoped_entries,{\"n\":\"$n\",\"p\":$p}"
+        done < <(echo "$usage_json" | grep -o '"kind":"weekly_scoped"[^{]*{"model":{[^}]*}')
+        if [ -n "$scoped_entries" ]; then
+            fable_fragment=",\"ws\":[${scoped_entries#,}]"
+            # Re-base the all-models % on the same source as the scoped ones.
+            # The header is a 2-decimal fraction and this endpoint a rounded
+            # integer, so mixing them can render a real 12.2/11.7 pair as
+            # 12/12 (and disagree with the settings UI). Header stays the
+            # fallback when this value is missing.
+            weekly_all=$(echo "$usage_json" \
+                | grep -o '"kind":"weekly_all"[^}]*"percent":[0-9]*' | head -1 \
+                | grep -o '[0-9]*$')
+            [ -n "$weekly_all" ] && s7d_util=$(awk -v p="$weekly_all" 'BEGIN { printf "%.4f", p / 100 }')
+        fi
+
+        payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$s5h_status" -v now="$now" -v fbl="$fable_fragment" -v clk="$clock_fragment" -v chm="$chime_fragment" \
+            'BEGIN {
+                sp = sprintf("%.0f", u5 * 100);
+                sr = (r5 - now) / 60; sr = sr > 0 ? sprintf("%.0f", sr) : 0;
+                wp = sprintf("%.0f", u7 * 100);
+                wr = (r7 - now) / 60; wr = wr > 0 ? sprintf("%.0f", wr) : 0;
+                printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"acct\":\"pro\"%s%s%s,\"ok\":true}", sp, sr, wp, wr, st, fbl, clk, chm;
+            }')
+    else
+        # Enterprise account — spending-limit model
+        overage_util=${overage_util:-0}; overage_reset=${overage_reset:-0}
+        # Compute period info via python3 (awk lacks date arithmetic)
+        local period_info
+        period_info=$(python3 - "$now" "$overage_reset" <<'PYEOF'
+import sys, datetime, calendar, json
+now, reset_ts = float(sys.argv[1]), float(sys.argv[2])
+dt_end = datetime.datetime.fromtimestamp(reset_ts)
+pm = dt_end.month - 1 or 12
+py = dt_end.year if dt_end.month > 1 else dt_end.year - 1
+pd = min(dt_end.day, calendar.monthrange(py, pm)[1])
+dt_start = dt_end.replace(year=py, month=pm, day=pd)
+period_len = reset_ts - dt_start.timestamp()
+tp = max(0, min(100, int(round((now - dt_start.timestamp()) / period_len * 100)))) if period_len > 0 else 0
+pd_days = int(round(period_len / 86400))
+rd = f"{dt_end.strftime('%b')} {dt_end.day}"
+print(json.dumps({"tp": tp, "pd": pd_days, "rd": rd}))
+PYEOF
+)
+        payload=$(awk -v ou="$overage_util" -v or_="$overage_reset" -v st="$status" -v now="$now" -v pi="$period_info" -v clk="$clock_fragment" -v chm="$chime_fragment" \
+            'BEGIN {
+                sp = sprintf("%.0f", ou * 100);
+                sr = (or_ - now) / 60; sr = sr > 0 ? sprintf("%.0f", sr) : 0;
+                # Extract tp, pd, rd from period_info JSON (simple regex)
+                tp = 0; pd = 30; rd = "";
+                match(pi, /"tp": *([0-9]+)/, a); if (RSTART) tp = a[1];
+                match(pi, /"pd": *([0-9]+)/, b); if (RSTART) pd = b[1];
+                match(pi, /"rd": *"([^"]+)"/, c); if (RSTART) rd = c[1];
+                printf "{\"s\":%s,\"sr\":%s,\"w\":0,\"wr\":0,\"st\":\"%s\",\"acct\":\"ent\",\"tp\":%s,\"pd\":%s,\"rd\":\"%s\"%s%s,\"ok\":true}", sp, sr, st, tp, pd, rd, clk, chm;
+            }')
+    fi
+
+    printf '%s' "$payload"
+    return 0
+}
+
+# Extract the integer session % ("s") from a built payload, or 0.
+_payload_session_pct() {
+    echo "$1" | grep -o '"s":[0-9]*' | head -1 | cut -d: -f2
+}
+
+# Poll every configured config dir, decide which plan is "active", and send
+# that plan's payload. "Active" = the plan whose session % rose most recently
+# (recent API activity); a rise stamps LAST_ACTIVE so the choice is sticky and
+# survives window resets (a drop to 0 isn't activity). Before any rise is seen
+# (startup), fall back to the plan with the highest current session %.
+poll() {
+    POLL_SEQ=$((POLL_SEQ + 1))
+
+    local -a dirs
+    mapfile -t dirs < <(read_config_dirs)
+
+    local -A cycle_payload cycle_s
+    local dir token payload s
+    for dir in "${dirs[@]}"; do
+        token=$(read_token_for "$dir")
+        if [ -z "$token" ]; then
+            log "No token in $dir; skipping"
+            continue
+        fi
+        payload=$(build_payload_for_token "$token") || { log "API call failed for $dir"; continue; }
+        [ -z "$payload" ] && continue
+        s=$(_payload_session_pct "$payload"); s=${s:-0}
+        cycle_payload["$dir"]="$payload"
+        cycle_s["$dir"]="$s"
+        # A rise in session % since the previous poll means this plan was just used.
+        if [ -n "${PREV_S[$dir]:-}" ] && (( s > PREV_S[$dir] )); then
+            LAST_ACTIVE["$dir"]=$POLL_SEQ
+        fi
+        PREV_S["$dir"]="$s"
+    done
+
+    if [ ${#cycle_payload[@]} -eq 0 ]; then
+        log "No usable config dir this cycle"
+        # Opt-in, rate-limited, never fatal (see nudge_token_refresh).
+        nudge_token_refresh
+        return 1
+    fi
+
+    # Pick the active dir: most recent activity wins; ties (and the no-activity
+    # startup case) broken by highest current session %.
+    local best_dir="" best_active=-1 best_s=-1 a
+    for dir in "${!cycle_payload[@]}"; do
+        a=${LAST_ACTIVE[$dir]:-0}
+        s=${cycle_s[$dir]}
+        if (( a > best_active )) || (( a == best_active && s > best_s )); then
+            best_active=$a; best_s=$s; best_dir=$dir
+        fi
+    done
+
+    if [ ${#dirs[@]} -gt 1 ]; then
+        log "Active plan: $best_dir (s=$best_s)"
+    fi
+    log "Sending: ${cycle_payload[$best_dir]}"
+    write_gatt "$RX_CHAR_PATH" "${cycle_payload[$best_dir]}" || { log "Write failed"; return 1; }
+    LAST_PAYLOAD="${cycle_payload[$best_dir]}"
+    LAST_PAYLOAD_TS=$(date +%s)
+    LAST_WRITE_TS=$LAST_PAYLOAD_TS
     return 0
 }
 
@@ -245,15 +648,23 @@ cleanup() {
 trap cleanup INT TERM
 
 log "=== Claude Usage Tracker Daemon (BLE) ==="
+POLL_INTERVAL=$(read_poll_interval)
 log "Poll interval: ${POLL_INTERVAL}s"
+HEARTBEAT_INTERVAL=$(read_heartbeat_interval)
+log "Heartbeat interval: ${HEARTBEAT_INTERVAL}s"
+if (( POLL_INTERVAL > 80 && HEARTBEAT_INTERVAL > 80 )); then
+    log "Warning: neither poll_interval nor heartbeat_interval is <= 80s; the firmware marks data stale after 90s"
+fi
 
 BACKOFF=1
 
 while true; do
-    # Find the device
+    # Find the device: only a device the system already knows (paired/connected).
+    # We never scan by name, so we can't grab a stranger's or the wrong nearby
+    # unit. Pair the device once first (it's a bonded BLE HID keyboard anyway).
     if ! load_mac; then
-        scan_for_device || {
-            log "Device not found, retrying in ${BACKOFF}s..."
+        find_system_device_mac || {
+            log "No paired/connected '$DEVICE_NAME'; waiting ${BACKOFF}s (not scanning)..."
             sleep "$BACKOFF"
             BACKOFF=$((BACKOFF < 60 ? BACKOFF * 2 : 60))
             continue
@@ -288,12 +699,24 @@ while true; do
     LAST_POLL=0
     while is_connected; do
         NOW=$(date +%s)
+        NEW_INTERVAL=$(read_poll_interval)
+        if (( NEW_INTERVAL != POLL_INTERVAL )); then
+            POLL_INTERVAL=$NEW_INTERVAL
+            log "Poll interval changed: ${POLL_INTERVAL}s"
+        fi
+        NEW_HB=$(read_heartbeat_interval)
+        if (( NEW_HB != HEARTBEAT_INTERVAL )); then
+            HEARTBEAT_INTERVAL=$NEW_HB
+            log "Heartbeat interval changed: ${HEARTBEAT_INTERVAL}s"
+        fi
         if [ -f "$REFRESH_FLAG" ] || (( NOW - LAST_POLL >= POLL_INTERVAL )); then
             if [ -f "$REFRESH_FLAG" ]; then
                 log "Refresh requested by device"
                 rm -f "$REFRESH_FLAG"
             fi
             poll && LAST_POLL=$NOW
+        elif (( HEARTBEAT_INTERVAL < POLL_INTERVAL && NOW - LAST_WRITE_TS >= HEARTBEAT_INTERVAL )); then
+            heartbeat
         fi
         sleep "$TICK"
     done

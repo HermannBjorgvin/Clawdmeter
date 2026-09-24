@@ -1,9 +1,12 @@
 #include "ui.h"
 #include "splash.h"
 #include <lvgl.h>
+#include <time.h>
 #include "logo.h"
+#include "clawd_still.h"
 #include "icons.h"
 #include "hal/board_caps.h"
+#include "theme.h"   // palette + font family, needed by compute_layout
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
@@ -14,7 +17,9 @@ LV_FONT_DECLARE(font_styrene_24);
 LV_FONT_DECLARE(font_styrene_20);
 LV_FONT_DECLARE(font_styrene_16);
 LV_FONT_DECLARE(font_styrene_14);
+LV_FONT_DECLARE(font_styrene_12);
 LV_FONT_DECLARE(font_mono_32);
+LV_FONT_DECLARE(font_mono_18);
 
 // Layout values computed from the active board's geometry. Populated once
 // in ui_init() and treated as const for the rest of the program. Adding a
@@ -32,6 +37,26 @@ struct Layout {
     int16_t usage_panel_gap;
     int16_t usage_bar_y;
     int16_t usage_reset_y;
+    int16_t bar_h;
+    int16_t panel_pad_x, panel_pad_y;
+    int16_t pill_pad_x, pill_pad_y;
+    const lv_font_t* title_font;     // screen title / clock
+    const lv_font_t* pct_font;       // big percentage number
+    const lv_font_t* ent_pct_font;   // enterprise spending number
+    const lv_font_t* pill_font;      // "Current" / "Weekly" pill
+    const lv_font_t* reset_font;     // "Resets in ..." line
+    const lv_font_t* pace_font;      // enterprise "Under/On/Over pace" line
+    const lv_font_t* anim_font;      // animated status line
+    int16_t anim_y;                  // status line offset from bottom
+    bool    small_icons;             // 40px logo + 24px battery (vs 80/48) on small screens
+    int16_t title_nudge;             // title x-shift balancing the corner logo
+    int16_t logo_y;                  // logo top edge
+    int16_t batt_y;                  // battery icon top edge
+    int16_t batt_w;                  // battery icon width, for position math
+
+    // Pairing hint / idle screen
+    int16_t pair_y1, pair_y2, pair_y3;
+    int16_t idle_px;                 // sleeping-creature size on the idle screen
 
     // Bluetooth screen
     int16_t bt_info_panel_h;
@@ -48,11 +73,45 @@ static Layout L = {};
 // existing boards happen to land on the two breakpoints below; new ports
 // inherit the closer one — visually OK, may need a polish pass for
 // pixel-perfect alignment but never blocks the port from booting.
+// Nearest sans at a comparable optical size. Styrene runs one nominal step
+// smaller than Tiempos because a grotesque's larger x-height reads as the same
+// size on the panel; matching the nominal number would look oversized.
+static const lv_font_t* sans_for(const lv_font_t* serif) {
+    if (serif == &font_tiempos_56) return &font_styrene_48;
+    if (serif == &font_tiempos_34) return &font_styrene_28;
+    return serif;
+}
+
 static void compute_layout(const BoardCaps& c) {
     L.scr_w = c.width;
     L.scr_h = c.height;
     L.margin = 20;
     L.title_y = 30;
+
+    // Values shared by the two original breakpoints; the small branch below
+    // overrides them wholesale.
+    L.bar_h = 24;
+    L.panel_pad_x = 16;
+    L.panel_pad_y = 12;
+    L.pill_pad_x = 18;
+    L.pill_pad_y = 6;
+    L.title_font   = &font_tiempos_56;
+    L.pct_font     = &font_styrene_48;
+    L.ent_pct_font = &font_tiempos_56;
+    L.pill_font    = &font_styrene_28;
+    L.reset_font   = &font_styrene_28;
+    L.pace_font    = &font_styrene_16;
+    L.anim_font    = &font_mono_32;
+    L.anim_y = -15;
+    L.small_icons = false;
+    L.title_nudge = 16;
+    L.logo_y = L.title_y - 10;
+    L.batt_y = L.title_y;
+    L.batt_w = ICON_BATTERY_W;
+    L.pair_y1 = 40;
+    L.pair_y2 = 120;
+    L.pair_y3 = 160;
+    L.idle_px = 160;
 
     if (c.height >= 460) {
         // Large layout — tuned for 480x480 (AMOLED-2.16).
@@ -68,7 +127,7 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_28;
         L.bt_credit_1_font = &font_styrene_24;
         L.bt_credit_2_font = &font_styrene_20;
-    } else {
+    } else if (c.height >= 300) {
         // Compact layout — tuned for 368x448 (AMOLED-1.8).
         L.content_y = 85;
         L.usage_panel_h = 130;
@@ -82,26 +141,86 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_20;
         L.bt_credit_1_font = &font_styrene_16;
         L.bt_credit_2_font = &font_styrene_14;
+    } else {
+        // Small layout — tuned for 240x240 (LCD-1.54 and similar square TFTs).
+        // Everything shrinks: fonts two steps down, panels ~half height, and
+        // the corner logo/battery switch to the 40px/24px small assets.
+        L.margin = 8;
+        L.title_y = 4;
+        L.content_y = 44;
+        L.usage_panel_h = 74;
+        L.usage_panel_gap = 6;
+        L.usage_bar_y = 30;
+        L.usage_reset_y = 46;
+        L.bar_h = 12;
+        L.panel_pad_x = 10;
+        L.panel_pad_y = 6;
+        L.pill_pad_x = 8;
+        L.pill_pad_y = 2;
+        L.title_font   = &font_tiempos_34;
+        L.pct_font     = &font_styrene_24;
+        L.ent_pct_font = &font_tiempos_34;
+        L.pill_font    = &font_styrene_14;
+        L.reset_font   = &font_styrene_14;
+        L.pace_font    = &font_styrene_12;
+        L.anim_font    = &font_mono_18;
+        // Center the status line in the strip below the weekly panel; flush
+        // against the bottom edge it reads as unevenly spaced.
+        L.anim_y = -10;
+        L.small_icons = true;
+        L.title_nudge = 8;
+        L.logo_y = 2;
+        L.batt_y = 10;
+        L.batt_w = ICON_BATTERY_SMALL_W;
+        L.pair_y1 = 12;
+        L.pair_y2 = 56;
+        L.pair_y3 = 80;
+        L.idle_px = 96;
+        L.bt_info_panel_h = 90;
+        L.bt_reset_zone_h = 60;
+        L.bt_title_font    = &font_tiempos_34;
+        L.bt_status_font   = &font_styrene_20;
+        L.bt_device_font   = &font_styrene_14;
+        L.bt_credit_1_font = &font_styrene_12;
+        L.bt_credit_2_font = &font_styrene_12;
     }
 
     L.content_w = L.scr_w - 2 * L.margin;
+
+    // Sans-only themes: the layout above picked sizes, this picks the family.
+    // Only the three display slots are serif; everything else is already
+    // Styrene or Mono.
+    if (theme().sans_only) {
+        L.title_font    = sans_for(L.title_font);
+        L.ent_pct_font  = sans_for(L.ent_pct_font);
+        L.bt_title_font = sans_for(L.bt_title_font);
+    }
 }
 
-// Anthropic brand palette — design tokens live in theme.h
-#include "theme.h"
-#define COL_BG        THEME_BG
-#define COL_PANEL     THEME_PANEL
-#define COL_TEXT      THEME_TEXT
-#define COL_DIM       THEME_DIM
-#define COL_ACCENT    THEME_ACCENT
-#define COL_GREEN     THEME_GREEN
-#define COL_AMBER     THEME_AMBER
-#define COL_RED       THEME_RED
-#define COL_BAR_BG    THEME_BAR_BG
+// Design tokens live in theme.h (included above, before compute_layout).
+// Resolved against the active provider palette at each use, so a mode switch
+// only needs a restyle pass rather than a rebuild.
+#define COL_BG        lv_color_hex(theme().bg)
+#define COL_PANEL     lv_color_hex(theme().panel)
+#define COL_TEXT      lv_color_hex(theme().text)
+#define COL_DIM       lv_color_hex(theme().dim)
+#define COL_ACCENT    lv_color_hex(theme().accent)
+#define COL_GREEN     lv_color_hex(theme().green)
+#define COL_AMBER     lv_color_hex(theme().amber)
+#define COL_RED       lv_color_hex(theme().red)
+#define COL_BAR_BG    lv_color_hex(theme().bar_bg)
+#define COL_PROGRESS  lv_color_hex(theme().progress)
+#define COL_SCOPED    lv_color_hex(theme().scoped)
 
 // ---- Usage screen widgets (single non-splash view) ----
 static lv_obj_t* usage_container;
 static lv_obj_t* lbl_title;
+// Clock fed by the daemon: base epoch (local wall-clock seconds) + the lv_tick at
+// which it landed, so the title ticks forward locally between 60s payloads.
+static long     clock_base_epoch = 0;
+static uint32_t clock_base_ms = 0;
+static int      clock_fmt = 24;   // 12 or 24, set from the daemon payload
+static int      clock_last_min = -1;   // last rendered minute; avoids redrawing the title every tick
 static lv_obj_t* usage_group;   // the two usage panels — shown when connected
 static lv_obj_t* pair_group;    // pairing hint — shown when disconnected
 static lv_obj_t* bar_session;
@@ -109,10 +228,34 @@ static lv_obj_t* lbl_session_pct;
 static lv_obj_t* lbl_session_label;
 static lv_obj_t* lbl_session_reset;
 static lv_obj_t* bar_weekly;
+static lv_obj_t* credit_cells[MAX_CREDIT_CELLS];
 static lv_obj_t* lbl_weekly_pct;
 static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
+static lv_obj_t* panel_session = nullptr;
+static lv_obj_t* panel_weekly = nullptr;
+// Weekly-card face rotation — accounts with weekly scoped-model limits
+// (today: Fable) rotate the Weekly card through 1+N faces: the classic
+// all-models face, then one face per scoped model (pill = the model's own
+// label from the payload; Fable fills blue, unrecognized models fill the
+// theme grey), switching in step with the status ticker's word change so the
+// screen feels coordinated. All weekly limits reset at the same instant, so
+// the reset line is truthful on every face. Without scoped limits the card
+// never rotates and renders exactly as it always has.
+static float cached_weekly_pct = 0;     // last payload's weekly (all-models) %
+static int   cached_weekly_reset = -1;  // last payload's weekly reset minutes
+static int   cached_scoped_count = 0;   // scoped models in the last payload; 0 = none
+static ScopedWeekly cached_scoped[MAX_SCOPED_WEEKLY];
+static int   weekly_face = 0;           // 0 = all models, i>0 = cached_scoped[i-1]
+static bool  cached_has_weekly = true;  // false = provider does not meter this window
+static char  cached_weekly_label[13] = "";   // provider pill override, "" = default
+// Enterprise-only widgets inside panel_session
+static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
+static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
+static lv_obj_t* lbl_spending_status = nullptr;   // "Under pace" / "On pace" / "Over pace"
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
+static char      hint_text[24] = "";   // transient override of the status line
+static uint32_t  hint_until_ms = 0;
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
@@ -190,22 +333,33 @@ static const char* const anim_messages[] = {
 };
 #define ANIM_MSG_COUNT (sizeof(anim_messages) / sizeof(anim_messages[0]))
 
+// A bar goes amber only once the quota is genuinely worth acting on. The old
+// 50%% cut fired halfway through a session, which trained you to ignore it.
+#define WARN_PCT 75.0f
+#define CRIT_PCT 90.0f
+
 static lv_color_t pct_color(float pct) {
-    if (pct >= 80.0f) return COL_RED;
-    if (pct >= 50.0f) return COL_AMBER;
-    return COL_GREEN;
+    if (pct >= CRIT_PCT) return COL_RED;
+    if (pct >= WARN_PCT) return COL_AMBER;
+    return COL_PROGRESS;
 }
 
-static void format_reset_time(int mins, char* buf, size_t len) {
+// "<verb> in 4d 21h": one formatter for every countdown on the screen, so a
+// quota's reset and a credit's expiry read as the same kind of line.
+static void format_countdown(const char* verb, int mins, char* buf, size_t len) {
     if (mins < 0) {
         snprintf(buf, len, "---");
     } else if (mins < 60) {
-        snprintf(buf, len, "Resets in %dm", mins);
+        snprintf(buf, len, "%s in %dm", verb, mins);
     } else if (mins < 1440) {
-        snprintf(buf, len, "Resets in %dh %dm", mins / 60, mins % 60);
+        snprintf(buf, len, "%s in %dh %dm", verb, mins / 60, mins % 60);
     } else {
-        snprintf(buf, len, "Resets in %dd %dh", mins / 1440, (mins % 1440) / 60);
+        snprintf(buf, len, "%s in %dd %dh", verb, mins / 1440, (mins % 1440) / 60);
     }
+}
+
+static void format_reset_time(int mins, char* buf, size_t len) {
+    format_countdown("Resets", mins, buf, len);
 }
 
 // Forward decls — callbacks defined near ui_show_screen below
@@ -219,10 +373,10 @@ static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(panel, 8, 0);
     lv_obj_set_style_border_width(panel, 0, 0);
-    lv_obj_set_style_pad_left(panel, 16, 0);
-    lv_obj_set_style_pad_right(panel, 16, 0);
-    lv_obj_set_style_pad_top(panel, 12, 0);
-    lv_obj_set_style_pad_bottom(panel, 12, 0);
+    lv_obj_set_style_pad_left(panel, L.panel_pad_x, 0);
+    lv_obj_set_style_pad_right(panel, L.panel_pad_x, 0);
+    lv_obj_set_style_pad_top(panel, L.panel_pad_y, 0);
+    lv_obj_set_style_pad_bottom(panel, L.panel_pad_y, 0);
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(panel, LV_OBJ_FLAG_EVENT_BUBBLE);
     return panel;
@@ -255,19 +409,27 @@ static void init_icon_dsc_rgb565a8(lv_image_dsc_t* dsc, int w, int h, const uint
 static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_font(lbl, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl, L.pill_font, 0);
     lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
     lv_obj_set_style_bg_color(lbl, COL_BAR_BG, 0);
     lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(lbl, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_pad_left(lbl, 18, 0);
-    lv_obj_set_style_pad_right(lbl, 18, 0);
-    lv_obj_set_style_pad_top(lbl, 6, 0);
-    lv_obj_set_style_pad_bottom(lbl, 6, 0);
+    lv_obj_set_style_pad_left(lbl, L.pill_pad_x, 0);
+    lv_obj_set_style_pad_right(lbl, L.pill_pad_x, 0);
+    lv_obj_set_style_pad_top(lbl, L.pill_pad_y, 0);
+    lv_obj_set_style_pad_bottom(lbl, L.pill_pad_y, 0);
     return lbl;
 }
 
 static void init_battery_icons(void) {
+    if (L.small_icons) {
+        init_icon_dsc_rgb565a8(&battery_dscs[0], ICON_BATTERY_SMALL_W, ICON_BATTERY_SMALL_H, icon_battery_small_data);
+        init_icon_dsc_rgb565a8(&battery_dscs[1], ICON_BATTERY_LOW_SMALL_W, ICON_BATTERY_LOW_SMALL_H, icon_battery_low_small_data);
+        init_icon_dsc_rgb565a8(&battery_dscs[2], ICON_BATTERY_MEDIUM_SMALL_W, ICON_BATTERY_MEDIUM_SMALL_H, icon_battery_medium_small_data);
+        init_icon_dsc_rgb565a8(&battery_dscs[3], ICON_BATTERY_FULL_SMALL_W, ICON_BATTERY_FULL_SMALL_H, icon_battery_full_small_data);
+        init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_SMALL_W, ICON_BATTERY_CHARGING_SMALL_H, icon_battery_charging_small_data);
+        return;
+    }
     init_icon_dsc_rgb565a8(&battery_dscs[0], ICON_BATTERY_W, ICON_BATTERY_H, icon_battery_data);
     init_icon_dsc_rgb565a8(&battery_dscs[1], ICON_BATTERY_LOW_W, ICON_BATTERY_LOW_H, icon_battery_low_data);
     init_icon_dsc_rgb565a8(&battery_dscs[2], ICON_BATTERY_MEDIUM_W, ICON_BATTERY_MEDIUM_H, icon_battery_medium_data);
@@ -277,27 +439,30 @@ static void init_battery_icons(void) {
 
 // ======== Usage Screen ========
 
-static void make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
-                             lv_obj_t** out_pct, lv_obj_t** out_pill,
-                             lv_obj_t** out_bar, lv_obj_t** out_reset) {
+static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
+                                  lv_obj_t** out_pct, lv_obj_t** out_pill,
+                                  lv_obj_t** out_bar, lv_obj_t** out_reset) {
     lv_obj_t* panel = make_panel(parent, L.margin, y, L.content_w, L.usage_panel_h);
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "---%");
-    lv_obj_set_style_text_font(*out_pct, &font_styrene_48, 0);
+    lv_obj_set_style_text_font(*out_pct, L.pct_font, 0);
     lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
     lv_obj_set_pos(*out_pct, 0, 0);
 
     *out_pill = make_pill(panel, pill_text);
     lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
 
-    *out_bar = make_bar(panel, 0, L.usage_bar_y, L.content_w - 32, 24);
+    *out_bar = make_bar(panel, 0, L.usage_bar_y,
+                        L.content_w - 2 * L.panel_pad_x, L.bar_h);
 
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
-    lv_obj_set_style_text_font(*out_reset, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(*out_reset, L.reset_font, 0);
     lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
     lv_obj_set_pos(*out_reset, 0, L.usage_reset_y);
+
+    return panel;
 }
 
 // Pairing hint — shown when disconnected so the screen isn't empty and the
@@ -316,19 +481,19 @@ static void build_pair_group(lv_obj_t* parent) {
     lv_label_set_text(l1, "To pair");
     lv_obj_set_style_text_font(l1, L.bt_status_font, 0);
     lv_obj_set_style_text_color(l1, COL_TEXT, 0);
-    lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, L.pair_y1);
 
     lv_obj_t* l2 = lv_label_create(pair_group);
     lv_label_set_text(l2, "hold the power button");
     lv_obj_set_style_text_font(l2, L.bt_device_font, 0);
     lv_obj_set_style_text_color(l2, COL_DIM, 0);
-    lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, 120);
+    lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, L.pair_y2);
 
     lv_obj_t* l3 = lv_label_create(pair_group);
     lv_label_set_text(l3, "for 3 seconds, then release");
     lv_obj_set_style_text_font(l3, L.bt_device_font, 0);
     lv_obj_set_style_text_color(l3, COL_DIM, 0);
-    lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, 160);
+    lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, L.pair_y3);
 
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);  // ui_update_ble_status decides
 }
@@ -346,10 +511,10 @@ static void build_idle_group(lv_obj_t* parent) {
     lv_obj_clear_flag(idle_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    // A shrunk-down sleeping creature (reused claudepix "expression sleep" art)
+    // A shrunk-down resting creature (the official cloud-ride animation)
     // sits between the header and the status line; the animated "Listening…"
     // status line carries the words, so no extra text is needed here.
-    lv_obj_t* creature = splash_mini_create(idle_group, "expression sleep", 160);
+    lv_obj_t* creature = splash_mini_create(idle_group, "cloud", L.idle_px);
     if (creature) lv_obj_align(creature, LV_ALIGN_CENTER, 0, -20);
 
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
@@ -367,9 +532,11 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
-    lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+    // The nudge balances the corner logo on the left; smaller on small
+    // screens where the logo is 40px and the battery icon sits closer.
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, L.title_nudge, L.title_y);
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
@@ -382,13 +549,44 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    make_usage_panel(usage_group, L.content_y, "Current",
+    panel_session = make_usage_panel(usage_group, L.content_y, "Current",
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
-    make_usage_panel(usage_group,
+
+    // Enterprise-only overlays inside panel_session — hidden until enterprise data arrives
+    lbl_session_pct_sym = lv_label_create(panel_session);
+    lv_label_set_text(lbl_session_pct_sym, "%");
+    lv_obj_set_style_text_font(lbl_session_pct_sym, L.reset_font, 0);
+    lv_obj_set_style_text_color(lbl_session_pct_sym, COL_TEXT, 0);
+    lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
+
+    lbl_spending_desc = lv_label_create(panel_session);
+    lv_label_set_text(lbl_spending_desc, "of your monthly budget");
+    lv_obj_set_style_text_font(lbl_spending_desc, L.reset_font, 0);
+    lv_obj_set_style_text_color(lbl_spending_desc, COL_DIM, 0);
+    lv_obj_set_pos(lbl_spending_desc, 0, L.usage_reset_y);
+    lv_obj_add_flag(lbl_spending_desc, LV_OBJ_FLAG_HIDDEN);
+
+    lbl_spending_status = lv_label_create(panel_session);
+    lv_label_set_text(lbl_spending_status, "");
+    lv_obj_set_style_text_font(lbl_spending_status, L.pace_font, 0);
+    lv_obj_set_pos(lbl_spending_status, 0, L.usage_reset_y + 20);
+    lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
+
+    panel_weekly = make_usage_panel(usage_group,
                      L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
                      &lbl_weekly_pct, &lbl_weekly_label,
                      &bar_weekly, &lbl_weekly_reset);
+    // Recolor enabled so enterprise period box can color pace and reset separately
+    lv_label_set_recolor(lbl_weekly_reset, true);
+
+    // Reset-credit cells occupy the bar's row on a card showing grants. Built
+    // up front and hidden; render_credit_card() sizes them once the count is
+    // known, and only a provider that grants credits ever shows them.
+    for (int i = 0; i < MAX_CREDIT_CELLS; i++) {
+        credit_cells[i] = make_bar(panel_weekly, 0, L.usage_bar_y, L.bar_h, L.bar_h);
+        lv_obj_add_flag(credit_cells[i], LV_OBJ_FLAG_HIDDEN);
+    }
 
     build_pair_group(usage_container);
     build_idle_group(usage_container);
@@ -396,9 +594,136 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
-    lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
-    lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
-    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+    lv_obj_set_style_text_font(lbl_anim, L.anim_font, 0);
+    // A healthy link should be discoverable, not attention-seeking. The
+    // whimsical line is part of Claude's character so it keeps the accent;
+    // a quiet theme drops the status to secondary text.
+    lv_obj_set_style_text_color(lbl_anim,
+                                theme().quiet_status ? COL_DIM : COL_ACCENT, 0);
+    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
+}
+
+// Reset credits on the Weekly card, as a ledger of the provider's own
+// trailing window rather than a live count: one cell per credit the window
+// handed out, filled while you still hold it and hollow once it is spent,
+// headed by the total. So the card answers both questions a use-it-or-lose-it
+// grant raises -- how many did I get, how many are left -- in one read, and
+// the answer to the second is just the length of the lit run.
+//
+// Cells are binary on purpose. An earlier version filled each one by how much
+// of its lifetime remained, which made every cell a percentage nobody thinks
+// in and, worse, drained toward red while the quota bar directly above filled
+// toward red. The clock that matters -- when the next one lapses -- is one
+// line down, in the same "in 4d 21h" form the quota card uses.
+static void render_credit_card(const UsageData* data) {
+    const int held = data->reset_credits;
+    const int used = data->reset_credits_used;
+    int total = held + used;
+    if (total > MAX_CREDIT_CELLS) total = MAX_CREDIT_CELLS;
+
+    lv_label_set_text_fmt(lbl_weekly_pct, "%d", held + used);
+    lv_label_set_text(lbl_weekly_label, "Resets");
+    if (bar_weekly) lv_obj_add_flag(bar_weekly, LV_OBJ_FLAG_HIDDEN);
+
+    const int row_w = L.content_w - 2 * L.panel_pad_x;
+    const int gap   = L.small_icons ? 4 : 8;
+    const int span  = row_w - gap * (total - 1);
+    const int base  = (total > 0) ? span / total : 0;
+    // Integer division would leave up to total-1 px of slack and the row would
+    // stop short of the bar on the card above. Hand the remainder out a pixel
+    // at a time instead.
+    const int extra = (total > 0) ? span - base * total : 0;
+
+    int x = 0;
+    for (int i = 0; i < MAX_CREDIT_CELLS; i++) {
+        lv_obj_t* cell = credit_cells[i];
+        if (!cell) continue;
+        if (i >= total) {
+            lv_obj_add_flag(cell, LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        const int w = base + (i < extra ? 1 : 0);
+        lv_obj_invalidate(cell);           // PARTIAL mode: clear the old cell
+        lv_obj_set_pos(cell, x, L.usage_bar_y);
+        lv_obj_set_size(cell, w, L.bar_h);
+        x += w + gap;
+
+        // Held first, so the lit run reads as "what I can still spend"; spent
+        // ones fall in behind it as empty slots.
+        lv_bar_set_value(cell, i < held ? 100 : 0, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(cell, COL_BAR_BG, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(cell, COL_PROGRESS, LV_PART_INDICATOR);
+        lv_obj_clear_flag(cell, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_invalidate(cell);
+    }
+
+    char buf[48];
+    const int mins = data->reset_credits_exp_mins;
+    if (held == 0) {
+        // Nothing to spend and nothing to count down to. Say so rather than
+        // leaving the line blank, which reads as a value that failed to load.
+        lv_label_set_text(lbl_weekly_reset, "All used");
+    } else if (mins >= 0) {
+        const char* verb = held > 1 ? "Next expires" : "Expires";
+        // Whole days above a day: a 30-day grant is spent on a scale of days,
+        // and "11d 3h" is both noise and too wide for the 368 px boards.
+        if (mins >= 1440) snprintf(buf, sizeof(buf), "%s in %dd", verb, mins / 1440);
+        else              format_countdown(verb, mins, buf, sizeof(buf));
+        lv_label_set_text(lbl_weekly_reset, buf);
+    } else {
+        lv_label_set_text(lbl_weekly_reset, "Available");
+    }
+    lv_obj_set_pos(lbl_weekly_reset, 0, L.usage_reset_y);
+}
+
+// The Weekly card carries credits only when there is no second quota to draw
+// and the window actually handed some out -- spent ones included, since "2,
+// both used" is a real state worth showing.
+static bool has_credits(const UsageData* data) {
+    return !data->has_weekly &&
+           (data->reset_credits > 0 || data->reset_credits_used > 0);
+}
+
+static void hide_credit_cells(void) {
+    for (int i = 0; i < MAX_CREDIT_CELLS; i++)
+        if (credit_cells[i]) lv_obj_add_flag(credit_cells[i], LV_OBJ_FLAG_HIDDEN);
+}
+
+// Draw the Weekly card's current face from the cached payload values. Face 0
+// is byte-for-byte today's rendering; scoped faces swap the number, relabel
+// the pill with the model's own label and fill the bar in THEME_BLUE for
+// Fable or the theme grey for a scoped model this firmware doesn't know.
+// The reset line is identical on every face (all weekly limits reset
+// together). Face flips pass animate=false so the bar snaps rather than
+// sliding 95→73→95 every few seconds.
+static void render_weekly_face(bool animate) {
+    int idx = (weekly_face > cached_scoped_count) ? 0 : weekly_face;
+    bool scoped = idx > 0;
+    const ScopedWeekly* s = scoped ? &cached_scoped[idx - 1] : nullptr;
+    float pct = scoped ? s->pct : cached_weekly_pct;
+    int p = (int)(pct + 0.5f);
+
+    // The all-models face is the only one a provider can leave unmetered; a
+    // scoped face exists precisely because that model has a quota.
+    const bool have = scoped || cached_has_weekly;
+
+    // Pill text, in order of specificity: the scoped model's own name, then a
+    // provider override ("Overall" when the panel above shows one model's
+    // slice), then the default.
+    lv_label_set_text(lbl_weekly_label,
+                      scoped              ? s->name
+                    : cached_weekly_label[0] ? cached_weekly_label
+                                             : "Weekly");
+    if (have) lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", p);
+    else      lv_label_set_text(lbl_weekly_pct, "-");
+    lv_bar_set_value(bar_weekly, have ? p : 0, animate ? LV_ANIM_ON : LV_ANIM_OFF);
+    lv_color_t fill = !scoped ? pct_color(cached_weekly_pct)
+                    : (strncmp(s->name, "Fable", 5) == 0) ? COL_SCOPED
+                    : COL_DIM;
+    lv_obj_set_style_bg_color(bar_weekly, fill, LV_PART_INDICATOR);
+    char buf[48];
+    format_reset_time(cached_weekly_reset, buf, sizeof(buf));
+    lv_label_set_text(lbl_weekly_reset, have ? buf : "");
 }
 
 // ======== Public API ========
@@ -410,7 +735,11 @@ void ui_init(void) {
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-    init_icon_dsc_rgb565a8(&logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data);
+#ifndef BOARD_HAS_PSRAM
+    // Static corner mascot (see clawd_still.h) — the animated one needs PSRAM.
+    if (L.small_icons) init_icon_dsc_rgb565a8(&logo_dsc, CLAWD_STILL_SMALL_W, CLAWD_STILL_SMALL_H, clawd_still_small_data);
+    else               init_icon_dsc_rgb565a8(&logo_dsc, CLAWD_STILL_W, CLAWD_STILL_H, clawd_still_data);
+#endif
     init_battery_icons();
 
     init_usage_screen(scr);
@@ -420,14 +749,34 @@ void ui_init(void) {
         lv_obj_add_event_cb(splash_get_root(), global_click_cb, LV_EVENT_CLICKED, NULL);
     }
 
-    logo_img = lv_image_create(scr);
-    lv_image_set_src(logo_img, &logo_dsc);
-    lv_obj_set_pos(logo_img, L.margin, L.title_y - 10);
+    // Corner mascot in the old logo slot. The still Clawd is shorter than the
+    // 80/40 px slot the spark logo used; center it vertically in that slot.
+    {
+        const int slot  = L.small_icons ? LOGO_SMALL_HEIGHT : LOGO_HEIGHT;
+        const int art_h = L.small_icons ? CLAWD_STILL_SMALL_H : CLAWD_STILL_H;
+        const int top   = L.logo_y + (slot - art_h) / 2;
+#ifdef BOARD_HAS_PSRAM
+        // Animated: idles, does acts, and takes walk-off/lurk trips.
+        // The mascot fits itself to the slot, and refits when the art set
+        // changes: Codey stands about twice as tall in art cells as Clawd.
+        splash_mascot_create(scr, L.margin, top + art_h, slot,
+                             L.small_icons ? 2 : 3);
+#else
+        logo_img = lv_image_create(scr);
+        lv_image_set_src(logo_img, &logo_dsc);
+        lv_obj_set_pos(logo_img, L.margin, top);
+#endif
+    }
 
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
-    lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
-
+    lv_obj_set_pos(battery_img, L.scr_w - L.batt_w - L.margin, L.batt_y);
+    // Boards without battery telemetry never show the indicator (per the HAL
+    // contract; previously every board drew the empty-battery glyph).
+    if (!board_caps().has_battery) {
+        lv_obj_del(battery_img);
+        battery_img = nullptr;
+    }
 }
 
 void ui_update(const UsageData* data) {
@@ -437,23 +786,126 @@ void ui_update(const UsageData* data) {
     last_data_ms = lv_tick_get();   // a real usage update just landed
     data_received = true;
 
+    if (data->clock_epoch > 0) {    // daemon supplied wall-clock time → drive the title clock
+        clock_base_epoch = data->clock_epoch;
+        clock_base_ms = last_data_ms;
+        clock_fmt = data->clock_fmt;
+    } else if (clock_base_epoch != 0) {   // clock turned off daemon-side → revert title to "Usage"
+        clock_base_epoch = 0;
+        clock_last_min = -1;
+        lv_label_set_text(lbl_title, "Usage");
+    }
+
     int s_pct = (int)(data->session_pct + 0.5f);
 
-    lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
-    lv_bar_set_value(bar_session, s_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
+    if (data->enterprise) {
+        // Spending box: big number-only label + small "%" symbol + desc + pace
+        lv_obj_set_style_text_font(lbl_session_pct, L.ent_pct_font, 0);
+        lv_label_set_text(lbl_session_label, "Spending");
+        hide_credit_cells();         // the Weekly card is a period box here
+        if (bar_weekly) lv_obj_clear_flag(bar_weekly, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_spending_status,   LV_OBJ_FLAG_HIDDEN);
+        if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_set_style_text_font(lbl_session_pct, L.pct_font, 0);
+        // A model-specific quota is not "Current" -- name it, so the two
+        // panels are not read as two windows onto the same limit. Codex sends
+        // "Spark"/"Overall" here, since both of its panels are weekly windows
+        // and only the scope distinguishes them.
+        lv_label_set_text(lbl_session_label,
+                          data->session_model[0] ? data->session_model : "Current");
+        // The weekly pill belongs to render_weekly_face(), which flips between
+        // the all-models face and any scoped-model faces and runs after this.
+        lv_obj_clear_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
+        // A provider with only one quota leaves the second card with nothing to
+        // show. Rather than draw a card whose only content is a dash -- which
+        // reads as a fault -- give the space to reset credits when the provider
+        // grants them, and drop the card entirely when it does not.
+        const bool show_credits = has_credits(data);
+        if (panel_weekly) {
+            if (data->has_weekly || show_credits)
+                lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+            else
+                lv_obj_add_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (show_credits) {
+            render_credit_card(data);
+        } else {
+            hide_credit_cells();
+            if (bar_weekly) lv_obj_clear_flag(bar_weekly, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(lbl_weekly_reset, 0, L.usage_reset_y);
+        }
+    }
 
     char buf[48];
-    format_reset_time(data->session_reset_mins, buf, sizeof(buf));
-    lv_label_set_text(lbl_session_reset, buf);
 
-    int w_pct = (int)(data->weekly_pct + 0.5f);
-    lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
-    lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
+    // Pace vars used in both enterprise blocks below
+    const char* pace_text = "Under pace";
+    lv_color_t  pace_color = COL_GREEN;
+    const char* pace_hex   = "788c5d";   // matches THEME_GREEN
+    if (data->session_pct > (float)data->time_pct + 15.0f) {
+        pace_text = "Over pace";  pace_color = COL_RED;   pace_hex = "c0392b";
+    } else if (data->session_pct > (float)data->time_pct - 15.0f) {
+        pace_text = "On pace";    pace_color = COL_AMBER; pace_hex = "d97757";
+    }
 
-    format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
-    lv_label_set_text(lbl_weekly_reset, buf);
+    if (data->enterprise) {
+        lv_label_set_text_fmt(lbl_session_pct, "%d", s_pct);
+        lv_obj_align_to(lbl_session_pct_sym, lbl_session_pct,
+                        LV_ALIGN_OUT_RIGHT_TOP, 4, 12);
+    } else {
+        if (data->has_session) lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
+        // Plain ASCII hyphen, not an em dash: the Styrene faces are subset to
+        // U+0020..U+007E, so anything typographic renders as tofu.
+        else                   lv_label_set_text(lbl_session_pct, "-");
+        format_reset_time(data->session_reset_mins, buf, sizeof(buf));
+        lv_label_set_text(lbl_session_reset, data->has_session ? buf : "");
+    }
+
+    lv_bar_set_value(bar_session, data->has_session ? s_pct : 0, LV_ANIM_ON);
+    lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
+
+    // Weekly scoped-model limits — only some plans have them. The sentinel is
+    // key-absence (count 0), never 0%: 0% used is a real reading. Cache the
+    // weekly numbers so ui_tick_anim can redraw the card's other faces
+    // between payloads; with no scoped limits the face pins to classic Weekly
+    // and the card renders exactly as it always has.
+    if (data->enterprise) {
+        cached_scoped_count = 0;
+    } else {
+        cached_weekly_pct = data->weekly_pct;
+        cached_weekly_reset = data->weekly_reset_mins;
+        cached_has_weekly = data->has_weekly;
+        strlcpy(cached_weekly_label, data->weekly_model, sizeof(cached_weekly_label));
+        cached_scoped_count = data->scoped_weekly_count;
+        for (int i = 0; i < cached_scoped_count; i++) cached_scoped[i] = data->scoped_weekly[i];
+    }
+    if (weekly_face > cached_scoped_count) weekly_face = 0;
+
+    if (data->enterprise) {
+        // Period box: time % + dynamic pace color + "Resets <date>" label
+        lv_label_set_text(lbl_weekly_label, "Period");
+        lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", data->time_pct);
+        lv_bar_set_value(bar_weekly, data->time_pct, LV_ANIM_ON);
+        lv_color_t bar_pace = (data->session_pct <= (float)data->time_pct) ? COL_PROGRESS :
+                              (data->session_pct <= (float)data->time_pct + 15.0f) ? COL_AMBER :
+                              COL_RED;
+        lv_obj_set_style_bg_color(bar_weekly, bar_pace, LV_PART_INDICATOR);
+        snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Resets %s#",
+                 pace_hex, pace_text, data->reset_date);
+        lv_label_set_text(lbl_weekly_reset, buf);
+    } else if (!has_credits(data)) {
+        // render_weekly_face() owns these same labels and runs after the
+        // branch above, so it has to stand down when that branch has filled
+        // the card with reset credits instead of a quota.
+        render_weekly_face(true);
+    }
 }
 
 // Pick the usage-view sub-screen: pairing hint (BLE down), the idle "Zzz" screen
@@ -486,10 +938,42 @@ void ui_tick_anim(void) {
 
     uint32_t now = lv_tick_get();
 
+    // Title clock: once the daemon has sent wall-clock time, replace "Usage" with
+    // the live time, advanced locally so it ticks every minute between payloads.
+    if (clock_base_epoch > 0) {
+        time_t cur = (time_t)(clock_base_epoch + (now - clock_base_ms) / 1000);
+        struct tm tmv;
+        gmtime_r(&cur, &tmv);   // epoch is already local wall-clock → gmtime keeps it as-is
+        if (tmv.tm_min != clock_last_min) {   // only rewrite the title when the minute changes
+            clock_last_min = tmv.tm_min;
+            char tbuf[12];
+            if (clock_fmt == 12) {
+                int h12 = tmv.tm_hour % 12;
+                if (h12 == 0) h12 = 12;
+                snprintf(tbuf, sizeof(tbuf), "%d:%02d %s", h12, tmv.tm_min,
+                         tmv.tm_hour < 12 ? "AM" : "PM");
+            } else {
+                snprintf(tbuf, sizeof(tbuf), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+            }
+            lv_label_set_text(lbl_title, tbuf);
+        }
+    }
+
     if (now - anim_msg_start >= ANIM_MSG_MS) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
         anim_msg_start = now;
+        // Accounts with weekly scoped-model limits rotate the Weekly card's
+        // face in step with the ticker word, so the screen changes together.
+        if (cached_scoped_count > 0 && view_state == 2) {
+            weekly_face = (weekly_face + 1) % (cached_scoped_count + 1);
+            render_weekly_face(false);
+        }
     }
+
+    // A hint owns the line until it lapses; the ticker keeps running
+    // underneath so the spinner does not visibly jump when it resumes.
+    if (hint_until_ms && (int32_t)(hint_until_ms - now) > 0) return;
+    hint_until_ms = 0;
 
     if (now - anim_last_ms < spinner_ms[anim_spinner_idx]) return;
     anim_last_ms = now;
@@ -506,13 +990,24 @@ void ui_tick_anim(void) {
     } else if (now - connected_at_ms < 5000) {
         text = "Connected";
     } else {
-        text = anim_messages[anim_msg_idx];
+        // A settled, connected link is a steady state, so a quiet theme just
+        // says so. The rotating gerunds stay with the theme they belong to.
+        text = theme().quiet_status ? "Connected" : anim_messages[anim_msg_idx];
     }
 
-    // All states share the whimsical style: "<glyph> <Title-case word>…"
     static char buf[80];
-    snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6",
-             spinner_frames[anim_spinner_idx], text);
+    if (theme().quiet_status) {
+        // The glyph keeps animating even when connected. A frozen indicator on
+        // a desk display reads as a hung device, and liveness is the one thing
+        // this line genuinely has to convey -- the spec's "do not animate when
+        // connected" is about the trailing "…", which claims work is in
+        // progress. That is dropped; the pulse stays.
+        snprintf(buf, sizeof(buf), "%s %s", spinner_frames[anim_spinner_idx], text);
+    } else {
+        // "<glyph> <Title-case word>…"
+        snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6",
+                 spinner_frames[anim_spinner_idx], text);
+    }
     lv_label_set_text(lbl_anim, buf);
 }
 
@@ -539,6 +1034,7 @@ void ui_show_screen(screen_t screen) {
     default: break;
     }
 
+    splash_mascot_set_visible(screen != SCREEN_SPLASH);
     if (logo_img) {
         if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
         else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
@@ -568,7 +1064,59 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
     update_view_state();
 }
 
+void ui_flash_hint(const char* text, uint32_t ms) {
+    if (!lbl_anim) return;
+    strlcpy(hint_text, text, sizeof(hint_text));
+    hint_until_ms = millis() + ms;
+    lv_label_set_text(lbl_anim, hint_text);
+}
+
+void ui_apply_theme(void) {
+    // Fonts are part of the theme, and compute_layout() resolves them, so the
+    // layout has to be recomputed before anything is restyled.
+    compute_layout(board_caps());
+    if (lbl_title) lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
+
+    lv_obj_set_style_bg_color(lv_screen_active(), COL_BG, 0);
+    if (splash_get_root()) lv_obj_set_style_bg_color(splash_get_root(), COL_BG, 0);
+
+    lv_obj_t* panels[] = { panel_session, panel_weekly };
+    for (unsigned i = 0; i < sizeof(panels) / sizeof(panels[0]); i++)
+        if (panels[i]) lv_obj_set_style_bg_color(panels[i], COL_PANEL, 0);
+
+    lv_obj_t* bars[] = { bar_session, bar_weekly };
+    for (unsigned i = 0; i < sizeof(bars) / sizeof(bars[0]); i++)
+        if (bars[i]) lv_obj_set_style_bg_color(bars[i], COL_BAR_BG, LV_PART_MAIN);
+    for (int i = 0; i < MAX_CREDIT_CELLS; i++)
+        if (credit_cells[i])
+            lv_obj_set_style_bg_color(credit_cells[i], COL_BAR_BG, LV_PART_MAIN);
+
+    // Pills: text over the track color.
+    lv_obj_t* pills[] = { lbl_session_label, lbl_weekly_label };
+    for (unsigned i = 0; i < sizeof(pills) / sizeof(pills[0]); i++) {
+        if (!pills[i]) continue;
+        lv_obj_set_style_text_color(pills[i], COL_TEXT, 0);
+        lv_obj_set_style_bg_color(pills[i], COL_BAR_BG, 0);
+    }
+
+    lv_obj_t* bright[] = { lbl_title, lbl_session_pct, lbl_weekly_pct,
+                           lbl_session_pct_sym };
+    for (unsigned i = 0; i < sizeof(bright) / sizeof(bright[0]); i++)
+        if (bright[i]) lv_obj_set_style_text_color(bright[i], COL_TEXT, 0);
+
+    lv_obj_t* dim[] = { lbl_session_reset, lbl_weekly_reset, lbl_spending_desc };
+    for (unsigned i = 0; i < sizeof(dim) / sizeof(dim[0]); i++)
+        if (dim[i]) lv_obj_set_style_text_color(dim[i], COL_DIM, 0);
+
+    if (lbl_anim) lv_obj_set_style_text_color(lbl_anim,
+            theme().quiet_status ? COL_DIM : COL_ACCENT, 0);
+
+    // pair_group and idle_group are built lazily and are only on screen when
+    // disconnected or asleep; they pick the new palette up when next built.
+}
+
 void ui_update_battery(int percent, bool charging) {
+    if (!battery_img) return;
     int idx;
     if (charging) {
         idx = 4;

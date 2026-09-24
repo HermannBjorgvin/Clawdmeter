@@ -1,16 +1,106 @@
-# Clawdmeter
+# Petmeter
 
-A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
+<img src="assets/readme/waving.gif" width="120" align="right" alt="">
 
-It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) as well as a few other alternative boards and pairs over Bluetooth, the splash screen plays pixel-art Clawd animations that get
+> **A fork of [HermannBjorgvin/Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter).**
+> Nearly all of this is Hermann's work — the firmware, the HAL, the splash
+> engine, the daemon. This fork adds multi-provider support: usage for more
+> than one coding-agent plan on the same device, switched with a button.
+> Upstream's licensing note below applies here unchanged, and this fork adds a
+> second vendor's assets to it — see [`research/codex-pets/`](research/codex-pets/CLAUDE.md).
+
+A small ESP32 dashboard for your desk that keeps an eye on coding-agent usage.
+
+It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) as well as a few other alternative boards and pairs over Bluetooth, the splash screen plays pixel-art animations that get
 busier when your usage rate climbs. The two side buttons send Space and
 Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
 
-|              Usage meter              |              Clawd animation screen              |
-| :-----------------------------------: | :----------------------------------------------: |
-| ![Usage meter](assets/demo.jpeg) | ![Clawd animation screen](assets/demo.gif) |
+## Providers
 
-The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaanbuilds](https://x.com/amaanbuilds)'s library of pixel-art Clawd sprites, check it out, it's lovely.
+Hold the right button to switch which plan the screen is showing. The host
+daemon polls every provider it can read and sends them in one payload, so the
+switch is instant rather than waiting for the next poll.
+
+| Provider | Source | Screen |
+|----------|--------|--------|
+| **Claude** | Claude Code's OAuth token → `anthropic-ratelimit-unified-*` response headers | Warm palette, serif title, Clawd. The Weekly card flips between all-models and any scoped-model allowance (e.g. Fable). |
+| **Codex** | Codex CLI's OAuth token → `chatgpt.com/backend-api/wham/usage`, with the session rollout logs as an offline fallback | Neutral palette, sans throughout, and any of the eight ChatGPT pets. Weekly quota on top; below it, the [reset credits](#reset-credits-codex) the plan has handed out and how many are unspent. |
+
+|                    Claude                     |                   Codex                    |
+| :-------------------------------------------: | :----------------------------------------: |
+| ![Claude](screenshots/petmeter-claude.png)     | ![Codex](screenshots/petmeter-codex.png)   |
+| Serif display face, warm palette, Clawd. The Weekly card flips between all-models and any scoped-model allowance. | Sans throughout, neutral palette, your chosen pet. Weekly quota above; below it, four reset credits granted in the last 30 days, three still unspent. |
+
+Tap the left button to change pet — eight ship with the firmware:
+
+![Pets](screenshots/petmeter-pets.png)
+
+### Reset credits (Codex)
+
+**What they are.** When you exhaust a Codex rate limit you normally wait for
+the window to roll over. A *reset credit* skips that wait: redeeming one clears
+the spent limit and you carry on immediately. OpenAI grants them to Codex
+accounts unprompted — they arrive titled "Full reset" — and ChatGPT lists them
+under its usage-limit-resets settings. **Each one expires 30 days after it is
+granted**, so an unspent credit is simply lost. That deadline is the reason
+they are worth a card: a quota tells you to slow down, a reset credit tells you
+that you don't have to, and the only way to waste one is to forget it exists.
+
+Claude has no equivalent, so this card is Codex-only — and it takes the second
+slot because a Codex plan meters one weekly window and nothing else, leaving
+that slot with no quota to draw (see
+[Codex panel mapping](docs/petmeter.md#codex-panel-mapping)).
+
+**What the card shows.** A ledger of the provider's own trailing window — 30
+days on Codex, read from the API rather than hardcoded. One cell per reset the
+window handed out, lit while you still hold it and hollow once spent, headed by
+the total. The length of the lit run is how many you have left.
+
+|                       Three of four left                        |                        One of four left                         |
+| :--------------------------------------------------------------: | :--------------------------------------------------------------: |
+| ![Reset credits](screenshots/petmeter-credits.png)               | ![Mostly spent](screenshots/petmeter-credits-spent.png)          |
+| Four resets in the last 30 days, three still held                | Three spent, one left, expiring inside a day                     |
+
+The line underneath counts down to the next expiry, in the same form the quota
+card uses — a reset is lost by *not* spending it, so it gets a deadline rather
+than a reading. A window whose resets are all spent reads `All used`; with
+neither a second quota nor any credits, the card is hidden rather than drawn
+with a dash in it.
+
+Adding a provider means writing one collector against the interface in
+[`daemon/collectors/`](daemon/collectors/__init__.py) — a normalized
+`UsageSnapshot` the daemon consumes without knowing which vendor produced it.
+
+### Secondary displays
+
+The same payload can be mirrored to another screen through
+[`daemon/sinks/`](daemon/sinks/__init__.py). A [BUSY Bar](https://busy.app)
+— a 72×16 LED matrix — is supported two ways: the daemon can **push** one
+quota to it, or the bar can run an app that **pulls** and rotates through
+every quota your plans meter, each with its label and mascot, with the bar's
+own Start/Pause bar and wheel driving it.
+
+```ini
+# ~/.config/claude-usage-monitor/config
+busybar_url = http://10.0.4.20      # push; USB, the address on the case
+```
+
+**[`busybar/README.md`](busybar/README.md) is the reference** — how to install
+it on macOS, where every number comes from, every screen, and the device
+quirks. It is self-contained: **you do not need the ESP32 meter.** Set
+`ble = off` and the daemon polls for the bar alone.
+
+Secondary is literal: a sink can never gate, delay or crash the meter on your
+desk, and the whole path costs nothing when unconfigured. It also publishes
+*below* a focus session's priority, so it will never overwrite the BUSY status
+the bar exists to show.
+
+**[`docs/petmeter.md`](docs/petmeter.md)** documents everything this fork
+adds: the collector interface, the wire format, the theme and art-set systems,
+the pet sprite pipeline, the button and serial controls, and the traps found
+building it.
+
+<img width="1179" height="994" alt="Usage meter" src="https://github.com/user-attachments/assets/83e54aea-0932-428f-94aa-b3ede3a360aa" />
 
 ## Screens
 
@@ -18,7 +108,7 @@ The device boots into the splash. Tap the screen anywhere to switch to the Usage
 
 |              Splash               |              Usage              |
 | :-------------------------------: | :-----------------------------: |
-| ![Splash](screenshots/splash.png) | ![Usage](screenshots/usage.png) |
+| ![Splash](screenshots/splash.gif) | ![Usage](screenshots/usage.png) |
 |   Splash; touch-toggle anytime    | Session and weekly utilization  |
 
 While the splash is up, the middle (PWR) button cycles animations. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
@@ -28,8 +118,12 @@ While the splash is up, the middle (PWR) button cycles animations. **Hold the po
 Boards supported out of the box:
 
 - [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786)
-- [Waveshare ESP32-C6-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-c6-touch-amoled-2.16.htm?&aff_id=149786) 
+- [Waveshare ESP32-C6-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-c6-touch-amoled-2.16.htm?&aff_id=149786)
 - [Waveshare ESP32-S3-Touch-AMOLED-1.8](https://www.waveshare.com/esp32-s3-touch-amoled-1.8.htm?&aff_id=149786)
+- [Waveshare ESP32-C6-Touch-AMOLED-1.8](https://www.waveshare.com/esp32-c6-touch-amoled-1.8.htm?&aff_id=149786)
+- [Waveshare ESP32-S3-Touch-AMOLED-2.06](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm?&aff_id=149786)
+- [Waveshare ESP32-S3-Touch-LCD-1.54](https://www.waveshare.com/esp32-s3-lcd-1.54.htm?sku=33869&aff_id=149786)
+- [Waveshare ESP32-S3-Touch-LCD-4](https://www.waveshare.com/esp32-s3-touch-lcd-4.htm)
 
 > Please check if a pull request exists for your alternative hardware port before opening a new one, providing QA feedback and testing on the same hardware is more valuable than duplicate pull requests.
 
@@ -39,7 +133,7 @@ Boards supported out of the box:
 
 - Linux (tested on Ubuntu), macOS, or Windows 10/11
 - [PlatformIO CLI](https://docs.platformio.org/en/latest/core/installation/index.html)
-- Linux: `curl`, `bluetoothctl`, `busctl` (BlueZ Bluetooth stack)
+- Linux: `curl`, `bluetoothctl`, `busctl`, `dbus-monitor` (BlueZ Bluetooth stack), `python3`, `setsid`, `stdbuf` (util-linux / coreutils), `systemctl` (systemd user services)
 - macOS: `python3` (the installer sets up a venv with `bleak` and `httpx`)
 - Windows: `python3` 3.11+ (the installer sets up a venv with `bleak`, `httpx`, and `pystray`)
 - Claude Code with an active subscription
@@ -51,15 +145,16 @@ The macOS host pieces — Python daemon, LaunchAgent, and flash helper — were 
 ### Flash the firmware
 
 ```bash
-./flash-mac.sh waveshare_amoled_216                       # auto-detects /dev/cu.usbmodem*
-./flash-mac.sh waveshare_amoled_18  /dev/cu.usbmodem1101  # or pass an explicit USB serial port
+./flash-mac.sh waveshare_amoled_216                       # ESP32-S3 2.16" (auto-detects /dev/cu.usbmodem*)
+./flash-mac.sh waveshare_amoled_216_c6                    # ESP32-C6 2.16" variant
+./flash-mac.sh waveshare_amoled_18  /dev/cu.usbmodem1101  # ESP32-S3 1.8" (or pass an explicit USB serial port)
 ```
 
 The board env name is required. Run `./flash-mac.sh` with no args to see the available envs (scraped from `firmware/platformio.ini`).
 
 ### Pair the device
 
-After flashing, open **System Settings → Bluetooth** and click *Connect* next to "Clawdmeter". The daemon will discover it on its next scan (~30 s).
+After flashing, open **System Settings → Bluetooth** and click _Connect_ next to "Clawdmeter". The daemon only ever connects to the peripheral this Mac is paired/connected to — it never scans for a nearby device — so once it's connected here the daemon picks it up on its next poll (~60 s).
 
 ### Install the daemon
 
@@ -85,8 +180,9 @@ launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # st
 ### Flash the firmware
 
 ```bash
-./flash.sh waveshare_amoled_216                  # defaults to /dev/ttyACM0
-./flash.sh waveshare_amoled_18  /dev/ttyACM1     # or pass an explicit USB serial port
+./flash.sh waveshare_amoled_216                  # ESP32-S3 2.16" (defaults to /dev/ttyACM0)
+./flash.sh waveshare_amoled_216_c6               # ESP32-C6 2.16" variant
+./flash.sh waveshare_amoled_18  /dev/ttyACM1     # ESP32-S3 1.8" (or pass an explicit USB serial port)
 ```
 
 The board env name is required. Run `./flash.sh` with no args to see the available envs (scraped from `firmware/platformio.ini`).
@@ -119,6 +215,8 @@ Check status: `systemctl --user status claude-usage-daemon`
 
 View logs: `journalctl --user -u claude-usage-daemon -f`
 
+To change the poll interval, set `poll_interval = <seconds>` in `~/.config/claude-usage-monitor/config` (see `daemon/config.example`). The daemon picks it up without a restart. Polling slower than ~80s is fine: between polls the daemon replays the last payload every `heartbeat_interval` seconds (default 60) with the reset countdowns aged, so the firmware's 90s freshness window never lapses and no reflash is needed.
+
 ## Windows installation
 
 Runs natively on Windows — no WSL required. A system-tray app polls your usage and pushes it over BLE, and starts automatically at login.
@@ -126,7 +224,7 @@ Runs natively on Windows — no WSL required. A system-tray app polls your usage
 ### Prerequisites
 
 - **Native Windows** (not WSL).
-- **Python 3.11+** from [python.org](https://www.python.org/downloads/) — check *"Add python.exe to PATH"* during install.
+- **Python 3.11+** from [python.org](https://www.python.org/downloads/) — check _"Add python.exe to PATH"_ during install.
 - **Claude Code** installed, with `claude login` completed. The token is read from `%USERPROFILE%\.claude\.credentials.json` (falling back to `%LOCALAPPDATA%\Claude\` then `%APPDATA%\Claude\`).
 - The repo on a **native Windows path** (e.g. `%USERPROFILE%\Clawdmeter`), **not** a `\\wsl$` share — the installer refuses a WSL path.
 
@@ -140,7 +238,7 @@ Run `pio run -d firmware` with no env to see the available board envs.
 
 ### Pair the device
 
-The device is a bonded BLE HID keyboard, so pair it once: **Settings → Bluetooth & devices → Add device → Bluetooth**, then select "Claude Controller". Pairing is **required** — it enables the physical buttons and keeps a persistent connection (the device keeps showing your last-synced usage even after the daemon quits). To undo, use **Remove device** (this disables the buttons).
+The device is a bonded BLE HID keyboard, so pair it once: **Settings → Bluetooth & devices → Add device → Bluetooth**, then select "Clawdmeter". Pairing is **required** — it enables the physical buttons and keeps a persistent connection (the device keeps showing your last-synced usage even after the daemon quits). To undo, use **Remove device** (this disables the buttons).
 
 ### Install the daemon (recommended)
 
@@ -176,14 +274,16 @@ Get-Content $env:LOCALAPPDATA\Clawdmeter\daemon.log -Tail 30        # view logs
 reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f   # remove autostart
 ```
 
-| Symptom | Fix |
-|---------|-----|
-| `Device not found` | Power on the device; make sure it's in range and paired. |
-| `token expired` toast / `API HTTP 401` | Re-run `claude login`, then restart the daemon. |
-| `Connection failed` | Toggle Windows Bluetooth off/on in Settings. |
-| `Warning: running under Linux/WSL` | Run from a native PowerShell window, not a WSL shell. |
+| Symptom                                | Fix                                                      |
+| -------------------------------------- | -------------------------------------------------------- |
+| `Device not found`                     | Power on the device; make sure it's in range and paired. |
+| `token expired` toast / `API HTTP 401` | Re-run `claude login`, then restart the daemon.          |
+| `Connection failed`                    | Toggle Windows Bluetooth off/on in Settings.             |
+| `Warning: running under Linux/WSL`     | Run from a native PowerShell window, not a WSL shell.    |
 
 ## How it works
+
+<img src="assets/readme/magnifier.gif" width="150" align="right" alt="">
 
 1. The daemon reads your Claude Code OAuth token — from the macOS Keychain (service `Claude Code-credentials`) on macOS, or from `~/.claude/.credentials.json` on Linux (`%USERPROFILE%\.claude\.credentials.json` on Windows).
 2. It makes a minimal API call to `api.anthropic.com/v1/messages` — one token of Haiku, basically free.
@@ -197,11 +297,11 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
 
 The board has three side buttons. Left and right send HID keys; the middle (PWR) button cycles splash animations and, held for 3 seconds, triggers pairing mode.
 
-| Button           | GPIO         | Function                                                       |
-| ---------------- | ------------ | -------------------------------------------------------------- |
-| **Left**         | GPIO 0       | Hold to send Space (Claude Code voice-mode push-to-talk)       |
+| Button           | GPIO         | Function                                                     |
+| ---------------- | ------------ | ------------------------------------------------------------ |
+| **Left**         | GPIO 0       | Hold to send Space (Claude Code voice-mode push-to-talk)     |
 | **Middle** (PWR) | AXP2101 PKEY | On splash: cycle animations. Hold 3s + release: pairing mode |
-| **Right**        | GPIO 18      | Press to send Shift+Tab (Claude Code mode toggle)              |
+| **Right**        | GPIO 18      | Press to send Shift+Tab (Claude Code mode toggle)            |
 
 Space and Shift+Tab go out as standard BLE HID keyboard reports, so they trigger in whatever window has focus on the paired host — not just Claude Code.
 
@@ -224,101 +324,33 @@ JSON payload format (written to RX):
 
 Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
 
-## Recompiling fonts
+Optional fields (omitted when not applicable; the firmware treats absence as "feature off"): `ws` = weekly scoped-model limits for plans that meter specific models separately, as `[{"n":"Fable","p":75}, ...]` — one entry per scoped model, labeled with the API's own display name. They share the weekly reset, so no separate reset field is sent. When `ws` is present, `w` is re-based on the same OAuth-usage source as the scoped percentages rather than the rate-limit header, so both weekly numbers carry identical rounding (the header is a 2-decimal fraction, the endpoint a rounded integer — mixing them can render a real 12.6/12.4 pair as 12/12).
 
-The `firmware/src/font_*.c` files are pre-compiled LVGL bitmap fonts.
+`x` = a second provider's usage, same field names nested one level down, for devices showing more than one plan. Claude stays at the top level so an older firmware ignores the key entirely. Within it, `has_s` / `has_w` mark which panels carry a real quota — a Codex Pro account meters one weekly window and no 5-hour one, and a slot with nothing behind it renders blank rather than a convincing 0%. `sm` / `wm` override the panel pills, so a panel showing one model's slice can say which (`"Spark"`, `"Overall"`) instead of `Current` / `Weekly`.
 
-```bash
-npm install -g lv_font_conv
-```
+## Development
 
-Generate each one (one at a time — `lv_font_conv` doesn't like loop-driven invocations) with `--no-compress` (required for LVGL 9):
+<img src="assets/readme/crab.gif" width="120" align="right" alt="">
 
-```bash
-# Tiempos Text (titles, 56px)
-lv_font_conv --font assets/TiemposText-400-Regular.otf -r 0x20-0x7E \
-  --size 56 --format lvgl --bpp 4 --no-compress \
-  -o firmware/src/font_tiempos_56.c --lv-include "lvgl.h"
-
-# Styrene B (large numbers 48, panel labels 28, small text 24, minimal 20)
-for size in 48 28 24 20; do
-  lv_font_conv --font assets/StyreneB-Regular.otf -r 0x20-0x7E \
-    --size $size --format lvgl --bpp 4 --no-compress \
-    -o firmware/src/font_styrene_${size}.c --lv-include "lvgl.h"
-done
-
-# DejaVu Sans Mono (32px, with spinner Unicode chars)
-lv_font_conv --font assets/DejaVuSansMono.ttf \
-  -r 0x20-0x7E,0xB7,0x2026,0x2722,0x2733,0x2736,0x273B,0x273D \
-  --size 32 --format lvgl --bpp 4 --no-compress \
-  -o firmware/src/font_mono_32.c --lv-include "lvgl.h"
-```
-
-**Important:** `lv_font_conv` v1.5.3 outputs LVGL 8 format. Each generated file must be patched for LVGL 9 compatibility:
-
-1. Remove `#if LVGL_VERSION_MAJOR >= 8` guards around `font_dsc` and the font struct
-2. Remove the `.cache` field from `font_dsc`
-3. Add `.release_glyph = NULL`, `.kerning = 0`, `.static_bitmap = 0` to the font struct
-4. Add `.fallback = NULL`, `.user_data = NULL` to the font struct
-
-Without these patches, fonts compile but render as invisible.
-
-### CJK support
-
-`firmware/src/font_cjk_16.c` covers the full CJK Unified Ideographs basic
-block (U+4E00–U+9FFF, ~20k glyphs) plus ASCII, CJK punctuation, and
-halfwidth/fullwidth forms. Generated from [Noto Sans CJK SC](https://github.com/notofonts/noto-cjk)
-(SIL OFL 1.1) at 16px, 2bpp:
-
-```bash
-lv_font_conv --font NotoSansCJKsc-Regular.otf --size 16 --bpp 2 \
-  --no-compress --format lvgl --lv-include 'lvgl.h' \
-  -r '0x20-0x7E,0xB7,0x2014,0x2018-0x2019,0x201C-0x201D,0x2026,0x3000-0x303F,0x4E00-0x9FFF,0xFF00-0xFFEF' \
-  -o firmware/src/font_cjk_16.c
-```
-
-Then apply the four LVGL 9 patches above. Because the font has >65k of
-glyph bitmap data, the build needs `-DLV_FONT_FMT_TXT_LARGE=1` in
-`platformio.ini` build flags so font descriptor offsets switch from
-16-bit to 32-bit.
-
-The CJK font is used for the Activity screen's user-prompt row and todo
-content rows. The headline (28pt Styrene B) and titles stay ASCII-only
-to preserve the brand font — Chinese text in those slots renders as
-empty boxes. Add a `font_cjk_28.c` if full coverage is needed (~1MB
-more flash).
-
-## Converting Lucide icons
-
-The UI uses a small set of [Lucide](https://lucide.dev) icons (bluetooth + battery states) converted to RGB565 / RGB565A8 C arrays for LVGL.
-
-```bash
-node tools/png_to_lvgl.js assets/icon_bluetooth_48.png icon_bluetooth_data ICON_BLUETOOTH_WIDTH ICON_BLUETOOTH_HEIGHT
-```
-
-Default tint is white (`0xFFFFFF`); Lucide PNGs ship as black-on-transparent and would render invisible against the dark UI without it. Pass `--no-tint` for pre-coloured artwork like the logo. Battery icons use RGB565A8 (alpha plane) so they blend cleanly over the splash; the rest are baked RGB565 over the panel colour. Paste the converter output into `firmware/src/icons.h`.
-
-## Splash animations
-
-The animations come from [claudepix.vercel.app](https://claudepix.vercel.app),
-a library of Clawd sprites. `tools/scrape_claudepix.js` evaluates the
-site's JavaScript in a Node VM to pull out frame data and palettes, then
-`tools/convert_to_c.js` turns everything into RGB565 C arrays and writes
-`firmware/src/splash_animations.h`.
-
-To re-pull (e.g. when the source library updates):
-
-```bash
-node tools/scrape_claudepix.js
-node tools/convert_to_c.js
-pio run -d firmware -t upload
-```
-
-See `tools/README.md` for details.
+- **Desktop simulator** — iterate on the UI without hardware: an SDL2 window
+  runs the full firmware loop with scenario playback (`pio run -d firmware -e
+sim`, then `cd firmware && .pio/build/sim/program`). See
+  [`SIM-USAGE.md`](SIM-USAGE.md) for controls, scenarios, and headless
+  screenshots.
+- **Splash animations** — Anthropic's official Clawd sprites, archived with
+  provenance notes in [`research/clawd-official/`](research/clawd-official/);
+  `node tools/convert_official_clawd.js` regenerates
+  `firmware/src/splash_animations.h`. See [`tools/README.md`](tools/README.md).
+- **Icons** — Lucide PNGs convert to LVGL C arrays with
+  `tools/png_to_lvgl.js`. See [`tools/README.md`](tools/README.md).
+- **Fonts** — the pre-compiled LVGL fonts and the LVGL-9 patching they need:
+  [`docs/fonts.md`](docs/fonts.md).
+- **Porting** — [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md)
+  and [`docs/porting/hal-contract.md`](docs/porting/hal-contract.md).
 
 ## Credits
 
-- Pixel-art Clawd animation by [@amaanbuilds](https://x.com/amaanbuilds), sourced from [claudepix.vercel.app](https://claudepix.vercel.app). Frame data and palettes scraped + converted by the tooling in `tools/`.
+- Pixel-art Clawd animations are Anthropic's official mascot art (claude.ai/code, Claude Code desktop), archived and converted by the tooling in `tools/` and `research/clawd-official/`.
 - Lucide icon set ([lucide.dev](https://lucide.dev), MIT) for bluetooth and battery UI glyphs.
 - Anthropic brand fonts (Tiempos Text, Styrene B) — see licensing warning below.
 

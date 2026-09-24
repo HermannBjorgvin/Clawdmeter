@@ -1,51 +1,59 @@
 #include "../../hal/display_hal.h"
+#include "../../hal/imu_hal.h"
+#include "../../brightness.h"
 #include "board.h"
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
+#include <lvgl.h>
 
-// C6 AMOLED-2.16 uses an SH8601 panel — same driver family as the
-// AMOLED-1.8 port. LCD reset is not wired to any MCU GPIO; the SH8601
-// boots from its internal POR. Rotation is disabled (no PSRAM headroom
-// for the strip buffer).
+// C6 AMOLED-2.16 uses a CO5300 AMOLED panel (per the Waveshare
+// ESP32-C6-Touch-AMOLED-2.16 spec) — the same controller as the S3
+// AMOLED-2.16 sibling, so we drive it with Arduino_CO5300 and reuse that
+// class's vendor-correct init rather than the SH8601 class + a hand-patched
+// sequence. LCD reset is not wired to any MCU GPIO; the panel boots from its
+// internal power-on reset (rst = GFX_NOT_DEFINED). Auto-rotation is done by
+// the panel itself through MADCTL (no CPU rotation strip, so no RAM cost):
+// each IMU quadrant maps to a MADCTL value below and LVGL simply redraws.
 
 static Arduino_DataBus* bus = nullptr;
-static Arduino_SH8601*  gfx = nullptr;
+static Arduino_CO5300*  gfx = nullptr;
 
 void display_hal_init(void) {
     bus = new Arduino_ESP32QSPI(
         LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
-    gfx = new Arduino_SH8601(
-        bus, GFX_NOT_DEFINED, 0, LCD_WIDTH, LCD_HEIGHT);
+    // CO5300 constructor: (bus, rst, rotation, w, h, col_off1..2, row_off1..2).
+    // No reset GPIO on this board; the 480-wide panel is full-width so all
+    // offsets are 0 — matches the S3 AMOLED-2.16 instantiation.
+    gfx = new Arduino_CO5300(
+        bus, GFX_NOT_DEFINED, 0 /* rotation disabled */,
+        LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
 }
 
-// Vendor-specific init commands from the Waveshare C6-2.16 BSP
-// (02_Example/Arduino-v3.3.3/09_LVGL_V9_Test/bsp_lvgl_port.cpp in the
-// waveshareteam/ESP32-C6-Touch-AMOLED-2.16 repo). The stock Arduino_GFX
-// SH8601 init does SLPOUT + NORON + INVOFF + PIXFMT + DISPON + brightness,
-// which is enough for the AMOLED-1.8 panel but leaves this 2.16 panel
-// dark. The page-switch sequence (0xFE 0x20 ... 0xFE 0x00) writes two
-// panel-specific manufacturer registers (0x19 and 0x1C) that gate the
-// driving voltages — without them the panel stays black even with the
-// rails up and the reset pulse applied.
-static void send_vendor_init(Arduino_DataBus* b) {
+// Arduino_CO5300::begin() already issues SLPOUT, SPI-mode control, pixel
+// format, brightness-control, DISPON and a default MADCTL. The ONLY thing it
+// does not set is this panel's manufacturer page-0x20 driving-voltage
+// registers (0x19/0x1C) — without them the panel stays black even with the
+// rails up. Set just those; everything else the SH8601-era hack also wrote
+// (0xC4/0x53/0x51/0x63/0x29) is now covered by the class init, and we override
+// MADCTL below to fix orientation.
+// The CO5300 class default (rotation-0, MADCTL 0x00) leaves the panel
+// sideways on this board — confirmed on hardware. Restore the MV+ML
+// transpose (MADCTL 0x30) that the pre-CO5300-rebase SH8601-hack version
+// used to write; touch mapping in touch.cpp is calibrated to match.
+static void send_panel_driving_init(Arduino_DataBus* b) {
     b->beginWrite();
     b->writeC8D8(0xFE, 0x20);    // enter manufacturer command page 0x20
-    b->writeC8D8(0x19, 0x10);    // panel driving
-    b->writeC8D8(0x1C, 0xA0);    // panel driving
+    b->writeC8D8(0x19, 0x10);    // panel driving voltage
+    b->writeC8D8(0x1C, 0xA0);    // panel driving voltage
     b->writeC8D8(0xFE, 0x00);    // back to user command page
-    b->writeC8D8(0xC4, 0x80);    // SPI mode control
-    b->writeC8D8(0x36, 0x30);    // MADCTL (BSP value)
-    b->writeC8D8(0x53, 0x20);    // CTRL display 1 (brightness control on)
-    b->writeC8D8(0x51, 0xFF);    // brightness = max
-    b->writeC8D8(0x63, 0xFF);    // HBM brightness = max
-    b->writeCommand(0x29);       // DISPON (idempotent — stock init already did this)
+    b->writeC8D8(0x36, 0x30);    // MADCTL: MV transpose + ML (orientation fix)
     b->endWrite();
     delay(20);
 }
 
 void display_hal_begin(void) {
     gfx->begin();
-    send_vendor_init(bus);       // patch up panel-specific regs the stock init misses
+    send_panel_driving_init(bus);   // panel-specific regs the class init omits
     gfx->fillScreen(0x0000);
     gfx->setBrightness(200);
 }
@@ -63,12 +71,55 @@ void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
     if (gfx) gfx->draw16bitRGBBitmap(x, y, (uint16_t*)pixels, w, h);
 }
 
-void display_hal_tick(void) {
-    // No rotation cycle on this board.
+// MADCTL per IMU quadrant. Base orientation is MV|ML (0x30, see
+// send_panel_driving_init). A 90° step toggles MV and mirrors one axis;
+// 180° mirrors both. ML (0x10) is kept in all four.
+// Measured on hardware: upright on the desk stand the IMU reads gravity on +Y
+// (quadrant 3), and that is the orientation the base MADCTL (0x30) is tuned
+// for. 0x90 rotates the image 90° CCW relative to base, 0x50 90° CW, 0xF0 180°.
+//   q3 (upright):        MV|ML         0x30
+//   q1 (upside down):    MV|MX|MY|ML   0xF0
+//   q2 / q0 (on a side): MY|ML 0x90 / MX|ML 0x50
+static const uint8_t MADCTL_BY_QUADRANT[4] = { 0x50, 0xF0, 0x90, 0x30 };
+
+static void apply_rotation(uint8_t q) {
+    if (!bus) return;
+    bus->beginWrite();
+    bus->writeC8D8(0x36, MADCTL_BY_QUADRANT[q & 3]);
+    bus->endWrite();
 }
 
-// Mirrors the CO5300/SH8601 even-alignment pattern from the other ports.
-// Harmless on SH8601, kept for consistency.
+// On rotation change: blank, switch MADCTL, force a full LVGL redraw at the
+// new orientation, then ramp brightness back up over ~125 ms (same feel as
+// the S3 port).
+void display_hal_tick(void) {
+    static uint8_t  last_rotation = 0;
+    static uint8_t  ramp_step = 0;     // 0=idle, 1..4=ramping
+    static uint32_t ramp_last = 0;
+
+    uint8_t rot = imu_hal_rotation_quadrant();
+    if (rot != last_rotation) {
+        display_hal_set_brightness(0);
+        last_rotation = rot;
+        apply_rotation(rot);
+        lv_obj_invalidate(lv_screen_active());
+        ramp_step = 1;
+        return;
+    }
+
+    if (ramp_step == 0) return;
+    uint32_t now = millis();
+    if (now - ramp_last < 25) return;
+    ramp_last = now;
+
+    static const uint8_t pct[] = {30, 60, 85, 100};
+    uint8_t target = brightness_get();
+    display_hal_set_brightness((uint8_t)(((uint16_t)target * pct[ramp_step - 1]) / 100));
+    if (ramp_step >= 4) ramp_step = 0;
+    else                ramp_step++;
+}
+
+// CO5300 requires even-aligned flush regions.
 void display_hal_round_area(int32_t* x1, int32_t* y1, int32_t* x2, int32_t* y2) {
     *x1 = *x1 & ~1;
     *y1 = *y1 & ~1;

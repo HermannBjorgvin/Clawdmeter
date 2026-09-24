@@ -13,9 +13,10 @@ At minimum:
 - An **ESP32-S3** (other ESP32 family members may work; this is what the
   upstream firmware is tested on). OPI PSRAM is **required** — partial
   flush buffers and the splash canvas are allocated from PSRAM.
-- A QSPI **AMOLED panel** with a driver supported by
-  [GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX)
-  (CO5300, SH8601, NV3041A, etc.). Other interfaces aren't supported yet.
+- A panel with a driver supported by
+  [GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX).
+  Reference ports cover QSPI AMOLED (CO5300, SH8601), 4-wire SPI TFT
+  (ST7789 on LCD-1.54), and RGB parallel (ST7701 on LCD-4).
 - A **touch controller** over I2C. The HAL just needs init + read; you
   can use any driver you can compile.
 - A **primary button** (typically the BOOT/GPIO 0 push button).
@@ -47,7 +48,7 @@ Optional:
 
    | File              | Reference port (start here)                                    |
    |-------------------|----------------------------------------------------------------|
-   | `display.cpp`     | `boards/waveshare_amoled_216/display.cpp` (with CPU rotation) or `_18/display.cpp` (no rotation) |
+   | `display.cpp`     | `boards/waveshare_amoled_216/display.cpp` (with CPU rotation), `_18/display.cpp` (no rotation), `waveshare_lcd_154/display.cpp` (SPI TFT), or `waveshare_lcd_4/display.cpp` (RGB parallel + bounce buffers) |
    | `touch.cpp`       | `_216/touch.cpp` (library-based) or `_18/touch.cpp` (vendored I2C reader) |
    | `input.cpp`       | `_216/input.cpp` (two buttons) or `_18/input.cpp` (one button) |
    | `power.cpp`       | `_216/power.cpp` (PMU IRQ) or `_18/power.cpp` (PMU + IO expander button) |
@@ -97,7 +98,16 @@ Optional:
   in platformio.ini (check `board_build.arduino.memory_type = qio_opi`);
   IO expander not released before `gfx->begin()` (run `io_expander_init()`
   from `board_init()`); GFX library version too old to know about your
-  panel chip.
+  panel chip; reset line not pulsed before `gfx->begin()` (do it in
+  `board_init()` for direct-GPIO resets, or via the IO expander otherwise).
+- **Display works but a vertical strip of garbage/stale content shows on
+  one edge.** CO5300-based panels expose their visible viewport at a
+  horizontal offset inside the controller's internal RAM, and the offset
+  varies per physical panel size. The 2.16" port uses `col_offset1 = 0`,
+  the 2.06" uses `col_offset1 = 23`. When adding a new CO5300 board,
+  grab Waveshare's reference value from their `Mylibrary/pin_config.h`
+  (or equivalent) and fine-tune ±1 if centering looks off. SH8601 panels
+  don't have this issue.
 - **Touch reads zeros / wrong coordinates.** The HAL hands LVGL whatever
   the controller reports — apply any axis swap / mirror inside your
   `touch.cpp`. CST9220 needs `setSwapXY(true)` + `setMirrorXY(true,

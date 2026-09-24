@@ -3,9 +3,9 @@
 // Waveshare ESP32-C6-Touch-AMOLED-2.16.
 //
 // Despite the matching "2.16" model number, this board is hardware-
-// distinct from the S3 AMOLED-2.16: it uses an SH8601 panel (same driver
-// family as the AMOLED-1.8), a CST9217 touch controller, and the C6 SoC's
-// own GPIO map. There is no PSRAM. AXP2101 PMU and QMI8658 IMU carry over.
+// distinct from the S3 AMOLED-2.16: it shares the CO5300 panel controller
+// but uses a CST9217 touch controller and the C6 SoC's own GPIO map. There
+// is no PSRAM. AXP2101 PMU and QMI8658 IMU carry over.
 //
 // Pin assignments verified against the official Waveshare XiaoZhi BSP at
 // waveshareteam/ESP32-C6-Touch-AMOLED-2.16 (XiaoZhi config.h) and the
@@ -16,14 +16,14 @@
 #define LCD_WIDTH            480
 #define LCD_HEIGHT           480
 
-// ---- QSPI display pins (SH8601) ----
+// ---- QSPI display pins (CO5300) ----
 #define LCD_CS               15
 #define LCD_SCLK             0
 #define LCD_SDIO0            1
 #define LCD_SDIO1            2
 #define LCD_SDIO2            3
 #define LCD_SDIO3            4
-// LCD reset is not wired to a MCU GPIO on this board — the SH8601 relies
+// LCD reset is not wired to a MCU GPIO on this board — the CO5300 relies
 // on its internal power-on reset. The Arduino_GFX driver gets
 // GFX_NOT_DEFINED for reset.
 
@@ -53,7 +53,7 @@
 
 // ---- Capability flags ----
 #define BOARD_HAS_SECONDARY_BUTTON 1
-#define BOARD_HAS_ROTATION         0    // C6 has no PSRAM headroom for the rotation strip
-#define BOARD_HAS_IMU              1    // present + initialized for I2C bus health
+#define BOARD_HAS_ROTATION         1    // via CO5300 MADCTL (panel-side), no rotation strip needed
+#define BOARD_HAS_IMU              1    // QMI8658 drives auto-rotation
 #define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      0    // TCA9554 exists on board but only services audio

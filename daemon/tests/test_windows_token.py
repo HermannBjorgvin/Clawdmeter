@@ -141,6 +141,14 @@ def test_read_expiry_non_dict_json_returns_unknown(tmp_path, monkeypatch):
 
 # --- WR-02: D-06 redaction requirement must be tested ---
 
+@pytest.mark.skipif(
+    sys.platform in ("darwin", "win32"),
+    reason="Linux/WSL-only. On macOS, spawning the Windows daemon inits "
+    "CoreBluetooth and trips the Bluetooth TCC privacy gate, SIGABRTing the "
+    "child (no NSBluetoothAlwaysUsageDescription) instead of the scan-loop "
+    "hang. On native Windows, the 'WinRT unavailable' warning this asserts is "
+    "correctly suppressed.",
+)
 def test_main_emits_linux_warning(monkeypatch):
     """__main__ prints a non-fatal stderr warning on non-Windows platforms (new async runner).
 
@@ -172,6 +180,14 @@ def test_main_emits_linux_warning(monkeypatch):
         )
 
 
+@pytest.mark.skipif(
+    sys.platform in ("darwin", "win32"),
+    reason="Linux/WSL-only. On macOS, spawning the Windows daemon inits "
+    "CoreBluetooth and trips the Bluetooth TCC privacy gate, SIGABRTing the "
+    "child (no NSBluetoothAlwaysUsageDescription) instead of the scan-loop "
+    "hang. On native Windows, the 'WinRT unavailable' warning this asserts is "
+    "correctly suppressed.",
+)
 def test_main_emits_linux_warning_before_loop(monkeypatch):
     """__main__ stderr warning appears before the async scan loop starts on Linux/WSL."""
     import signal as _signal

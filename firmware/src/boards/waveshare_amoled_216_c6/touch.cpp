@@ -23,8 +23,8 @@ void touch_hal_init(void) {
     }
     touch.setMaxCoordinates(LCD_WIDTH, LCD_HEIGHT);
     // C6 2.16 panel mapping (verified empirically): the CST9217's raw
-    // axes are swapped relative to the SH8601 raster AND X is mirrored.
-    // Matches the Waveshare BSP, which reads y = raw_byte1, x = W - raw_byte2.
+    // axes are swapped relative to the raster AND X is mirrored, to match
+    // the MADCTL 0x30 (MV+ML) transpose written in display.cpp.
     touch.setSwapXY(true);
     touch.setMirrorXY(true, false);
     pinMode(TP_INT, INPUT_PULLUP);

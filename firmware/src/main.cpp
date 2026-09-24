@@ -6,6 +6,7 @@
 
 #include "data.h"
 #include "ui.h"
+#include "theme.h"
 #include "ble.h"
 #include "splash.h"
 #include "usage_rate.h"
@@ -19,8 +20,13 @@
 #include "hal/input_hal.h"
 #include "hal/power_hal.h"
 #include "hal/imu_hal.h"
+#include "hal/sound_hal.h"
 
-static UsageData usage = {};
+// One slot per provider. The daemon sends every provider it can read in a
+// single payload, so switching mode is instant -- no round trip to the host,
+// and no stale screen while the next poll lands.
+static UsageData usage[THEME_MODE_COUNT] = {};
+static inline UsageData* active_usage(void) { return &usage[theme_mode()]; }
 
 // ---- LVGL draw buffers (partial render mode) ----
 // PSRAM-equipped boards (S3) can comfortably hold larger strips. PSRAM-free
@@ -96,8 +102,51 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 }
 
-// Parse a JSON line into UsageData.
-static bool parse_json(const char* json, UsageData* out) {
+// Fill one provider's slot from a JSON object holding the usage fields.
+static void parse_provider(JsonObjectConst doc, UsageData* out) {
+    out->session_pct = doc["s"] | 0.0f;
+    out->session_reset_mins = doc["sr"] | -1;
+    out->weekly_pct = doc["w"] | 0.0f;
+    out->weekly_reset_mins = doc["wr"] | -1;
+    // Weekly scoped-model limits. Absent key (no scoped limits / old daemon)
+    // → count 0 and the Weekly card never flips; 0% is a real value.
+    out->scoped_weekly_count = 0;
+    for (JsonObjectConst lim : doc["ws"].as<JsonArrayConst>()) {
+        if (out->scoped_weekly_count >= MAX_SCOPED_WEEKLY) break;
+        const char* n = lim["n"] | "";
+        if (!n[0]) continue;
+        ScopedWeekly& s = out->scoped_weekly[out->scoped_weekly_count++];
+        strlcpy(s.name, n, sizeof(s.name));
+        s.pct = lim["p"] | 0.0f;
+    }
+    strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
+    out->chime = doc["c"] | false;   // absent (old daemon / chime off) → stay silent
+    const char* acct = doc["acct"] | "pro";
+    out->enterprise = (strcmp(acct, "ent") == 0);
+    out->time_pct = doc["tp"] | 0;
+    out->period_days = doc["pd"] | 30;
+    strlcpy(out->reset_date, doc["rd"] | "", sizeof(out->reset_date));
+    out->clock_epoch = doc["t"] | 0L;
+    out->clock_fmt = doc["tf"] | 24;
+    // Default true: a daemon that does not send these meters both windows.
+    out->has_session = doc["has_s"] | true;
+    out->has_weekly  = doc["has_w"] | true;
+    strlcpy(out->session_model, doc["sm"] | "", sizeof(out->session_model));
+    strlcpy(out->weekly_model,  doc["wm"] | "", sizeof(out->weekly_model));
+    out->reset_credits = doc["rc"] | 0;
+    out->reset_credits_used = doc["ru"] | 0;
+    out->reset_credits_exp_mins = doc["rm"] | -1;
+    out->ok = doc["ok"] | false;
+    out->valid = true;
+}
+
+// Parse a JSON line into the per-provider slots.
+//
+// Claude's fields sit at the top level and a second provider, when the daemon
+// can read one, arrives nested under "x". Keeping Claude flat means an older
+// daemon's payload still parses exactly as before -- it simply carries no "x",
+// and Codex mode reports no data rather than the screen breaking.
+static bool parse_json(const char* json) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
@@ -105,14 +154,56 @@ static bool parse_json(const char* json, UsageData* out) {
         return false;
     }
 
-    out->session_pct = doc["s"] | 0.0f;
-    out->session_reset_mins = doc["sr"] | -1;
-    out->weekly_pct = doc["w"] | 0.0f;
-    out->weekly_reset_mins = doc["wr"] | -1;
-    strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
-    out->ok = doc["ok"] | false;
-    out->valid = true;
+    parse_provider(doc.as<JsonObjectConst>(), &usage[THEME_MODE_CLAUDE]);
+
+    JsonObjectConst x = doc["x"];
+    if (!x.isNull()) {
+        parse_provider(x, &usage[THEME_MODE_CODEX]);
+        // Clock and chime are host settings, not provider data, so they are
+        // sent once at the top level and shared by every slot.
+        usage[THEME_MODE_CODEX].chime       = usage[THEME_MODE_CLAUDE].chime;
+        usage[THEME_MODE_CODEX].clock_epoch = usage[THEME_MODE_CLAUDE].clock_epoch;
+        usage[THEME_MODE_CODEX].clock_fmt   = usage[THEME_MODE_CLAUDE].clock_fmt;
+    } else {
+        usage[THEME_MODE_CODEX].valid = false;
+    }
     return true;
+}
+
+// Hold on SECONDARY that means "change how flipping works" rather than "flip
+// now". Long enough not to trip on a firm tap, short enough not to feel stuck.
+#define MODE_HOLD_MS 600
+
+// Contact bounce settle time. Short enough to feel instant, long enough that a
+// noisy edge cannot register as a press.
+#define SECONDARY_DEBOUNCE_MS 30
+
+static uint32_t autoflip_last_ms = 0;
+
+// Two flips in quick succession leave the screen where it started, so they
+// read as a glitch rather than an action. Observed intermittently on hardware
+// at the same millisecond, with the timer measurably correct (60002ms elapsed,
+// last-fired updated) -- so the second call comes from somewhere else, most
+// likely a dirty edge on SECONDARY that outlasts the debounce. Rather than
+// guess further, make a repeat impossible at the one place every flip goes
+// through. 250ms is past any contact bounce and short of a deliberate
+// double-tap.
+#define MIN_FLIP_GAP_MS 250
+
+static void cycle_provider(void) {
+    static uint32_t last_flip_ms = 0;
+    const uint32_t now = millis();
+    if (last_flip_ms && now - last_flip_ms < MIN_FLIP_GAP_MS) return;
+    last_flip_ms = now;
+
+    theme_set_mode(theme_next_mode());
+    splash_reload_art();
+    ui_apply_theme();
+    ui_update(active_usage());
+    // A manual flip restarts the clock, so the next automatic one is a full
+    // interval away rather than possibly landing a second later.
+    autoflip_last_ms = millis();
+    Serial.printf("mode: -> %s\n", theme().name);
 }
 
 // ---- Serial command buffer ----
@@ -164,6 +255,30 @@ static void check_serial_cmd() {
         if (c == '\n' || c == '\r') {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
+            else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
+            // Screen and mode over serial so a UI change can be verified on
+            // real hardware without a reflash. The documented workaround was
+            // to edit the default boot screen and flash again, which is a
+            // 30-second round trip per look and cannot reach the mode at all.
+            else if (strcmp(cmd_buf, "usage") == 0)  ui_show_screen(SCREEN_USAGE);
+            else if (strcmp(cmd_buf, "splash") == 0) ui_show_screen(SCREEN_SPLASH);
+            else if (strcmp(cmd_buf, "mode") == 0) cycle_provider();
+            else if (strcmp(cmd_buf, "pet") == 0) {
+                splash_pet_next();
+                ui_flash_hint(splash_pet_name(), 1600);
+            }
+            else if (strcmp(cmd_buf, "hold") == 0) {
+                const bool paused = !splash_paused();
+                splash_set_paused(paused);
+                ui_flash_hint(paused ? "Pets held" : "Pets live", 1600);
+                Serial.printf("pets: %s\n", paused ? "held" : "live");
+            }
+            else if (strcmp(cmd_buf, "auto") == 0) {
+                theme_cycle_autoflip();
+                autoflip_last_ms = millis();
+                ui_flash_hint(theme_autoflip_label(), 1600);
+                Serial.printf("autoflip: %s\n", theme_autoflip_label());
+            }
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -187,10 +302,12 @@ void setup() {
     display_hal_init();
     display_hal_begin();
     idle_init();        // takes over panel brightness and starts the idle timer
+    theme_init();       // restore the provider mode before anything reads the theme
     brightness_init();  // load the user's saved brightness level and apply via idle
 
     power_hal_init();
     imu_hal_init();
+    sound_hal_init();
     touch_hal_init();
 
     // ---- LVGL ----
@@ -281,13 +398,16 @@ void loop() {
     ble_tick();
     power_hal_tick();
     imu_hal_tick();
+    sound_hal_tick();
     splash_tick();
+    splash_mascot_tick();
     // Rotation transition (blank + ramp) would fight the idle fade — skip
     // ticks while the panel is dark. A rotation that happens during sleep
     // is detected by the next tick after wake and ramped in then.
     if (!idle_is_asleep()) display_hal_tick();
 
     // ---- Physical buttons ----
+    //   SECONDARY long-press → cycle provider mode (see MODE_HOLD_MS)
     //   PRIMARY   → HID Space  (Claude Code voice-mode PTT)
     //   SECONDARY → HID Shift+Tab  (mode toggle; only if the board has one)
     //   PWR       → on splash: cycle animations; on usage: cycle brightness;
@@ -297,34 +417,104 @@ void loop() {
     // press. Activity bookkeeping happens inside idle_consume_wake_press
     // so no separate idle_note_activity() call is needed here.
     {
-        static bool primary_was = false;
-        static bool primary_wake_swallowed = false;
-        bool primary_now = input_hal_is_held(INPUT_BTN_PRIMARY);
-        if (primary_now != primary_was) {
-            if (primary_now) {
+        // PRIMARY, like SECONDARY, now splits by hold length:
+        //   tap  -> next pet (Codex only; the Claude side has one mascot)
+        //   hold -> freeze/unfreeze every mascot, with a hint
+        //
+        // This retires the HID Space that was voice-mode push-to-talk. Both
+        // HID bindings are now gone -- there is no third button on any
+        // supported board, and the buttons are worth more driving the screen
+        // in front of you than sending shortcuts to a terminal.
+        {
+            static bool     primary_was = false;
+            static bool     primary_wake_swallowed = false;
+            static uint32_t primary_down_ms = 0;
+            static bool     primary_consumed = false;
+            static bool     primary_raw_was = false;
+            static uint32_t primary_edge_ms = 0;
+            static bool     primary_now = false;
+            const bool praw = input_hal_is_held(INPUT_BTN_PRIMARY);
+            if (praw != primary_raw_was) {
+                primary_raw_was = praw;
+                primary_edge_ms = millis();
+            } else if (praw != primary_now &&
+                       millis() - primary_edge_ms >= SECONDARY_DEBOUNCE_MS) {
+                primary_now = praw;
+            }
+
+            if (primary_now && !primary_was) {
+                primary_down_ms = millis();
+                primary_consumed = false;
                 if (idle_consume_wake_press()) primary_wake_swallowed = true;
-                else                            ble_keyboard_press(0x2C, 0);  // HID Space, no mods
-            } else {
-                if (primary_wake_swallowed) primary_wake_swallowed = false;
-                else                        ble_keyboard_release();
+            } else if (primary_now && !primary_consumed &&
+                       !primary_wake_swallowed &&
+                       millis() - primary_down_ms >= MODE_HOLD_MS) {
+                const bool paused = !splash_paused();
+                splash_set_paused(paused);
+                ui_flash_hint(paused ? "Pets held" : "Pets live", 1600);
+                primary_consumed = true;
+                Serial.printf("pets: %s\n", paused ? "held" : "live");
+            } else if (!primary_now && primary_was) {
+                if (primary_wake_swallowed)   primary_wake_swallowed = false;
+                else if (!primary_consumed && theme_mode() == THEME_MODE_CODEX) {
+                    splash_pet_next();
+                    ui_flash_hint(splash_pet_name(), 1600);
+                }
             }
             primary_was = primary_now;
         }
 
         if (board_caps().button_count >= 2) {
-            static bool secondary_was = false;
-            static bool secondary_wake_swallowed = false;
-            bool secondary_now = input_hal_is_held(INPUT_BTN_SECONDARY);
-            if (secondary_now != secondary_was) {
-                if (secondary_now) {
-                    if (idle_consume_wake_press()) secondary_wake_swallowed = true;
-                    else                            ble_keyboard_press(0x2B, 0x02);  // HID Tab + LEFT_SHIFT
-                } else {
-                    if (secondary_wake_swallowed) secondary_wake_swallowed = false;
-                    else                          ble_keyboard_release();
-                }
-                secondary_was = secondary_now;
+            // SECONDARY carries two actions, split by how long it is held:
+            // a tap flips the provider now, a hold turns auto-flip on or off.
+            // This retires the HID Shift+Tab that used to live on the tap --
+            // there is no third button on any supported board to move it to.
+            //
+            // The hold fires on the threshold rather than on release, so the
+            // gesture confirms itself under your thumb; the hint exists
+            // because turning auto-flip ON has no other visible effect for
+            // two minutes.
+            static bool     secondary_was = false;
+            static bool     secondary_wake_swallowed = false;
+            static uint32_t secondary_down_ms = 0;
+            static bool     secondary_consumed = false;
+            static bool     secondary_raw_was = false;
+            static uint32_t secondary_edge_ms = 0;
+            static bool     secondary_now = false;
+            const bool raw = input_hal_is_held(INPUT_BTN_SECONDARY);
+            if (raw != secondary_raw_was) {
+                secondary_raw_was = raw;
+                secondary_edge_ms = millis();
+            } else if (raw != secondary_now &&
+                       millis() - secondary_edge_ms >= SECONDARY_DEBOUNCE_MS) {
+                secondary_now = raw;
             }
+
+            if (secondary_now && !secondary_was) {
+                secondary_down_ms = millis();
+                secondary_consumed = false;
+                if (idle_consume_wake_press()) secondary_wake_swallowed = true;
+            } else if (secondary_now && !secondary_wake_swallowed &&
+                       millis() - secondary_down_ms >= MODE_HOLD_MS) {
+                theme_cycle_autoflip();
+                autoflip_last_ms = millis();
+                ui_flash_hint(theme_autoflip_label(), 1600);
+                secondary_consumed = true;
+                Serial.printf("autoflip: %s\n", theme_autoflip_label());
+                secondary_down_ms = millis();   // next step after another hold
+            } else if (!secondary_now && secondary_was) {
+                if (secondary_wake_swallowed)   secondary_wake_swallowed = false;
+                else if (!secondary_consumed)   cycle_provider();
+            }
+            secondary_was = secondary_now;
+        }
+
+        // Auto-flip. Runs regardless of button count: a one-button board can
+        // still be put into auto-flip over serial, and this is its only way to
+        // reach the second provider at all.
+        const uint32_t flip_ms = theme_autoflip_ms();
+        if (flip_ms && millis() - autoflip_last_ms >= flip_ms) {
+            cycle_provider();
         }
 
         if (power_hal_pwr_pressed()) {
@@ -350,6 +540,7 @@ void loop() {
     int  pct      = power_hal_battery_pct();
     bool charging = power_hal_is_charging();
     if (pct != last_pct || charging != last_charging) {
+        if (pct != last_pct) ble_set_battery_level(pct);
         last_pct = pct;
         last_charging = charging;
         ui_update_battery(pct, charging);
@@ -358,16 +549,23 @@ void loop() {
     check_serial_cmd();
 
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
+        if (parse_json(ble_get_data())) {
             int g_before = usage_rate_group();
-            usage_rate_sample(usage.session_pct);
+            bool session_reset = usage_rate_sample(active_usage()->session_pct);
             int g_after = usage_rate_group();
+            // 5-hour session limit refilled → chime so the user knows they can
+            // use Claude again (no-op on boards without a buzzer). Gated on the
+            // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
+            if (session_reset && active_usage()->chime) {
+                Serial.println("session reset detected — chime");
+                sound_hal_play_reset();
+            }
             if (g_after != g_before) {
                 Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
+                    g_before, g_after, active_usage()->session_pct);
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
-            ui_update(&usage);
+            ui_update(active_usage());
             ble_send_ack();
         } else {
             ble_send_nack();

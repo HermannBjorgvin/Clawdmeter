@@ -190,19 +190,36 @@ def main() -> None:
     ts = TrayState()
     icon = pystray.Icon("Clawdmeter", images["scanning"], "Clawdmeter")
 
-    # --- background thread: asyncio loop ---
+    # Set by the Quit handler so the supervisor below knows a clean stop was
+    # requested and must NOT resurrect the loop.
+    _quit_requested = threading.Event()
+
+    # --- background thread: asyncio loop (supervised, auto-restart on crash) ---
     def _run_daemon() -> None:
-        # daemon=True thread: an unhandled exception here would vanish silently
-        # and freeze the tray on its last state forever (the field "frozen tray"
-        # failure mode). Surface it instead — log the traceback to the rotating
-        # file and flip the tray to an actionable error state.
-        try:
-            _asyncio.run(daemon_main(tray_state=ts))
-        except Exception as e:  # last-resort thread guard
-            import traceback
-            daemon_log(f"Daemon thread crashed: {e!r}")
-            daemon_log(traceback.format_exc())
-            ts.set_error(f"daemon crashed: {type(e).__name__}")
+        # A crash used to END this daemon=True thread for good: polling stopped
+        # silently and the tray froze on its last state until the user manually
+        # relaunched (the field "frozen tray" / "sticky error" mode — one transient
+        # bleak assert turned into an outage). Now we SUPERVISE it: log the
+        # traceback, flip the tray to an actionable error, then restart the loop
+        # with capped backoff. A CLEAN return means Quit was requested (main()'s
+        # loop exited on stop_event), so we stay down and do NOT restart.
+        backoff = 2
+        while not _quit_requested.is_set():
+            try:
+                _asyncio.run(daemon_main(tray_state=ts))
+                return  # clean exit == Quit requested; stay down
+            except Exception as e:  # last-resort thread guard
+                import traceback
+                daemon_log(f"Daemon thread crashed: {e!r}")
+                daemon_log(traceback.format_exc())
+                ts.set_error(f"daemon crashed: {type(e).__name__}")
+            if _quit_requested.is_set():
+                return
+            daemon_log(f"Restarting daemon loop in {backoff}s after crash")
+            # Interruptible sleep: a Quit during backoff wakes us immediately.
+            if _quit_requested.wait(timeout=backoff):
+                return
+            backoff = min(backoff * 2, 30)
 
     daemon_thread = threading.Thread(target=_run_daemon, daemon=True)
     daemon_thread.start()
@@ -219,6 +236,10 @@ def main() -> None:
         # the device sits frozen on stale data instead of returning to its waiting
         # screen (SC#3 field report). The timeout caps the block so Quit can never
         # hang if a WinRT disconnect wedges (rare) — we exit anyway as a fallback.
+        #
+        # Set _quit_requested FIRST so the supervisor loop in _run_daemon never
+        # resurrects the daemon after we signal stop (Quit must be final).
+        _quit_requested.set()
         if ts.loop is not None and ts.stop_event is not None:
             ts.loop.call_soon_threadsafe(ts.stop_event.set)
             daemon_thread.join(timeout=6.0)
