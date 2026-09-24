@@ -92,6 +92,44 @@ hosted service would mean shipping someone else's credentials off the laptop.
 Distribution is a GitHub Release, not a deploy: `.github/workflows/release.yml`
 turns a version tag into the `.tgz` device package, built by `busy-cli`.
 
+## Should this be its own repo?
+
+Not yet, and the reason is where the seam falls. This is two things, and they
+separate differently:
+
+- **The app** (`petmeter/`) is genuinely standalone — its own `package.json`,
+  its own release workflow that turns a version tag into a `.tgz` device
+  package. It could move tomorrow.
+- **The daemon halves** ([`sinks/busybar.py`](../daemon/sinks/busybar.py),
+  [`sinks/serve.py`](../daemon/sinks/serve.py),
+  [`sinks/busybar_buttons.py`](../daemon/sinks/busybar_buttons.py)) are
+  Petmeter. They import the collectors, share the poll loop and the free-ride
+  token rule, and exist to turn *Petmeter's* snapshot into cards. Moving them
+  means duplicating the collector stack or making Petmeter a package it is
+  not.
+
+So splitting today produces a repo that cannot run alone — its README would
+have to open with "first install Petmeter", which is the worst outcome for the
+audience most likely to find it.
+
+**Split when any of these becomes true:**
+
+1. **The apps menu ships.** Publishing through the BUSY ecosystem becomes
+   real, and the app wants its own issues and release cadence.
+2. **Someone other than the author runs it.** A second user turns "first
+   install Petmeter" from awkward into a support burden.
+3. **It outgrows the daemon's orbit** — a second bar-side app, or providers
+   Petmeter itself does not carry.
+
+Two arguments already point the other way and are worth re-weighing each time:
+a BUSY Bar owner landing in Petmeter finds a repo that is mostly ESP32
+firmware — board ports, LVGL fonts, sprite pipelines — which is noise to them;
+and Petmeter is a fork that takes upstream merges, so every sync drags across
+a tree carrying unrelated Node tooling.
+
+This directory is kept self-contained against that day: the split is a
+`git subtree split` and a README edit, not a rewrite.
+
 ## What we learned the hard way
 
 Everything here was found against real hardware, and none of it is in the published API spec.
