@@ -44,9 +44,10 @@ def _cards(payload: dict, provider: str, now: float) -> list[dict]:
             return
         card = {"provider": provider, "label": label, "pct": float(pct)}
         if isinstance(resets_in, int) and resets_in >= 0:
-            # An instant, not a duration: the device counts it down itself and
-            # stays true between refreshes.
-            card["resets_at"] = int(now + resets_in * 60)
+            # Seconds remaining at the moment of this poll, not an absolute
+            # instant. The app ages it with its own elapsed time, so the
+            # countdown never depends on the bar's clock being right.
+            card["in_s"] = resets_in * 60
         out.append(card)
 
     session_label = payload.get("sm") or "Current"
@@ -68,7 +69,7 @@ def _cards(payload: dict, provider: str, now: float) -> list[dict]:
         card = {"provider": provider, "label": "Resets",
                 "held": int(held or 0), "used": int(used or 0)}
         if isinstance(payload.get("rm"), int) and payload["rm"] >= 0:
-            card["expires_at"] = int(now + payload["rm"] * 60)
+            card["in_s"] = payload["rm"] * 60
         out.append(card)
     return out
 

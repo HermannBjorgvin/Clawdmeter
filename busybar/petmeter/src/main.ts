@@ -14,44 +14,368 @@ import manifest from "./appmeta/manifest.json";
  */
 type Element = Record<string, unknown>;
 
-/** The name the app draws under; the device clears elements by this id. */
 const APP = manifest.id;
 
 /**
  * Where the usage comes from. The Petmeter daemon serves its latest poll at
- * /usage.json. Over USB both addresses are fixed — the bar is 10.0.4.20 and
- * the host 10.0.4.21 — so there is nothing to discover and no Wi-Fi involved.
+ * /usage.json. Over USB both addresses are fixed -- the bar is 10.0.4.20 and
+ * the host 10.0.4.21 -- so there is nothing to discover and no Wi-Fi involved.
  */
 const HOST = import.meta.env.VITE_PETMETER_HOST ?? "http://10.0.4.21:8724";
+const SELF = "http://10.0.4.20";
 
-const POLL_MS = 30_000; // the daemon polls every 60s; half that is never
-                        // more than one poll behind
-const CARD_MS = 4_000;  // how long each quota holds the screen
-const TICK_MS = 250;    // how often the dwell timer is checked, which is also
-                        // how quickly a press feels like it did something
+const POLL_MS = 30_000;
+const CARD_MS = 4_000;
+const TICK_MS = 250;
 
-const WIDTH = 72;
-const PET = 16;          // the mascot is a square the height of the screen
-const GAP = 2;
+const PET = 16;
+const NUM_X = 18;       // the big number, right of the mascot
+const COL_X = 45;       // the label-over-reset column
+const COL_W = 27;       // clipped, so a long label cannot overflow
+const BAR_X = 18;
+const BAR_Y = 12;
+const BAR_W = 54;
+const BAR_H = 3;
+const MAX_CELLS = 8;
 
 // Thresholds and colours from the firmware's pct_color(), so the bar and the
-// meter on the desk never disagree about whether a number is alarming.
+// meter on the desk never disagree about whether a number is alarming. The
+// number itself stays white: the firmware colours bar indicators, never text.
 const WARN_PCT = 75;
 const CRIT_PCT = 90;
 const COL_OK = "#8FA76BFF";
 const COL_WARN = "#D97757FF";
 const COL_CRIT = "#C0392BFF";
 const COL_TEXT = "#FAF9F5FF";
-// Panel greys vanish on an LED matrix — there is no lit background for them to
-// sit against — so "dim" here is the firmware's dim, not its track colour.
 const COL_DIM = "#B0AEA5FF";
 const COL_TRACK = "#2A2A28FF";
 
+type Card = {
+  provider: string;
+  label: string;
+  pct?: number;
+  held?: number;
+  used?: number;
+  /** Seconds left as of the poll; aged locally, never from the bar's clock. */
+  in_s?: number;
+};
+
+const PET_IMAGE: Record<string, string> = {
+  // Image paths resolve against the APP ROOT, not the assets folder -- and one
+  // unreadable image rejects the whole draw with a 400, so a wrong path here
+  // means no frame at all rather than a frame with a gap in it.
+  claude: "appmeta/assets/clawd_16.png",
+  codex: "appmeta/assets/codey_16.png",
+};
+
 /**
- * The runtime's input global. `listen` is installed on the realm by
- * js_input.c, so it is not an import — it is simply there, and TypeScript has
- * to be told. The handler gets one event per physical action; the returned
- * function unbinds.
+ * THE FIXED ID SET, AND WHY IT IS FIXED.
+ *
+ * The canvas merges draws by id: an element missing from the next draw stays
+ * on screen. Left alone, the credit card's cells would still be sitting under
+ * the next card's bar. So every frame names every id, and the ones it does
+ * not use go as tombstones -- a `display_until` already in the past, which
+ * the device destroys on sight.
+ *
+ * An id must also keep its **type** across draws or the entire batch 400s,
+ * which is why `reset` is always text and never a countdown.
+ */
+const IDS: Array<[string, "text" | "rectangle"]> = [
+  ["num", "text"],
+  ["label", "text"],
+  ["reset", "text"],
+  ["msg", "text"],
+  ["track", "rectangle"],
+  ["fill", "rectangle"],
+  ["paused", "rectangle"],
+];
+for (let i = 0; i < MAX_CELLS; i++) IDS.push([`cell${i}`, "rectangle"]);
+
+function tombstone(id: string, type: "text" | "rectangle"): Element {
+  const base = { id, type, x: 0, y: 0, display: "front", display_until: "1" };
+  return type === "text"
+    ? { ...base, text: " ", font: "small", color: COL_DIM, align: "top_left" }
+    : { ...base, width: 1, height: 1, fill: "solid",
+        fill_colors: [COL_TRACK], border_width: 0 };
+}
+
+/** Fills in whatever the frame left out, so nothing lingers from the last card. */
+function complete(used: Element[]): Element[] {
+  const seen: Record<string, boolean> = {};
+  for (const el of used) seen[el.id as string] = true;
+  const out = used.slice();
+  for (const pair of IDS) if (!seen[pair[0]]) out.push(tombstone(pair[0], pair[1]));
+  return out;
+}
+
+function colorFor(pct: number): string {
+  if (pct >= CRIT_PCT) return COL_CRIT;
+  if (pct >= WARN_PCT) return COL_WARN;
+  return COL_OK;
+}
+
+function text(
+  id: string,
+  value: string,
+  font: "small" | "normal" | "large",
+  x: number,
+  y: number,
+  color: string,
+  width?: number,
+): Element {
+  const el: Element = {
+    id, type: "text", text: value, font, x, y,
+    align: "top_left", color, display: "front", timeout: 0,
+  };
+  if (width !== undefined) el.width = width;
+  return el;
+}
+
+/** A rectangle has no `color`: it has a fill and a border, and the border
+ *  defaults to 1px white. Pass only a colour and you get an outline. */
+function rect(
+  id: string, x: number, y: number, w: number, h: number,
+  color: string | null, border?: string,
+): Element {
+  return {
+    id, type: "rectangle", x, y, width: w, height: h, radius: 0,
+    fill: color ? "solid" : "none",
+    fill_colors: [color ?? COL_TRACK],
+    border_width: border ? 1 : 0,
+    border_color: border ?? COL_DIM,
+    display: "front", timeout: 0,
+  };
+}
+
+/**
+ * "1h25m", "5d21h", "10d" -- no spaces, because "23h 59m" is 28px and would
+ * clip the 27px column. Deliberately not the device's `countdown` element:
+ * that renders HH:MM:SS in a wide font, ticks every 100ms, and takes hours
+ * modulo 60, so a five-day reset would show as 21 hours.
+ */
+function until(seconds: number): string {
+  if (seconds <= 0) return "now";
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d >= 1) return `${d}d${h}h`;
+  if (h >= 1) return `${h}h${m}m`;
+  return `${m}m`;
+}
+
+function petOf(card: Card): Element {
+  return {
+    id: "pet", type: "image",
+    path: PET_IMAGE[card.provider] ?? PET_IMAGE.claude,
+    x: 0, y: 0, display: "front", timeout: 0,
+  };
+}
+
+/**
+ * A quota. Big number left of the pane, label over reset time in a fixed
+ * column, bar across the bottom. The column sits at a fixed x rather than
+ * following the number's width, or the label would jump between cards.
+ *
+ * Text `y` is the top of the line box and goes negative so the caps land on
+ * the intended rows: the number's ink on 1..9, the column's on 0..4 and 6..10.
+ */
+function quota(card: Card, left: number | null): Element[] {
+  const pct = Math.round(card.pct ?? 0);
+  // At 100 the "%" no longer fits beside three digits, and shrinking the font
+  // at the moment the number matters most is the wrong trade.
+  const shown = pct >= 100 ? "100" : `${pct}%`;
+  const filled =
+    pct > 0 ? Math.max(1, Math.round((BAR_W * Math.min(pct, 100)) / 100)) : 0;
+
+  const out: Element[] = [
+    petOf(card),
+    text("num", shown, "large", NUM_X, -1, COL_TEXT),
+    text("label", card.label, "small", COL_X, -2, COL_DIM, COL_W),
+    rect("track", BAR_X, BAR_Y, BAR_W, BAR_H, COL_TRACK),
+  ];
+  if (left !== null) {
+    out.push(text("reset", until(left), "small", COL_X, 4, COL_DIM, COL_W));
+  }
+  if (filled > 0) out.push(rect("fill", BAR_X, BAR_Y, filled, BAR_H, colorFor(pct)));
+  return out;
+}
+
+/**
+ * Reset credits are a count, not a proportion, so the bar row becomes the desk
+ * device's ledger: one cell per credit the window handed out, solid while held
+ * and hollow once spent. Same grammar, different shape.
+ */
+function credits(card: Card, left: number | null): Element[] {
+  const held = card.held ?? 0;
+  const total = held + (card.used ?? 0);
+  const out: Element[] = [
+    petOf(card),
+    text("num", `${held}/${total}`, "large", NUM_X, -1, COL_TEXT),
+    text("label", card.label, "small", COL_X, -2, COL_DIM, COL_W),
+    text(
+      "reset",
+      held === 0 ? "all used" : left !== null ? until(left) : " ",
+      "small", COL_X, 4, COL_DIM, COL_W,
+    ),
+  ];
+
+  const n = Math.min(total, MAX_CELLS);
+  if (n > 0) {
+    const cellW = Math.floor((BAR_W - 2 * (n - 1)) / n);
+    for (let i = 0; i < n; i++) {
+      const x = BAR_X + i * (cellW + 2);
+      out.push(
+        i < held
+          ? rect(`cell${i}`, x, BAR_Y, cellW, BAR_H, COL_OK)
+          : rect(`cell${i}`, x, BAR_Y, cellW, BAR_H, null, COL_DIM),
+      );
+    }
+  }
+  return out;
+}
+
+function frame(card: Card, left: number | null, paused: boolean): Element[] {
+  const body = card.pct === undefined ? credits(card, left) : quota(card, left);
+  // The badge sits in the pet box's top-right corner, clear of ink on both
+  // mascots, so it never collides with the label the way a screen-corner dot
+  // does.
+  if (paused) body.push(rect("paused", PET - 2, 0, 2, 2, COL_DIM));
+  return complete(body);
+}
+
+/** The pet says "app alive, host present, reading missing". Without a host
+ *  there is nothing of ours to show, so that state is text alone. */
+function message(value: string, withPet: Card | null): Element[] {
+  const out: Element[] = withPet ? [petOf(withPet)] : [];
+  out.push(text("msg", value, "normal", withPet ? 27 : 18, 3, COL_DIM));
+  return complete(out);
+}
+
+/**
+ * Wipe whatever a previous version of this app left on screen.
+ *
+ * Draws merge by id, and ids this build never names can never be overwritten
+ * -- an older layout's elements simply stay there forever, which is exactly
+ * what a stale "27%" sitting under the new label column turned out to be.
+ * Once, at startup: clearing between cards would close the canvas and let the
+ * bar's own UI flash through.
+ */
+async function clearCanvas(): Promise<void> {
+  await fetch(
+    new Request(`${SELF}/api/display/draw?application_name=${APP}`, {
+      method: "DELETE",
+    }),
+  );
+}
+
+let lastError = "";
+
+async function draw(elements: Element[]): Promise<void> {
+  const resp = await fetch(
+    new Request(`${SELF}/api/display/draw`, {
+      method: "POST",
+      body: JSON.stringify({ application_name: APP, priority: 50, elements }),
+    }),
+  );
+  // A rejected draw used to be silent, which is what made a bad frame look
+  // like a dead app. 409 is a focus session owning the screen, not a fault.
+  if (resp.status !== 200 && resp.status !== 409) {
+    const body = await resp.text();
+    if (body !== lastError) {
+      lastError = body;
+      console.error(`${APP}: draw ${resp.status} ${body}`);
+    }
+  }
+}
+
+/** Entry point. The build rewrites the default export into a call. */
+export default function run(): void {
+  let cards: Card[] = [];
+  let index = 0;
+  let paused = false;
+  let dwell = 0;
+  let polledAt = 0;
+
+  const report = (err: unknown) =>
+    console.error(`${APP}: ${err instanceof Error ? err.message : String(err)}`);
+
+  /** Seconds left on this card, aged by our own elapsed time since the poll,
+   *  so the countdown never depends on the bar's clock being right. */
+  function remaining(card: Card): number | null {
+    if (typeof card.in_s !== "number") return null;
+    return Math.max(0, card.in_s - Math.round((Date.now() - polledAt) / 1000));
+  }
+
+  function show(): void {
+    if (cards.length === 0) return;
+    index = ((index % cards.length) + cards.length) % cards.length;
+    const card = cards[index];
+    void draw(frame(card, remaining(card), paused)).catch(report);
+  }
+
+  function step(by: number): void {
+    index += by;
+    dwell = 0;
+    show();
+  }
+
+  async function poll(): Promise<void> {
+    try {
+      const resp = await fetch(`${HOST}/usage.json`);
+      const data = await resp.json();
+      polledAt = Date.now();
+      cards = Array.isArray(data.cards) ? data.cards : [];
+      if (cards.length === 0) await draw(message("no data", null));
+    } catch (err) {
+      // Host asleep, unplugged, or the daemon stopped. Say which rather than
+      // leaving the last good frame up, which would quietly go stale.
+      report(err);
+      cards = [];
+      await draw(message("no host", null)).catch(report);
+    }
+  }
+
+  // Controls follow what the case itself is engraved with: the red bar is
+  // Start/Pause, the wheel is Scroll, and the wheel's press says "OK/Skip".
+  // A manual step restarts the dwell, or the card you just asked for would
+  // vanish a moment later.
+  // Wrapped: the runtime throws here if a handler is already bound (it
+  // forbids overrides), and an uncaught throw at this point takes the whole
+  // app down silently -- which looked for a long time like a dead draw loop.
+  // Losing the buttons is survivable; losing the display is not.
+  try {
+    listen("input", (event: InputEvent) => {
+      if (event.action === "release") return;
+      if (event.key === "start") {
+        paused = !paused;
+        dwell = 0;
+        show();
+      } else if (event.key === "encoder") {
+        step(event.delta ?? (event.action === "clockwise" ? 1 : -1));
+      } else if (event.key === "ok") {
+        step(1);
+      }
+    });
+  } catch (err) {
+    console.error(`${APP}: controls unavailable: ${String(err)}`);
+  }
+
+  void clearCanvas()
+    .catch(report)
+    .then(poll)
+    .then(show)
+    .catch(report);
+  setInterval(() => void poll().catch(report), POLL_MS);
+  setInterval(() => {
+    if (paused || cards.length === 0) return;
+    dwell += TICK_MS;
+    if (dwell >= CARD_MS) step(1);
+  }, TICK_MS);
+}
+
+/**
+ * The runtime's input global, installed on the realm by js_input.c -- not an
+ * import, so TypeScript has to be told it exists.
  */
 declare function listen(
   type: "input",
@@ -65,241 +389,3 @@ type InputEvent = {
   /** Encoder only: +1 clockwise, -1 counterclockwise. */
   delta?: number;
 };
-
-/** One quota, as the daemon describes it. */
-type Card = {
-  provider: "claude" | "codex" | string;
-  label: string;
-  pct?: number;
-  resets_at?: number;
-  held?: number;
-  used?: number;
-  expires_at?: number;
-};
-
-// Image paths resolve against the APP ROOT, not the assets folder -- and one
-// unreadable image rejects the whole draw with a 400, so a wrong path here
-// means no frame at all rather than a frame with a gap in it.
-const PET_IMAGE: Record<string, string> = {
-  claude: "appmeta/assets/clawd_16.png",
-  codex: "appmeta/assets/codey_16.png",
-};
-
-const PANE_X = PET + GAP;        // where the reading starts
-const BAR_Y = 13;
-const BAR_H = 3;
-
-/** Advance width per character, measured on the device's bitmap fonts. */
-const ADV = { small: 4, normal: 6 } as const;
-
-function textWidth(text: string, font: keyof typeof ADV): number {
-  return text.length * ADV[font];
-}
-
-function colorFor(pct: number): string {
-  if (pct >= CRIT_PCT) return COL_CRIT;
-  if (pct >= WARN_PCT) return COL_WARN;
-  return COL_OK;
-}
-
-function text(
-  id: string,
-  value: string,
-  font: keyof typeof ADV,
-  x: number,
-  y: number,
-  color: string,
-): Element {
-  return {
-    id,
-    type: "text",
-    text: value,
-    font,
-    x,
-    y,
-    align: "top_left",
-    color,
-    display: "front",
-    timeout: 0,
-  };
-}
-
-/** A rectangle has no `color`: it has a fill and a border, and the border
- *  defaults to 1px white. Pass only a colour and you get an outline. */
-function rect(id: string, x: number, y: number, w: number, h: number, color: string): Element {
-  return {
-    id,
-    type: "rectangle",
-    x,
-    y,
-    width: w,
-    height: h,
-    radius: 0,
-    fill: "solid",
-    fill_colors: [color],
-    border_width: 0,
-    display: "front",
-    timeout: 0,
-  };
-}
-
-function petOf(card: Card): Element {
-  return {
-    id: "pet",
-    type: "image",
-    path: PET_IMAGE[card.provider] ?? PET_IMAGE.claude,
-    x: 0,
-    y: 0,
-    width: PET,
-    height: PET,
-    display: "front",
-    timeout: 0,
-  };
-}
-
-/** A quota: its name, its number, and a bar showing the proportion spent. */
-function quota(card: Card): Element[] {
-  const pct = Math.round(card.pct ?? 0);
-  const shown = `${pct}%`;
-  const pane = WIDTH - PANE_X;
-  const filled = pct > 0 ? Math.max(1, Math.round((pane * Math.min(pct, 100)) / 100)) : 0;
-
-  const out: Element[] = [
-    petOf(card),
-    text("label", card.label, "small", PANE_X, 2, COL_DIM),
-    // Right-aligned by arithmetic: the number is the thing you read first, so
-    // it sits against the edge rather than drifting with the label's length.
-    text("pct", shown, "normal", WIDTH - textWidth(shown, "normal"), 1, COL_TEXT),
-    rect("track", PANE_X, BAR_Y, pane, BAR_H, COL_TRACK),
-  ];
-  if (filled > 0) out.push(rect("fill", PANE_X, BAR_Y, filled, BAR_H, colorFor(pct)));
-  return out;
-}
-
-/**
- * Reset credits are a count, not a proportion: how many grants the window
- * handed out and how many are left. Drawn as a count and a countdown rather
- * than a bar, since there is no whole for it to be a fraction of.
- */
-function credits(card: Card): Element[] {
-  const total = (card.held ?? 0) + (card.used ?? 0);
-  const shown = `${card.held ?? 0}/${total}`;
-  const out: Element[] = [
-    petOf(card),
-    text("label", card.label, "small", PANE_X, 2, COL_DIM),
-    text("count", shown, "normal", WIDTH - textWidth(shown, "normal"), 1, COL_TEXT),
-  ];
-  if (card.expires_at) {
-    out.push({
-      id: "exp",
-      type: "countdown",
-      timestamp: String(card.expires_at),
-      direction: "time_left",
-      show_hours: "when_non_zero",
-      x: PANE_X,
-      y: BAR_Y - 3,
-      align: "top_left",
-      color: COL_DIM,
-      display: "front",
-      timeout: 0,
-    });
-  }
-  return out;
-}
-
-function frame(card: Card, paused: boolean): Element[] {
-  const body = card.pct === undefined ? credits(card) : quota(card);
-  // Pressing pause with nothing on screen to show for it feels broken, and
-  // there is no room for a word. A dot in the corner is the whole budget.
-  return paused ? [...body, rect("paused", WIDTH - 2, 0, 2, 2, COL_DIM)] : body;
-}
-
-function message(value: string): Element[] {
-  return [text("msg", value, "small", PANE_X, 6, COL_DIM)];
-}
-
-/** The bar's own address, from inside the bar. */
-const SELF = "http://10.0.4.20";
-
-/**
- * One endpoint, called directly.
- *
- * The scaffold routes this through `@shared/device`, the generated BusyBar
- * client — which drags in an OpenAPI fetch layer and every other endpoint with
- * it. That bundles to ~36 KB minified, and a bundle that size dies silently on
- * this runtime while a 37 KB file of comments runs fine, so it is the weight
- * of the code and not the file that the device objects to. We call exactly one
- * endpoint; the client is not worth its bundle.
- */
-async function draw(elements: Element[]): Promise<void> {
-  await fetch(
-    new Request(`${SELF}/api/display/draw`, {
-      method: "POST",
-      body: JSON.stringify({ application_name: APP, priority: 50, elements }),
-    }),
-  );
-}
-
-/** Entry point. The build rewrites the default export into a call. */
-export default function run(): void {
-  let cards: Card[] = [];
-  let index = 0;
-  let paused = false;
-  let dwell = 0;
-
-  const report = (err: unknown) =>
-    console.error(`${APP}: ${err instanceof Error ? err.message : String(err)}`);
-
-  function show(): void {
-    if (cards.length === 0) return;
-    index = ((index % cards.length) + cards.length) % cards.length;
-    void draw(frame(cards[index], paused)).catch(report);
-  }
-
-  function step(by: number): void {
-    index += by;
-    dwell = 0;
-    show();
-  }
-
-  async function poll(): Promise<void> {
-    try {
-      const resp = await fetch(`${HOST}/usage.json`);
-      const data = await resp.json();
-      cards = Array.isArray(data.cards) ? data.cards : [];
-      if (cards.length === 0) await draw(message("no data"));
-    } catch (err) {
-      // Host asleep, unplugged, or the daemon stopped. Say which rather than
-      // leaving the last good frame up, which would quietly go stale.
-      report(err);
-      cards = [];
-      await draw(message("no host")).catch(report);
-    }
-  }
-
-  // Controls follow what the case itself says: the red bar is Start/Pause, so
-  // it holds and releases the rotation; the wheel is Scroll, so it steps by
-  // hand in either direction; and the wheel's press is engraved "OK/Skip", so
-  // it skips forward. A manual step restarts the dwell, or the card you just
-  // asked for would vanish a moment later.
-  listen("input", (event: InputEvent) => {
-    if (event.action === "release") return;      // one action per press
-    if (event.key === "start") {
-      paused = !paused;
-      dwell = 0;
-      show();
-    } else if (event.key === "encoder") {
-      step(event.delta ?? (event.action === "clockwise" ? 1 : -1));
-    } else if (event.key === "ok") {
-      step(1);
-    }
-  });
-
-  void poll().then(show).catch(report);
-  setInterval(() => void poll().catch(report), POLL_MS);
-  setInterval(() => {
-    if (paused || cards.length === 0) return;
-    dwell += TICK_MS;
-    if (dwell >= CARD_MS) step(1);
-  }, TICK_MS);
-}
