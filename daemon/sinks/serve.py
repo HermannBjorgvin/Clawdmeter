@@ -190,9 +190,11 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
 
         # A button, from whoever can see one. The in-process reader uses the
         # Control object directly; this is for a reader running outside the
-        # daemon -- which on macOS is the only place it can run until the
-        # daemon is granted Local Network access, since a launchd job cannot
-        # raise that prompt.
+        # daemon, which on macOS is the fallback when the daemon cannot reach
+        # the bar's LAN address -- a launchd job cannot raise the Local
+        # Network prompt, so it is denied silently. See
+        # tools/busybar_lan_access.py for the fix, and this for when you would
+        # rather not apply it.
         if len(parts) >= 2 and path == CONTROL_PATH:
             action = _query(target).get("do", "")
             if action == "pause":

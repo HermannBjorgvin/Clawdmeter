@@ -126,7 +126,7 @@ Sinks are opt-in via the config file and cost nothing unconfigured.
 
 ### BUSY Bar
 
-> **[`busybar/README.md`](../busybar/README.md) is the reference** for this — setup both ways, the device quirks, and why the app is not in the apps menu. It is self-contained so it can be published on its own.
+> **[`busybar/README.md`](../busybar/README.md) is the reference** for this — setup both ways, every screen, the device quirks, and the buttons. It is self-contained so it can be published on its own.
 
 [busy.app](https://busy.app) — a 72×16 RGB LED matrix with an open HTTP API
 over USB or Wi-Fi, no cloud round trip. Enable it with:
@@ -196,61 +196,48 @@ them to sit against, so the track colour that reads as "secondary" on the
 AMOLED read as "off" on the bar and the countdown simply was not there. The
 countdown uses the firmware's `dim` (`0xB0AEA5`) instead.
 
-#### An on-device app, and why it is not in the menu yet
+#### An on-device app, and host-owned buttons
 
-The bar can also *pull* instead of being pushed to, as an app you pick from its
-apps menu. Everything that needs is already on the device, undocumented:
-`apps_assets/js_runner` is a JavaScript runtime, and `user_assets/` holds apps
-as plain directories — the firmware ships `app.busy.js_example` as a working
-template:
+The bar can also *pull* instead of being pushed to, as an app you pick from
+its apps menu — the difference matters at the moment you **look** at it: a
+push shows whatever the daemon last sent, a pull shows what is true now, which
+is what you want from something you selected deliberately. The app, how to
+build and install it, and the device quirks that shaped it are all in
+[`busybar/README.md`](../busybar/README.md).
 
-```
-/ext/user_assets/app.petmeter/
-  appmeta/manifest.json       {format_version, id, name, version, ...}
-  appmeta/icon_front_8x8.png
-  appmeta/icon_back_11x11.png
-  scripts/main.js
-```
+Two parts of it are Petmeter's architecture rather than the device's, so they
+live here:
 
-The runtime's own `fetch.js` example fetches `https://qdiv.dev`, so app code
-can reach the network, not just the bar's API. That makes a pull design work:
-`busybar/app.petmeter/scripts/main.js` fetches the daemon and draws, and
-`daemon/sinks/serve.py` answers `GET /usage.json` with the latest payload.
-Over USB both addresses are fixed — the bar is **10.0.4.20** and the host
-**10.0.4.21** — so there is nothing to discover and no Wi-Fi involved. Enable
-it with `busybar_serve = 10.0.4.21:8724` and install with
-`tools/busybar_install_app.py`.
+**The control state is on the host** ([`sinks/serve.py`](../daemon/sinks/serve.py)'s
+`Control`), including the rotation clock, which makes the app a renderer. Not
+a design preference — this firmware has no input API for JS, so a press can
+only be read host-side off the device's CLI, and one state machine on one side
+beats two that have to agree. `GET /usage.json?since=<gen>&wait=8000` long-polls,
+so a press reaches the screen in one round trip.
 
-**It installs, and it will not appear.** On this firmware the apps menu is a
-placeholder reading *"More apps soon — keep your device up to date for
-upcoming apps"*, and nothing in `user_assets/` is listed, including the
-vendor's own example. The JS SDK is documented as "coming soon"; this is what
-that looks like from the device side. The app is inert until the menu opens
-up — `tools/busybar_install_app.py --remove` takes it off.
+**`serve.py` binds to `10.0.4.21`, not `0.0.0.0`.** Over USB both addresses are
+fixed, and the payload is your usage — nobody else's business on a coffee-shop
+network. Binding narrow is cheaper than explaining to a firewall later.
 
-Push (`daemon/sinks/busybar.py`) is therefore the path that works today, and
-the two are complementary rather than alternatives: push keeps the bar current
-while you are not looking, pull makes it right the moment you select it.
+**Push and pull cannot both run.** `canvas_draw_rejected` refuses a *different*
+`application_name` at *equal* priority, so the sink (`petmeter`) and the app
+(`app.petmeter`) fight for the screen at 50 — whichever drew first wins and the
+other collects 409s. Set `busybar_url` **or** `busybar_serve`, not both.
 
 **QA it the way the firmware is QA'd** — don't design a 72×16 layout blind:
 
 ```bash
-python3 tools/busybar_shot.py out.png http://10.0.4.20
+python3 tools/busybar_shot.py out.png http://10.0.4.20 [--skin]
 ```
 
-`GET /api/screen` is documented as `image/bmp` and is neither: it returns
-**base64 text** which decodes to 3456 bytes (72×16×3), and those bytes are
-**BGR**. Sending `#8FA76B` (143,167,107) and reading back (107,167,143) is what
-proves it — render without the swap and amber looks blue.
-
-**The bar is slow over Wi-Fi, and goes quiet.** A draw answers in ~5.0s over Wi-Fi,
-consistently, and after a burst of requests it stops answering for ~20s. **Over
-USB the same draw returns in under 0.1s** — if you are iterating on a layout,
-use USB. The
-first live attempt failed on a 5s `ConnectTimeout` against a device that was
-about to answer — the same trap as the Codex endpoint, where a timeout set at
-the measured response time is a coin flip rather than a margin. `HTTP_TIMEOUT`
-is 20s, which it can afford because the fan-out does not block the poll loop.
+**The bar is slow over Wi-Fi, and goes quiet.** A draw answers in ~5.0s over
+Wi-Fi, consistently, and after a burst it stops answering for ~20s. **Over USB
+the same draw returns in under 0.1s** — if you are iterating on a layout, use
+USB. The first live attempt failed on a 5s `ConnectTimeout` against a device
+that was about to answer: the same trap as the Codex endpoint, where a timeout
+set at the measured response time is a coin flip rather than a margin.
+`HTTP_TIMEOUT` is 20s, which it can afford because the fan-out does not block
+the poll loop.
 
 ## 2. Wire format
 

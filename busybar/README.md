@@ -216,11 +216,44 @@ every 8s also restores the frame after anything else clears the canvas.
 | wheel **scroll** | steps through the cards |
 | wheel press (**OK/Skip**) | skips forward |
 
-**macOS needs to allow it.** The daemon runs under launchd, and connecting out
-to the bar's LAN address is gated by Local Network privacy — a background
-daemon cannot show that prompt, so it is denied silently and the log reads
-`no CLI (OSError: [Errno 65] No route to host)`. Grant the daemon's Python
-binary Local Network access in System Settings → Privacy & Security.
+**On macOS, the daemon has to be launched through `osascript`** — one command,
+but the reason is worth knowing, because the symptom lies:
+
+```bash
+python3 tools/busybar_lan_access.py     # then bootout + bootstrap, as it prints
+```
+
+Since Sequoia, LAN traffic is gated by Local Network privacy, and macOS
+attributes the socket to *the executable launchd spawned*. A venv `python3`
+has no application identity to attribute, so it is denied — and a background
+job cannot raise the prompt, so it is denied **silently**, surfacing as
+`no CLI (OSError: [Errno 65] No route to host)`. That reads as "the bar is
+unplugged" and is really "the OS blocked you", which is how it survives
+every obvious fix: granting "Python" in System Settings does nothing (that
+entry is not the identity being consulted) and neither does rebooting. Both
+were tried here, on the hardware, before the real cause turned up.
+
+`osascript` is an Apple platform binary, and `do shell script` makes its child
+osascript-responsible — which carries the exemption. Measured on one machine,
+same probe, only the spawn path differing:
+
+| launchd → python | `[Errno 65] No route to host` |
+|---|---|
+| launchd → osascript → python | connected |
+
+Bluetooth still works through that path, which matters more than the buttons
+do: the daemon needs launchd for CoreBluetooth at all (it `SIGABRT`s from a
+plain shell), so a fix that bought the LAN and cost BLE would be a bad trade.
+The desk meter kept receiving data across the change.
+
+The script patches the *installed* LaunchAgent rather than the template in
+`daemon/`, which is upstream's file — editing that would cost a merge conflict
+on every sync for a fix only this fork needs. `--revert` puts it back.
+
+If you would rather not have the daemon reach the network at all, skip this
+and run [`tools/busybar_buttons.py`](../tools/busybar_buttons.py) in a
+terminal instead: it reads the same CLI and POSTs to `/control`, and a
+terminal *can* raise the permission prompt.
 
 **Push and pull cannot both run.** `canvas_draw_rejected` refuses a *different*
 `application_name` at *equal* priority, so the sink (`petmeter`) and the app
