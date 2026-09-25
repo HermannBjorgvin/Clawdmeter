@@ -6,7 +6,7 @@ selected via PlatformIO's `build_src_filter`. Adding a board means dropping in
 a new folder + a new `[env:...]` block — `main.cpp`, `ui.cpp`, and `splash.cpp`
 never see board-specific code. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md).
 
-Seven ports today (two SoC families, five panel sizes):
+Eight ports today (two SoC families, six panel sizes):
 
 - `boards/waveshare_amoled_216/` — original Waveshare ESP32-S3-Touch-AMOLED-2.16 (CO5300, 480×480 square, CST9220 touch, IMU rotation). Build env: `waveshare_amoled_216`.
 - `boards/waveshare_amoled_18/` — Waveshare ESP32-S3-Touch-AMOLED-1.8 (368×448 portrait, XCA9554 IO expander). Build env: `waveshare_amoled_18`. **Two panel revisions are auto-detected at boot** (`board_rev()` in `board_init.cpp`, enum in `board_rev.h`): original = SH8601 display + FT3168 touch (0x38); later = CO5300 display + CST816 touch (0x15). One binary drives both.
@@ -15,6 +15,7 @@ Seven ports today (two SoC families, five panel sizes):
 - `boards/waveshare_amoled_206/` — Waveshare ESP32-S3-Touch-AMOLED-2.06 (CO5300, 410×502 watch form factor, FT3168 touch, no IO expander, 32 MB flash, PCF85063 RTC, ES8311 codec). Build env: `waveshare_amoled_206`. Display, touch, battery, IMU init, and BLE verified on hardware; the ES8311 chime path is not wired up (`sound.cpp` no-ops).
 - `boards/waveshare_lcd_154/` — Waveshare ESP32-S3-Touch-LCD-1.54 (ST7789, 240×240 square, CST816T touch @ 0x15). Build env: `waveshare_lcd_154`. **The first non-AMOLED port**: a plain 4-wire SPI TFT, not QSPI, and the panel has no brightness command — backlight is LEDC PWM on `LCD_BL`. **No PMU**: battery is an ADC divider on GPIO1 and `BAT_EN` (GPIO2) is a power-hold line that must be driven HIGH early in `board_init()` or the board browns out on battery. Three buttons (BOOT + GPIO5 + a PWR-role GPIO4); ES8311 chime wired up; QMI8658 populated but unused (fixed orientation, no rotation).
 - `boards/waveshare_lcd_4/` — Waveshare ESP32-S3-Touch-LCD-4 (ST7701 RGB parallel, 480×480 square, GT911 touch). Build env: `waveshare_lcd_4`. **RGB-panel port**: Arduino_ESP32RGBPanel + bounce buffers (tearing fix). IO expander @ 0x24 (TCA9554 / CH32V003) must init before `gfx->begin()` or the panel stays dark; backlight is expander pin 2 (on/off only). No AXP2101 / IMU; KEY/PWR is hardware RST. Single BOOT button (GPIO 0 → Space/PTT).
+- `boards/waveshare_lcd_147_c6/` — Waveshare ESP32-C6-Touch-LCD-1.47 (JD9853, 172×320 native panel run rotated as a 320×172 **landscape** canvas, AXS5106L touch, QMI8658 IMU). Build env: `waveshare_lcd_147_c6`. **The first landscape support merged into `main`** — `ui.cpp::compute_layout()` gained a `width > height && height < 200` breakpoint that sits the two usage panels side by side instead of stacked (the still-unmerged PR #148, an S3 sibling port, got there first). C6 SoC (no PSRAM, BLE 5 only) + confirmed 8 MB flash (ESP32-C6FH8), `default_8MB.csv` partitions. No PMU, no IO expander; a real ETA6098 charger + VBAT divider exists on GPIO0 but `BOARD_HAS_BATTERY=0` by default (see the LCD-1.47 (C6) section below). Single BOOT button (GPIO 9) in the PWR role, same as the LCD-1.54/LCD-4 ports.
 
 Plus one non-hardware target: `boards/sim/` — **native desktop simulator** (SDL2 window, 480×480, `platform = native`). Build env: `sim`. See "Desktop simulator" below.
 
@@ -72,6 +73,17 @@ ESP32-C6 sibling of the S3 1.8: same 368×448 SH8601 panel + FocalTech touch, di
 - No PMU / IMU. Buttons: GPIO 0 only (BOOT → Space/PTT). KEY/PWR is EN/RST (hardware reset). GPIO 18 is display R3.
 - RGB tearing fix: pass `bounce_buffer_size_px = LCD_WIDTH * 10` to `Arduino_ESP32RGBPanel`. Do not call `rgbpanel->getFrameBuffer()` after `gfx->begin()`.
 
+### LCD-1.47 (C6) — `waveshare_lcd_147_c6`
+Pin map from Waveshare's official docs ([docs.waveshare.com/ESP32-C6-Touch-LCD-1.47](https://docs.waveshare.com/ESP32-C6-Touch-LCD-1.47)), confirmed end-to-end on hardware. One correction to the docs: BOOT is GPIO9, not the GPIO8 they list.
+
+- Display: **JD9853** 172×320 IPS via plain 4-wire SPI (CS=14, SCLK=1, MOSI=2, DC=15, RST=22, BL=23 — LEDC PWM, panel has no brightness command). Register-compatible enough with ST7789 for `Arduino_ST7789` to drive it once JD9853's vendor init sequence is pushed after `gfx->begin()`. Run rotated (`setRotation(1)`) to a 320×172 **landscape** canvas — the first landscape support merged into `main` (the still-unmerged PR #148 got there first, on the S3 sibling); `ui.cpp::compute_layout()` gained a `width > height && height < 200` breakpoint (side-by-side usage panels, `usage_panels_row` flag, generalized `make_usage_panel(x, w, …)`).
+- Touch: **AXS5106L** @ I2C 0x63 (SDA=18, SCL=19, RST=20, INT=21), vendored inline reader (14-byte burst @ reg 0x01), same protocol as the unmerged S3 sibling (PR #148).
+- IMU: **QMI8658** @ 0x6B on the same I2C bus — initialized via `SensorLib` for bus health only; rotation disabled (`BOARD_HAS_ROTATION=0`, no PSRAM headroom).
+- No PMU, no IO expander. Battery: **ETA6098** charger (standalone switching, no digital interface, works with the ME6217C33M5G to provide 3.3V) + a VBAT ADC divider on **GPIO0** (network name `BAT_ADC` — R21=200K pull-up to VBAT, R22=100K pull-down to GND, `VBAT = VADC × 3`). The `power.cpp` sampling code is correct, but **`BOARD_HAS_BATTERY` defaults to 0**: with no battery attached, the ETA6098's unloaded output free-runs to ~4.2V (measured), indistinguishable from a genuinely full battery on a single ADC read. Since this bare, connector-less kit will most often run with no battery at all, showing a confidently wrong "full battery" icon by default would be worse than showing none — flip the flag and recompile if a real battery is wired to VBAT. No separate CHG/STAT pin is broken out, so charging/VBUS state stay unknowable regardless.
+- Buttons: **GPIO 9** only (BOOT → PWR role: screens/brightness/hold-3s-release pairing, same reasoning as LCD-1.54/S3-1.47 — no HID button, `button_count=0`). No hold-to-power-off (GPIO9 is the C6's boot-strap pin; see LCD-1.54's GPIO0 gotcha for the same class of hazard).
+- Flash: confirmed **8 MB** via `esptool flash-id` on hardware (chip: ESP32-C6FH8) — `default_8MB.csv` partitions.
+- Display, touch (tap to switch screens), BOOT/PWR button (cycle screens/brightness, hold-3s pairing), and the landscape UI all confirmed working end-to-end on hardware.
+
 ## Architecture
 
 ```text
@@ -121,6 +133,7 @@ pio run -d firmware -e waveshare_amoled_18_c6                                   
 pio run -d firmware -e waveshare_amoled_206                                     # build 2.06 (S3, watch)
 pio run -d firmware -e waveshare_lcd_154                                        # build 1.54 (S3, SPI TFT)
 pio run -d firmware -e waveshare_lcd_4                                           # build LCD-4 (S3, RGB TFT)
+pio run -d firmware -e waveshare_lcd_147_c6                                     # build LCD-1.47 (C6, landscape)
 pio run -d firmware -e waveshare_amoled_18 -t upload --upload-port /dev/cu.usbmodem101   # flash 1.8 on macOS
 pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0         # flash 2.16 on Linux
 # C6 boards: same native USB-JTAG flashing; flag a chip mismatch ("This chip is ESP32-C6,
