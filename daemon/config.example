@@ -42,3 +42,26 @@ chime = off
 #   12   = show the clock, forced 12-hour  (e.g. 6:28 PM)
 #   24   = show the clock, forced 24-hour  (e.g. 18:28)
 clock = off
+
+# --- Long-lived token (optional) -------------------------------------------
+#
+# By default the daemon uses the OAuth token the Claude Code CLI keeps (macOS
+# Keychain, or ~/.claude/.credentials.json elsewhere). That token lasts hours
+# and is refreshed only when the CLI is actually used, so a daemon left running
+# unattended goes blind until someone runs `claude auth login` again.
+#
+# To give the daemon a credential of its own:
+#
+#     claude setup-token        # mints a year-long token (subscription required)
+#
+# then either export it:
+#
+#     CLAUDE_CODE_OAUTH_TOKEN=<token>
+#
+# or store it, readable only by you, in:
+#
+#     ~/.config/claude-usage-monitor/token
+#
+# Either source wins over the CLI's own token. Keep the file at mode 600 — the
+# daemon warns if it is readable by anyone else. The log line "token source:"
+# says which one is in use.
