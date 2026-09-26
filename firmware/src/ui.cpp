@@ -52,6 +52,11 @@ struct Layout {
     int16_t logo_y;                  // logo top edge
     int16_t batt_y;                  // battery icon top edge
     int16_t batt_w;                  // battery icon width, for position math
+    int16_t rssi_bar_w;              // BLE signal bars: width of one bar
+    int16_t rssi_bar_gap;            // gap between bars
+    int16_t rssi_bar_step;           // height added per bar
+    int16_t rssi_bar_min_h;          // shortest bar
+    int16_t rssi_batt_gap;           // gap between the bars and the battery icon
 
     // Pairing hint / idle screen
     int16_t pair_y1, pair_y2, pair_y3;
@@ -98,6 +103,11 @@ static void compute_layout(const BoardCaps& c) {
     L.logo_y = L.title_y - 10;
     L.batt_y = L.title_y;
     L.batt_w = ICON_BATTERY_W;
+    L.rssi_bar_w = 4;
+    L.rssi_bar_gap = 2;
+    L.rssi_bar_step = 5;
+    L.rssi_bar_min_h = 9;
+    L.rssi_batt_gap = 8;
     L.pair_y1 = 40;
     L.pair_y2 = 120;
     L.pair_y3 = 160;
@@ -124,6 +134,12 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 12;
         L.usage_bar_y = 48;
         L.usage_reset_y = 78;
+        // The title leaves ~21px before the battery here, so slim bars.
+        L.rssi_bar_w = 3;
+        L.rssi_bar_gap = 1;
+        L.rssi_bar_step = 4;
+        L.rssi_bar_min_h = 8;
+        L.rssi_batt_gap = 2;
         L.bt_info_panel_h = 140;
         L.bt_reset_zone_h = 90;
         L.bt_title_font    = &font_tiempos_34;
@@ -162,6 +178,11 @@ static void compute_layout(const BoardCaps& c) {
         L.logo_y = 2;
         L.batt_y = 10;
         L.batt_w = ICON_BATTERY_SMALL_W;
+        L.rssi_bar_w = 3;
+        L.rssi_bar_gap = 1;
+        L.rssi_bar_step = 3;
+        L.rssi_bar_min_h = 5;
+        L.rssi_batt_gap = 4;
         L.pair_y1 = 12;
         L.pair_y2 = 56;
         L.pair_y3 = 80;
@@ -221,6 +242,12 @@ static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idl
 static lv_obj_t* battery_img;
 static lv_obj_t* logo_img;
 static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
+
+// ---- BLE signal bars, opt-in via "rb":1 from the daemon ----
+static lv_obj_t* rssi_bars[4] = {};
+static int  rssi_level = -1;            // bars lit (1..4); -1 = unknown, hidden
+static bool rssi_bars_enabled = false;  // latest "rb" flag
+static void apply_rssi_visibility(void); // defined with the other visibility helpers
 
 // ---- Live-data freshness → which usage sub-view to show ----
 // usage panels when data is flowing, an idle "Zzz" screen when the host is
@@ -588,6 +615,28 @@ void ui_init(void) {
         lv_obj_del(battery_img);
         battery_img = nullptr;
     }
+
+    // BLE signal bars beside the battery (or in its corner when there is none),
+    // centered on the battery row. The icon art is centered in a square box.
+    {
+        int16_t bars_w = 4 * L.rssi_bar_w + 3 * L.rssi_bar_gap;
+        int16_t max_h  = L.rssi_bar_min_h + 3 * L.rssi_bar_step;
+        int16_t x0 = L.scr_w - L.margin - bars_w -
+                     (board_caps().has_battery ? L.batt_w + L.rssi_batt_gap : 0);
+        int16_t bottom = L.batt_y + L.batt_w / 2 + max_h / 2;
+        for (int i = 0; i < 4; i++) {
+            int16_t h = L.rssi_bar_min_h + i * L.rssi_bar_step;
+            lv_obj_t* bar = lv_obj_create(scr);
+            lv_obj_remove_style_all(bar);
+            lv_obj_set_size(bar, L.rssi_bar_w, h);
+            lv_obj_set_pos(bar, x0 + i * (L.rssi_bar_w + L.rssi_bar_gap), bottom - h);
+            lv_obj_set_style_radius(bar, 2, 0);
+            lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_color(bar, COL_BAR_BG, 0);
+            lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+            rssi_bars[i] = bar;
+        }
+    }
 }
 
 void ui_update(const UsageData* data) {
@@ -596,6 +645,12 @@ void ui_update(const UsageData* data) {
     if (!data->ok) return;          // a {"ok":false} "no data" beat → fall through to idle, keep last numbers
     last_data_ms = lv_tick_get();   // a real usage update just landed
     data_received = true;
+
+    // "rb" shows/hides the bars live, the same way "t" drives the clock.
+    if (data->rssi_bars != rssi_bars_enabled) {
+        rssi_bars_enabled = data->rssi_bars;
+        apply_rssi_visibility();
+    }
 
     if (data->clock_epoch > 0) {    // daemon supplied wall-clock time → drive the title clock
         clock_base_epoch = data->clock_epoch;
@@ -763,6 +818,16 @@ static void apply_battery_visibility(void) {
     else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
+static void apply_rssi_visibility(void) {
+    if (!rssi_bars[0]) return;
+    bool show = rssi_bars_enabled &&
+                (current_screen != SCREEN_SPLASH) && (rssi_level > 0);
+    for (int i = 0; i < 4; i++) {
+        if (show) lv_obj_clear_flag(rssi_bars[i], LV_OBJ_FLAG_HIDDEN);
+        else      lv_obj_add_flag(rssi_bars[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 static void global_click_cb(lv_event_t* e) {
     (void)e;
     if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
@@ -788,6 +853,7 @@ void ui_show_screen(screen_t screen) {
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
     current_screen = screen;
     apply_battery_visibility();
+    apply_rssi_visibility();
 }
 
 void ui_toggle_splash(void) {
@@ -827,4 +893,35 @@ void ui_update_battery(int percent, bool charging) {
     }
     lv_image_set_src(battery_img, &battery_dscs[idx]);
     apply_battery_visibility();
+}
+
+void ui_update_rssi(int8_t rssi) {
+    // Thresholds from #107 with a 2 dB hysteresis band so a signal sitting
+    // on a boundary doesn't flap between bar counts.
+    static const int8_t EDGE[5] = {0, 0, -80, -70, -60};  // EDGE[L] = min dBm for level L
+    static const int8_t HYST = 2;
+
+    int level;
+    if (rssi == BLE_RSSI_UNKNOWN) {
+        level = -1;                       // link down, hide immediately
+    } else if (rssi_level <= 0) {
+        // First reading of a connection: plain quantize, no anchor yet.
+        if      (rssi >= -60) level = 4;
+        else if (rssi >= -70) level = 3;
+        else if (rssi >= -80) level = 2;
+        else                  level = 1;
+    } else {
+        level = rssi_level;
+        while (level < 4 && rssi >= EDGE[level + 1] + HYST) level++;
+        while (level > 1 && rssi <  EDGE[level] - HYST)     level--;
+    }
+
+    if (level == rssi_level) return;   // jitter within the band, same bar count
+    rssi_level = level;
+
+    for (int i = 0; i < 4; i++) {
+        lv_obj_set_style_bg_color(rssi_bars[i],
+            (i < level) ? COL_TEXT : COL_BAR_BG, 0);
+    }
+    apply_rssi_visibility();
 }

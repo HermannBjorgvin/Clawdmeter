@@ -112,6 +112,8 @@ static bool parse_json(const char* json, UsageData* out) {
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->chime = doc["c"] | false;   // absent (old daemon / chime off) → stay silent
+    // as<bool>() so the daemons' integer 1 reads as true.
+    out->rssi_bars = doc["rb"].as<bool>();
     const char* acct = doc["acct"] | "pro";
     out->enterprise = (strcmp(acct, "ent") == 0);
     out->time_pct = doc["tp"] | 0;
@@ -367,6 +369,13 @@ void loop() {
         last_pct = pct;
         last_charging = charging;
         ui_update_battery(pct, charging);
+    }
+
+    static int8_t last_rssi = BLE_RSSI_UNKNOWN;
+    int8_t rssi = ble_get_rssi();
+    if (rssi != last_rssi) {
+        last_rssi = rssi;
+        ui_update_rssi(rssi);   // quantizes internally; redraws only on bar change
     }
 
     check_serial_cmd();

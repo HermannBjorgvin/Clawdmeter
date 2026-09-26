@@ -366,6 +366,35 @@ def add_chime_field(payload: dict) -> None:
         payload["c"] = 1
 
 
+def read_rssi_setting() -> str:
+    """Read the `rssi` option from the config file. One of: off|on.
+
+    Defaults to "off" so the BLE signal bars stay hidden until the user
+    opts in.
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "rssi":
+                    val = val.strip().lower()
+                    if val in ("off", "on"):
+                        return val
+    except OSError:
+        pass
+    return "off"
+
+
+def add_rssi_field(payload: dict) -> None:
+    """Add "rb":1 to the payload when the config opts in, so the firmware may
+    draw the BLE signal bars. Omitted entirely when rssi is off."""
+    if read_rssi_setting() == "on":
+        payload["rb"] = 1
+
+
 def detect_hour_format() -> int:
     """Best-effort 12h/24h detection for the host. Returns 12 or 24 (default 24)."""
     # macOS: the explicit System Settings toggle lives in NSGlobalDomain.
@@ -465,6 +494,7 @@ async def poll_api(token: str) -> dict | None:
         }
     add_chime_field(payload)   # adds "c":1 iff the config opts in
     add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
+    add_rssi_field(payload)    # adds "rb":1 iff the config opts in
     return payload
 
 

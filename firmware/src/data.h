@@ -8,6 +8,7 @@ struct UsageData {
     int weekly_reset_mins;   // minutes until weekly reset (Pro/Max only)
     char status[16];         // "allowed", "limited", etc.
     bool chime;              // play the session-reset chime; false unless daemon opts in
+    bool rssi_bars;          // show the BLE signal bars; false unless daemon opts in
     bool enterprise;         // true = Enterprise spending-limit account
     int time_pct;            // 0-100: fraction of billing period elapsed (Enterprise)
     int period_days;         // total billing period length in days (Enterprise)

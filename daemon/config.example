@@ -34,6 +34,14 @@
 #   off = silent (default)
 #   on  = chime through the board speaker (boards with audio: AMOLED-2.16 / 1.8)
 chime = off
+# Show BLE signal-strength bars next to the battery icon, driven by the live
+# connection RSSI measured on the device. Useful for finding a good spot for
+# the device. The bars show relative signal quality, not calibrated dBm.
+#   off = no bars (default)
+#   on  = show 1-4 bars while connected; hidden when the link is down
+# Note: the 12-hour clock is wide enough to touch or overlap the bars
+# (depending on the panel). Use `clock = 24` or `off` with `rssi = on`.
+rssi = off
 # Show a clock on the Usage screen, in place of the "Usage" title.
 #   off  = no clock; the screen keeps showing "Usage" (default)
 #   auto = show the clock, auto-detecting 12h/24h from this machine's settings

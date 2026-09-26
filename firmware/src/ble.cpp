@@ -3,6 +3,7 @@
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
 #include <Preferences.h>
+#include <host/ble_gap.h>   // ble_gap_conn_rssi
 
 #define DEVICE_NAME "Clawdmeter"
 
@@ -72,6 +73,13 @@ static const uint16_t DESIRED_TIMEOUT   = 600;   // ×10ms = 6s, matches PPCP
 static volatile uint16_t param_fix_handle = CONN_HANDLE_NONE;  // pending retry
 static volatile uint32_t param_fix_at_ms  = 0;                 // when to send it
 static volatile uint16_t param_fix_spent  = CONN_HANDLE_NONE;  // one per connection
+// Link RSSI for the signal bars, polled from ble_tick(). EMA-smoothed
+// (alpha 1/4) because single readings jitter and spike by tens of dB.
+static const uint32_t RSSI_POLL_MS = 3000;
+static volatile int8_t link_rssi = BLE_RSSI_UNKNOWN;
+static float rssi_filt = 0;
+static bool  rssi_filt_valid = false;
+
 static char rx_buf[BLE_BUF_SIZE];
 static volatile bool data_ready = false;
 static volatile bool has_received_data = false;
@@ -200,7 +208,11 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
     void onDisconnect(NimBLEServer* s, NimBLEConnInfo& info, int reason) override {
         // Only flip the UI state to DISCONNECTED when the last client leaves.
-        if (s->getConnectedCount() == 0) state = BLE_STATE_DISCONNECTED;
+        if (s->getConnectedCount() == 0) {
+            state = BLE_STATE_DISCONNECTED;
+            link_rssi = BLE_RSSI_UNKNOWN;   // hide the signal bars immediately
+            rssi_filt_valid = false;        // next link seeds the EMA fresh
+        }
         need_advertise = true;
         // Drop any pending/spent param pushback for this handle — NimBLE
         // reuses conn handles, so stale state would leak onto the next link.
@@ -381,6 +393,39 @@ void ble_tick(void) {
             server->updateConnParams(h, 12, 24, 0, DESIRED_TIMEOUT);
         }
     }
+    // Only an encrypted peer counts: unpaired centrals can connect too, and
+    // the owner-lock drops encrypted non-owners, so this is the owner's link.
+    static uint32_t rssi_next_ms = 0;
+    if ((int32_t)(millis() - rssi_next_ms) >= 0) {
+        rssi_next_ms = millis() + RSSI_POLL_MS;
+        int8_t r = BLE_RSSI_UNKNOWN;
+        bool got = false;
+        int n = server ? (int)server->getConnectedCount() : 0;
+        for (int i = 0; i < n && !got; i++) {
+            NimBLEConnInfo pi = server->getPeerInfo(i);
+            if (!pi.isEncrypted()) continue;
+            // 127 from the controller means "RSSI not available", skip it.
+            got = (ble_gap_conn_rssi(pi.getConnHandle(), &r) == 0) &&
+                  (r != BLE_RSSI_UNKNOWN);
+        }
+        // onDisconnect runs on the host task; don't let a sample read just
+        // before the link dropped overwrite its reset.
+        if (got && server->getConnectedCount() == 0) got = false;
+        if (got) {
+            int8_t prev = link_rssi;
+            if (!rssi_filt_valid) { rssi_filt = r; rssi_filt_valid = true; }
+            else                  { rssi_filt += 0.25f * ((float)r - rssi_filt); }
+            link_rssi = (int8_t)lroundf(rssi_filt);
+            if (link_rssi != prev) Serial.printf("BLE: rssi=%d avg=%d\n", (int)r, (int)link_rssi);
+        } else {
+            link_rssi = BLE_RSSI_UNKNOWN;
+            rssi_filt_valid = false;
+        }
+    }
+}
+
+int8_t ble_get_rssi(void) {
+    return link_rssi;
 }
 
 ble_state_t ble_get_state(void) {

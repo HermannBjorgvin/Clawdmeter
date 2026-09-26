@@ -1,6 +1,9 @@
 #pragma once
 #include <stdint.h>
 
+// RSSI unknown / not connected. Same value HCI uses for "RSSI not available".
+#define BLE_RSSI_UNKNOWN 127
+
 enum ble_state_t {
     BLE_STATE_INIT,
     BLE_STATE_ADVERTISING,
@@ -17,6 +20,7 @@ void ble_clear_bonds(void);
 bool ble_has_bonds(void);
 bool ble_has_data(void);
 const char* ble_get_data(void);
+int8_t ble_get_rssi(void);   // BLE_RSSI_UNKNOWN when disconnected/unknown
 void ble_send_ack(void);
 void ble_send_nack(void);
 void ble_request_refresh(void);

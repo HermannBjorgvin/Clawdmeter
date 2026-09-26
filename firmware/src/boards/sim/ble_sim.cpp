@@ -119,6 +119,7 @@ void ble_send_ack(void)  {}
 void ble_send_nack(void) { printf("[sim] payload NACKed — check the scenario JSON\n"); }
 void ble_request_refresh(void) {}
 void ble_set_battery_level(int pct) { (void)pct; }
+int8_t ble_get_rssi(void) { return connected ? -65 : BLE_RSSI_UNKNOWN; }   // 3 bars; 'd' toggles the link
 
 void ble_keyboard_press(uint8_t key, uint8_t modifier) {
     printf("[sim] HID press key=0x%02X mod=0x%02X\n", key, modifier);
