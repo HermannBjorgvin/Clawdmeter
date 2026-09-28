@@ -58,7 +58,32 @@ bool usage_rate_sample(float session_pct) {
     return was_reset;
 }
 
+// Matches the firmware's 90s agents freshness window (daemon resends every 60s).
+#define AGENTS_STALE_MS 90000UL
+
+static bool     agents_known = false;
+static int      agents_working = 0;
+static uint32_t agents_ms = 0;
+
+void usage_rate_set_agents(int working) {
+    agents_known = true;
+    agents_working = working;
+    agents_ms = millis();
+}
+
+static int rate_group(void);
+
 int usage_rate_group(void) {
+    int rg = rate_group();
+    if (!agents_known || millis() - agents_ms >= AGENTS_STALE_MS) return rg;
+    // Agents are the direct signal: nobody working → sleepy, whatever the
+    // (lagging) usage rate says. Otherwise more agents → livelier.
+    if (agents_working <= 0) return 0;
+    int ag = agents_working >= 3 ? 3 : agents_working;
+    return ag > rg ? ag : rg;
+}
+
+static int rate_group(void) {
     if (count < 2) return 0;
 
     uint8_t o = oldest_idx();

@@ -12,3 +12,7 @@
 void sound_hal_init(void);
 void sound_hal_tick(void);
 void sound_hal_play_reset(void);
+// Short agent alerts: 1 beep = an agent finished, 2 = one is waiting on you.
+// Boards that don't override it get a weak default (main.cpp) that plays the
+// reset chime for 2+ and stays silent for 1.
+void sound_hal_play_beeps(int count);

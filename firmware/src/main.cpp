@@ -22,6 +22,7 @@
 #include "hal/sound_hal.h"
 
 static UsageData usage = {};
+static AgentsData agents = {};
 
 // ---- LVGL draw buffers (partial render mode) ----
 // PSRAM-equipped boards (S3) can comfortably hold larger strips. PSRAM-free
@@ -97,15 +98,24 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 }
 
-// Parse a JSON line into UsageData.
-static bool parse_json(const char* json, UsageData* out) {
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, json);
-    if (err) {
-        Serial.printf("JSON parse error: %s\n", err.c_str());
-        return false;
+// Parse a running-agents payload ({"ag":[[name,state,mins],…],"n":total}).
+static void parse_agents(const JsonDocument& doc, AgentsData* out) {
+    JsonArrayConst rows = doc["ag"].as<JsonArrayConst>();
+    out->count = 0;
+    for (JsonArrayConst row : rows) {
+        if (out->count >= AGENTS_MAX) break;
+        AgentInfo& a = out->list[out->count++];
+        strlcpy(a.name, row[0] | "?", sizeof(a.name));
+        const char* st = row[1] | "i";
+        a.state = st[0];
+        a.mins = row[2] | 0;
+        strlcpy(a.act, row[3] | "", sizeof(a.act));
     }
+    out->total = doc["n"] | out->count;
+}
 
+// Parse a usage payload into UsageData.
+static void parse_usage(const JsonDocument& doc, UsageData* out) {
     out->session_pct = doc["s"] | 0.0f;
     out->session_reset_mins = doc["sr"] | -1;
     out->weekly_pct = doc["w"] | 0.0f;
@@ -121,7 +131,6 @@ static bool parse_json(const char* json, UsageData* out) {
     out->clock_fmt = doc["tf"] | 24;
     out->ok = doc["ok"] | false;
     out->valid = true;
-    return true;
 }
 
 // ---- Serial command buffer ----
@@ -186,6 +195,12 @@ static void check_serial_cmd() {
 // to settle before display/touch (e.g. an IO expander gating the LCD
 // reset line). Called exactly once at the start of setup().
 extern "C" void board_init(void);
+
+// Boards without their own beep patterns: waiting (2+) plays the reset chime,
+// done stays silent.
+__attribute__((weak)) void sound_hal_play_beeps(int count) {
+    if (count >= 2) sound_hal_play_reset();
+}
 
 void setup() {
     Serial.begin(115200);
@@ -371,28 +386,53 @@ void loop() {
 
     check_serial_cmd();
 
-    if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
-            int g_before = usage_rate_group();
-            bool session_reset = usage_rate_sample(usage.session_pct);
-            int g_after = usage_rate_group();
-            // 5-hour session limit refilled → chime so the user knows they can
-            // use Claude again (no-op on boards without a buzzer). Gated on the
-            // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
-            if (session_reset && usage.chime) {
-                Serial.println("session reset detected — chime");
-                sound_hal_play_reset();
-            }
-            if (g_after != g_before) {
-                Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
-                if (splash_is_active()) splash_pick_for_current_rate();
-            }
-            ui_update(&usage);
-            ble_send_ack();
-        } else {
+    while (ble_has_data()) {
+        JsonDocument doc;
+        DeserializationError err = deserializeJson(doc, ble_get_data());
+        if (err) {
+            Serial.printf("JSON parse error: %s\n", err.c_str());
             ble_send_nack();
+            continue;
         }
+        if (doc["ag"].is<JsonArrayConst>()) {
+            parse_agents(doc, &agents);
+            int working = 0;
+            for (int i = 0; i < agents.count; i++) working += agents.list[i].state == 'b';
+            int g_before = usage_rate_group();
+            usage_rate_set_agents(working);
+            if (usage_rate_group() != g_before && splash_is_active())
+                splash_pick_for_current_rate();
+            // An agent just finished or started waiting on the user → wake the
+            // panel and beep (same opt-in as the reset chime; no-op without a
+            // speaker): one beep for done, two for waiting.
+            agents_nudge_t nudge = ui_update_agents(&agents);
+            if (nudge != AGENTS_NUDGE_NONE) {
+                Serial.println(nudge == AGENTS_NUDGE_WAITING ? "agent waiting — nudge"
+                                                             : "agent done — nudge");
+                idle_note_activity();
+                if (usage.chime) sound_hal_play_beeps(nudge == AGENTS_NUDGE_WAITING ? 2 : 1);
+            }
+            ble_send_ack();
+            continue;
+        }
+        parse_usage(doc, &usage);
+        int g_before = usage_rate_group();
+        bool session_reset = usage_rate_sample(usage.session_pct);
+        int g_after = usage_rate_group();
+        // 5-hour session limit refilled → chime so the user knows they can
+        // use Claude again (no-op on boards without a buzzer). Gated on the
+        // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
+        if (session_reset && usage.chime) {
+            Serial.println("session reset detected — chime");
+            sound_hal_play_reset();
+        }
+        if (g_after != g_before) {
+            Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
+                g_before, g_after, usage.session_pct);
+            if (splash_is_active()) splash_pick_for_current_rate();
+        }
+        ui_update(&usage);
+        ble_send_ack();
     }
 
     delay(5);

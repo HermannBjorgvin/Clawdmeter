@@ -42,3 +42,10 @@ chime = off
 #   12   = show the clock, forced 12-hour  (e.g. 6:28 PM)
 #   24   = show the clock, forced 24-hour  (e.g. 18:28)
 clock = off
+# Show running Claude Code sessions on the device. While any are running, the
+# Usage screen alternates every 8s with an "Agents" page listing them (name,
+# Working / Waiting / Idle, time in that state). Read from Claude Code's live
+# session registry (<config_dir>/sessions/*.json). macOS daemon only for now.
+#   on  = send the running-agents list (default)
+#   off = never send it; the device shows only the usage page
+# agents = on

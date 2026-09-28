@@ -31,6 +31,10 @@ REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 
 POLL_INTERVAL = 60
 TICK = 5
+RETRY_AFTER_FAILURE_S = 30   # a failed poll retries after this, not every TICK
+RATE_LIMIT_MIN_S = 60        # floor for backing off after an HTTP 429
+HEARTBEAT_S = 60             # replay the last payload (aged) this often while polls fail…
+HEARTBEAT_MAX_AGE_S = 900    # …for at most this long, then let the device show "No data"
 CONNECT_TIMEOUT = 20.0
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
@@ -52,6 +56,23 @@ API_BODY = {
     "max_tokens": 1,
     "messages": [{"role": "user", "content": "hi"}],
 }
+
+
+# After an HTTP 429 no poll is attempted before this time (time.time()).
+_rate_limited_until = 0.0
+
+
+def age_payload(payload: dict, secs: float) -> dict:
+    """Copy of a usage payload aged by ``secs``: reset countdowns shrink and the
+    clock advances, so a replay reads correctly. Mirrors the Linux daemon."""
+    aged = dict(payload)
+    mins = int(secs) // 60
+    for k in ("sr", "wr"):
+        if isinstance(aged.get(k), int) and aged[k] > 0:
+            aged[k] = max(aged[k] - mins, 0)
+    if isinstance(aged.get("t"), int) and aged["t"] > 0:
+        aged["t"] += int(secs)
+    return aged
 
 
 class TokenExpired(Exception):
@@ -404,6 +425,279 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
+# ---- Running agents ----
+# Claude Code keeps a registry of live sessions at <config_dir>/sessions/<pid>.json
+# ({"pid", "name", "cwd", "status": "busy"|"idle"|…, "statusUpdatedAt" ms, …}).
+# Files can outlive a crashed process, so each entry is kept only while its PID
+# is alive. The list goes to the device as its own payload, separate from usage:
+#   {"ag": [[name, state, mins_in_state, activity], …], "n": total_running}
+# state: "b" busy/working, "w" waiting on the user, "d" done (went busy →
+# idle within the last DONE_HOLD_S), "i" idle (Claude Code's
+# statuses are busy / waiting / idle, plus "shell" = idle with a shell open,
+# which falls through to idle here). activity is a
+# short hint of what a busy/waiting session is doing ("Edit ui.cpp"), read from
+# the tail of its transcript; "" when idle or unknown.
+AGENTS_MAX = 4            # rows the device can show
+AGENT_NAME_MAX = 16       # device-side name buffer is 20 bytes; keep it short
+AGENT_ACT_MAX = 18        # device-side activity buffer is 20 bytes
+AGENTS_PAYLOAD_MAX = 180  # default write-without-response budget (MTU 185 - 3)
+TRANSCRIPT_TAIL = 65536   # bytes of transcript read to find the latest action
+AGENTS_RESEND_S = 60      # re-send an unchanged list so the device's 90s freshness never lapses
+AGENTS_WATCH_S = 0.5      # registry change check; Claude Code rewrites it on every status flip
+DONE_HOLD_S = 60          # how long a just-finished session shows as "done"
+STATE_ORDER = "wdbi"      # rows: waiting, done, working, idle
+
+
+def read_agents_setting() -> str:
+    """Read the `agents` option from the config file. One of: off|on. Default on."""
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "agents":
+                    val = val.strip().lower()
+                    if val in ("off", "on"):
+                        return val
+    except OSError:
+        pass
+    return "on"
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True   # exists, owned by someone else
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _agent_state(status: str) -> str:
+    s = (status or "").lower()
+    if s == "busy":
+        return "b"
+    if "wait" in s or "permission" in s or "input" in s:
+        return "w"
+    return "i"
+
+
+def _short(text: str, n: int) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[: n - 2].rstrip() + ".."
+
+
+SHELL_PREFIX_WORDS = {"do", "then", "else", "elif", "{", "(", "!", "time"}
+SHELL_SKIP_WORDS = {"cd", "for", "while", "until", "if", "case", "select",
+                    "done", "fi", "esac", "}", ")"}
+
+
+def describe_tool(name: str, inp: dict) -> str:
+    """One short phrase for a tool call, e.g. "Edit ui.cpp", "Run pio"."""
+    inp = inp if isinstance(inp, dict) else {}
+    path = inp.get("file_path") or inp.get("notebook_path") or inp.get("path")
+    if name in ("Edit", "MultiEdit", "Write", "Read", "NotebookEdit") and path:
+        verb = "Edit" if name in ("MultiEdit", "NotebookEdit") else name
+        return f"{verb} {Path(str(path)).name}"
+    if name == "Bash":
+        # First real program: skip `cd …` segments, env assignments, sudo, and
+        # shell syntax like `$(` so "cd x && P=$(ls y) && pio run" → "Run pio".
+        for seg in re.split(r"&&|\|\||;|\||\n", str(inp.get("command", ""))):
+            words = []
+            for w in seg.split():
+                if "=" in w:   # VAR=value is skipped; VAR=$(cmd … runs cmd
+                    if "$(" not in w:
+                        continue
+                    w = w.split("$(", 1)[1]
+                w = w.lstrip("$(`")
+                if w and w != "sudo":
+                    words.append(w)
+            # Shell control flow: `for x in …` / `while cond` headers aren't
+            # programs, and `do`/`then` prefix the body's first command.
+            while words and words[0] in SHELL_PREFIX_WORDS:
+                words.pop(0)
+            if words and words[0] not in SHELL_SKIP_WORDS:
+                return f"Run {Path(words[0]).name}"
+        return "Run command"
+    if name in ("Grep", "Glob"):
+        return f"Search {inp.get('pattern', '')}".strip()
+    if name in ("Agent", "Task"):
+        return "Subagent"
+    if name == "WebSearch":
+        return "Web search"
+    if name == "WebFetch":
+        return "Fetch web page"
+    if name.startswith("mcp__"):
+        return name.rsplit("__", 1)[-1].replace("_", " ")
+    return name
+
+
+def last_activity(transcript: Path) -> str:
+    """What the session is doing now, from the newest user/assistant entry."""
+    try:
+        with transcript.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - TRANSCRIPT_TAIL))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue   # first line of the tail is usually cut mid-way
+        if entry.get("type") not in ("assistant", "user"):
+            continue
+        content = (entry.get("message") or {}).get("content")
+        if entry["type"] == "user":
+            return "Thinking"   # just got a prompt or a tool result back
+        if not isinstance(content, list) or not content:
+            return "Thinking"
+        block = content[-1]
+        kind = block.get("type")
+        if kind == "tool_use":
+            return describe_tool(block.get("name", "Tool"), block.get("input"))
+        return "Writing" if kind == "text" else "Thinking"
+    return ""
+
+
+_TRANSCRIPTS: dict[str, Path] = {}
+
+
+def find_transcript(config_dir: Path, session_id: str) -> Path | None:
+    """<config_dir>/projects/<encoded cwd>/<session_id>.jsonl, cached."""
+    if not session_id:
+        return None
+    hit = _TRANSCRIPTS.get(session_id)
+    if hit and hit.exists():
+        return hit
+    for path in (config_dir / "projects").glob(f"*/{session_id}.jsonl"):
+        _TRANSCRIPTS[session_id] = path
+        return path
+    return None
+
+
+def collect_agents(config_dirs: list[Path] | None = None,
+                   now_ms: float | None = None) -> list[tuple[str, str, int, str]]:
+    """Live Claude Code sessions as (name, state, minutes_in_state, activity),
+    most relevant first: working, then waiting, then idle; newest change first."""
+    dirs = config_dirs if config_dirs is not None else read_config_dirs()
+    now_ms = now_ms if now_ms is not None else time.time() * 1000
+    seen: set[int] = set()
+    rows: list[tuple[int, float, str, str, int, str]] = []
+    for d in dirs:
+        for f in (d / "sessions").glob("*.json"):
+            try:
+                info = json.loads(f.read_text())
+                pid = int(info.get("pid") or f.stem)
+            except (OSError, ValueError, TypeError):
+                continue
+            if pid in seen or not _pid_alive(pid):
+                continue
+            seen.add(pid)
+            name = info.get("name") or Path(info.get("cwd") or "?").name or "claude"
+            # Device fonts are ASCII-only (0x20-0x7E)
+            name = "".join(c if " " <= c <= "~" else "?" for c in str(name))
+            state = _agent_state(info.get("status", ""))
+            since = info.get("statusUpdatedAt") or info.get("startedAt") or now_ms
+            try:
+                mins = max(0, int((now_ms - float(since)) // 60000))
+            except (TypeError, ValueError):
+                mins = 0
+            act = ""
+            if state != "i":
+                transcript = find_transcript(d, str(info.get("sessionId") or ""))
+                if transcript:
+                    act = last_activity(transcript)
+            # Claude Code records why a session is waiting: "permission prompt"
+            # (the pending tool call is what needs approving) or "input needed".
+            waiting_for = str(info.get("waitingFor") or "")
+            if state == "w" and "input" in waiting_for:
+                act = "Needs your input"
+            elif state == "w" and act and act not in ("Thinking", "Writing"):
+                act = f"Allow {act}"
+            act = "".join(c if " " <= c <= "~" else "?" for c in act)
+            rows.append((STATE_ORDER.index(state), -float(since), name, state, mins, act))
+    rows.sort()
+    return [(name, state, mins, act) for _, _, name, state, mins, act in rows]
+
+
+def sessions_signature(config_dirs: list[Path] | None = None) -> tuple:
+    """Cheap fingerprint of the session registries (names + mtimes). Claude Code
+    rewrites a session's file on every status change, so a new signature means
+    a session started, stopped, finished or began waiting."""
+    dirs = config_dirs if config_dirs is not None else read_config_dirs()
+    sig = []
+    for d in dirs:
+        for f in (d / "sessions").glob("*.json"):
+            try:
+                sig.append((str(f), f.stat().st_mtime_ns))
+            except OSError:
+                pass
+    return tuple(sorted(sig))
+
+
+class DoneTracker:
+    """Marks sessions that just went busy → idle as "d" (done) for DONE_HOLD_S,
+    so the device can flag "finished" instead of a plain idle row."""
+
+    def __init__(self) -> None:
+        self.prev: dict[str, str] = {}
+        self.done_at: dict[str, float] = {}
+
+    def apply(self, agents: list[tuple[str, str, int, str]],
+              now: float | None = None) -> list[tuple[str, str, int, str]]:
+        now = now if now is not None else time.time()
+        out = []
+        for name, state, mins, act in agents:
+            if state == "i" and self.prev.get(name) == "b":
+                self.done_at[name] = now
+            elif state != "i":
+                self.done_at.pop(name, None)
+            self.prev[name] = state
+            if state == "i" and now - self.done_at.get(name, -1e9) < DONE_HOLD_S:
+                state, act = "d", "Finished"
+            out.append((name, state, mins, act))
+        live = {a[0] for a in agents}
+        for gone in set(self.prev) - live:   # session exited
+            self.prev.pop(gone, None)
+            self.done_at.pop(gone, None)
+        out.sort(key=lambda a: STATE_ORDER.index(a[1]))   # stable: keeps recency order
+        return out
+
+
+def agents_payload(agents: list[tuple[str, str, int, str]],
+                   limit: int = AGENTS_PAYLOAD_MAX) -> dict:
+    """Device payload for the agents page, trimmed to fit one BLE write of
+    ``limit`` bytes: activity hints shrink first, then vanish, then rows drop."""
+    top = agents[:AGENTS_MAX]
+
+    def build(act_max: int) -> dict:
+        rows = []
+        for n, s, m, a in top:
+            row = [n[:AGENT_NAME_MAX], s, min(m, 9999)]
+            if a and act_max:
+                row.append(_short(a, act_max))
+            rows.append(row)
+        return {"ag": rows, "n": len(agents)}
+
+    def size(p: dict) -> int:
+        return len(json.dumps(p, separators=(",", ":")).encode())
+
+    for act_max in (AGENT_ACT_MAX, 10, 0):
+        payload = build(act_max)
+        if size(payload) <= limit:
+            return payload
+    while payload["ag"] and size(payload) > limit:
+        payload["ag"].pop()
+    return payload
+
+
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
@@ -416,6 +710,17 @@ async def poll_api(token: str) -> dict | None:
     if resp.status_code in (401, 403):
         log(f"API HTTP {resp.status_code} (token expired/invalid)")
         raise TokenExpired()
+    if resp.status_code == 429:
+        # Retrying fast keeps the account rate-limited; back off.
+        global _rate_limited_until
+        try:
+            wait = float(resp.headers.get("retry-after", "0"))
+        except ValueError:
+            wait = 0.0
+        wait = max(wait, RATE_LIMIT_MIN_S)
+        _rate_limited_until = time.time() + wait
+        log(f"API HTTP 429 (rate limited); next poll in {int(wait)}s")
+        return None
     if resp.status_code >= 400:
         log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
         return None
@@ -618,6 +923,17 @@ class Session:
         except asyncio.TimeoutError:
             log("Refresh subscription timed out; polling without it")
 
+    def write_limit(self) -> int:
+        """Largest single write-without-response the link allows (bytes)."""
+        try:
+            char = self.client.services.get_characteristic(RX_CHAR_UUID)
+            n = int(char.max_write_without_response_size)
+            if n >= 20:
+                return n
+        except (AttributeError, BleakError, TypeError, ValueError):
+            pass
+        return AGENTS_PAYLOAD_MAX
+
     async def write_payload(self, payload: dict) -> bool:
         data = json.dumps(payload, separators=(",", ":")).encode()
         log(f"Sending: {data.decode()}")
@@ -750,14 +1066,39 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     log("Connected")
     session = Session(client)
     await session.setup_refresh_subscription()
+    log(f"Write budget: {session.write_limit()} bytes")
 
     last_poll = 0.0
+    last_payload: dict | None = None   # last good usage payload…
+    last_payload_at = 0.0              # …when it was fetched
+    last_usage_write = 0.0             # last usage write of any kind (poll or heartbeat)
+    last_agents: dict | None = None
+    last_agents_sent = 0.0
+    tracker = DoneTracker()
     used_successfully = False
+
+    async def push_agents() -> None:
+        # Write only on a change (or the periodic resend that keeps the
+        # device's copy fresh).
+        nonlocal last_agents, last_agents_sent
+        if read_agents_setting() != "on":
+            return
+        agents = agents_payload(tracker.apply(collect_agents()), session.write_limit())
+        if agents != last_agents or time.time() - last_agents_sent >= AGENTS_RESEND_S:
+            if await session.write_payload(agents):
+                last_agents = agents
+                last_agents_sent = time.time()
+
     try:
         while client.is_connected and not stop_event.is_set():
+            # Full agents scan every tick (activity hints come from transcripts)…
+            await push_agents()
+
             now = time.time()
             elapsed = now - last_poll
-            if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
+            if now < _rate_limited_until:
+                pass   # backing off after a 429; heartbeats below keep the device live
+            elif session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
                 # Pure free-ride: read whatever access token(s) Claude Code
                 # currently holds across the configured config dirs and NEVER
@@ -770,6 +1111,8 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                 if payload is not None:
                     if await session.write_payload(payload):
                         last_poll = time.time()
+                        last_payload, last_payload_at = payload, last_poll
+                        last_usage_write = last_poll
                         used_successfully = True
                 elif dead:
                     # No live token in any config dir (missing, or a 401/expired
@@ -781,15 +1124,39 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                         "`claude login` or use the CLI to let Claude Code renew it")
                     if await session.write_payload({"ok": False}):
                         last_poll = time.time()
+                        last_payload = None   # never heartbeat over a no-data beat
                 else:
                     # Transient poll failure (a live token that didn't answer this
-                    # cycle) -> stay silent and retry next tick.
+                    # cycle, or a 429) -> retry in RETRY_AFTER_FAILURE_S rather
+                    # than every tick; hammering is what keeps a 429 going.
                     log("No usable config dir this cycle")
+                    last_poll = time.time() - POLL_INTERVAL + RETRY_AFTER_FAILURE_S
 
-            try:
-                await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
-            except asyncio.TimeoutError:
-                pass
+            # Heartbeat: while polls fail, replay the last good numbers (aged) so
+            # the device's 90s freshness window doesn't lapse into "No data" —
+            # but only for HEARTBEAT_MAX_AGE_S, after which they're too old to show.
+            now = time.time()
+            if (last_payload is not None and now - last_usage_write >= HEARTBEAT_S
+                    and now - last_payload_at <= HEARTBEAT_MAX_AGE_S):
+                aged = age_payload(last_payload, now - last_payload_at)
+                log("Heartbeat (replaying last usage)")
+                if await session.write_payload(aged):
+                    last_usage_write = now
+
+            # …and between ticks, react within AGENTS_WATCH_S when the session
+            # registry changes (finished / waiting / started / exited).
+            sig = sessions_signature()
+            deadline = time.time() + TICK
+            while time.time() < deadline and client.is_connected and not stop_event.is_set():
+                try:
+                    await asyncio.wait_for(session.refresh_requested.wait(), timeout=AGENTS_WATCH_S)
+                    break
+                except asyncio.TimeoutError:
+                    pass
+                new_sig = sessions_signature()
+                if new_sig != sig:
+                    sig = new_sig
+                    await push_agents()
     finally:
         try:
             await client.disconnect()

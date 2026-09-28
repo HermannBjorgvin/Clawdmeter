@@ -74,6 +74,11 @@ static volatile uint32_t param_fix_at_ms  = 0;                 // when to send i
 static volatile uint16_t param_fix_spent  = CONN_HANDLE_NONE;  // one per connection
 static char rx_buf[BLE_BUF_SIZE];
 static volatile bool data_ready = false;
+// Running-agents payloads ({"ag":…}) get their own slot: the daemon can write
+// one right next to a usage payload, and a single buffer would let the second
+// write clobber the first before loop() reads it.
+static char ag_buf[BLE_BUF_SIZE];
+static volatile bool ag_ready = false;
 static volatile bool has_received_data = false;
 static char mac_str[18];
 
@@ -279,6 +284,12 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
         }
         std::string val = chr->getValue();
         size_t len = std::min(val.length(), (size_t)(BLE_BUF_SIZE - 1));
+        if (val.compare(0, 5, "{\"ag\"") == 0) {
+            memcpy(ag_buf, val.c_str(), len);
+            ag_buf[len] = '\0';
+            ag_ready = true;
+            return;   // agents alone don't count as "has data" (usage refresh still wanted)
+        }
         memcpy(rx_buf, val.c_str(), len);
         rx_buf[len] = '\0';
         data_ready = true;
@@ -410,10 +421,15 @@ bool ble_has_bonds(void) {
 }
 
 bool ble_has_data(void) {
-    return data_ready;
+    return data_ready || ag_ready;
 }
 
+// One payload per call; agents first. Call again while ble_has_data().
 const char* ble_get_data(void) {
+    if (ag_ready) {
+        ag_ready = false;
+        return ag_buf;
+    }
     data_ready = false;
     return rx_buf;
 }

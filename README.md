@@ -16,12 +16,21 @@ Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
 
 The device boots into the splash. Tap the screen anywhere to switch to the Usage view; tap again to flip back to the splash.
 
-|              Splash               |              Usage              |
-| :-------------------------------: | :-----------------------------: |
-| ![Splash](screenshots/splash.gif) | ![Usage](screenshots/usage.png) |
-|   Splash; touch-toggle anytime    | Session and weekly utilization  |
+|              Splash               |              Usage              |               Agents                |
+| :-------------------------------: | :-----------------------------: | :---------------------------------: |
+| ![Splash](screenshots/splash.gif) | ![Usage](screenshots/usage.png) | ![Agents](screenshots/agents.png)  |
+|   Splash; touch-toggle anytime    | Session and weekly utilization  | Running Claude Code sessions (macOS) |
 
 While the splash is up, the middle (PWR) button cycles animations. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
+
+### Running agents (macOS)
+
+While Claude Code sessions are running, the Usage view alternates every 8 s with an **Agents** page: up to four sessions with their state (Waiting / Working / Done / Idle), how long they've been in it, and what they're doing — the last tool call (`Edit ui.cpp`, `Run pio`) or, for a session waiting on you, the prompt (`Allow Run npm`, `Needs your input`).
+
+- A session that starts **waiting on you** jumps straight to the Agents page (even from the splash), wakes the screen and gets an amber outline. A session that **finishes** shows a green Done badge for a minute.
+- With `chime = on`, boards with a buzzer beep: **two beeps** when a session is waiting, **one** when it finishes (other boards play their reset chime for waiting).
+- The splash and corner mascot get busier with the number of sessions working, not just the usage rate.
+- Sessions are read from Claude Code's live session registry (`~/.claude/sessions/`). Only the macOS daemon sends them so far; turn it off with `agents = off` in `~/.config/claude-usage-monitor/config`.
 
 ## Hardware
 
@@ -233,6 +242,14 @@ JSON payload format (written to RX):
 ```
 
 Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
+
+Running agents go in a separate write (macOS daemon):
+
+```json
+{ "ag": [["api-server", "w", 1, "Allow Run npm"], ["clawdmeter", "b", 3, "Edit ui.cpp"]], "n": 2 }
+```
+
+Each row is `[name, state, minutes in state, activity]`, state `b` = working, `w` = waiting, `d` = done, `i` = idle; `n` = total running sessions. The daemon trims each write to the link's max write length.
 
 ## Development
 

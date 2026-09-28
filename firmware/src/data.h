@@ -17,3 +17,21 @@ struct UsageData {
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
 };
+
+// Running Claude Code sessions, sent by the daemon as its own payload:
+//   {"ag":[["name","b",12,"Edit ui.cpp"],…],"n":5}
+//   state: b = working, w = waiting, d = just finished (daemon holds it ~60s
+//   after busy → idle), i = idle; 4th field (optional) = what it's
+//   doing now (last tool call), empty/absent when idle
+#define AGENTS_MAX 4
+struct AgentInfo {
+    char name[20];
+    char state;              // 'b' | 'w' | 'd' | 'i'
+    int  mins;               // minutes in the current state
+    char act[20];            // activity hint, "" when none
+};
+struct AgentsData {
+    AgentInfo list[AGENTS_MAX];
+    int count;               // rows in list[]
+    int total;               // all running sessions (may exceed count)
+};

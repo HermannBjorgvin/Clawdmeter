@@ -12,4 +12,12 @@ bool usage_rate_sample(float session_pct);
 
 // 0 = idle, 1 = normal, 2 = active, 3 = heavy.
 // Defaults to 0 when the buffer doesn't have enough samples yet.
+// While a fresh running-agents count is known (see usage_rate_set_agents), the
+// group follows the agents instead: none working = 0, then 1/2/3+ working = 1/2/3,
+// lifted to the usage-rate group if that's higher.
 int usage_rate_group(void);
+
+// Feed the number of agents currently working (from the daemon's agents
+// payload). Counts as known for AGENTS_STALE_MS, then the group falls back to
+// the usage rate alone.
+void usage_rate_set_agents(int working);

@@ -53,6 +53,16 @@ struct Layout {
     int16_t batt_y;                  // battery icon top edge
     int16_t batt_w;                  // battery icon width, for position math
 
+    // Agents page (alternates with the usage panels)
+    int16_t agent_row_h;
+    int16_t agent_row_gap;
+    int16_t agent_pad_y;
+    int16_t agent_meta_y;            // second line offset inside the row
+    int16_t agent_rows;              // rows that fit on this panel (<= AGENTS_MAX)
+    const lv_font_t* agent_name_font;
+    const lv_font_t* agent_meta_font;
+    const lv_font_t* agent_pill_font;
+
     // Pairing hint / idle screen
     int16_t pair_y1, pair_y2, pair_y3;
     int16_t idle_px;                 // sleeping-creature size on the idle screen
@@ -117,6 +127,13 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_28;
         L.bt_credit_1_font = &font_styrene_24;
         L.bt_credit_2_font = &font_styrene_20;
+        L.agent_row_h = 74;
+        L.agent_row_gap = 8;
+        L.agent_pad_y = 10;
+        L.agent_meta_y = 34;
+        L.agent_name_font = &font_styrene_28;
+        L.agent_meta_font = &font_styrene_16;
+        L.agent_pill_font = &font_styrene_20;
     } else if (c.height >= 300) {
         // Compact layout — tuned for 368x448 (AMOLED-1.8).
         L.content_y = 85;
@@ -131,6 +148,13 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_20;
         L.bt_credit_1_font = &font_styrene_16;
         L.bt_credit_2_font = &font_styrene_14;
+        L.agent_row_h = 64;
+        L.agent_row_gap = 8;
+        L.agent_pad_y = 8;
+        L.agent_meta_y = 28;
+        L.agent_name_font = &font_styrene_24;
+        L.agent_meta_font = &font_styrene_16;
+        L.agent_pill_font = &font_styrene_16;
     } else {
         // Small layout — tuned for 240x240 (LCD-1.54 and similar square TFTs).
         // Everything shrinks: fonts two steps down, panels ~half height, and
@@ -173,9 +197,22 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_14;
         L.bt_credit_1_font = &font_styrene_12;
         L.bt_credit_2_font = &font_styrene_12;
+        L.agent_row_h = 38;
+        L.agent_row_gap = 4;
+        L.agent_pad_y = 4;
+        L.agent_meta_y = 16;
+        L.agent_name_font = &font_styrene_14;
+        L.agent_meta_font = &font_styrene_12;
+        L.agent_pill_font = &font_styrene_12;
     }
 
     L.content_w = L.scr_w - 2 * L.margin;
+
+    // As many agent rows as fit between the content top and the status line.
+    const int status_reserve = lv_font_get_line_height(L.anim_font) - L.anim_y;
+    const int avail = L.scr_h - L.content_y - status_reserve;
+    int rows = (avail + L.agent_row_gap) / (L.agent_row_h + L.agent_row_gap);
+    L.agent_rows = rows < 1 ? 1 : rows > AGENTS_MAX ? AGENTS_MAX : rows;
 }
 
 // Anthropic brand palette — design tokens live in theme.h
@@ -217,6 +254,19 @@ static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
 static lv_obj_t* lbl_spending_status = nullptr;   // "Under pace" / "On pace" / "Over pace"
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
 
+// ---- Agents page: running Claude Code sessions, alternating with the usage
+// panels while both are fresh. Hidden entirely when nothing is running.
+static lv_obj_t* agents_group;
+struct AgentRow { lv_obj_t* panel; lv_obj_t* name; lv_obj_t* meta; lv_obj_t* pill; };
+static AgentRow  agent_rows[AGENTS_MAX];
+static AgentsData s_agents = {};
+static uint32_t  last_agents_ms = 0;
+static bool      agents_received = false;
+static bool      page_agents = false;       // live view is showing agents (vs usage)
+static uint32_t  page_since_ms = 0;
+static const uint32_t AGENTS_FRESH_MS = 90000;  // daemon re-sends at least every 60s
+static const uint32_t PAGE_MS         = 8000;   // dwell on each page before flipping
+
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
 static lv_obj_t* logo_img;
@@ -230,7 +280,7 @@ static lv_obj_t* idle_group;            // the "Zzz" idle screen
 static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage update landed
 static bool      data_received = false; // any valid update since boot
 static bool      data_ok = true;        // last payload's ok flag; a {"ok":false} beat = "no fresh data"
-static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage
+static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage / 3 agents
 static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within this window (daemon sends ~60s)
 
 // ---- Shared ----
@@ -469,6 +519,62 @@ static void build_idle_group(lv_obj_t* parent) {
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
 }
 
+// Second line of an agent row: what it's doing ("Edit ui.cpp - 3m") when the
+// daemon sent an activity hint, else how long it's been in this state.
+static void format_agent_meta(const AgentInfo& a, char* buf, size_t len) {
+    char dur[16];
+    const int m = a.mins;
+    if (m < 60)        snprintf(dur, sizeof(dur), "%dm", m);
+    else if (m < 1440) snprintf(dur, sizeof(dur), "%dh %dm", m / 60, m % 60);
+    else               snprintf(dur, sizeof(dur), "%dd %dh", m / 1440, (m % 1440) / 60);
+    if (a.act[0])      snprintf(buf, len, m > 0 ? "%s - %s" : "%s", a.act, dur);
+    else if (m <= 0)   snprintf(buf, len, "just now");
+    else               snprintf(buf, len, "for %s", dur);
+}
+
+static void build_agents_group(lv_obj_t* parent) {
+    agents_group = lv_obj_create(parent);
+    lv_obj_set_size(agents_group, L.scr_w, L.scr_h);
+    lv_obj_set_pos(agents_group, 0, 0);
+    lv_obj_set_style_bg_opa(agents_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(agents_group, 0, 0);
+    lv_obj_set_style_pad_all(agents_group, 0, 0);
+    lv_obj_clear_flag(agents_group, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(agents_group, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    const int inner_w = L.content_w - 2 * L.panel_pad_x;
+    for (int i = 0; i < AGENTS_MAX; i++) {
+        AgentRow& r = agent_rows[i];
+        r.panel = make_panel(agents_group, L.margin,
+                             L.content_y + i * (L.agent_row_h + L.agent_row_gap),
+                             L.content_w, L.agent_row_h);
+        lv_obj_set_style_pad_top(r.panel, L.agent_pad_y, 0);
+        lv_obj_set_style_pad_bottom(r.panel, L.agent_pad_y, 0);
+
+        r.pill = make_pill(r.panel, "Idle");
+        lv_obj_set_style_text_font(r.pill, L.agent_pill_font, 0);
+        lv_obj_align(r.pill, LV_ALIGN_RIGHT_MID, 0, 0);
+
+        // Name gets the left ~2/3; long session names end in "..."
+        r.name = lv_label_create(r.panel);
+        lv_label_set_long_mode(r.name, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(r.name, inner_w * 2 / 3);
+        lv_obj_set_style_text_font(r.name, L.agent_name_font, 0);
+        lv_obj_set_style_text_color(r.name, COL_TEXT, 0);
+        lv_obj_set_pos(r.name, 0, 0);
+
+        r.meta = lv_label_create(r.panel);
+        lv_label_set_long_mode(r.meta, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(r.meta, inner_w * 2 / 3);
+        lv_obj_set_style_text_font(r.meta, L.agent_meta_font, 0);
+        lv_obj_set_style_text_color(r.meta, COL_DIM, 0);
+        lv_obj_set_pos(r.meta, 0, L.agent_meta_y);
+
+        lv_obj_add_flag(r.panel, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_add_flag(agents_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
+}
+
 static void init_usage_screen(lv_obj_t* scr) {
     usage_container = lv_obj_create(scr);
     lv_obj_set_size(usage_container, L.scr_w, L.scr_h);
@@ -529,6 +635,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
 
+    build_agents_group(usage_container);
     build_pair_group(usage_container);
     build_idle_group(usage_container);
 
@@ -675,27 +782,112 @@ void ui_update(const UsageData* data) {
     }
 }
 
+// True if `name` was already in `state` in the previous agents list.
+static bool was_in_state(const AgentsData& prev, const char* name, char state) {
+    for (int i = 0; i < prev.count; i++)
+        if (prev.list[i].state == state && strcmp(prev.list[i].name, name) == 0) return true;
+    return false;
+}
+
+agents_nudge_t ui_update_agents(const AgentsData* data) {
+    // Only a fresh transition (not "still waiting" / "still done") nudges;
+    // waiting outranks done.
+    agents_nudge_t nudge = AGENTS_NUDGE_NONE;
+    for (int i = 0; i < data->count; i++) {
+        const AgentInfo& a = data->list[i];
+        if (a.state == 'w' && !was_in_state(s_agents, a.name, 'w'))
+            nudge = AGENTS_NUDGE_WAITING;
+        else if (a.state == 'd' && !was_in_state(s_agents, a.name, 'd') && nudge == AGENTS_NUDGE_NONE)
+            nudge = AGENTS_NUDGE_DONE;
+    }
+
+    s_agents = *data;
+    last_agents_ms = lv_tick_get();
+    agents_received = true;
+
+    char buf[48];
+    for (int i = 0; i < AGENTS_MAX; i++) {
+        AgentRow& r = agent_rows[i];
+        if (i >= s_agents.count || i >= L.agent_rows) {
+            lv_obj_add_flag(r.panel, LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        const AgentInfo& a = s_agents.list[i];
+        lv_label_set_text(r.name, a.name);
+        format_agent_meta(a, buf, sizeof(buf));
+        lv_label_set_text(r.meta, buf);
+        // Waiting rows get an amber outline so they stand out at a glance.
+        lv_obj_set_style_border_color(r.panel, COL_AMBER, 0);
+        lv_obj_set_style_border_width(r.panel, a.state == 'w' ? 2 : 0, 0);
+        const char* st  = a.state == 'b' ? "Working" : a.state == 'w' ? "Waiting" :
+                          a.state == 'd' ? "Done"    : "Idle";
+        lv_color_t  col = a.state == 'b' ? COL_GREEN : a.state == 'w' ? COL_AMBER :
+                          a.state == 'd' ? COL_TEXT  : COL_DIM;
+        lv_label_set_text(r.pill, st);
+        lv_obj_set_style_text_color(r.pill, col, 0);
+        // "Done" is the one filled pill, so a finished run reads at a glance.
+        lv_obj_set_style_bg_color(r.pill, a.state == 'd' ? COL_GREEN : COL_BAR_BG, 0);
+        lv_obj_clear_flag(r.panel, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (nudge != AGENTS_NUDGE_NONE) {
+        // Jump to the Agents page now (restarting its dwell), leaving the
+        // splash if that's what was up.
+        if (current_screen == SCREEN_SPLASH) ui_show_screen(SCREEN_USAGE);
+        page_agents = true;
+        page_since_ms = lv_tick_get();
+    }
+    return nudge;
+}
+
+static bool agents_available(void) {
+    return agents_received && s_agents.count > 0 &&
+           (lv_tick_get() - last_agents_ms) < AGENTS_FRESH_MS;
+}
+
+// Title for the live pages: "Agents" on the agents page; the daemon clock (or
+// "Usage") otherwise — clock_last_min = -1 makes ui_tick_anim redraw it.
+static void apply_page_title(void) {
+    if (view_state == 3)            lv_label_set_text(lbl_title, "Agents");
+    else if (clock_base_epoch > 0)  clock_last_min = -1;
+    else                            lv_label_set_text(lbl_title, "Usage");
+}
+
 // Pick the usage-view sub-screen: pairing hint (BLE down), the idle "Zzz" screen
-// (connected but data has gone stale), or the live usage panels. Only re-lays-out
-// on an actual change. The animated status line stays visible everywhere — it
-// reads "Listening…" on the idle screen, keeping it alive rather than frozen.
+// (connected but data has gone stale), or the live pages — usage panels, and
+// the running-agents list alternating with them every PAGE_MS while any agent
+// is running. Only re-lays-out on an actual change. The animated status line
+// stays visible everywhere — it reads "Listening…" on the idle screen, keeping
+// it alive rather than frozen.
 static void update_view_state(void) {
-    if (!usage_group || !pair_group || !idle_group) return;
+    if (!usage_group || !pair_group || !idle_group || !agents_group) return;
+    uint32_t now = lv_tick_get();
     int v;
     if (!s_ble_connected) {
         v = 0;  // pairing hint
-    } else if (data_received && data_ok && (lv_tick_get() - last_data_ms) < DATA_FRESH_MS) {
-        v = 2;  // live usage
+    } else if (data_received && data_ok && (now - last_data_ms) < DATA_FRESH_MS) {
+        if (!agents_available()) {
+            page_agents = false;
+        } else if (now - page_since_ms >= PAGE_MS) {
+            page_agents = !page_agents;
+            page_since_ms = now;
+        }
+        v = page_agents ? 3 : 2;  // live agents / live usage
     } else {
         v = 1;  // idle / Zzz
     }
+    if (v != 2 && v != 3) page_since_ms = now;  // a fresh live view starts on usage
     if (v == view_state) return;
+    bool title_changes = (v == 3) != (view_state == 3);
     view_state = v;
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group : usage_group,
+    lv_obj_add_flag(agents_group, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group :
+                      v == 2 ? usage_group : agents_group,
                       LV_OBJ_FLAG_HIDDEN);
+    if (title_changes) apply_page_title();
 }
 
 void ui_tick_anim(void) {
@@ -707,7 +899,7 @@ void ui_tick_anim(void) {
 
     // Title clock: once the daemon has sent wall-clock time, replace "Usage" with
     // the live time, advanced locally so it ticks every minute between payloads.
-    if (clock_base_epoch > 0) {
+    if (clock_base_epoch > 0 && view_state != 3) {
         time_t cur = (time_t)(clock_base_epoch + (now - clock_base_ms) / 1000);
         struct tm tmv;
         gmtime_r(&cur, &tmv);   // epoch is already local wall-clock → gmtime keeps it as-is
@@ -745,6 +937,21 @@ void ui_tick_anim(void) {
         text = (anim_msg_idx & 1) ? "No data" : "Listening";
     } else if (now - connected_at_ms < 5000) {
         text = "Connected";
+    } else if (view_state == 3) {      // agents page — summarize, alternating with any overflow
+        static char sum[24];
+        int busy = 0, waiting = 0, done = 0;
+        for (int i = 0; i < s_agents.count; i++) {
+            busy    += s_agents.list[i].state == 'b';
+            waiting += s_agents.list[i].state == 'w';
+            done    += s_agents.list[i].state == 'd';
+        }
+        const int hidden = s_agents.total - (s_agents.count < L.agent_rows ? s_agents.count : L.agent_rows);
+        if (hidden > 0 && (anim_msg_idx & 1)) snprintf(sum, sizeof(sum), "+%d more", hidden);
+        else if (waiting > 0)                 snprintf(sum, sizeof(sum), "%d waiting", waiting);
+        else if (done > 0)                    snprintf(sum, sizeof(sum), "%d done", done);
+        else if (busy > 0)                    snprintf(sum, sizeof(sum), "%d working", busy);
+        else                                  snprintf(sum, sizeof(sum), "All idle");
+        text = sum;
     } else {
         text = anim_messages[anim_msg_idx];
     }
