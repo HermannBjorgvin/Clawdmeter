@@ -117,6 +117,10 @@ static bool parse_json(const char* json, UsageData* out) {
     out->time_pct = doc["tp"] | 0;
     out->period_days = doc["pd"] | 30;
     strlcpy(out->reset_date, doc["rd"] | "", sizeof(out->reset_date));
+    out->money_used = doc["mu"] | -1L;   // absent (old daemon / endpoint down) → percent-only card
+    out->money_limit = doc["ml"] | 0L;
+    out->money_exp = doc["mx"] | 2;
+    strlcpy(out->currency, doc["cur"] | "USD", sizeof(out->currency));
     out->clock_epoch = doc["t"] | 0L;
     out->clock_fmt = doc["tf"] | 24;
     out->ok = doc["ok"] | false;

@@ -42,3 +42,9 @@ chime = off
 #   12   = show the clock, forced 12-hour  (e.g. 6:28 PM)
 #   24   = show the clock, forced 24-hour  (e.g. 18:28)
 clock = off
+# Show the amount spent and the monthly limit on the Enterprise Spending card
+# (Enterprise spend-limit accounts only; adds one GET to Claude Code's usage
+# endpoint at most every 5 min, backing off 15 min if it is rate-limited).
+#   off = percent only (default)
+#   on  = also show e.g. $12.50 / $500.00
+spend = off

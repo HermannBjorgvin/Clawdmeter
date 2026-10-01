@@ -132,6 +132,23 @@ configure_chime() {
     fi
 }
 
+# Offer the optional Enterprise spend amount (one extra usage GET every 5 min).
+configure_spend() {
+    [ -t 0 ] || return 0
+    local ans cur
+    cur=$(current_config_value spend)
+    read -r -p "  Enterprise accounts: show amount spent / monthly limit? [y/N] " ans || ans=""
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+        upsert_config_key spend on
+        echo "  Set: spend = on"
+    elif [ "$cur" = "on" ]; then
+        upsert_config_key spend off
+        echo "  Set: spend = off"
+    else
+        echo "  Spend amount off (default)."
+    fi
+}
+
 echo "=== Clawdmeter macOS install ==="
 echo ""
 
@@ -208,11 +225,13 @@ echo "  Installed: $PLIST_DST"
 echo ""
 
 # Interactive daemon configuration: which plans to poll, plus the optional
-# clock display and session-reset chime. All re-read by the daemon each poll.
+# clock display, session-reset chime and Enterprise spend amount. All re-read
+# by the daemon each poll.
 echo "[4/6] Configuring the daemon..."
 configure_config_dirs
 configure_clock
 configure_chime
+configure_spend
 echo ""
 
 echo "[5/6] Bluetooth permission check..."

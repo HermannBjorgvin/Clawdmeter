@@ -34,6 +34,14 @@ LAST_PAYLOAD_TS=0    # epoch when LAST_PAYLOAD's numbers were fetched from the A
 LAST_WRITE_TS=0      # epoch of the last GATT write of any kind (poll or heartbeat)
 DBUS_DEST="org.bluez"
 NOTIFY_PID=""
+# Enterprise spend amount (opt-in `spend = on`). The usage endpoint was once
+# reverted over a 429 retry loop, so each dir is fetched at most every 300s.
+USAGE_URL="https://api.anthropic.com/api/oauth/usage"
+SPEND_CACHE_TTL=300   # seconds between usage GETs per dir, success or failure
+SPEND_COOLDOWN=900    # seconds with no usage GETs at all after a 429
+declare -A SPEND_FIELDS    # last good ',"mu":..,"cur":".."' fragment per dir
+declare -A SPEND_TRIED_TS  # epoch of the last usage GET attempt per dir
+SPEND_COOLDOWN_UNTIL=0
 
 log() {
     echo "[$(date '+%H:%M:%S')] $1"
@@ -186,6 +194,116 @@ read_clock_setting() {
         off|auto|12|24) echo "$val" ;;
         *)              echo "off" ;;
     esac
+}
+
+# Read the `spend` option from the config file. Echoes one of: off|on.
+# Defaults to "off" so the extra usage-endpoint GET never happens until opted in.
+read_spend_setting() {
+    local val=""
+    if [ -f "$CONFIG_FILE" ]; then
+        val=$(grep -E '^[[:space:]]*spend[[:space:]]*=' "$CONFIG_FILE" | tail -1 \
+            | tr -d '\r' \
+            | sed -E 's/^[[:space:]]*spend[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//' \
+            | tr '[:upper:]' '[:lower:]')
+    fi
+    case "$val" in
+        on) echo "on" ;;
+        *)  echo "off" ;;
+    esac
+}
+
+# Parse an /api/oauth/usage body ($1) into the payload fragment
+# ',"mu":1250,"ml":50000,"mx":2,"cur":"USD"' (`spend` first, then `extra_usage`).
+# Echoes nothing unless all four fields are valid and the limit is > 0.
+parse_spend_json() {
+    python3 - "$1" <<'PYEOF' 2>/dev/null
+import json, math, re, sys
+def num(v):
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+        return None
+    return int(round(v))
+def fields(used, limit, exp, cur):
+    mu, ml, mx = num(used), num(limit), num(exp)
+    if mu is None or ml is None or mx is None or ml <= 0 or mx > 6:
+        return None
+    if not isinstance(cur, str) or not re.fullmatch(r"[A-Za-z]{1,3}", cur):
+        return None
+    return mu, ml, mx, cur.upper()
+try:
+    d = json.loads(sys.argv[1])
+except ValueError:
+    sys.exit(0)
+out = None
+if isinstance(d, dict):
+    sp = d.get("spend")
+    if isinstance(sp, dict) and isinstance(sp.get("used"), dict) and isinstance(sp.get("limit"), dict):
+        u, l = sp["used"], sp["limit"]
+        out = fields(u.get("amount_minor"), l.get("amount_minor"),
+                     l.get("exponent", u.get("exponent")), l.get("currency", u.get("currency")))
+    ex = d.get("extra_usage")
+    if out is None and isinstance(ex, dict):
+        out = fields(ex.get("used_credits"), ex.get("monthly_limit"),
+                     ex.get("decimal_places"), ex.get("currency"))
+if out:
+    print(',"mu":%d,"ml":%d,"mx":%d,"cur":"%s"' % out, end="")
+PYEOF
+}
+
+# Human form of a spend fragment ($1) for logs, e.g. "$12.50/$500.00".
+format_spend() {
+    echo "$1" | awk '{
+        match($0, /"mu":[0-9]+/); mu = substr($0, RSTART + 5, RLENGTH - 5);
+        match($0, /"ml":[0-9]+/); ml = substr($0, RSTART + 5, RLENGTH - 5);
+        match($0, /"mx":[0-9]+/); mx = substr($0, RSTART + 5, RLENGTH - 5);
+        match($0, /"cur":"[A-Z]+"/); cur = substr($0, RSTART + 7, RLENGTH - 8);
+        sym = (cur == "USD") ? "$" : cur " ";
+        printf "%s%.*f/%s%.*f", sym, mx, mu / 10 ^ mx, sym, mx, ml / 10 ^ mx;
+    }'
+}
+
+# Refresh SPEND_FIELDS[$1] from the usage endpoint using token $2. Must run in
+# the main shell (not a $(...) subshell) so the cache and cooldown persist.
+# Never fails: on any error the last good fragment (if any) is kept.
+update_spend_for() {
+    local dir="$1" token="$2" now tried resp code body frag
+    now=$(date +%s)
+    tried=${SPEND_TRIED_TS[$dir]:-0}
+    (( now - tried < SPEND_CACHE_TTL || now < SPEND_COOLDOWN_UNTIL )) && return 0
+    SPEND_TRIED_TS["$dir"]=$now
+    # Bearer token via a curl config on stdin, as in build_payload_for_token.
+    resp=$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -s -m 20 -w '\n%{http_code}' -K - \
+        "$USAGE_URL" \
+        -H "anthropic-beta: oauth-2025-04-20" \
+        -H "User-Agent: claude-code/2.1.5" \
+        2>/dev/null)
+    code=${resp##*$'\n'}
+    body=${resp%$'\n'*}
+    if [ "$code" = "429" ]; then
+        SPEND_COOLDOWN_UNTIL=$(( now + SPEND_COOLDOWN ))
+        log "Usage HTTP 429; no spend requests for ${SPEND_COOLDOWN}s"
+        return 0
+    fi
+    if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
+        log "Usage HTTP ${code:-error}; spend amount unavailable"
+        return 0
+    fi
+    frag=$(parse_spend_json "$body")
+    if [ -z "$frag" ]; then
+        log "Usage response had no spend amount"
+        return 0
+    fi
+    SPEND_FIELDS["$dir"]=$frag
+    log "Enterprise spend=$(format_spend "$frag")"
+    return 0
+}
+
+# Insert spend fragment $2 before the trailing ,"ok":true} of payload $1.
+splice_spend() {
+    local p="$1" frag="$2" tail=',"ok":true}'
+    if [ -n "$frag" ] && [[ "$p" == *"$tail" ]]; then
+        p="${p%"$tail"}$frag$tail"
+    fi
+    printf '%s' "$p"
 }
 
 # Best-effort 12h/24h detection from the locale. Echoes 12 or 24 (default 24).
@@ -497,6 +615,11 @@ poll() {
         fi
         payload=$(build_payload_for_token "$token") || { log "API call failed for $dir"; continue; }
         [ -z "$payload" ] && continue
+        # Enterprise only, opt-in: splice the (cached) spend amount in before "ok".
+        if [[ "$payload" == *'"acct":"ent"'* ]] && [ "$(read_spend_setting)" = "on" ]; then
+            update_spend_for "$dir" "$token"
+            payload=$(splice_spend "$payload" "${SPEND_FIELDS[$dir]:-}")
+        fi
         s=$(_payload_session_pct "$payload"); s=${s:-0}
         cycle_payload["$dir"]="$payload"
         cycle_s["$dir"]="$s"

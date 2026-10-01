@@ -5,6 +5,7 @@
 #include "logo.h"
 #include "clawd_still.h"
 #include "icons.h"
+#include "money_format.h"
 #include "hal/board_caps.h"
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
@@ -640,10 +641,44 @@ void ui_update(const UsageData* data) {
         pace_text = "On pace";    pace_color = COL_AMBER; pace_hex = "d97757";
     }
 
-    if (data->enterprise) {
+    const bool has_money = data->enterprise && data->money_used >= 0 && data->money_limit > 0;
+    if (has_money) {
+        // Amount spent as the headline; the percentage moves into the description.
+        char used[24], limit[24];
+        money_format_whole(data->money_used, data->money_exp, data->currency, used, sizeof(used));
+        money_format_whole(data->money_limit, data->money_exp, data->currency, limit, sizeof(limit));
+        lv_label_set_text(lbl_session_pct, used);
+        lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
+        // Step down a font size until the amount clears the "Spending" pill.
+        const lv_font_t* fonts[] = { L.ent_pct_font, L.pct_font, L.pill_font };
+        lv_obj_update_layout(panel_session);
+        const int32_t avail = lv_obj_get_content_width(panel_session)
+                            - lv_obj_get_width(lbl_session_label) - 8;
+        for (const lv_font_t* f : fonts) {
+            lv_obj_set_style_text_font(lbl_session_pct, f, 0);
+            lv_obj_update_layout(lbl_session_pct);
+            if (lv_obj_get_width(lbl_session_pct) <= avail) break;
+        }
+        if (lv_obj_get_width(lbl_session_pct) > avail) {   // still too wide: "$1.2M"
+            money_format_short(data->money_used, data->money_exp, data->currency, used, sizeof(used));
+            lv_label_set_text(lbl_session_pct, used);
+        }
+        // Description: full limit, else short limit, else drop "monthly".
+        const int32_t desc_avail = lv_obj_get_content_width(panel_session);
+        lv_label_set_text_fmt(lbl_spending_desc, "%d%% of %s monthly", s_pct, limit);
+        lv_obj_update_layout(lbl_spending_desc);
+        if (lv_obj_get_width(lbl_spending_desc) > desc_avail) {
+            money_format_short(data->money_limit, data->money_exp, data->currency, limit, sizeof(limit));
+            lv_label_set_text_fmt(lbl_spending_desc, "%d%% of %s monthly", s_pct, limit);
+            lv_obj_update_layout(lbl_spending_desc);
+            if (lv_obj_get_width(lbl_spending_desc) > desc_avail)
+                lv_label_set_text_fmt(lbl_spending_desc, "%d%% of %s", s_pct, limit);
+        }
+    } else if (data->enterprise) {
         lv_label_set_text_fmt(lbl_session_pct, "%d", s_pct);
         lv_obj_align_to(lbl_session_pct_sym, lbl_session_pct,
                         LV_ALIGN_OUT_RIGHT_TOP, 4, 12);
+        lv_label_set_text(lbl_spending_desc, "of your monthly budget");
     } else {
         lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
         format_reset_time(data->session_reset_mins, buf, sizeof(buf));

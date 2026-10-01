@@ -10,7 +10,9 @@ import asyncio
 import calendar
 import datetime
 import getpass
+import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -52,6 +54,12 @@ API_BODY = {
     "max_tokens": 1,
     "messages": [{"role": "user", "content": "hi"}],
 }
+
+# Enterprise spend amount (opt-in `spend = on`). This endpoint was once reverted
+# over a 429 retry loop, so it's fetched at most every SPEND_CACHE_TTL seconds.
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+SPEND_CACHE_TTL = 300   # seconds between usage GETs per token, success or failure
+SPEND_COOLDOWN = 900    # seconds with no usage GETs at all after a 429
 
 
 class TokenExpired(Exception):
@@ -404,6 +412,133 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
+def read_spend_setting() -> str:
+    """Read the `spend` option from the config file. One of: off|on.
+
+    Defaults to "off" so the extra usage-endpoint GET never happens until the
+    user opts in.
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "spend":
+                    val = val.strip().lower()
+                    if val in ("off", "on"):
+                        return val
+    except OSError:
+        pass
+    return "off"
+
+
+def _minor_int(v) -> int | None:
+    """A JSON number as a non-negative int (1250.0 -> 1250), or None."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if not math.isfinite(v) or v < 0:
+        return None
+    return int(round(v))
+
+
+def _spend_fields(used, limit, exponent, currency) -> dict:
+    """Validated {"mu","ml","mx","cur"} or {} — all four or nothing."""
+    mu, ml, mx = _minor_int(used), _minor_int(limit), _minor_int(exponent)
+    if mu is None or ml is None or mx is None or ml <= 0 or mx > 6:
+        return {}
+    if not isinstance(currency, str) or not re.fullmatch(r"[A-Za-z]{1,3}", currency):
+        return {}
+    return {"mu": mu, "ml": ml, "mx": mx, "cur": currency.upper()}
+
+
+def parse_spend(data) -> dict:
+    """Spend fields from an /api/oauth/usage body: `spend` first, then `extra_usage`."""
+    if not isinstance(data, dict):
+        return {}
+    spend = data.get("spend")
+    if isinstance(spend, dict):
+        used, limit = spend.get("used"), spend.get("limit")
+        if isinstance(used, dict) and isinstance(limit, dict):
+            fields = _spend_fields(
+                used.get("amount_minor"), limit.get("amount_minor"),
+                limit.get("exponent", used.get("exponent")),
+                limit.get("currency", used.get("currency")),
+            )
+            if fields:
+                return fields
+    extra = data.get("extra_usage")
+    if isinstance(extra, dict):
+        return _spend_fields(extra.get("used_credits"), extra.get("monthly_limit"),
+                             extra.get("decimal_places"), extra.get("currency"))
+    return {}
+
+
+def format_spend(fields: dict) -> str:
+    """Human form of the spend fields for logs, e.g. "$12.50/$500.00"."""
+    mx = fields["mx"]
+    sym = "$" if fields["cur"] == "USD" else f"{fields['cur']} "
+    return (f"{sym}{fields['mu'] / 10 ** mx:.{mx}f}/"
+            f"{sym}{fields['ml'] / 10 ** mx:.{mx}f}")
+
+
+# Per-token spend cache: sha256(token)[:16] -> (last_attempt_ts, last_good_fields).
+_spend_cache: dict[str, tuple[float, dict]] = {}
+_spend_cooldown_until = 0.0
+
+
+async def fetch_spend(token: str) -> dict:
+    """Spend fields for an Enterprise payload, or {}. Never raises.
+
+    One GET per token per SPEND_CACHE_TTL whatever the outcome, none at all for
+    SPEND_COOLDOWN after a 429; in between, the last good fields are reused.
+    A failure here never feeds the auth-error path — the token's health is
+    judged by the /v1/messages poll alone.
+    """
+    global _spend_cooldown_until
+    key = hashlib.sha256(token.encode()).hexdigest()[:16]
+    now = time.time()
+    tried, last = _spend_cache.get(key, (0.0, {}))
+    if now - tried < SPEND_CACHE_TTL or now < _spend_cooldown_until:
+        return dict(last)
+    if len(_spend_cache) >= 8 and key not in _spend_cache:
+        _spend_cache.pop(min(_spend_cache, key=lambda k: _spend_cache[k][0]))
+    _spend_cache[key] = (now, last)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": API_HEADERS_TEMPLATE["anthropic-beta"],
+        "User-Agent": API_HEADERS_TEMPLATE["User-Agent"],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.get(USAGE_URL, headers=headers)
+        status = int(resp.status_code)
+        if status == 429:
+            _spend_cooldown_until = now + SPEND_COOLDOWN
+            log(f"Usage HTTP 429; no spend requests for {SPEND_COOLDOWN}s")
+            return dict(last)
+        if not 200 <= status < 300:
+            log(f"Usage HTTP {status}; spend amount unavailable")
+            return dict(last)
+        fields = parse_spend(resp.json())
+    except Exception as e:  # optional extra: nothing here may break the poll
+        log(f"Usage fetch failed: {type(e).__name__}: {e}")
+        return dict(last)
+    if not fields:
+        log("Usage response had no spend amount")
+        return dict(last)
+    _spend_cache[key] = (now, fields)
+    log(f"Enterprise spend={format_spend(fields)}")
+    return dict(fields)
+
+
+async def add_spend_fields(payload: dict, token: str) -> None:
+    """Add mu/ml/mx/cur to an Enterprise payload when the config opts in."""
+    if read_spend_setting() == "on":
+        payload.update(await fetch_spend(token))
+
+
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
@@ -463,6 +598,7 @@ async def poll_api(token: str) -> dict | None:
             **_billing_period_info(now, reset_ts),
             "ok": True,
         }
+        await add_spend_fields(payload, token)   # mu/ml/mx/cur iff opted in; cached
     add_chime_field(payload)   # adds "c":1 iff the config opts in
     add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
     return payload
