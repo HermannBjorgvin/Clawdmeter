@@ -6,6 +6,7 @@
 #include "clawd_still.h"
 #include "icons.h"
 #include "money_format.h"
+#include "spend_forecast.h"
 #include "hal/board_caps.h"
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
@@ -415,6 +416,19 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
     return panel;
 }
 
+// Step `lbl` down through `fonts` until it clears the panel's pill; false if none fit.
+static bool fit_beside_pill(lv_obj_t* lbl, lv_obj_t* pill, lv_obj_t* panel,
+                            const lv_font_t* const* fonts, int n) {
+    lv_obj_update_layout(panel);
+    const int32_t avail = lv_obj_get_content_width(panel) - lv_obj_get_width(pill) - 8;
+    for (int i = 0; i < n; i++) {
+        lv_obj_set_style_text_font(lbl, fonts[i], 0);
+        lv_obj_update_layout(lbl);
+        if (lv_obj_get_width(lbl) <= avail) return true;
+    }
+    return false;
+}
+
 // Pairing hint — shown when disconnected so the screen isn't empty and the
 // user knows how to (re)pair. Wording matches the 3-second release gesture.
 static void build_pair_group(lv_obj_t* parent) {
@@ -629,7 +643,7 @@ void ui_update(const UsageData* data) {
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     }
 
-    char buf[48];
+    char buf[64];
 
     // Pace vars used in both enterprise blocks below
     const char* pace_text = "Under pace";
@@ -649,17 +663,8 @@ void ui_update(const UsageData* data) {
         money_format_whole(data->money_limit, data->money_exp, data->currency, limit, sizeof(limit));
         lv_label_set_text(lbl_session_pct, used);
         lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
-        // Step down a font size until the amount clears the "Spending" pill.
         const lv_font_t* fonts[] = { L.ent_pct_font, L.pct_font, L.pill_font };
-        lv_obj_update_layout(panel_session);
-        const int32_t avail = lv_obj_get_content_width(panel_session)
-                            - lv_obj_get_width(lbl_session_label) - 8;
-        for (const lv_font_t* f : fonts) {
-            lv_obj_set_style_text_font(lbl_session_pct, f, 0);
-            lv_obj_update_layout(lbl_session_pct);
-            if (lv_obj_get_width(lbl_session_pct) <= avail) break;
-        }
-        if (lv_obj_get_width(lbl_session_pct) > avail) {   // still too wide: "$1.2M"
+        if (!fit_beside_pill(lbl_session_pct, lbl_session_label, panel_session, fonts, 3)) {   // "$1.2M"
             money_format_short(data->money_used, data->money_exp, data->currency, used, sizeof(used));
             lv_label_set_text(lbl_session_pct, used);
         }
@@ -688,7 +693,40 @@ void ui_update(const UsageData* data) {
     lv_bar_set_value(bar_session, s_pct, LV_ANIM_ON);
     lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
 
-    if (data->enterprise) {
+    lv_obj_set_style_text_font(lbl_weekly_pct, L.pct_font, 0);
+    if (has_money) {
+        // Daily box: average spend per day, projected month-end bar, run-out date.
+        const SpendForecast f = spend_forecast(data->money_used, data->money_limit,
+                                               data->period_days, data->session_reset_mins);
+        lv_label_set_text(lbl_weekly_label, "Per day");
+        char daily[24];
+        money_format_rate(f.daily_minor, data->money_exp, data->currency, daily, sizeof(daily));
+        lv_label_set_text(lbl_weekly_pct, daily);
+        const lv_font_t* fonts[] = { L.pct_font, L.pill_font };
+        if (!fit_beside_pill(lbl_weekly_pct, lbl_weekly_label, panel_weekly, fonts, 2)) {
+            money_format_short(f.daily_minor, data->money_exp, data->currency, daily, sizeof(daily));
+            lv_label_set_text(lbl_weekly_pct, daily);
+        }
+        lv_bar_set_value(bar_weekly, f.projected_pct > 100 ? 100 : f.projected_pct, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_weekly, f.projected_pct > 100 ? COL_RED :
+                                  f.projected_pct > 85 ? COL_AMBER : COL_GREEN, LV_PART_INDICATOR);
+        if (f.runout_mins == 0) {
+            snprintf(buf, sizeof(buf), "#c0392b Limit reached# - #faf9f5 Resets %s#", data->reset_date);
+        } else if (f.runout_mins > 0) {
+            char when[16];
+            if (clock_base_epoch > 0) {   // wall clock known: a date, else a countdown
+                forecast_date(clock_base_epoch + (lv_tick_get() - clock_base_ms) / 1000
+                              + (long long)f.runout_mins * 60, when, sizeof(when));
+                snprintf(buf, sizeof(buf), "#c0392b Runs out %s#", when);
+            } else {
+                forecast_eta(f.runout_mins, when, sizeof(when));
+                snprintf(buf, sizeof(buf), "#c0392b Runs out in %s#", when);
+            }
+        } else {
+            snprintf(buf, sizeof(buf), "#788c5d On track# - #faf9f5 Resets %s#", data->reset_date);
+        }
+        lv_label_set_text(lbl_weekly_reset, buf);
+    } else if (data->enterprise) {
         // Period box: time % + dynamic pace color + "Resets <date>" label
         lv_label_set_text(lbl_weekly_label, "Period");
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", data->time_pct);

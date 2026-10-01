@@ -234,7 +234,7 @@ JSON payload format (written to RX):
 
 Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
 
-Enterprise spend-limit accounts send `"acct": "ent"`, with `s` = spend % and `sr` = minutes to the monthly reset, plus `tp` = % of the billing period elapsed, `pd` = period length (days), `rd` = reset date (e.g. `"Oct 31"`). With `spend = on` in the daemon config they also send the amounts from Claude Code's usage endpoint (fetched at most every 5 min): `mu` = amount spent and `ml` = monthly limit, both in minor units, `mx` = decimal exponent, `cur` = ISO currency code, e.g. `"mu": 1250, "ml": 50000, "mx": 2, "cur": "USD"` is $12.50 of $500.00. Absent fields mean percent-only.
+Enterprise spend-limit accounts send `"acct": "ent"`, with `s` = spend % and `sr` = minutes to the monthly reset, plus `tp` = % of the billing period elapsed, `pd` = period length (days), `rd` = reset date (e.g. `"Oct 31"`). With `spend = on` in the daemon config they also send the amounts from Claude Code's usage endpoint (fetched at most every 5 min): `mu` = amount spent and `ml` = monthly limit, both in minor units, `mx` = decimal exponent, `cur` = ISO currency code, e.g. `"mu": 1250, "ml": 50000, "mx": 2, "cur": "USD"` is $12.50 of $500.00. Absent fields mean percent-only. With the amounts present, the second card shows the average spend per day so far, a bar for the projected month-end spend against the limit, and the date the limit runs out at that rate (or "On track"). It needs no extra fields: the device works the rate out from `mu`, `ml`, `pd` and `sr`.
 
 ## Development
 

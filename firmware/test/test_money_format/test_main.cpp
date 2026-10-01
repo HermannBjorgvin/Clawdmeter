@@ -39,6 +39,15 @@ int main() {
     CHECK_SHORT(100000000, 2, "USD", "$1.0M");
     CHECK_SHORT(1250, 2, "USD", "$12");          // small amounts stay whole
     CHECK_SHORT(-1, 2, "USD", "$0");
+#define CHECK_RATE(minor, exp, cur, expected)  CHECK_WITH(money_format_rate, minor, exp, cur, expected)
+    CHECK_RATE(340, 2, "USD", "$3.40");          // cents kept under 10 units
+    CHECK_RATE(5, 2, "USD", "$0.05");
+    CHECK_RATE(999, 2, "USD", "$9.99");
+    CHECK_RATE(1000, 2, "USD", "$10");           // whole units from 10 up
+    CHECK_RATE(13412, 2, "USD", "$134");
+    CHECK_RATE(250000, 2, "USD", "$2,500");
+    CHECK_RATE(5, 0, "JPY", "JPY 5");            // no minor unit to show
+    CHECK_RATE(-3, 2, "USD", "$0.00");
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("all money format checks passed\n");
     return 0;

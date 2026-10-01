@@ -43,3 +43,15 @@ static inline void money_format_short(long minor, int exponent, const char* curr
     else if (whole >= 1000) snprintf(out, n, "%s%ld.%ldk", prefix, whole / 1000, (whole / 100) % 10);
     else                    snprintf(out, n, "%s%ld", prefix, whole);
 }
+
+// Like money_format_whole, but keeps cents under 10 units: "$3.40", "$56".
+static inline void money_format_rate(long minor, int exponent, const char* currency,
+                                     char* out, size_t n) {
+    long scale = 1;
+    for (int i = 0; i < exponent; i++) scale *= 10;
+    const long m = minor < 0 ? 0 : minor;
+    if (exponent < 2 || m >= 10 * scale) { money_format_whole(minor, exponent, currency, out, n); return; }
+    char prefix[8];
+    money_prefix(currency, prefix, sizeof(prefix));
+    snprintf(out, n, "%s%ld.%02ld", prefix, m / scale, (m % scale) / (scale / 100));
+}
