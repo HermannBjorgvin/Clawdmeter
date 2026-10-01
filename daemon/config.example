@@ -34,6 +34,11 @@
 #   off = silent (default)
 #   on  = chime through the board speaker (boards with audio: AMOLED-2.16 / 1.8)
 chime = off
+# Bottom status line on the Usage screen. While live data shows it cycles
+# whimsical words ("Musing…", "Vibing…"); connection states always show.
+#   on  = show the rotating words (default)
+#   off = keep the line blank while live data shows
+status_line = on
 # Show a clock on the Usage screen, in place of the "Usage" title.
 #   off  = no clock; the screen keeps showing "Usage" (default)
 #   auto = show the clock, auto-detecting 12h/24h from this machine's settings

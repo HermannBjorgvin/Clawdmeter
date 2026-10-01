@@ -43,6 +43,7 @@ RECONNECT_BACKOFF_CAP = 8  # D-05: fast-reconnect cap (seconds); keeps stacked r
 
 # Optional reset chime.
 # Optional clock display. 
+# Optional status line opt-out.
 # Config lives under the same Clawdmeter dir as daemon.log.
 CONFIG_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "config"
 
@@ -133,6 +134,27 @@ def read_chime_setting() -> str:
     return "off"
 
 
+def read_status_line_setting() -> str:
+    """Read the `status_line` option from the config file. One of: on|off.
+
+    Defaults to "on" so the rotating words show until the user opts out.
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "status_line":
+                    val = val.strip().lower()
+                    if val in ("off", "on"):
+                        return val
+    except OSError:
+        pass
+    return "on"
+
+
 def read_clock_setting() -> str:
     """Read the `clock` option from the config file. One of: off|auto|12|24.
 
@@ -159,6 +181,13 @@ def add_chime_field(payload: dict) -> None:
     sound the session-reset chime. Omitted entirely when chime is off."""
     if read_chime_setting() == "on":
         payload["c"] = 1
+
+
+def add_status_line_field(payload: dict) -> None:
+    """Add "sl":0 to the payload when the config opts out of the rotating
+    status words. Omitted entirely when status_line is on (firmware default)."""
+    if read_status_line_setting() == "off":
+        payload["sl"] = 0
 
 
 def detect_hour_format() -> int:
@@ -245,6 +274,7 @@ async def poll_api(token: str) -> dict | None:
             "ok": True,
         }
     add_chime_field(payload)   # adds "c":1 iff the config opts in
+    add_status_line_field(payload)   # adds "sl":0 iff the config opts out
     add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
     return payload
 

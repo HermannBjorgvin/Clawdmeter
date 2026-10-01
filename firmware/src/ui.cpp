@@ -237,6 +237,7 @@ static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within t
 static lv_image_dsc_t logo_dsc;
 static screen_t current_screen = SCREEN_USAGE;
 static bool     s_ble_connected = false;   // cached BLE connection state
+static bool     s_status_whimsy = true;    // daemon's `status_line` setting (sl)
 static uint32_t connected_at_ms = 0;       // when we last entered CONNECTED ("Connected" dwell)
 
 // Animation state
@@ -594,6 +595,7 @@ void ui_update(const UsageData* data) {
     if (!data->valid) return;
     data_ok = data->ok;
     if (!data->ok) return;          // a {"ok":false} "no data" beat → fall through to idle, keep last numbers
+    s_status_whimsy = data->status_whimsy;
     last_data_ms = lv_tick_get();   // a real usage update just landed
     data_received = true;
 
@@ -745,8 +747,12 @@ void ui_tick_anim(void) {
         text = (anim_msg_idx & 1) ? "No data" : "Listening";
     } else if (now - connected_at_ms < 5000) {
         text = "Connected";
-    } else {
+    } else if (s_status_whimsy) {
         text = anim_messages[anim_msg_idx];
+    } else {
+        // `status_line = off`: blank while live data shows (skip redundant redraws).
+        if (*lv_label_get_text(lbl_anim)) lv_label_set_text(lbl_anim, "");
+        return;
     }
 
     // All states share the whimsical style: "<glyph> <Title-case word>…"

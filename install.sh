@@ -123,6 +123,26 @@ configure_chime() {
     fi
 }
 
+# Offer to hide the rotating status words. Unlike chime, Enter keeps the current
+# value so a re-run never flips an existing `off` back on.
+configure_status_line() {
+    [ -t 0 ] || return 0
+    local ans cur
+    cur=$(current_config_value status_line)
+    read -r -p "  Hide the rotating status words at the bottom of the Usage screen? [y/N] " ans || ans=""
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+        upsert_config_key status_line off
+        echo "  Set: status_line = off"
+    elif [[ "$ans" =~ ^[Nn]$ ]] && [ "$cur" = "off" ]; then
+        upsert_config_key status_line on
+        echo "  Set: status_line = on"
+    elif [ "$cur" = "off" ]; then
+        echo "  Kept: status_line = off"
+    else
+        echo "  Status line on (default)."
+    fi
+}
+
 echo "=== Claude Usage Tracker - Install ==="
 echo ""
 
@@ -142,11 +162,13 @@ sed "s|DAEMON_PATH|${DAEMON_BIN}|g" "$SERVICE_FILE" > "$USER_SERVICE_DIR/$SERVIC
 systemctl --user daemon-reload
 
 # Interactive daemon configuration: which plans to poll, plus the optional
-# clock display and session-reset chime. All re-read by the daemon each poll.
+# clock display, session-reset chime and status line. All re-read by the daemon
+# each poll.
 echo "[3/4] Configuring the daemon..."
 configure_config_dirs
 configure_clock
 configure_chime
+configure_status_line
 echo ""
 
 # Enable service

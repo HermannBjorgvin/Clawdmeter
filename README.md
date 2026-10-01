@@ -127,6 +127,8 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 
 To change the poll interval, set `poll_interval = <seconds>` in `~/.config/claude-usage-monitor/config` (see `daemon/config.example`). The daemon picks it up without a restart. Polling slower than ~80s is fine: between polls the daemon replays the last payload every `heartbeat_interval` seconds (default 60) with the reset countdowns aged, so the firmware's 90s freshness window never lapses and no reflash is needed.
 
+To keep the bottom status line on the Usage screen blank instead of cycling whimsical words ("Musing…", "Vibing…"), set `status_line = off` in the same config file; the installer offers this too.
+
 ## Windows installation
 
 Runs natively on Windows — no WSL required. A system-tray app polls your usage and pushes it over BLE, and starts automatically at login.
@@ -233,6 +235,8 @@ JSON payload format (written to RX):
 ```
 
 Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
+
+Optional `sl`: the daemon adds `"sl":0` when `status_line = off` is set in the config, telling the device to keep the bottom status line blank instead of cycling its whimsical words while live data shows. Absent (the default) means the words rotate as usual.
 
 ## Development
 
