@@ -85,6 +85,8 @@ launchctl unload ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist  # st
 launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # start
 ```
 
+The poll interval works the same as on Linux: set `poll_interval = <seconds>` in `~/.config/claude-usage-monitor/config` (no restart needed); between polls the daemon replays the last payload every `heartbeat_interval` seconds so the display stays live.
+
 ## Linux installation
 
 ### Flash the firmware

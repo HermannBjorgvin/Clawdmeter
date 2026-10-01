@@ -29,7 +29,9 @@ SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 
-POLL_INTERVAL = 60
+POLL_INTERVAL = 60        # default; `poll_interval` in the config overrides
+HEARTBEAT_INTERVAL = 60   # default; `heartbeat_interval` in the config overrides
+MIN_INTERVAL = 10
 TICK = 5
 CONNECT_TIMEOUT = 20.0
 
@@ -313,6 +315,58 @@ async def discover_target(skip_addr: str | None = None):
     if not address:
         log("No pinned address cached; waiting (not scanning by name)")
     return address
+
+
+def _read_interval(key: str, default: int) -> int:
+    """Read an integer seconds option from the config, clamped to >= MIN_INTERVAL."""
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                k, val = line.split("=", 1)
+                if k.strip().lower() == key and val.strip().isdigit():
+                    return max(int(val.strip()), MIN_INTERVAL)
+    except OSError:
+        pass
+    return default
+
+
+def read_poll_interval() -> int:
+    """Seconds between Anthropic API polls (`poll_interval`). Same option as the Linux daemon."""
+    return _read_interval("poll_interval", POLL_INTERVAL)
+
+
+def read_heartbeat_interval() -> int:
+    """Seconds between replays of the last payload while waiting for the next poll.
+
+    The firmware marks data older than 90s as stale, so this is what keeps the
+    display live when poll_interval > ~80s. Set it >= poll_interval to disable.
+    """
+    return _read_interval("heartbeat_interval", HEARTBEAT_INTERVAL)
+
+
+def age_payload(payload: dict, secs: float) -> dict:
+    """Copy of a payload aged by `secs`: reset countdowns tick down, clock advances."""
+    aged = dict(payload)
+    mins = int(secs) // 60
+    for k in ("sr", "wr"):
+        if isinstance(aged.get(k), int) and aged[k] > 0:
+            aged[k] = max(aged[k] - mins, 0)
+    if isinstance(aged.get("t"), int) and aged["t"] > 0:
+        aged["t"] += int(secs)
+    return aged
+
+
+def next_action(now: float, last_poll: float, last_write: float, poll_iv: int,
+                hb_iv: int, has_payload: bool, refresh: bool) -> str | None:
+    """What the connect loop should do this tick: "poll", "heartbeat" or None."""
+    if refresh or now - last_poll >= poll_iv:
+        return "poll"
+    if has_payload and hb_iv < poll_iv and now - last_write >= hb_iv:
+        return "heartbeat"
+    return None
 
 
 def read_chime_setting() -> str:
@@ -752,12 +806,19 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     await session.setup_refresh_subscription()
 
     last_poll = 0.0
+    last_write = 0.0
+    last_payload: dict | None = None   # last data payload, replayed by the heartbeat
     used_successfully = False
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
-            elapsed = now - last_poll
-            if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
+            action = next_action(now, last_poll, last_write, read_poll_interval(),
+                                 read_heartbeat_interval(), last_payload is not None,
+                                 session.refresh_requested.is_set())
+            if action == "heartbeat":
+                if await session.write_payload(age_payload(last_payload, now - last_poll)):
+                    last_write = now
+            elif action == "poll":
                 session.refresh_requested.clear()
                 # Pure free-ride: read whatever access token(s) Claude Code
                 # currently holds across the configured config dirs and NEVER
@@ -769,7 +830,8 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                 payload, dead = await poll_active()
                 if payload is not None:
                     if await session.write_payload(payload):
-                        last_poll = time.time()
+                        last_poll = last_write = time.time()
+                        last_payload = payload
                         used_successfully = True
                 elif dead:
                     # No live token in any config dir (missing, or a 401/expired
@@ -779,8 +841,9 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                     # be a healthy link for a full POLL_INTERVAL.
                     log("No usable token; signalling no-data to device — run "
                         "`claude login` or use the CLI to let Claude Code renew it")
+                    last_payload = None   # never replay numbers past a dead token
                     if await session.write_payload({"ok": False}):
-                        last_poll = time.time()
+                        last_poll = last_write = time.time()
                 else:
                     # Transient poll failure (a live token that didn't answer this
                     # cycle) -> stay silent and retry next tick.
@@ -815,7 +878,7 @@ async def main() -> None:
             signal.signal(sig, _stop)
 
     log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
-    log(f"Poll interval: {POLL_INTERVAL}s")
+    log(f"Poll interval: {read_poll_interval()}s, heartbeat: {read_heartbeat_interval()}s")
 
     backoff = 1
     skip_addr: str | None = None  # macOS: a peripheral to skip for one cycle
