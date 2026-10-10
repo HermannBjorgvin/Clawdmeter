@@ -32,7 +32,7 @@
 # Play a sound on the device when your 5-hour session limit resets, so you know
 # you can use Claude again without watching the screen.
 #   off = silent (default)
-#   on  = chime through the board speaker (boards with audio: S3 AMOLED-2.16 / 1.8, LCD-1.54)
+#   on  = chime through the board speaker (boards with audio: AMOLED-2.16 S3 + C6 / 1.8, LCD-1.54)
 chime = off
 
 # Beep when a Claude Code session needs your attention (needs the hooks from the
