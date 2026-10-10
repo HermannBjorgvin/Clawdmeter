@@ -228,6 +228,9 @@ void setup() {
     lv_indev_t* indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, my_touch_cb);
+    // A 3 s hold opens the Clawd face (ui.cpp); taps use SHORT_CLICKED, which
+    // LVGL skips once a long press has fired.
+    lv_indev_set_long_press_time(indev, 3000);
 
     ble_init();
     input_hal_init();

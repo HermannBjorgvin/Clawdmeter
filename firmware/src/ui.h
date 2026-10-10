@@ -5,6 +5,7 @@
 enum screen_t {
     SCREEN_SPLASH,
     SCREEN_USAGE,
+    SCREEN_FACE,     // full-screen Clawd face (hold 3 s to open, tap to close)
     SCREEN_COUNT,
 };
 

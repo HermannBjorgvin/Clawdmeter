@@ -1,5 +1,6 @@
 #include "ui.h"
 #include "splash.h"
+#include "face.h"
 #include <lvgl.h>
 #include <time.h>
 #include "logo.h"
@@ -313,6 +314,8 @@ static void format_reset_time(int mins, char* buf, size_t len) {
 
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
+static void face_hold_cb(lv_event_t* e);
+static void face_tap_cb(lv_event_t* e);
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -477,7 +480,10 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_border_width(usage_container, 0, 0);
     lv_obj_set_style_pad_all(usage_container, 0, 0);
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+    // SHORT_CLICKED (not CLICKED) so releasing a 3 s hold doesn't also act as
+    // a tap; the hold itself opens the face.
+    lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_SHORT_CLICKED, NULL);
+    lv_obj_add_event_cb(usage_container, face_hold_cb, LV_EVENT_LONG_PRESSED, NULL);
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
@@ -584,7 +590,8 @@ void ui_init(void) {
     splash_init(scr);
 
     if (splash_get_root()) {
-        lv_obj_add_event_cb(splash_get_root(), global_click_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(splash_get_root(), global_click_cb, LV_EVENT_SHORT_CLICKED, NULL);
+        lv_obj_add_event_cb(splash_get_root(), face_hold_cb, LV_EVENT_LONG_PRESSED, NULL);
     }
 
     // Corner mascot in the old logo slot. The still Clawd is shorter than the
@@ -614,6 +621,10 @@ void ui_init(void) {
     }
 
     init_alert();
+
+    // Clawd face: created last so it covers everything when shown.
+    if (lv_obj_t* face = face_init(scr))
+        lv_obj_add_event_cb(face, face_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);
 }
 
 void ui_update(const UsageData* data) {
@@ -785,10 +796,23 @@ void ui_tick_anim(void) {
 }
 
 static screen_t prev_non_splash_screen = SCREEN_USAGE;
+static screen_t face_return_screen = SCREEN_SPLASH;   // where a tap on the face goes back to
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
-    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-    else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    if (current_screen != SCREEN_USAGE) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    else                                 lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Hold 3 s anywhere (indev long-press time, main.cpp) → Clawd face.
+static void face_hold_cb(lv_event_t* e) {
+    (void)e;
+    if (current_screen != SCREEN_FACE) ui_show_screen(SCREEN_FACE);
+}
+
+// Tap the face → back to the screen it was opened from.
+static void face_tap_cb(lv_event_t* e) {
+    (void)e;
+    ui_show_screen(face_return_screen);
 }
 
 static void global_click_cb(lv_event_t* e) {
@@ -798,28 +822,34 @@ static void global_click_cb(lv_event_t* e) {
 }
 
 void ui_show_screen(screen_t screen) {
+    if (screen == SCREEN_FACE && current_screen != SCREEN_FACE)
+        face_return_screen = current_screen;
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
+    face_hide();
 
     switch (screen) {
     case SCREEN_SPLASH:  splash_show(); break;
     case SCREEN_USAGE:   lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_FACE:    face_show(); break;
     default: break;
     }
 
-    splash_mascot_set_visible(screen != SCREEN_SPLASH);
+    // Corner mascot / logo belong to the usage view only.
+    splash_mascot_set_visible(screen == SCREEN_USAGE);
     if (logo_img) {
-        if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        if (screen != SCREEN_USAGE) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        else                         lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
     }
 
-    if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
+    if (screen == SCREEN_USAGE) prev_non_splash_screen = screen;
     current_screen = screen;
     apply_battery_visibility();
 }
 
 void ui_toggle_splash(void) {
-    if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
+    if (current_screen == SCREEN_FACE)   ui_show_screen(face_return_screen);
+    else if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
     else                                  ui_show_screen(SCREEN_SPLASH);
 }
 
