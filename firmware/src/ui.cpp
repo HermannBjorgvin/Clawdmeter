@@ -2,6 +2,7 @@
 #include "splash.h"
 #include <lvgl.h>
 #include <time.h>
+#include <Preferences.h>
 #include "logo.h"
 #include "clawd_still.h"
 #include "icons.h"
@@ -199,6 +200,17 @@ static long     clock_base_epoch = 0;
 static uint32_t clock_base_ms = 0;
 static int      clock_fmt = 24;   // 12 or 24, set from the daemon payload
 static int      clock_last_min = -1;   // last rendered minute; avoids redrawing the title every tick
+// Tapping the title hides/shows the clock on-device (persisted in NVS). Only
+// meaningful while the daemon is sending time; otherwise the title is "Usage".
+static bool     clock_hidden = false;
+#define CLOCK_TAP_PAD 16   // px of slop around the title's text for the tap target
+
+// "Usage" keeps the serif title font (Claude wordmark style); only the clock
+// switches to the sans pct_font in ui_tick_anim.
+static void show_usage_title(void) {
+    lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
+    lv_label_set_text(lbl_title, "Usage");
+}
 static lv_obj_t* usage_group;   // the two usage panels — shown when connected
 static lv_obj_t* pair_group;    // pairing hint — shown when disconnected
 static lv_obj_t* bar_session;
@@ -545,6 +557,13 @@ static void init_usage_screen(lv_obj_t* scr) {
 void ui_init(void) {
     compute_layout(board_caps());
 
+    {
+        Preferences prefs;
+        prefs.begin("clawdmeter", true);
+        clock_hidden = prefs.getUChar("clock_hide", 0) != 0;
+        prefs.end();
+    }
+
     lv_obj_t* scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
@@ -604,8 +623,7 @@ void ui_update(const UsageData* data) {
     } else if (clock_base_epoch != 0) {   // clock turned off daemon-side → revert title to "Usage"
         clock_base_epoch = 0;
         clock_last_min = -1;
-        lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
-        lv_label_set_text(lbl_title, "Usage");
+        show_usage_title();
     }
 
     int s_pct = (int)(data->session_pct + 0.5f);
@@ -708,7 +726,7 @@ void ui_tick_anim(void) {
 
     // Title clock: once the daemon has sent wall-clock time, replace "Usage" with
     // the live time, advanced locally so it ticks every minute between payloads.
-    if (clock_base_epoch > 0) {
+    if (clock_base_epoch > 0 && !clock_hidden) {
         time_t cur = (time_t)(clock_base_epoch + (now - clock_base_ms) / 1000);
         struct tm tmv;
         gmtime_r(&cur, &tmv);   // epoch is already local wall-clock → gmtime keeps it as-is
@@ -767,8 +785,32 @@ static void apply_battery_visibility(void) {
     else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
+// True if the active touch point is on the title (text bounds plus slop). The
+// full-screen usage/pair/idle groups sit above the title and bubble clicks to
+// usage_container, so the title is hit-tested here rather than made clickable.
+static bool click_on_title(const lv_point_t& p) {
+    lv_area_t a;
+    lv_obj_get_coords(lbl_title, &a);
+    return p.x >= a.x1 - CLOCK_TAP_PAD && p.x <= a.x2 + CLOCK_TAP_PAD &&
+           p.y >= 0                    && p.y <= a.y2 + CLOCK_TAP_PAD;
+}
+
 static void global_click_cb(lv_event_t* e) {
     (void)e;
+    lv_point_t p = {-1, -1};
+    if (lv_indev_t* indev = lv_indev_active()) lv_indev_get_point(indev, &p);
+    // Title tap on the usage view toggles the clock — only while the daemon
+    // sends time, so with the clock off daemon-side the tap still flips screens.
+    if (current_screen == SCREEN_USAGE && clock_base_epoch > 0 && click_on_title(p)) {
+        clock_hidden = !clock_hidden;
+        Preferences prefs;
+        prefs.begin("clawdmeter", false);
+        prefs.putUChar("clock_hide", clock_hidden ? 1 : 0);
+        prefs.end();
+        clock_last_min = -1;               // force the next tick to redraw the time
+        if (clock_hidden) show_usage_title();
+        return;
+    }
     if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
     else                                  ui_show_screen(SCREEN_SPLASH);
 }
