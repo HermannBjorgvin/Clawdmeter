@@ -111,7 +111,9 @@ static bool parse_json(const char* json, UsageData* out) {
     out->weekly_pct = doc["w"] | 0.0f;
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
-    out->chime = doc["c"] | false;   // absent (old daemon / chime off) → stay silent
+    // Daemons send "c":1. `| false` only matches a JSON bool, so it read 1 as
+    // false; as<bool>() accepts 1 or true. Absent (chime off) → stay silent.
+    out->chime = doc["c"].as<bool>();
     const char* acct = doc["acct"] | "pro";
     out->enterprise = (strcmp(acct, "ent") == 0);
     out->time_pct = doc["tp"] | 0;
