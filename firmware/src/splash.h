@@ -35,9 +35,11 @@ lv_obj_t* splash_get_root(void);
 lv_obj_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px);
 void splash_mini_tick(void);
 
-// Corner mascot (usage screen, PSRAM boards): the still Clawd idles in the
-// logo slot, does occasional acts, and takes walk-off/lurk/walk-back trips.
+// Corner mascot (usage screen): the still Clawd idles in the logo slot. On
+// PSRAM boards he also does occasional acts and takes walk-off/lurk/walk-back
+// trips on his own; on all boards a tap on him plays the next act.
 // feet_y = px of the art's ground line; cell = px per art cell in the corner.
+// Returns NULL if the buffer can't be allocated (caller falls back to a still).
 lv_obj_t* splash_mascot_create(lv_obj_t *parent, int slot_x, int feet_y, int cell);
 void splash_mascot_tick(void);
 void splash_mascot_set_visible(bool v);
@@ -45,3 +47,9 @@ void splash_mascot_set_visible(bool v);
 // and points until attention(false), then they swap back. No-op without the
 // PSRAM mascot.
 void splash_mascot_attention(bool on);
+
+// Screen-px tap. If it lands inside the mascot's bounding box, starts the next
+// tap act (dance → scuttle off-left and back → wave) when he's idle, and
+// returns true so the caller swallows the tap. Taps on him mid-act are
+// swallowed too. Returns false for taps anywhere else.
+bool splash_mascot_tap(int x, int y);

@@ -593,14 +593,14 @@ void ui_init(void) {
         const int slot  = L.small_icons ? LOGO_SMALL_HEIGHT : LOGO_HEIGHT;
         const int art_h = L.small_icons ? CLAWD_STILL_SMALL_H : CLAWD_STILL_H;
         const int top   = L.logo_y + (slot - art_h) / 2;
-#ifdef BOARD_HAS_PSRAM
-        // Animated: idles, does acts, and takes walk-off/lurk trips.
-        splash_mascot_create(scr, L.margin, top + art_h, L.small_icons ? 2 : 3);
-#else
-        logo_img = lv_image_create(scr);
-        lv_image_set_src(logo_img, &logo_dsc);
-        lv_obj_set_pos(logo_img, L.margin, top);
+        // Animated: tap acts everywhere; PSRAM boards also act on their own.
+        if (!splash_mascot_create(scr, L.margin, top + art_h, L.small_icons ? 2 : 3)) {
+#ifndef BOARD_HAS_PSRAM
+            logo_img = lv_image_create(scr);   // alloc failed: static still
+            lv_image_set_src(logo_img, &logo_dsc);
+            lv_obj_set_pos(logo_img, L.margin, top);
 #endif
+        }
     }
 
     battery_img = lv_image_create(scr);
@@ -793,6 +793,10 @@ static void apply_battery_visibility(void) {
 
 static void global_click_cb(lv_event_t* e) {
     (void)e;
+    lv_point_t p = {-1, -1};
+    if (lv_indev_t* indev = lv_indev_active()) lv_indev_get_point(indev, &p);
+    // A tap on the corner Clawd plays his next act instead of flipping screens.
+    if (current_screen == SCREEN_USAGE && splash_mascot_tap(p.x, p.y)) return;
     if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
     else                                  ui_show_screen(SCREEN_SPLASH);
 }

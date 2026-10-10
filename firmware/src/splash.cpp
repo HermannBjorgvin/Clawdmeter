@@ -411,9 +411,11 @@ void splash_mini_tick(void) {
 // The corner logo slot, alive: the still Clawd idles, occasionally does a
 // small act (waving, dancing, pointing) in place, and every few acts walks
 // off the left edge, does the full-size lurking animation over the screen,
-// and walks back into the slot. PSRAM boards only (ui.cpp falls back to the
-// static clawd_still.h icon on the C6); driven by splash_mascot_tick() from
-// the main loop, independent of the splash screen itself.
+// and walks back into the slot. Those autonomous acts run on PSRAM boards
+// only; PSRAM-less boards (C6) keep him still in a small internal-RAM buffer
+// (no full-size lurk). On every board a tap on him plays the next tap act
+// (splash_mascot_tap). Driven by splash_mascot_tick() from the main loop,
+// independent of the splash screen itself.
 static lv_obj_t *mas_img = NULL;
 static lv_obj_t *mas_lurk_img = NULL;
 static uint8_t  *mas_buf = NULL;       // planar RGB565A8, sized for largest act
@@ -443,6 +445,22 @@ static int  big_cell = 12;             // px per art cell for the attention Claw
 static int  big_x0 = 0;                // px of stage x 0, chosen so he is centered
 static int  big_feet_y = 420;
 static uint8_t big_act = 0;            // 0 waving, 1 pointing
+static WalkKind mas_walk_kind = WALK_FRONT;   // gait of the current walk-off/in
+static int  mas_step_mult = 1;         // gait multiplier (tap scuttle runs 2×)
+static bool mas_trip_lurk = false;     // walk-off ends in the full-size lurk
+static uint8_t mas_loops_left = 0;     // extra loop-region passes for an act
+static uint8_t mas_tap_idx = 0;
+
+#ifdef BOARD_HAS_PSRAM
+static const bool MAS_AUTO_ACTS = true;
+#else
+static const bool MAS_AUTO_ACTS = false;   // tap-only on PSRAM-less boards
+#endif
+
+// Tap acts, cycled in order. "scuttle" = crab-walk off the left edge and back.
+static const char* MAS_TAP_ACTS[] = { "dancing", "scuttle", "waving" };
+#define MAS_TAP_ACT_COUNT (sizeof(MAS_TAP_ACTS) / sizeof(MAS_TAP_ACTS[0]))
+#define MAS_TAP_WAVE_LOOPS 4   // the official wave is ~0.8s; repeat its loop
 
 // The corner mascot mirrors the splash's excitement: per usage-rate group,
 // how long he idles between acts and which acts he does. "lurking" means the
@@ -524,9 +542,56 @@ static void mas_show_still(void) {
     mas_mode_started = millis();
     mas_x = mas_slot_x;
     mas_face = +1;
+    mas_loops_left = 0;
     if (mas_anim)
         mas_render(mas_anim, 0, false, &mas_dsc, mas_buf, mas_img,
                    mas_cell, mas_x, mas_feet_y);
+}
+
+// Start an act from the still pose. "lurking" = the autonomous walk-off /
+// full-size lurk / walk-back trip; "scuttle" = the tap trip (crab-walk off the
+// left edge at 2× gait and straight back, no lurk); anything else plays that
+// animation in place (extra_loops extra passes of its loop region), as does
+// "lurking" when there's no lurk buffer. Returns false if the animation is
+// missing.
+static bool mas_start(const char *act, uint8_t extra_loops) {
+    const uint32_t now = millis();
+    mas_frame = 0;
+    mas_frame_started = now;
+    mas_from_loop = false;
+    mas_loops_left = 0;
+    const bool lurk = strcmp(act, "lurking") == 0 && mas_lurk_img;
+    if (lurk || strcmp(act, "scuttle") == 0) {
+        const splash_anim_def_t *w = anim_by_name(lurk ? "walking" : "crab walking");
+        if (!w) return false;
+        mas_anim = w;
+        mas_walk_kind = lurk ? WALK_FRONT : WALK_CRAB;
+        mas_step_mult = lurk ? 1 : 2;
+        mas_trip_lurk = lurk;
+        mas_face = -1;
+        mas_mode = MAS_WALK_OFF;
+        return true;
+    }
+    const splash_anim_def_t *a = anim_by_name(act);
+    if (!a) return false;
+    mas_anim = a;
+    mas_face = +1;
+    mas_loops_left = extra_loops;
+    mas_mode = MAS_ACT;
+    return true;
+}
+
+bool splash_mascot_tap(int x, int y) {
+    if (!mas_img || !mas_visible || lv_obj_has_flag(mas_img, LV_OBJ_FLAG_HIDDEN))
+        return false;
+    lv_area_t a;
+    lv_obj_get_coords(mas_img, &a);
+    if (x < a.x1 || x > a.x2 || y < a.y1 || y > a.y2) return false;
+    if (mas_mode == MAS_STILL) {
+        const char *act = MAS_TAP_ACTS[mas_tap_idx++ % MAS_TAP_ACT_COUNT];
+        mas_start(act, strcmp(act, "waving") == 0 ? MAS_TAP_WAVE_LOOPS : 0);
+    }
+    return true;   // on him: never flips screens, even mid-act
 }
 
 lv_obj_t* splash_mascot_create(lv_obj_t *parent, int slot_x, int feet_y, int cell) {
@@ -559,8 +624,16 @@ lv_obj_t* splash_mascot_create(lv_obj_t *parent, int slot_x, int feet_y, int cel
             if (b > lurk_bytes) lurk_bytes = b;
         }
     }
+#ifdef BOARD_HAS_PSRAM
     mas_buf      = (uint8_t*)heap_caps_malloc(mas_bytes,  MALLOC_CAP_SPIRAM);
     mas_lurk_buf = lurk_bytes ? (uint8_t*)heap_caps_malloc(lurk_bytes, MALLOC_CAP_SPIRAM) : NULL;
+#else
+    // No PSRAM: the corner buffer (~16 KB at cell 3) fits in internal RAM; the
+    // full-size lurk (~42 KB) doesn't earn its keep, so it's skipped.
+    (void)lurk;
+    mas_buf      = (uint8_t*)heap_caps_malloc(mas_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    mas_lurk_buf = NULL;
+#endif
     if (!mas_buf) return NULL;
     mas_img = lv_image_create(parent);
     if (mas_lurk_buf) {
@@ -622,6 +695,7 @@ void splash_mascot_tick(void) {
     const uint32_t now = millis();
 
     if (mas_mode == MAS_STILL) {
+        if (!MAS_AUTO_ACTS) return;                 // tap-only: idle until poked
         int g = usage_rate_group();
         if (g < 0 || g > 3) g = 0;
         if (now - mas_mode_started < MAS_STILL_MS_BY_RATE[g]) return;
@@ -629,20 +703,7 @@ void splash_mascot_tick(void) {
         while (count < 4 && MAS_ACTS_BY_RATE[g][count]) count++;
         if (count == 0) { mas_mode_started = now; return; }
         const char *act = MAS_ACTS_BY_RATE[g][mas_act_idx++ % count];
-        mas_frame = 0;
-        mas_frame_started = now;
-        mas_from_loop = false;
-        if (strcmp(act, "lurking") == 0 && mas_lurk_img) {   // the lurk trip
-            mas_anim = anim_by_name("walking");
-            mas_face = -1;
-            mas_mode = MAS_WALK_OFF;
-        } else {
-            const splash_anim_def_t *a = anim_by_name(act);
-            if (!a) { mas_mode_started = now; return; }
-            mas_anim = a;
-            mas_face = +1;
-            mas_mode = MAS_ACT;
-        }
+        if (!mas_start(act, 0)) mas_mode_started = now;
         return;
     }
 
@@ -661,6 +722,10 @@ void splash_mascot_tick(void) {
                                mas_mode == MAS_ATTN_OUT);
     if (walking_mode && mas_frame == a->loop_end)
         next = a->loop_start;                       // walk: hold the gait loop
+    else if (mas_mode == MAS_ACT && mas_frame == a->loop_end && mas_loops_left > 0) {
+        next = a->loop_start;                       // tap wave: extra passes
+        mas_loops_left--;
+    }
 
     if (next >= a->frame_count && mas_mode == MAS_ATTN_ACT) {
         big_act ^= 1;                               // wave, point, wave, ...
@@ -714,7 +779,8 @@ void splash_mascot_tick(void) {
             return;
         }
     } else if (walking_mode && mas_from_loop) {
-        const int step = walk_gait_cells_k(WALK_FRONT, mas_frame, from_loop) * mas_cell;
+        const int step = walk_gait_cells_k(mas_walk_kind, mas_frame, from_loop)
+                         * mas_cell * mas_step_mult;
         // Walk-off always exits left; walk-in heads toward the slot from
         // whichever side he's on (right, after the lurk trip).
         const bool leaving = (mas_mode == MAS_WALK_OFF || mas_mode == MAS_ATTN_OFF);
@@ -727,9 +793,9 @@ void splash_mascot_tick(void) {
         }
         if (mas_mode == MAS_WALK_OFF && mas_x <= -a->w * mas_cell) {
             // Fully off: hide the corner sprite, run the full-size lurk.
-            lv_obj_add_flag(mas_img, LV_OBJ_FLAG_HIDDEN);
             const splash_anim_def_t *lurk = anim_by_name("lurking");
-            if (lurk && mas_lurk_img && mas_lurk_buf) {
+            if (mas_trip_lurk && lurk && mas_lurk_img && mas_lurk_buf) {
+                lv_obj_add_flag(mas_img, LV_OBJ_FLAG_HIDDEN);
                 mas_anim = lurk;
                 mas_frame = 0;
                 mas_mode = MAS_LURK;
@@ -742,7 +808,7 @@ void splash_mascot_tick(void) {
                            mas_screen_w - lurk->w * mas_lurk_cell,
                            (STAGE_ANCHOR_Y + lurk->oy + lurk->h) * mas_lurk_cell);
             } else {
-                mas_mode = MAS_WALK_IN;             // no lurk asset: turn back
+                mas_mode = MAS_WALK_IN;             // scuttle / no lurk: turn back
                 mas_face = +1;
             }
             return;
