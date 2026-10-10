@@ -604,6 +604,7 @@ void ui_update(const UsageData* data) {
     } else if (clock_base_epoch != 0) {   // clock turned off daemon-side → revert title to "Usage"
         clock_base_epoch = 0;
         clock_last_min = -1;
+        lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
         lv_label_set_text(lbl_title, "Usage");
     }
 
@@ -722,6 +723,9 @@ void ui_tick_anim(void) {
             } else {
                 snprintf(tbuf, sizeof(tbuf), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
             }
+            // "Usage" keeps the serif title font (Claude wordmark style); the
+            // clock uses the sans percentage font to match the numbers below.
+            lv_obj_set_style_text_font(lbl_title, L.pct_font, 0);
             lv_label_set_text(lbl_title, tbuf);
         }
     }
