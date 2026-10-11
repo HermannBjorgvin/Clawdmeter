@@ -178,6 +178,10 @@ static void check_serial_cmd() {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
             else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
+            // Same as the PWR hold-3s-release pairing gesture, for scripted pairing.
+            else if (strcmp(cmd_buf, "pair") == 0)  ble_clear_bonds();
+            else if (strcmp(cmd_buf, "ble") == 0)   ble_print_status();
+            else if (strcmp(cmd_buf, "disconnect") == 0) ble_disconnect_all();
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;

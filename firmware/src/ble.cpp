@@ -409,6 +409,26 @@ bool ble_has_bonds(void) {
     return NimBLEDevice::getNumBonds() > 0;
 }
 
+void ble_print_status(void) {
+    static const char* names[] = {"INIT", "ADVERTISING", "CONNECTED", "DISCONNECTED"};
+    Serial.printf("BLE status: state=%s bonds=%d owner=%s\n",
+        names[state], NimBLEDevice::getNumBonds(), owner_set ? owner_addr : "none");
+    if (!server) return;
+    for (uint8_t i = 0; i < server->getConnectedCount(); i++) {
+        NimBLEConnInfo ci = server->getPeerInfo(i);
+        Serial.printf("BLE status: peer=%s id=%s enc=%d bonded=%d\n",
+            ci.getAddress().toString().c_str(), ci.getIdAddress().toString().c_str(),
+            ci.isEncrypted() ? 1 : 0, ci.isBonded() ? 1 : 0);
+    }
+}
+
+void ble_disconnect_all(void) {
+    if (!server) return;
+    for (uint8_t i = 0; i < server->getConnectedCount(); i++) {
+        server->disconnect(server->getPeerInfo(i).getConnHandle());
+    }
+}
+
 bool ble_has_data(void) {
     return data_ready;
 }
