@@ -11,6 +11,7 @@ int main(void) {
         "  d              toggle BLE link\n"
         "  b / n (hold)   BOOT / secondary button    p  PWR button\n"
         "  c              toggle charging            - / =  battery down/up\n"
+        "  u              toggle no battery (USB power only)\n"
         "  s              screenshot                 esc  quit\n\n");
     setup();
     while (!sim_should_quit()) {

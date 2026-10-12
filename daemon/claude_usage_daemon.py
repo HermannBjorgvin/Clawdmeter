@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 import httpx
@@ -47,6 +48,13 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 DEFAULT_CONFIG_DIR = Path.home() / ".claude"
 SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
 CONFIG_FILE = Path.home() / ".config" / "claude-usage-monitor" / "config"
+# Written by Claude Code hooks: `attention` holds {"m", "s"} (message, session
+# id) when a session needs the user, and `clear-<session id>` is touched when
+# that session moves on.
+ATTENTION_DIR = Path.home() / ".config" / "claude-usage-monitor"
+ATTENTION_FLAG = ATTENTION_DIR / "attention"
+ATTENTION_MAX_AGE = 60
+DEFAULT_MAX_WRITE = 180
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
@@ -323,8 +331,8 @@ async def discover_target(skip_addr: str | None = None):
     return address
 
 
-def read_chime_setting() -> str:
-    """Read the `chime` option from the config file. One of: off|on.
+def read_onoff_setting(name: str) -> str:
+    """Read an off|on option from the config file.
 
     Defaults to "off" (the device stays silent) so existing setups are
     unaffected until the user opts in.
@@ -336,13 +344,18 @@ def read_chime_setting() -> str:
                 if "=" not in line:
                     continue
                 key, val = line.split("=", 1)
-                if key.strip().lower() == "chime":
+                if key.strip().lower() == name:
                     val = val.strip().lower()
                     if val in ("off", "on"):
                         return val
     except OSError:
         pass
     return "off"
+
+
+def read_chime_setting() -> str:
+    """Read the `chime` option (session-reset chime). One of: off|on."""
+    return read_onoff_setting("chime")
 
 
 def read_clock_setting() -> str:
@@ -599,10 +612,72 @@ async def poll_active_payload(selector: PlanSelector = _SELECTOR) -> dict | None
     return payload
 
 
+def to_ascii(text: str, limit: int) -> str:
+    """The device fonts are ASCII only: drop accents, collapse whitespace, cap."""
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
+
+
+def take_attention_flag() -> dict | None:
+    """Consume the attention file. Only a fresh one counts, so a file written
+    while the device was away doesn't beep on reconnect. A bare `touch` with no
+    JSON still beeps, just without a card."""
+    try:
+        mtime = ATTENTION_FLAG.stat().st_mtime
+        raw = ATTENTION_FLAG.read_text()
+        ATTENTION_FLAG.unlink()
+    except FileNotFoundError:
+        return None
+    if time.time() - mtime >= ATTENTION_MAX_AGE:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        data = {}
+    return {
+        "m": to_ascii(str(data.get("m") or ""), 120),
+        "s": str(data.get("s") or ""),
+        "t": mtime,
+    }
+
+
+def take_clears() -> dict[str, float]:
+    """Consume every clear-<session id> file and return {session id: mtime}."""
+    clears = {}
+    for f in ATTENTION_DIR.glob("clear-*"):
+        try:
+            clears[f.name.removeprefix("clear-")] = f.stat().st_mtime
+            f.unlink()
+        except FileNotFoundError:
+            pass
+    return clears
+
+
+def encode_payload(payload: dict, limit: int) -> bytes:
+    """JSON-encode for one write-without-response of at most `limit` bytes.
+    Shortens the alert message, then drops it, until it fits."""
+    data = json.dumps(payload, separators=(",", ":")).encode()
+    msg = payload.get("m", "")
+    while len(data) > limit and msg:
+        msg = msg[: max(0, len(msg) - (len(data) - limit) - 3)].rstrip()
+        payload = {**payload, "m": msg + "..." if msg else ""}
+        data = json.dumps(payload, separators=(",", ":")).encode()
+    if len(data) > limit:
+        payload = {k: v for k, v in payload.items() if k != "m"}
+        data = json.dumps(payload, separators=(",", ":")).encode()
+    return data
+
+
 class Session:
     def __init__(self, client: BleakClient) -> None:
         self.client = client
         self.refresh_requested = asyncio.Event()
+        rx = client.services.get_characteristic(RX_CHAR_UUID)
+        self.max_write = rx.max_write_without_response_size if rx else DEFAULT_MAX_WRITE
+        log(f"Max write size: {self.max_write} bytes")
         self.takes_stats = False
 
     def _on_refresh(self, _char, _data: bytearray) -> None:
@@ -628,7 +703,7 @@ class Session:
             log("Refresh subscription timed out; polling without it")
 
     async def write_payload(self, payload: dict) -> bool:
-        data = json.dumps(payload, separators=(",", ":")).encode()
+        data = encode_payload(payload, self.max_write)
         log(f"Sending: {data.decode()}")
         try:
             await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
@@ -767,18 +842,39 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
         return False
 
     log("Connected")
+    ATTENTION_FLAG.unlink(missing_ok=True)
+    take_clears()
     session = Session(client)
     await session.setup_refresh_subscription()
     await session.read_takes_stats()
 
     last_poll = 0.0
     used_successfully = False
+    alert = None            # latest alert, kept to match its session's clear
+    alert_unsent = False
+    clear_unsent = False
     stats_sent = None       # stats-cache.json mtime last sent to the device
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
             elapsed = now - last_poll
-            if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
+            # The firmware treats every write as a full payload, so alerts and
+            # clears go out with a fresh poll, never on their own.
+            # One alert slot, latest wins: two sessions alerting in the same tick
+            # keep only the last one.
+            new_alert = take_attention_flag()
+            # A session that is still waiting can notify twice (AskUserQuestion
+            # fires PreToolUse, then a permission_prompt). Keep the first card
+            # and beep once until that session clears.
+            repeat = new_alert and alert and alert["s"] and new_alert["s"] == alert["s"]
+            if new_alert is not None and not repeat:
+                alert, alert_unsent, clear_unsent = new_alert, True, False
+            clears = take_clears()
+            if alert and clears.get(alert["s"], 0) > alert["t"]:
+                clear_unsent = not alert_unsent   # never shown, nothing to clear
+                alert, alert_unsent = None, False
+            if (alert_unsent or clear_unsent or session.refresh_requested.is_set()
+                    or elapsed >= POLL_INTERVAL):
                 session.refresh_requested.clear()
                 # Pure free-ride: read whatever access token(s) Claude Code
                 # currently holds across the configured config dirs and NEVER
@@ -788,10 +884,19 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                 # we signal "No data" so the device idles instead of holding stale
                 # numbers until the CLI re-seeds it.
                 payload, dead = await poll_active()
+                extra = {}
+                if alert_unsent:
+                    if read_onoff_setting("beep") == "on":
+                        extra["b"] = 1
+                    if alert["m"]:
+                        extra["m"] = alert["m"]
+                if clear_unsent:
+                    extra["x"] = 1
                 if payload is not None:
-                    if await session.write_payload(payload):
+                    if await session.write_payload({**payload, **extra}):
                         last_poll = time.time()
                         used_successfully = True
+                        alert_unsent = clear_unsent = False
                 elif dead:
                     # No live token in any config dir (missing, or a 401/expired
                     # token) -> show "No data" now instead of stale numbers. Guard
@@ -800,8 +905,9 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                     # be a healthy link for a full POLL_INTERVAL.
                     log("No usable token; signalling no-data to device — run "
                         "`claude login` or use the CLI to let Claude Code renew it")
-                    if await session.write_payload({"ok": False}):
+                    if await session.write_payload({"ok": False, **extra}):
                         last_poll = time.time()
+                        alert_unsent = clear_unsent = False
                 else:
                     # Transient poll failure (a live token that didn't answer this
                     # cycle) -> stay silent and retry next tick.

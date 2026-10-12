@@ -31,6 +31,7 @@ Launch from the `firmware/` directory — the default scenario path
 | `n` (hold) | SECONDARY button (HID Shift+Tab on hardware) |
 | `p` | PWR button (short press; hold ~3s + release = pair gesture) |
 | `c` | toggle charging |
+| `u` | toggle no battery / USB power only (shows the plug-zap icon) |
 | `-` / `=` | battery down / up 5% |
 | `s` | save screenshot BMP to the current directory |
 | `esc` / window close | quit |

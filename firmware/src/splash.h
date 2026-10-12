@@ -41,3 +41,7 @@ void splash_mini_tick(void);
 lv_obj_t* splash_mascot_create(lv_obj_t *parent, int slot_x, int feet_y, int cell);
 void splash_mascot_tick(void);
 void splash_mascot_set_visible(bool v);
+// Attention: the corner Clawd walks off, a full-size one walks in and waves
+// and points until attention(false), then they swap back. No-op without the
+// PSRAM mascot.
+void splash_mascot_attention(bool on);

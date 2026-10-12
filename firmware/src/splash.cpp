@@ -426,7 +426,8 @@ static int  mas_lurk_cell = 8;
 static int  mas_screen_w = 480;
 static bool mas_visible = false;
 
-enum MasMode { MAS_STILL, MAS_ACT, MAS_WALK_OFF, MAS_LURK, MAS_WALK_IN };
+enum MasMode { MAS_STILL, MAS_ACT, MAS_WALK_OFF, MAS_LURK, MAS_WALK_IN,
+               MAS_ATTN_OFF, MAS_ATTN_IN, MAS_ATTN_ACT, MAS_ATTN_OUT };
 static MasMode mas_mode = MAS_STILL;
 static const splash_anim_def_t *mas_anim = NULL;
 static uint16_t mas_frame = 0;
@@ -436,6 +437,12 @@ static int  mas_x = 0;                 // widget x, px (may be off-screen)
 static int  mas_face = +1;
 static uint8_t mas_act_idx = 0;
 static bool mas_from_loop = false;
+static bool mas_attn = false;          // attention requested (splash_mascot_attention)
+static int  big_dx = 0;                // attention Clawd's px offset from his centered spot
+static int  big_cell = 12;             // px per art cell for the attention Clawd
+static int  big_x0 = 0;                // px of stage x 0, chosen so he is centered
+static int  big_feet_y = 420;
+static uint8_t big_act = 0;            // 0 waving, 1 pointing
 
 // The corner mascot mirrors the splash's excitement: per usage-rate group,
 // how long he idles between acts and which acts he does. "lurking" means the
@@ -487,6 +494,29 @@ static void mas_render(const splash_anim_def_t *a, uint16_t frame, bool mirror,
     lv_obj_invalidate(img);
 }
 
+// Attention mode draws a big Clawd centered on screen, shifted by big_dx while
+// he walks. The core poses share one stage origin, so they line up.
+static void big_render(const splash_anim_def_t *a, uint16_t frame, bool mirror) {
+    mas_render(a, frame, mirror, &mas_lurk_dsc, mas_lurk_buf, mas_lurk_img,
+               big_cell, big_x0 + a->ox * big_cell + big_dx, big_feet_y);
+}
+
+// The corner Clawd is off screen: the big one walks in from the left.
+static void big_enter(void) {
+    const splash_anim_def_t *w = anim_by_name("walking");
+    lv_obj_add_flag(mas_img, LV_OBJ_FLAG_HIDDEN);
+    mas_anim = w;
+    // Start mid-stride: the frames before it would play off screen.
+    mas_frame = w->loop_start;
+    mas_from_loop = false;
+    mas_frame_started = millis();
+    big_dx = -(big_x0 + (w->ox + w->w) * big_cell);
+    mas_mode = MAS_ATTN_IN;
+    lv_obj_clear_flag(mas_lurk_img, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(mas_lurk_img);
+    big_render(w, mas_frame, false);
+}
+
 static void mas_show_still(void) {
     mas_anim = anim_by_name("walking");     // frame 0 == the official still pose
     mas_frame = 0;
@@ -511,8 +541,24 @@ lv_obj_t* splash_mascot_create(lv_obj_t *parent, int slot_x, int feet_y, int cel
     int mind = (c.width < c.height) ? c.width : c.height;
     mas_lurk_cell = mind / SPLASH_GRID;
     if (mas_lurk_cell < 1) mas_lurk_cell = 1;
-    const size_t lurk_bytes = lurk ?
-        (size_t)(lurk->w * mas_lurk_cell) * (lurk->h * mas_lurk_cell) * 3 : 0;
+    // The attention Clawd is 1.5x the lurk size, centered, with his feet just
+    // above the status line.
+    big_cell = mas_lurk_cell * 3 / 2;
+    if (big_cell < 1) big_cell = 1;
+    big_feet_y = c.height * 7 / 8;
+    const splash_anim_def_t *walk = anim_by_name("walking");
+    if (walk) big_x0 = (c.width - walk->w * big_cell) / 2 - walk->ox * big_cell;
+    // The full-size image also carries the attention walk, wave and point.
+    size_t lurk_bytes = 0;
+    if (lurk) {
+        static const char *const BIG[] = { "lurking", "walking", "waving", "pointing" };
+        for (const char *n : BIG) {
+            const splash_anim_def_t *a = anim_by_name(n);
+            const int cl = (a == lurk) ? mas_lurk_cell : big_cell;
+            const size_t b = a ? (size_t)(a->w * cl) * (a->h * cl) * 3 : 0;
+            if (b > lurk_bytes) lurk_bytes = b;
+        }
+    }
     mas_buf      = (uint8_t*)heap_caps_malloc(mas_bytes,  MALLOC_CAP_SPIRAM);
     mas_lurk_buf = lurk_bytes ? (uint8_t*)heap_caps_malloc(lurk_bytes, MALLOC_CAP_SPIRAM) : NULL;
     if (!mas_buf) return NULL;
@@ -534,10 +580,40 @@ void splash_mascot_set_visible(bool v) {
         // siblings (battery icon, labels) whenever he's shown.
         lv_obj_move_foreground(mas_img);
         if (mas_lurk_img) lv_obj_move_foreground(mas_lurk_img);
-        mas_show_still();                       // restart clean at the slot
+        if (mas_attn) big_enter();              // an alert came in while hidden
+        else          mas_show_still();         // restart clean at the slot
     } else {
         lv_obj_add_flag(mas_img, LV_OBJ_FLAG_HIDDEN);
         if (mas_lurk_img) lv_obj_add_flag(mas_lurk_img, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void splash_mascot_attention(bool on) {
+    if (!mas_img || !mas_lurk_img || !mas_lurk_buf || on == mas_attn) return;
+    mas_attn = on;
+    if (!mas_visible) return;                   // set_visible picks it up
+    if (on) {
+        if (mas_mode == MAS_LURK) {             // already off screen
+            lv_obj_add_flag(mas_lurk_img, LV_OBJ_FLAG_HIDDEN);
+            big_enter();
+        } else if (mas_mode == MAS_ATTN_OUT) {
+            mas_mode = MAS_ATTN_IN;             // was leaving: turn around
+        } else {                                // in or near the slot: walk off
+            mas_anim = anim_by_name("walking");
+            mas_frame = 0;
+            mas_from_loop = false;
+            mas_frame_started = millis();
+            mas_face = -1;
+            mas_mode = MAS_ATTN_OFF;
+        }
+    } else if (mas_mode == MAS_ATTN_OFF) {
+        mas_mode = MAS_WALK_IN;                 // hadn't left yet: come back
+    } else {
+        mas_anim = anim_by_name("walking");
+        mas_frame = 0;
+        mas_from_loop = false;
+        mas_frame_started = millis();
+        mas_mode = MAS_ATTN_OUT;
     }
 }
 
@@ -571,14 +647,28 @@ void splash_mascot_tick(void) {
     }
 
     const splash_anim_def_t *a = mas_anim;
-    if (now - mas_frame_started < a->holds[mas_frame]) return;
+    uint32_t hold = a->holds[mas_frame];
+    // The walk to an alert plays at twice the normal speed.
+    if (mas_mode == MAS_ATTN_OFF || mas_mode == MAS_ATTN_IN) hold /= 2;
+    if (now - mas_frame_started < hold) return;
     mas_frame_started = now;
 
     uint16_t next = mas_frame + 1;
-    const bool walking_mode = (mas_mode == MAS_WALK_OFF || mas_mode == MAS_WALK_IN);
+    const bool big = (mas_mode == MAS_ATTN_IN || mas_mode == MAS_ATTN_ACT ||
+                      mas_mode == MAS_ATTN_OUT);
+    const bool walking_mode = (mas_mode == MAS_WALK_OFF || mas_mode == MAS_WALK_IN ||
+                               mas_mode == MAS_ATTN_OFF || mas_mode == MAS_ATTN_IN ||
+                               mas_mode == MAS_ATTN_OUT);
     if (walking_mode && mas_frame == a->loop_end)
         next = a->loop_start;                       // walk: hold the gait loop
 
+    if (next >= a->frame_count && mas_mode == MAS_ATTN_ACT) {
+        big_act ^= 1;                               // wave, point, wave, ...
+        mas_anim = anim_by_name(big_act ? "pointing" : "waving");
+        mas_frame = 0;
+        big_render(mas_anim, 0, false);
+        return;
+    }
     if (next >= a->frame_count) {                   // act / lurk finished
         if (mas_mode == MAS_LURK) {
             lv_obj_add_flag(mas_lurk_img, LV_OBJ_FLAG_HIDDEN);
@@ -600,14 +690,41 @@ void splash_mascot_tick(void) {
     mas_from_loop = walking_mode &&
         mas_frame >= a->loop_start && mas_frame <= a->loop_end;
 
-    if (walking_mode && mas_from_loop) {
+    if (big && mas_from_loop) {
+        const int step = walk_gait_cells_k(WALK_FRONT, mas_frame, from_loop) * big_cell;
+        big_dx += (mas_mode == MAS_ATTN_IN) ? step : -step;
+        if (mas_mode == MAS_ATTN_IN && big_dx >= 0) {
+            big_dx = 0;                             // on his spot: wave
+            big_act = 0;
+            mas_anim = anim_by_name("waving");
+            mas_frame = 0;
+            mas_mode = MAS_ATTN_ACT;
+            big_render(mas_anim, 0, false);
+            return;
+        }
+        if (mas_mode == MAS_ATTN_OUT &&
+            big_x0 + (a->ox + a->w) * big_cell + big_dx <= 0) {
+            lv_obj_add_flag(mas_lurk_img, LV_OBJ_FLAG_HIDDEN);
+            mas_frame = 0;                          // corner Clawd walks back home
+            mas_from_loop = false;
+            mas_x = -a->w * mas_cell;
+            mas_face = +1;
+            mas_mode = MAS_WALK_IN;
+            lv_obj_clear_flag(mas_img, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+    } else if (walking_mode && mas_from_loop) {
         const int step = walk_gait_cells_k(WALK_FRONT, mas_frame, from_loop) * mas_cell;
         // Walk-off always exits left; walk-in heads toward the slot from
         // whichever side he's on (right, after the lurk trip).
-        const int dir = (mas_mode == MAS_WALK_OFF) ? -1
-                        : (mas_x < mas_slot_x ? +1 : -1);
-        mas_face = (mas_mode == MAS_WALK_OFF) ? -1 : dir;
+        const bool leaving = (mas_mode == MAS_WALK_OFF || mas_mode == MAS_ATTN_OFF);
+        const int dir = leaving ? -1 : (mas_x < mas_slot_x ? +1 : -1);
+        mas_face = leaving ? -1 : dir;
         mas_x += dir * step;
+        if (mas_mode == MAS_ATTN_OFF && mas_x <= -a->w * mas_cell) {
+            big_enter();
+            return;
+        }
         if (mas_mode == MAS_WALK_OFF && mas_x <= -a->w * mas_cell) {
             // Fully off: hide the corner sprite, run the full-size lurk.
             lv_obj_add_flag(mas_img, LV_OBJ_FLAG_HIDDEN);
@@ -637,7 +754,9 @@ void splash_mascot_tick(void) {
         }
     }
 
-    if (mas_mode == MAS_LURK) {
+    if (big) {
+        big_render(a, mas_frame, mas_mode == MAS_ATTN_OUT);
+    } else if (mas_mode == MAS_LURK) {
         mas_render(a, mas_frame, true, &mas_lurk_dsc, mas_lurk_buf, mas_lurk_img,
                    mas_lurk_cell, mas_screen_w - a->w * mas_lurk_cell,
                    (STAGE_ANCHOR_Y + a->oy + a->h) * mas_lurk_cell);

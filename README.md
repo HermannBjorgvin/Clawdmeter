@@ -87,6 +87,7 @@ launchctl unload ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist  # st
 launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # start
 ```
 
+
 ## Linux installation
 
 ### Flash the firmware
@@ -193,6 +194,35 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
 | `Connection failed`                    | Toggle Windows Bluetooth off/on in Settings.             |
 | `Warning: running under Linux/WSL`     | Run from a native PowerShell window, not a WSL shell.    |
 
+
+## Attention alerts (optional)
+
+When a Claude Code session is waiting on you (a permission prompt, a question, or the idle prompt after a reply), the corner Clawd walks off, a full-size Clawd walks on and waves and points, and the message scrolls on the status line. Add these hooks to `~/.claude/settings.json` (merge them into any hook arrays you already have) and point the path at your checkout. The script needs `jq`: recent macOS ships it as `/usr/bin/jq`, otherwise install it with `brew install jq` or `sudo apt install jq`.
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      { "matcher": "permission_prompt|idle_prompt|elicitation_dialog",
+        "hooks": [{ "type": "command", "command": "/path/to/Clawdmeter/daemon/attention-hook.sh alert" }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "AskUserQuestion",
+        "hooks": [{ "type": "command", "command": "/path/to/Clawdmeter/daemon/attention-hook.sh alert" }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "/path/to/Clawdmeter/daemon/attention-hook.sh clear" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*",
+        "hooks": [{ "type": "command", "command": "/path/to/Clawdmeter/daemon/attention-hook.sh clear" }] }
+    ]
+  }
+}
+```
+
+Clawd walks back to his corner when you tap the screen, after 2 minutes, or when that session moves on (you answer, approve a tool, or send a prompt). He shows up about 5 seconds after Claude Code raises the notification, because the daemon checks once per tick. To hear a beep as well, set `beep = on` in `~/.config/claude-usage-monitor/config` (the installers ask). The macOS and Linux daemons handle these alerts; the Windows daemon doesn't yet.
+
 ## How it works
 
 <img src="assets/readme/magnifier.gif" width="150" align="right" alt="">
@@ -235,6 +265,8 @@ JSON payload format (written to RX):
 ```
 
 Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
+
+Optional attention fields are only sent as part of a full payload, because the firmware treats every write as a complete update: `b` = beep once, `m` = attention message (ASCII), `x` = end the alert.
 
 Stats messages go to RX as well, tagged with a `k` kind. Firmware that takes them has `"stats":1` in its TX value; daemons read TX when they connect and skip stats otherwise.
 

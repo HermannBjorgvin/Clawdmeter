@@ -18,6 +18,7 @@ bool sim_take_pwr_long(void);
 bool sim_take_pwr_released(void);
 int  sim_battery_pct(void);
 bool sim_charging(void);
+bool sim_vbus_in(void);     // USB power present (charging, or no battery fitted)
 
 // Scenario playback controls, implemented in ble_sim.cpp.
 void sim_playback_toggle(void);

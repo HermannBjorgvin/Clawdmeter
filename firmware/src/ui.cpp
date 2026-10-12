@@ -233,7 +233,7 @@ static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idl
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
 static lv_obj_t* logo_img;
-static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
+static lv_image_dsc_t battery_dscs[6];  // empty, low, medium, full, charging, plug-zap (no battery)
 
 // ---- Live-data freshness → which usage sub-view to show ----
 // usage panels when data is flowing, an idle "Zzz" screen when the host is
@@ -390,6 +390,7 @@ static void init_battery_icons(void) {
         init_icon_dsc_rgb565a8(&battery_dscs[2], ICON_BATTERY_MEDIUM_SMALL_W, ICON_BATTERY_MEDIUM_SMALL_H, icon_battery_medium_small_data);
         init_icon_dsc_rgb565a8(&battery_dscs[3], ICON_BATTERY_FULL_SMALL_W, ICON_BATTERY_FULL_SMALL_H, icon_battery_full_small_data);
         init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_SMALL_W, ICON_BATTERY_CHARGING_SMALL_H, icon_battery_charging_small_data);
+        init_icon_dsc_rgb565a8(&battery_dscs[5], ICON_PLUG_ZAP_SMALL_W, ICON_PLUG_ZAP_SMALL_H, icon_plug_zap_small_data);
         return;
     }
     init_icon_dsc_rgb565a8(&battery_dscs[0], ICON_BATTERY_W, ICON_BATTERY_H, icon_battery_data);
@@ -397,6 +398,7 @@ static void init_battery_icons(void) {
     init_icon_dsc_rgb565a8(&battery_dscs[2], ICON_BATTERY_MEDIUM_W, ICON_BATTERY_MEDIUM_H, icon_battery_medium_data);
     init_icon_dsc_rgb565a8(&battery_dscs[3], ICON_BATTERY_FULL_W, ICON_BATTERY_FULL_H, icon_battery_full_data);
     init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_W, ICON_BATTERY_CHARGING_H, icon_battery_charging_data);
+    init_icon_dsc_rgb565a8(&battery_dscs[5], ICON_PLUG_ZAP_W, ICON_PLUG_ZAP_H, icon_plug_zap_data);
 }
 
 // ======== Usage Screen ========
@@ -757,6 +759,30 @@ static bool was_tap(void) {
     return LV_ABS(p.x - press_pt.x) <= TAP_SLOP_PX && LV_ABS(p.y - press_pt.y) <= TAP_SLOP_PX;
 }
 
+// ---- Attention: the mascot walk-on (splash_mascot_attention) plus the
+// message on the status line. Ends on a tap, after 2 minutes, or ui_hide_alert().
+static const uint32_t ALERT_TIMEOUT_MS = 120000;
+static bool        alert_active = false;
+static lv_timer_t* alert_timer;
+
+static void alert_timer_cb(lv_timer_t* t) { (void)t; ui_hide_alert(); }
+
+// Registered on the input device, so it sees every tap. A tap that dismisses
+// does nothing else.
+static void alert_tap_cb(lv_event_t* e) {
+    if (!alert_active) return;
+    ui_hide_alert();
+    lv_indev_stop_processing((lv_indev_t*)lv_event_get_user_data(e));
+}
+
+static void init_alert(void) {
+    alert_timer = lv_timer_create(alert_timer_cb, ALERT_TIMEOUT_MS, NULL);
+    lv_timer_pause(alert_timer);
+    lv_indev_t* indev = lv_indev_get_next(NULL);
+    if (indev) lv_indev_add_event_cb(indev, alert_tap_cb, LV_EVENT_CLICKED, indev);
+    lv_obj_set_style_text_align(lbl_anim, LV_TEXT_ALIGN_CENTER, 0);
+}
+
 // ======== Public API ========
 
 void ui_init(void) {
@@ -808,6 +834,7 @@ void ui_init(void) {
 
     lv_indev_t* indev = lv_indev_get_next(NULL);
     if (indev) lv_indev_add_event_cb(indev, press_cb, LV_EVENT_PRESSED, NULL);
+    init_alert();
 }
 
 void ui_update(const UsageData* data) {
@@ -946,6 +973,8 @@ void ui_tick_anim(void) {
         }
     }
 
+    if (alert_active) return;          // the status line holds the alert message
+
     if (now - anim_msg_start >= ANIM_MSG_MS) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
         anim_msg_start = now;
@@ -1030,10 +1059,12 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
     update_view_state();
 }
 
-void ui_update_battery(int percent, bool charging) {
+void ui_update_battery(int percent, bool charging, bool usb_power) {
     if (!battery_img) return;
     int idx;
-    if (charging) {
+    if (percent < 0 && usb_power) {
+        idx = 5;   // no battery, running on USB: show the plug-zap glyph, not an empty battery
+    } else if (charging) {
         idx = 4;
     } else if (percent < 0) {
         idx = 0;
@@ -1065,4 +1096,24 @@ void ui_update_stats(const StatsData* stats) {
         }
     }
     lv_obj_invalidate(heat_obj);
+}
+
+void ui_show_alert(const char* message) {
+    alert_active = true;
+    if (current_screen == SCREEN_SPLASH) ui_show_screen(SCREEN_USAGE);
+    splash_mascot_attention(true);
+    lv_label_set_long_mode(lbl_anim, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_width(lbl_anim, L.content_w);
+    lv_label_set_text(lbl_anim, message);
+    lv_timer_reset(alert_timer);
+    lv_timer_resume(alert_timer);
+}
+
+void ui_hide_alert(void) {
+    if (!alert_active) return;
+    alert_active = false;
+    splash_mascot_attention(false);
+    lv_label_set_long_mode(lbl_anim, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_anim, LV_SIZE_CONTENT);
+    lv_timer_pause(alert_timer);
 }

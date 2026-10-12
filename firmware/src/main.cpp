@@ -150,7 +150,11 @@ static ParseResult parse_json(const char* json, UsageData* out) {
     out->weekly_pct = doc["w"] | 0.0f;
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
-    out->chime = doc["c"] | false;   // absent (old daemon / chime off) → stay silent
+    // as<bool>, not `| false`: daemons send 1, and `|` only accepts a JSON bool.
+    out->chime = doc["c"].as<bool>();   // absent (old daemon / chime off) → stay silent
+    out->beep = doc["b"].as<bool>();
+    strlcpy(out->alert_msg, doc["m"] | "", sizeof(out->alert_msg));
+    out->alert_clear = doc["x"].as<bool>();
     const char* acct = doc["acct"] | "pro";
     out->enterprise = (strcmp(acct, "ent") == 0);
     out->time_pct = doc["tp"] | 0;
@@ -269,7 +273,7 @@ void setup() {
 
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
-    ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
+    ui_update_battery(power_hal_battery_pct(), power_hal_is_charging(), power_hal_is_vbus_in());
     ui_show_screen(SCREEN_SPLASH);
 
     Serial.printf("Dashboard ready (%s, %dx%d), waiting for data on BLE...\n",
@@ -399,13 +403,16 @@ void loop() {
 
     static int  last_pct      = -2;
     static bool last_charging = false;
+    static bool last_vbus     = false;
     int  pct      = power_hal_battery_pct();
     bool charging = power_hal_is_charging();
-    if (pct != last_pct || charging != last_charging) {
+    bool vbus     = power_hal_is_vbus_in();
+    if (pct != last_pct || charging != last_charging || vbus != last_vbus) {
         if (pct != last_pct) ble_set_battery_level(pct);
         last_pct = pct;
         last_charging = charging;
-        ui_update_battery(pct, charging);
+        last_vbus = vbus;
+        ui_update_battery(pct, charging, vbus);
     }
 
     check_serial_cmd();
@@ -426,6 +433,18 @@ void loop() {
                 Serial.println("session reset detected — chime");
                 sound_hal_play_reset();
             }
+            // Claude Code hook fired on the host. Not gated on `chime`: the daemon
+            // only sets `b` when that hook ran.
+            if (usage.beep) {
+                Serial.println("attention — chime");
+                sound_hal_play_reset();
+            }
+            if (usage.alert_msg[0]) {
+                Serial.println("attention — mascot");
+                idle_note_activity();
+                ui_show_alert(usage.alert_msg);
+            }
+            if (usage.alert_clear) ui_hide_alert();
             if (g_after != g_before) {
                 Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
                     g_before, g_after, usage.session_pct);

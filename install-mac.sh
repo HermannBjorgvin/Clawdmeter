@@ -132,6 +132,23 @@ configure_chime() {
     fi
 }
 
+# Offer the optional attention beep (Claude Code hooks, see the README).
+configure_beep() {
+    [ -t 0 ] || return 0
+    local ans cur
+    cur=$(current_config_value beep)
+    read -r -p "  Beep through the speaker when Claude Code needs your attention? [y/N] " ans || ans=""
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+        upsert_config_key beep on
+        echo "  Set: beep = on"
+    elif [ "$cur" = "on" ]; then
+        upsert_config_key beep off
+        echo "  Set: beep = off"
+    else
+        echo "  Beep off (default)."
+    fi
+}
+
 echo "=== Clawdmeter macOS install ==="
 echo ""
 
@@ -208,11 +225,13 @@ echo "  Installed: $PLIST_DST"
 echo ""
 
 # Interactive daemon configuration: which plans to poll, plus the optional
-# clock display and session-reset chime. All re-read by the daemon each poll.
+# clock display, session-reset chime and attention beep. All re-read by the
+# daemon each poll.
 echo "[4/6] Configuring the daemon..."
 configure_config_dirs
 configure_clock
 configure_chime
+configure_beep
 echo ""
 
 echo "[5/6] Bluetooth permission check..."

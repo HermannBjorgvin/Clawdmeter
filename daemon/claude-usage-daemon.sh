@@ -188,20 +188,111 @@ heartbeat() {
     return 0
 }
 
-# Read the `chime` option from the config file. Echoes one of: off|on.
+# Read an off|on option ($1) from the config file. Echoes one of: off|on.
 # Defaults to "off" so the device stays silent until the user opts in.
-read_chime_setting() {
+read_onoff_setting() {
     local val=""
     if [ -f "$CONFIG_FILE" ]; then
-        val=$(grep -E '^[[:space:]]*chime[[:space:]]*=' "$CONFIG_FILE" | tail -1 \
+        val=$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$CONFIG_FILE" | tail -1 \
             | tr -d '\r' \
-            | sed -E 's/^[[:space:]]*chime[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//' \
+            | sed -E "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?\$//" \
             | tr '[:upper:]' '[:lower:]')
     fi
     case "$val" in
         on) echo "on" ;;
         *)  echo "off" ;;
     esac
+}
+
+# Read the `chime` option (session-reset chime). Echoes one of: off|on.
+read_chime_setting() {
+    read_onoff_setting chime
+}
+
+# --- Attention alerts --------------------------------------------------------
+# daemon/attention-hook.sh writes $ATTN_DIR/attention ({"m","s"}: message,
+# session id) when a Claude Code session needs the user, and touches
+# clear-<session id> when that session moves on. check_attention() consumes
+# both each tick. The alert is then sent inside an aged replay of the last
+# payload, because the firmware treats every write as a full payload.
+ATTN_DIR="$HOME/.config/claude-usage-monitor"
+ALERT_SID=""         # session of the alert on screen, to match its clear
+ALERT_TS=0
+ALERT_MSG=""
+ALERT_UNSENT=0
+CLEAR_UNSENT=0
+
+check_attention() {
+    local f="$ATTN_DIR/attention" now ts parsed sid msg c
+    now=$(date +%s)
+    if [ -f "$f" ]; then
+        ts=$(date -r "$f" +%s%N 2>/dev/null || echo 0)   # ns: a clear can land in the same second
+        # Fonts on the device are ASCII only: fold accents, collapse whitespace.
+        parsed=$(python3 - "$f" <<'PYEOF'
+import json, sys, unicodedata
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    d = {}
+if not isinstance(d, dict):
+    d = {}
+m = unicodedata.normalize("NFKD", str(d.get("m") or "")).encode("ascii", "ignore").decode()
+m = " ".join(m.split())
+if len(m) > 120:
+    m = m[:117].rstrip() + "..."
+print(str(d.get("s") or "") + "\t" + m)
+PYEOF
+        )
+        rm -f "$f"
+        sid=${parsed%%$'\t'*}
+        msg=${parsed#*$'\t'}
+        # Skip a stale file (written while the device was away) and a second
+        # alert from a session still waiting (AskUserQuestion notifies twice).
+        if (( now - ts / 1000000000 < 60 )) && { [ -z "$sid" ] || [ "$sid" != "$ALERT_SID" ]; }; then
+            ALERT_SID=$sid ALERT_TS=$ts ALERT_MSG=$msg ALERT_UNSENT=1 CLEAR_UNSENT=0
+        fi
+    fi
+    for c in "$ATTN_DIR"/clear-*; do
+        [ -e "$c" ] || continue
+        sid=${c##*/clear-}
+        ts=$(date -r "$c" +%s%N 2>/dev/null || echo 0)
+        rm -f "$c"
+        # Only the alerting session, and only a clear newer than its alert, so
+        # another busy session can't end it.
+        if [ -n "$ALERT_SID" ] && [ "$sid" = "$ALERT_SID" ] && (( ts > ALERT_TS )); then
+            (( ALERT_UNSENT )) || CLEAR_UNSENT=1   # never shown, nothing to clear
+            ALERT_SID="" ALERT_UNSENT=0
+        fi
+    done
+}
+
+# Add the pending attention fields to payload $1. Echoes the JSON.
+attention_payload() {
+    python3 - "$1" "$ALERT_UNSENT" "$CLEAR_UNSENT" "$(read_onoff_setting beep)" "$ALERT_MSG" <<'PYEOF'
+import json, sys
+d = json.loads(sys.argv[1])
+alert, clear, beep, msg = sys.argv[2:6]
+if alert == "1":
+    if beep == "on":
+        d["b"] = 1
+    if msg:
+        d["m"] = msg
+if clear == "1":
+    d["x"] = 1
+print(json.dumps(d, separators=(",", ":")))
+PYEOF
+}
+
+send_attention() {
+    [ -z "$LAST_PAYLOAD" ] && return 1   # waits for the first poll
+    local now aged
+    now=$(date +%s)
+    aged=$(age_payload "$LAST_PAYLOAD" $(( now - LAST_PAYLOAD_TS ))) || return 1
+    aged=$(attention_payload "$aged") || return 1
+    log "Attention: $aged"
+    write_gatt "$RX_CHAR_PATH" "$aged" || { log "Attention write failed"; return 1; }
+    LAST_WRITE_TS=$now
+    ALERT_UNSENT=0 CLEAR_UNSENT=0
 }
 
 # Read the `clock` option from the config file. Echoes one of: off|auto|12|24.
@@ -622,6 +713,8 @@ while true; do
     BACKOFF=1  # reset backoff on successful connection
 
     start_notify_subscriber
+    rm -f "$ATTN_DIR/attention" "$ATTN_DIR"/clear-*
+    ALERT_SID="" ALERT_UNSENT=0 CLEAR_UNSENT=0
 
     # Poll loop: tick every $TICK seconds. Poll Anthropic when the
     # interval has elapsed OR when the ESP requested a refresh.
@@ -638,6 +731,8 @@ while true; do
             HEARTBEAT_INTERVAL=$NEW_HB
             log "Heartbeat interval changed: ${HEARTBEAT_INTERVAL}s"
         fi
+        check_attention
+        (( ALERT_UNSENT || CLEAR_UNSENT )) && send_attention
         if [ -f "$REFRESH_FLAG" ] || (( NOW - LAST_POLL >= POLL_INTERVAL )); then
             if [ -f "$REFRESH_FLAG" ]; then
                 log "Refresh requested by device"

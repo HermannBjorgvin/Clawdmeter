@@ -12,13 +12,16 @@ static bool     edge_pressed = false, edge_long = false, edge_released = false;
 
 static int  battery = 87;
 static bool charging = false;
+// No battery fitted, running on USB (key `u`, or SIM_NO_BATTERY=1 at launch).
+static bool no_battery = getenv("SIM_NO_BATTERY") != NULL;
 
 static bool take(bool* f) { bool v = *f; *f = false; return v; }
 bool sim_take_pwr_pressed(void)  { return take(&edge_pressed); }
 bool sim_take_pwr_long(void)     { return take(&edge_long); }
 bool sim_take_pwr_released(void) { return take(&edge_released); }
-int  sim_battery_pct(void) { return battery; }
-bool sim_charging(void)    { return charging; }
+int  sim_battery_pct(void) { return no_battery ? -1 : battery; }
+bool sim_charging(void)    { return !no_battery && charging; }
+bool sim_vbus_in(void)     { return no_battery || charging; }
 bool sim_should_quit(void) { return quit; }
 
 // Matches the AXP2101 long-press threshold main.cpp's pair gesture expects.
@@ -38,6 +41,7 @@ void sim_pump(void) {
             case SDLK_d:      sim_playback_toggle_link(); break;
             case SDLK_s:      sim_display_screenshot(NULL); break;
             case SDLK_c:      charging = !charging; break;
+            case SDLK_u:      no_battery = !no_battery; break;
             case SDLK_MINUS:  battery = battery < 5 ? 0 : battery - 5; break;
             case SDLK_EQUALS: battery = battery > 95 ? 100 : battery + 5; break;
             case SDLK_p:

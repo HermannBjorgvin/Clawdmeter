@@ -13,6 +13,7 @@
 //   n (hold)             SECONDARY button (HID Shift+Tab on hardware)
 //   p                    PWR button (short press; hold ~3s + release = pair)
 //   c                    toggle charging       - / =   battery down / up 5%
+//   u                    toggle no battery (USB power only → plug-zap icon)
 //   s                    save screenshot BMP to the current directory
 //   esc / window close   quit
 //
