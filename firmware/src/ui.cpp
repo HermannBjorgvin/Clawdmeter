@@ -594,24 +594,71 @@ static void build_stats_workspace(lv_obj_t* tile) {
     lv_obj_center(stats_empty);
 }
 
-// Workspaces: full-screen tiles side by side. A horizontal swipe moves between
-// them while the header, status line and mascot stay put. Taps bubble up to
+// Workspaces: full-screen pages stacked in place, one visible at a time. A
+// horizontal swipe slides to the next one while the header, status line and
+// mascot stay put. The page doesn't follow the finger, because each frame of
+// motion redraws the whole screen over QSPI; see WS_SLIDE_MS. Taps bubble up to
 // usage_container, where a tap toggles the splash.
-static lv_obj_t* ws_view;
-static lv_obj_t* ws_stats;
+enum { WS_USAGE, WS_STATS, WS_COUNT };
+static const char* const ws_title[WS_COUNT] = {"Usage", "Stats"};
+static lv_obj_t* ws[WS_COUNT];
+static uint8_t   ws_cur;
 
-// The header names the workspace, unless the clock owns it.
-static void ws_changed_cb(lv_event_t* e) {
-    (void)e;
-    if (clock_base_epoch > 0) return;
-    lv_label_set_text(lbl_title, lv_tileview_get_tile_active(ws_view) == ws_stats ? "Stats" : "Usage");
+// A short time-based slide: LVGL drops frames instead of stretching it, so it
+// stays quick even though each frame is a full-screen redraw.
+static const uint32_t WS_SLIDE_MS = 120;
+
+static void ws_x_cb(void* obj, int32_t x) { lv_obj_set_x((lv_obj_t*)obj, x); }
+
+static void ws_slide_done(lv_anim_t* a) {
+    if (a->var != ws[ws_cur]) lv_obj_add_flag((lv_obj_t*)a->var, LV_OBJ_FLAG_HIDDEN);
 }
 
-static lv_obj_t* add_workspace(uint8_t col, lv_dir_t dir) {
-    lv_obj_t* tile = lv_tileview_add_tile(ws_view, col, 0, dir);
-    lv_obj_set_style_bg_opa(tile, LV_OPA_TRANSP, 0);
-    lv_obj_add_flag(tile, LV_OBJ_FLAG_EVENT_BUBBLE);
-    return tile;
+static void ws_slide(lv_obj_t* obj, int32_t from, int32_t to) {
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, obj);
+    lv_anim_set_exec_cb(&a, ws_x_cb);
+    lv_anim_set_values(&a, from, to);
+    lv_anim_set_duration(&a, WS_SLIDE_MS);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&a, ws_slide_done);
+    lv_anim_start(&a);
+}
+
+static void show_workspace(uint8_t i) {
+    const int32_t dx = i > ws_cur ? L.scr_w : -L.scr_w;
+    lv_obj_t* out = ws[ws_cur];
+    ws_cur = i;
+    // A swipe during a slide restarts from wherever the pages are.
+    for (uint8_t k = 0; k < WS_COUNT; k++) {
+        lv_anim_delete(ws[k], ws_x_cb);
+        if (ws[k] != out && k != i) lv_obj_add_flag(ws[k], LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_clear_flag(ws[i], LV_OBJ_FLAG_HIDDEN);
+    ws_slide(out, lv_obj_get_x(out), -dx);
+    ws_slide(ws[i], dx, 0);
+    // The header names the workspace, unless the clock owns it.
+    if (clock_base_epoch == 0) lv_label_set_text(lbl_title, ws_title[i]);
+}
+
+static void ws_gesture_cb(lv_event_t* e) {
+    (void)e;
+    lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
+    if (dir == LV_DIR_LEFT && ws_cur + 1 < WS_COUNT) show_workspace(ws_cur + 1);
+    else if (dir == LV_DIR_RIGHT && ws_cur > 0)      show_workspace(ws_cur - 1);
+}
+
+static lv_obj_t* add_workspace(lv_obj_t* parent) {
+    lv_obj_t* ws = lv_obj_create(parent);
+    lv_obj_set_size(ws, L.scr_w, L.scr_h);
+    lv_obj_set_pos(ws, 0, 0);
+    lv_obj_set_style_bg_opa(ws, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ws, 0, 0);
+    lv_obj_set_style_pad_all(ws, 0, 0);
+    lv_obj_clear_flag(ws, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(ws, LV_OBJ_FLAG_EVENT_BUBBLE);
+    return ws;
 }
 
 static void init_usage_screen(lv_obj_t* scr) {
@@ -625,15 +672,16 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
 
     // Created before the title and status line so those draw on top.
-    ws_view = lv_tileview_create(usage_container);
-    lv_obj_set_size(ws_view, L.scr_w, L.scr_h);
-    lv_obj_set_style_bg_opa(ws_view, LV_OPA_TRANSP, 0);   // the theme paints it opaque
-    lv_obj_set_scrollbar_mode(ws_view, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_add_flag(ws_view, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_t* ws_usage = add_workspace(0, LV_DIR_RIGHT);
-    ws_stats = add_workspace(1, LV_DIR_LEFT);
-    lv_obj_add_event_cb(ws_view, ws_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    build_stats_workspace(ws_stats);
+    for (uint8_t i = 0; i < WS_COUNT; i++) {
+        ws[i] = add_workspace(usage_container);
+        if (i != ws_cur) lv_obj_add_flag(ws[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    // Gestures bubble to the screen by default; stop them here. The screen must
+    // not scroll either (the mascot walks past its edge), or LVGL drops them.
+    lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(usage_container, ws_gesture_cb, LV_EVENT_GESTURE, NULL);
+    build_stats_workspace(ws[WS_STATS]);
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
@@ -645,7 +693,7 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
-    usage_group = lv_obj_create(ws_usage);
+    usage_group = lv_obj_create(ws[WS_USAGE]);
     lv_obj_set_size(usage_group, L.scr_w, L.scr_h);
     lv_obj_set_pos(usage_group, 0, 0);
     lv_obj_set_style_bg_opa(usage_group, LV_OPA_TRANSP, 0);
@@ -685,8 +733,8 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
 
-    build_pair_group(ws_usage);
-    build_idle_group(ws_usage);
+    build_pair_group(ws[WS_USAGE]);
+    build_idle_group(ws[WS_USAGE]);
 
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
@@ -696,8 +744,8 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
 }
 
-// LVGL sends CLICKED for any press that didn't scroll, including a drag past
-// the last workspace. A tap is a press released near where it started.
+// LVGL sends CLICKED for any press that didn't scroll, swipes included. A tap
+// is a press released near where it started.
 static const int32_t TAP_SLOP_PX = 20;
 static lv_point_t    press_pt;
 
