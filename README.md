@@ -16,6 +16,8 @@ Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
 
 The device boots into the splash. Tap the screen anywhere to switch to the Usage view; tap again to flip back to the splash.
 
+On the Usage view, swipe left for Stats: a heatmap of your Claude Code messages per day over the last 26 weeks, plus six numbers (sessions, total tokens, active days, longest and current streak, favorite model). The daemon reads them from `~/.claude/stats-cache.json`, the cache behind Claude Code's `/stats`, so they are as fresh as Claude Code last left that file.
+
 |              Splash               |              Usage              |
 | :-------------------------------: | :-----------------------------: |
 | ![Splash](screenshots/splash.gif) | ![Usage](screenshots/usage.png) |
@@ -265,6 +267,15 @@ JSON payload format (written to RX):
 Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
 
 Optional attention fields are only sent as part of a full payload, because the firmware treats every write as a complete update: `b` = beep once, `m` = attention message (ASCII), `x` = end the alert.
+
+Stats messages go to RX as well, tagged with a `k` kind. Firmware that takes them has `"stats":1` in its TX value; daemons read TX when they connect and skip stats otherwise.
+
+```json
+{ "k": "hm", "n": 180, "h": "AAAFHFK...", "mo": [["Apr", 0], ["May", 3]] }
+{ "k": "st", "v": [["Sessions", "584"], ["Total tokens", "43.4b"]] }
+```
+
+`hm` is the heatmap: week columns from the oldest Sunday, `n` valid days, `h` levels 0 to 4 packed two days per character (`'A' + 5 * first + second`), `mo` month labels by column. `st` holds up to six label and value pairs, already formatted.
 
 ## Development
 

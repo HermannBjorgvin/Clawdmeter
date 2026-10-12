@@ -9,6 +9,7 @@ DEVICE_MAC="${DEVICE_MAC:-}"  # auto-discovered if empty
 SERVICE_UUID="4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID="4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID="4c41555a-4465-7669-6365-000000000004"
+TX_CHAR_UUID="4c41555a-4465-7669-6365-000000000003"
 # The POLL_INTERVAL env var seeds the default that `poll_interval` in the
 # config file overrides. Validate it the same way as the config value: an
 # integer, clamped to >= 10s; anything else falls back to 60.
@@ -144,6 +145,37 @@ PYEOF
 
 # Replay the last payload, aged by the time since it was fetched, so the
 # device's freshness window (90s in firmware) never lapses between polls.
+# Stats workspace: daemon/stats.py turns Claude Code's stats cache into the
+# device's messages, one per line. Sent whenever the cache changes, and only
+# to firmware that takes them.
+STATS_CACHE="$HOME/.claude/stats-cache.json"
+STATS_PY="$(dirname "$(readlink -f "$0")")/stats.py"
+STATS_SENT=""        # stats-cache.json mtime last sent to the device
+TAKES_STATS=0
+
+# Firmware that takes stats says "stats":1 in its TX value. busctl prints the
+# bytes as decimals; 34 115 116 97 116 115 34 58 49 is "stats":1.
+firmware_takes_stats() {
+    local path value
+    path=$(find_char_path_by_uuid "$TX_CHAR_UUID")
+    [ -n "$path" ] || return 1
+    value=$(busctl call "$DBUS_DEST" "$path" org.bluez.GattCharacteristic1 \
+        ReadValue "a{sv}" 0 2>/dev/null) || return 1
+    [[ " $value " == *" 34 115 116 97 116 115 34 58 49 "* ]]
+}
+
+send_stats() {
+    (( TAKES_STATS )) && [ -n "$LAST_PAYLOAD" ] && [ -f "$STATS_CACHE" ] || return 0
+    local mtime msg
+    mtime=$(date -r "$STATS_CACHE" +%s 2>/dev/null) || return 0
+    [ "$mtime" = "$STATS_SENT" ] && return 0
+    while IFS= read -r msg; do
+        log "Stats: $msg"
+        write_gatt "$RX_CHAR_PATH" "$msg" || { log "Stats write failed"; return 1; }
+    done < <(python3 "$STATS_PY")
+    STATS_SENT=$mtime
+}
+
 heartbeat() {
     [ -z "$LAST_PAYLOAD" ] && return 1
     local now aged
@@ -675,6 +707,8 @@ while true; do
         continue
     fi
     log "GATT RX path: $RX_CHAR_PATH"
+    TAKES_STATS=0 STATS_SENT=""
+    firmware_takes_stats && TAKES_STATS=1 || log "Firmware doesn't take stats; not sending them"
 
     BACKOFF=1  # reset backoff on successful connection
 
@@ -708,6 +742,7 @@ while true; do
         elif (( HEARTBEAT_INTERVAL < POLL_INTERVAL && NOW - LAST_WRITE_TS >= HEARTBEAT_INTERVAL )); then
             heartbeat
         fi
+        send_stats
         sleep "$TICK"
     done
 

@@ -25,10 +25,18 @@ import httpx
 from bleak import BleakClient
 from bleak.exc import BleakError
 
+# Run as a script, the repo root isn't on sys.path; stats is imported as
+# daemon.stats so the tests' package import resolves it the same way.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from daemon.stats import STATS_CACHE, load_messages as load_stats_messages  # noqa: E402
+
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
+TX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000003"
 
 POLL_INTERVAL = 60
 TICK = 5
@@ -670,6 +678,7 @@ class Session:
         rx = client.services.get_characteristic(RX_CHAR_UUID)
         self.max_write = rx.max_write_without_response_size if rx else DEFAULT_MAX_WRITE
         log(f"Max write size: {self.max_write} bytes")
+        self.takes_stats = False
 
     def _on_refresh(self, _char, _data: bytearray) -> None:
         log("Refresh requested by device")
@@ -702,6 +711,16 @@ class Session:
         except BleakError as e:
             log(f"Write failed: {e}")
             return False
+
+    async def read_takes_stats(self) -> None:
+        """Firmware that takes stats messages says "stats":1 in its TX value."""
+        try:
+            value = await asyncio.wait_for(self.client.read_gatt_char(TX_CHAR_UUID), timeout=5)
+        except (BleakError, asyncio.TimeoutError):
+            value = b""
+        self.takes_stats = b'"stats":1' in bytes(value)
+        if not self.takes_stats:
+            log("Firmware doesn't take stats; not sending them")
 
 
 def _is_encryption_error(exc: BaseException) -> bool:
@@ -827,12 +846,14 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     take_clears()
     session = Session(client)
     await session.setup_refresh_subscription()
+    await session.read_takes_stats()
 
     last_poll = 0.0
     used_successfully = False
     alert = None            # latest alert, kept to match its session's clear
     alert_unsent = False
     clear_unsent = False
+    stats_sent = None       # stats-cache.json mtime last sent to the device
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
@@ -891,6 +912,19 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                     # Transient poll failure (a live token that didn't answer this
                     # cycle) -> stay silent and retry next tick.
                     log("No usable config dir this cycle")
+
+            # The stats workspace: resend whenever Claude Code rewrites its cache.
+            try:
+                stats_mtime = STATS_CACHE.stat().st_mtime
+            except OSError:
+                stats_mtime = None
+            if (session.takes_stats and stats_mtime is not None
+                    and stats_mtime != stats_sent and used_successfully):
+                sent = True
+                for msg in load_stats_messages():
+                    sent = await session.write_payload(msg) and sent
+                if sent:
+                    stats_sent = stats_mtime
 
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)

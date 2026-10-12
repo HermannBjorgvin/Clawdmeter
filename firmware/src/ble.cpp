@@ -14,6 +14,12 @@
 
 #define BLE_BUF_SIZE 512
 
+// Daemons read TX when they connect. "stats":1 tells them stats messages are
+// welcome, so older firmware, which lacks it, never gets one.
+#define TX_READY "{\"stats\":1}"
+#define TX_ACK   "{\"ack\":true,\"stats\":1}"
+#define TX_ERR   "{\"err\":true,\"stats\":1}"
+
 // HID keyboard report descriptor (standard 6-KRO boot-protocol-compatible).
 // Includes the LED output report (Num/Caps/Scroll Lock indicators) — without
 // it macOS's Keyboard Setup Assistant flags the device as "unidentifiable"
@@ -72,8 +78,10 @@ static const uint16_t DESIRED_TIMEOUT   = 600;   // ×10ms = 6s, matches PPCP
 static volatile uint16_t param_fix_handle = CONN_HANDLE_NONE;  // pending retry
 static volatile uint32_t param_fix_at_ms  = 0;                 // when to send it
 static volatile uint16_t param_fix_spent  = CONN_HANDLE_NONE;  // one per connection
-static char rx_buf[BLE_BUF_SIZE];
-static volatile bool data_ready = false;
+// Writes can land back to back (a usage payload, then the stats messages)
+// faster than loop() reads them, so they queue instead of sharing one buffer.
+static QueueHandle_t rx_queue;
+static char rx_buf[BLE_BUF_SIZE];      // the message loop() is handling
 static volatile bool has_received_data = false;
 static char mac_str[18];
 
@@ -277,11 +285,12 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
             Serial.printf("BLE: dropping RX write from non-owner %s\n", id.c_str());
             return;
         }
+        static char msg[BLE_BUF_SIZE];   // only the NimBLE host task writes here
         std::string val = chr->getValue();
         size_t len = std::min(val.length(), (size_t)(BLE_BUF_SIZE - 1));
-        memcpy(rx_buf, val.c_str(), len);
-        rx_buf[len] = '\0';
-        data_ready = true;
+        memcpy(msg, val.c_str(), len);
+        msg[len] = '\0';
+        if (xQueueSend(rx_queue, msg, 0) != pdTRUE) Serial.println("BLE: RX queue full, dropping write");
         has_received_data = true;
     }
 };
@@ -299,6 +308,7 @@ class ReqCallbacks : public NimBLECharacteristicCallbacks {
 };
 
 void ble_init(void) {
+    rx_queue = xQueueCreate(4, BLE_BUF_SIZE);
     NimBLEDevice::init(DEVICE_NAME);
     NimBLEDevice::setSecurityAuth(true, false, true);  // bonding, no MITM, SC
 
@@ -350,6 +360,7 @@ void ble_init(void) {
         TX_CHAR_UUID,
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
     );
+    tx_char->setValue(TX_READY);
 
     req_char = svc->createCharacteristic(
         REQ_CHAR_UUID,
@@ -410,24 +421,24 @@ bool ble_has_bonds(void) {
 }
 
 bool ble_has_data(void) {
-    return data_ready;
+    return uxQueueMessagesWaiting(rx_queue) > 0;
 }
 
 const char* ble_get_data(void) {
-    data_ready = false;
+    if (xQueueReceive(rx_queue, rx_buf, 0) != pdTRUE) rx_buf[0] = '\0';
     return rx_buf;
 }
 
 void ble_send_ack(void) {
     if (state == BLE_STATE_CONNECTED && tx_char) {
-        tx_char->setValue("{\"ack\":true}");
+        tx_char->setValue(TX_ACK);
         tx_char->notify();
     }
 }
 
 void ble_send_nack(void) {
     if (state == BLE_STATE_CONNECTED && tx_char) {
-        tx_char->setValue("{\"err\":true}");
+        tx_char->setValue(TX_ERR);
         tx_char->notify();
     }
 }

@@ -20,3 +20,15 @@ struct UsageData {
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
 };
+
+#define STATS_WEEKS 26       // heatmap columns; the daemon's STATS_WEEKS must match
+
+// Stats workspace, filled by the daemon's "hm" (heatmap) and "st" messages.
+struct StatsData {
+    uint8_t level[STATS_WEEKS * 7];    // 0..4 per day, week by week from the oldest Sunday
+    uint8_t days;                      // valid days; the rest of this week is in the future
+    struct { char name[4]; uint8_t col; } month[8];
+    uint8_t months;
+    struct { char label[16]; char value[16]; } stat[6];
+    uint8_t stats;
+};

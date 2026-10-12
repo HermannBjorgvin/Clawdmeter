@@ -97,13 +97,52 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 }
 
-// Parse a JSON line into UsageData.
-static bool parse_json(const char* json, UsageData* out) {
+static StatsData stats;
+
+// Stats messages carry a "k" kind and share the RX characteristic with usage
+// payloads, so they must never reach the usage fields.
+static void parse_stats(JsonDocument& doc) {
+    const char* kind = doc["k"];
+    if (strcmp(kind, "hm") == 0) {
+        const char* h = doc["h"] | "";
+        size_t n = 0;
+        for (; h[n / 2] && n + 1 < sizeof(stats.level); n += 2) {   // two days per char
+            int v = h[n / 2] - 'A';
+            if (v < 0 || v > 24) v = 0;
+            stats.level[n] = v / 5;
+            stats.level[n + 1] = v % 5;
+        }
+        int days = doc["n"] | 0;
+        stats.days = (uint8_t)LV_CLAMP(0, days, (int)n);
+        stats.months = 0;
+        for (JsonArray m : doc["mo"].as<JsonArray>()) {
+            if (stats.months == 8) break;
+            strlcpy(stats.month[stats.months].name, m[0] | "", sizeof(stats.month[0].name));
+            stats.month[stats.months++].col = m[1] | 0;
+        }
+    } else if (strcmp(kind, "st") == 0) {
+        stats.stats = 0;
+        for (JsonArray v : doc["v"].as<JsonArray>()) {
+            if (stats.stats == 6) break;
+            strlcpy(stats.stat[stats.stats].label, v[0] | "", sizeof(stats.stat[0].label));
+            strlcpy(stats.stat[stats.stats++].value, v[1] | "", sizeof(stats.stat[0].value));
+        }
+    }
+}
+
+enum ParseResult { PARSE_ERROR, PARSE_USAGE, PARSE_STATS };
+
+// Parse a JSON line into UsageData, or into StatsData for a stats message.
+static ParseResult parse_json(const char* json, UsageData* out) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
         Serial.printf("JSON parse error: %s\n", err.c_str());
-        return false;
+        return PARSE_ERROR;
+    }
+    if (doc["k"].is<const char*>()) {
+        parse_stats(doc);
+        return PARSE_STATS;
     }
 
     out->session_pct = doc["s"] | 0.0f;
@@ -125,7 +164,7 @@ static bool parse_json(const char* json, UsageData* out) {
     out->clock_fmt = doc["tf"] | 24;
     out->ok = doc["ok"] | false;
     out->valid = true;
-    return true;
+    return PARSE_USAGE;
 }
 
 // ---- Serial command buffer ----
@@ -379,7 +418,11 @@ void loop() {
     check_serial_cmd();
 
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
+        const ParseResult parsed = parse_json(ble_get_data(), &usage);
+        if (parsed == PARSE_STATS) {
+            ui_update_stats(&stats);
+            ble_send_ack();
+        } else if (parsed == PARSE_USAGE) {
             int g_before = usage_rate_group();
             bool session_reset = usage_rate_sample(usage.session_pct);
             int g_after = usage_rate_group();

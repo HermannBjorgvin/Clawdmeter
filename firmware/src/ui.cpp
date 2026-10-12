@@ -65,6 +65,11 @@ struct Layout {
     const lv_font_t* bt_device_font;
     const lv_font_t* bt_credit_1_font;
     const lv_font_t* bt_credit_2_font;
+
+    // Stats workspace
+    const lv_font_t* stat_label_font;   // heatmap axis, legend and stat names
+    const lv_font_t* stat_value_font;   // stat numbers
+    uint8_t stat_rows;                  // rows of the two-column stat grid
 };
 static Layout L = {};
 
@@ -102,6 +107,9 @@ static void compute_layout(const BoardCaps& c) {
     L.pair_y2 = 120;
     L.pair_y3 = 160;
     L.idle_px = 160;
+    L.stat_label_font = &font_styrene_16;
+    L.stat_value_font = &font_styrene_24;
+    L.stat_rows = 3;
 
     if (c.height >= 460) {
         // Large layout — tuned for 480x480 (AMOLED-2.16).
@@ -131,6 +139,8 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_20;
         L.bt_credit_1_font = &font_styrene_16;
         L.bt_credit_2_font = &font_styrene_14;
+        L.stat_label_font = &font_styrene_14;
+        L.stat_value_font = &font_styrene_20;
     } else {
         // Small layout — tuned for 240x240 (LCD-1.54 and similar square TFTs).
         // Everything shrinks: fonts two steps down, panels ~half height, and
@@ -173,6 +183,9 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_device_font   = &font_styrene_14;
         L.bt_credit_1_font = &font_styrene_12;
         L.bt_credit_2_font = &font_styrene_12;
+        L.stat_label_font = &font_styrene_12;
+        L.stat_value_font = &font_styrene_14;
+        L.stat_rows = 2;
     }
 
     L.content_w = L.scr_w - 2 * L.margin;
@@ -471,6 +484,185 @@ static void build_idle_group(lv_obj_t* parent) {
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
 }
 
+// ---- Stats workspace: messages per day as a heatmap, plus a grid of numbers,
+// both from the daemon's stats messages.
+static const StatsData* stats_data = nullptr;
+static lv_obj_t* stats_empty;
+static lv_obj_t* heat_obj;
+static lv_obj_t* stat_name[6];
+static lv_obj_t* stat_value[6];
+static int32_t   heat_label_w, heat_pitch, heat_cell, heat_text_h;
+
+static int32_t text_width(const char* txt, const lv_font_t* font) {
+    lv_point_t size;
+    lv_text_get_size(&size, txt, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return size.x;
+}
+
+static lv_color_t heat_color(uint8_t level) {
+    return level ? lv_color_mix(COL_ACCENT, COL_BAR_BG, level * 255 / 4) : COL_BAR_BG;
+}
+
+// Text must outlive the draw call: literals or StatsData strings only.
+static void heat_text(lv_layer_t* layer, lv_draw_label_dsc_t* dsc, const char* txt,
+                      int32_t x, int32_t y) {
+    dsc->text = txt;
+    const lv_area_t a = { x, y, x + text_width(txt, dsc->font) + 2, y + heat_text_h };
+    lv_draw_label(layer, dsc, &a);
+}
+
+// One object draws the whole heatmap: an lv_obj per cell would not fit LVGL's heap.
+static void heat_draw_cb(lv_event_t* e) {
+    if (!stats_data || !stats_data->days) return;
+    lv_layer_t* layer = lv_event_get_layer(e);
+    lv_area_t a;
+    lv_obj_get_coords(lv_event_get_target_obj(e), &a);
+    const int32_t gx = a.x1 + heat_label_w;          // grid origin
+    const int32_t gy = a.y1 + heat_text_h + 4;
+
+    lv_draw_label_dsc_t t;
+    lv_draw_label_dsc_init(&t);
+    t.font = L.stat_label_font;
+    t.color = COL_DIM;
+    for (uint8_t i = 0; i < stats_data->months; i++) {
+        const char* name = stats_data->month[i].name;
+        const int32_t x = gx + stats_data->month[i].col * heat_pitch;
+        heat_text(layer, &t, name, LV_MIN(x, a.x2 - text_width(name, t.font)), a.y1);
+    }
+    static const char* const DAY[] = { "Mon", "Wed", "Fri" };
+    for (int i = 0; i < 3; i++)
+        heat_text(layer, &t, DAY[i], a.x1, gy + (1 + 2 * i) * heat_pitch + (heat_cell - heat_text_h) / 2);
+
+    lv_draw_rect_dsc_t r;
+    lv_draw_rect_dsc_init(&r);
+    r.radius = 2;
+    for (uint8_t i = 0; i < stats_data->days; i++) {
+        const int32_t x = gx + (i / 7) * heat_pitch, y = gy + (i % 7) * heat_pitch;
+        const lv_area_t cell = { x, y, x + heat_cell - 1, y + heat_cell - 1 };
+        r.bg_color = heat_color(stats_data->level[i]);
+        lv_draw_rect(layer, &r, &cell);
+    }
+
+    // Legend under the grid, right-aligned: Less, the five levels, More.
+    const int32_t ly = gy + 7 * heat_pitch + 4;
+    const int32_t cy = ly + (heat_text_h - heat_cell) / 2;
+    int32_t x = a.x2 - text_width("More", t.font);
+    heat_text(layer, &t, "More", x, ly);
+    x -= 6 + 5 * heat_pitch;
+    for (uint8_t lvl = 0; lvl <= 4; lvl++) {
+        const lv_area_t cell = { x + lvl * heat_pitch, cy, x + lvl * heat_pitch + heat_cell - 1, cy + heat_cell - 1 };
+        r.bg_color = heat_color(lvl);
+        lv_draw_rect(layer, &r, &cell);
+    }
+    heat_text(layer, &t, "Less", x - 6 - text_width("Less", t.font), ly);
+}
+
+static void build_stats_workspace(lv_obj_t* tile) {
+    heat_text_h  = lv_font_get_line_height(L.stat_label_font);
+    heat_label_w = text_width("Mon", L.stat_label_font) + 6;
+    heat_pitch   = (L.content_w - heat_label_w) / STATS_WEEKS;
+    heat_cell    = heat_pitch - LV_MAX(1, heat_pitch / 7);
+    const int32_t heat_h = heat_text_h + 4 + 7 * heat_pitch + 4 + heat_text_h;
+
+    heat_obj = lv_obj_create(tile);
+    lv_obj_remove_style_all(heat_obj);
+    lv_obj_clear_flag(heat_obj, LV_OBJ_FLAG_CLICKABLE);   // taps fall through to the tile
+    lv_obj_set_size(heat_obj, L.content_w, heat_h);
+    lv_obj_set_pos(heat_obj, L.margin, L.content_y);
+    lv_obj_add_event_cb(heat_obj, heat_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
+
+    // Two columns under the heatmap, each stat a dim name over its value.
+    const int32_t row_h = heat_text_h + lv_font_get_line_height(L.stat_value_font) + 4;
+    const int32_t y0 = L.content_y + heat_h + 10;
+    for (int i = 0; i < 6; i++) {
+        const int32_t x = L.margin + (i % 2) * (L.content_w / 2);
+        const int32_t y = y0 + (i / 2) * row_h;
+        stat_name[i] = lv_label_create(tile);
+        lv_obj_set_style_text_font(stat_name[i], L.stat_label_font, 0);
+        lv_obj_set_style_text_color(stat_name[i], COL_DIM, 0);
+        lv_obj_set_pos(stat_name[i], x, y);
+        stat_value[i] = lv_label_create(tile);
+        lv_obj_set_style_text_font(stat_value[i], L.stat_value_font, 0);
+        lv_obj_set_style_text_color(stat_value[i], COL_ACCENT, 0);
+        lv_obj_set_pos(stat_value[i], x, y + heat_text_h);
+        lv_obj_add_flag(stat_name[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(stat_value[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    stats_empty = lv_label_create(tile);
+    lv_label_set_text(stats_empty, "No stats yet");
+    lv_obj_set_style_text_font(stats_empty, L.pill_font, 0);
+    lv_obj_set_style_text_color(stats_empty, COL_DIM, 0);
+    lv_obj_center(stats_empty);
+}
+
+// Workspaces: full-screen pages stacked in place, one visible at a time. A
+// horizontal swipe slides to the next one while the header, status line and
+// mascot stay put. The page doesn't follow the finger, because each frame of
+// motion redraws the whole screen over QSPI; see WS_SLIDE_MS. Taps bubble up to
+// usage_container, where a tap toggles the splash.
+enum { WS_USAGE, WS_STATS, WS_COUNT };
+static const char* const ws_title[WS_COUNT] = {"Usage", "Stats"};
+static lv_obj_t* ws[WS_COUNT];
+static uint8_t   ws_cur;
+
+// A short time-based slide: LVGL drops frames instead of stretching it, so it
+// stays quick even though each frame is a full-screen redraw.
+static const uint32_t WS_SLIDE_MS = 120;
+
+static void ws_x_cb(void* obj, int32_t x) { lv_obj_set_x((lv_obj_t*)obj, x); }
+
+static void ws_slide_done(lv_anim_t* a) {
+    if (a->var != ws[ws_cur]) lv_obj_add_flag((lv_obj_t*)a->var, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void ws_slide(lv_obj_t* obj, int32_t from, int32_t to) {
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, obj);
+    lv_anim_set_exec_cb(&a, ws_x_cb);
+    lv_anim_set_values(&a, from, to);
+    lv_anim_set_duration(&a, WS_SLIDE_MS);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&a, ws_slide_done);
+    lv_anim_start(&a);
+}
+
+static void show_workspace(uint8_t i) {
+    const int32_t dx = i > ws_cur ? L.scr_w : -L.scr_w;
+    lv_obj_t* out = ws[ws_cur];
+    ws_cur = i;
+    // A swipe during a slide restarts from wherever the pages are.
+    for (uint8_t k = 0; k < WS_COUNT; k++) {
+        lv_anim_delete(ws[k], ws_x_cb);
+        if (ws[k] != out && k != i) lv_obj_add_flag(ws[k], LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_clear_flag(ws[i], LV_OBJ_FLAG_HIDDEN);
+    ws_slide(out, lv_obj_get_x(out), -dx);
+    ws_slide(ws[i], dx, 0);
+    // The header names the workspace, unless the clock owns it.
+    if (clock_base_epoch == 0) lv_label_set_text(lbl_title, ws_title[i]);
+}
+
+static void ws_gesture_cb(lv_event_t* e) {
+    (void)e;
+    lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
+    if (dir == LV_DIR_LEFT && ws_cur + 1 < WS_COUNT) show_workspace(ws_cur + 1);
+    else if (dir == LV_DIR_RIGHT && ws_cur > 0)      show_workspace(ws_cur - 1);
+}
+
+static lv_obj_t* add_workspace(lv_obj_t* parent) {
+    lv_obj_t* ws = lv_obj_create(parent);
+    lv_obj_set_size(ws, L.scr_w, L.scr_h);
+    lv_obj_set_pos(ws, 0, 0);
+    lv_obj_set_style_bg_opa(ws, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ws, 0, 0);
+    lv_obj_set_style_pad_all(ws, 0, 0);
+    lv_obj_clear_flag(ws, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(ws, LV_OBJ_FLAG_EVENT_BUBBLE);
+    return ws;
+}
+
 static void init_usage_screen(lv_obj_t* scr) {
     usage_container = lv_obj_create(scr);
     lv_obj_set_size(usage_container, L.scr_w, L.scr_h);
@@ -480,6 +672,18 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_pad_all(usage_container, 0, 0);
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+
+    // Created before the title and status line so those draw on top.
+    for (uint8_t i = 0; i < WS_COUNT; i++) {
+        ws[i] = add_workspace(usage_container);
+        if (i != ws_cur) lv_obj_add_flag(ws[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    // Gestures bubble to the screen by default; stop them here. The screen must
+    // not scroll either (the mascot walks past its edge), or LVGL drops them.
+    lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(usage_container, ws_gesture_cb, LV_EVENT_GESTURE, NULL);
+    build_stats_workspace(ws[WS_STATS]);
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
@@ -491,7 +695,7 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
-    usage_group = lv_obj_create(usage_container);
+    usage_group = lv_obj_create(ws[WS_USAGE]);
     lv_obj_set_size(usage_group, L.scr_w, L.scr_h);
     lv_obj_set_pos(usage_group, 0, 0);
     lv_obj_set_style_bg_opa(usage_group, LV_OPA_TRANSP, 0);
@@ -531,8 +735,8 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
 
-    build_pair_group(usage_container);
-    build_idle_group(usage_container);
+    build_pair_group(ws[WS_USAGE]);
+    build_idle_group(ws[WS_USAGE]);
 
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
@@ -540,6 +744,19 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_font(lbl_anim, L.anim_font, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
+}
+
+// LVGL sends CLICKED for any press that didn't scroll, swipes included. A tap
+// is a press released near where it started.
+static const int32_t TAP_SLOP_PX = 20;
+static lv_point_t    press_pt;
+
+static void press_cb(lv_event_t* e) { (void)e; lv_indev_get_point(lv_indev_active(), &press_pt); }
+
+static bool was_tap(void) {
+    lv_point_t p;
+    lv_indev_get_point(lv_indev_active(), &p);
+    return LV_ABS(p.x - press_pt.x) <= TAP_SLOP_PX && LV_ABS(p.y - press_pt.y) <= TAP_SLOP_PX;
 }
 
 // ---- Attention: the mascot walk-on (splash_mascot_attention) plus the
@@ -615,6 +832,8 @@ void ui_init(void) {
         battery_img = nullptr;
     }
 
+    lv_indev_t* indev = lv_indev_get_next(NULL);
+    if (indev) lv_indev_add_event_cb(indev, press_cb, LV_EVENT_PRESSED, NULL);
     init_alert();
 }
 
@@ -795,6 +1014,7 @@ static void apply_battery_visibility(void) {
 
 static void global_click_cb(lv_event_t* e) {
     (void)e;
+    if (!was_tap()) return;
     if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
     else                                  ui_show_screen(SCREEN_SPLASH);
 }
@@ -859,6 +1079,23 @@ void ui_update_battery(int percent, bool charging, bool usb_power) {
     }
     lv_image_set_src(battery_img, &battery_dscs[idx]);
     apply_battery_visibility();
+}
+
+void ui_update_stats(const StatsData* stats) {
+    stats_data = stats;
+    if (stats->days || stats->stats) lv_obj_add_flag(stats_empty, LV_OBJ_FLAG_HIDDEN);
+    for (int i = 0; i < 6; i++) {
+        if (i < stats->stats && i / 2 < L.stat_rows) {
+            lv_label_set_text(stat_name[i], stats->stat[i].label);
+            lv_label_set_text(stat_value[i], stats->stat[i].value);
+            lv_obj_clear_flag(stat_name[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(stat_value[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(stat_name[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(stat_value[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    lv_obj_invalidate(heat_obj);
 }
 
 void ui_show_alert(const char* message) {
