@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Per-user Windows installer (WiX v5). release.yml builds it with:
+
+    wix build tools/packaging/wix/clawdmeter.wxs -arch x64
+      -d Version=1.2.3 -d Exe=path\to\clawdmeter.exe
+      -d Icon=tools\packaging\icons\clawdmeter.ico
+      -ext WixToolset.Util.wixext -o clawdmeter.msi
+
+  Installs to %LOCALAPPDATA%\Programs\Clawdmeter without elevation, adds a
+  Start Menu shortcut and an Apps & features entry. The UpgradeCode never
+  changes: a newer MSI (or a release candidate's final build, same version)
+  replaces the installed one in place. App state in %LOCALAPPDATA%\Clawdmeter
+  is the app's own and is left alone on uninstall. Uninstalling removes the
+  app's Start at login entry (HKCU Run value `Clawdmeter`, written by
+  clawdmeter-core's autostart.rs); upgrades keep it, since the path stays.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Clawdmeter"
+           Manufacturer="Clawdmeter"
+           Version="$(var.Version)"
+           UpgradeCode="1012DDC1-60D9-461E-8D64-1939270200AD"
+           Scope="perUser"
+           Language="1033">
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of Clawdmeter is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="ClawdmeterIcon" SourceFile="$(var.Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="ClawdmeterIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/HermannBjorgvin/Clawdmeter" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <!-- Start at login is the app's own HKCU Run value, not an installer
+         component, so delete it explicitly on a real uninstall. WixQuietExec
+         runs reg.exe without a console window; a missing value is fine. -->
+    <SetProperty Id="RemoveAutostart" Sequence="execute" Before="RemoveAutostart"
+                 Value="&quot;[System64Folder]reg.exe&quot; delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v Clawdmeter /f" />
+    <CustomAction Id="RemoveAutostart" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
+                  Execute="deferred" Impersonate="yes" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="RemoveAutostart" Before="RemoveFiles"
+              Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsDir" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Clawdmeter" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <!-- Per-user components use an HKCU value as their key path (ICE38).
+         App carries a file besides that key path, so WiX can't derive its
+         GUID; it is fixed instead. Keep it: it identifies the component
+         across upgrades. -->
+    <Feature Id="Main">
+      <Component Id="App" Directory="INSTALLFOLDER" Guid="0B8C5262-C5B9-4E19-A416-F9E8A750DA24">
+        <File Id="ClawdmeterExe" Source="$(var.Exe)" Name="clawdmeter.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Clawdmeter\Installer" Name="InstallDir"
+                       Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveProgramsDir" Directory="ProgramsDir" On="uninstall" />
+      </Component>
+      <Component Id="StartMenu" Directory="ProgramMenuFolder">
+        <Shortcut Id="StartMenuShortcut"
+                  Name="Clawdmeter"
+                  Description="Claude Code usage on your Clawdmeter"
+                  Target="[INSTALLFOLDER]clawdmeter.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="ClawdmeterIcon" />
+        <RegistryValue Root="HKCU" Key="Software\Clawdmeter\Installer" Name="StartMenuShortcut"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </Feature>
+  </Package>
+</Wix>

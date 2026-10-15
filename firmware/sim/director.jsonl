@@ -1,0 +1,14 @@
+# Director walkthrough: notice → show → (tap) → wave → screensaver → wake →
+# attention → reset. Run with compressed timings:
+#   SIM_FAST=1 SIM_SCENARIO=sim/director.jsonl .pio/build/sim/program
+# SIM_FAST makes a show need 8 s of a=3 (not 5 min) and the screensaver 15 s
+# of quiet (not 10 min). See docs/clawd-director.md for the beats.
+{"name":"baseline (hooks on)","hold_ms":3000,"s":3.0,"sr":295,"w":12.0,"wr":9000,"st":"allowed","ok":true,"t":1785474000,"tf":24,"a":0,"e":"s","es":1,"n":1}
+{"name":"prompt: he notices","hold_ms":3000,"s":3.0,"sr":294,"w":12.0,"wr":8999,"st":"allowed","ok":true,"a":1,"e":"p","es":2,"n":1,"t":1785474003,"tf":24}
+{"name":"busy stretch (a=3): a show","hold_ms":32000,"s":9.0,"sr":292,"w":13.0,"wr":8997,"st":"allowed","ok":true,"a":3,"e":"p","es":2,"n":1,"t":1785474006,"tf":24}
+{"name":"stop after a long turn: wave, then quiet","hold_ms":52000,"s":12.0,"sr":290,"w":14.0,"wr":8995,"st":"allowed","ok":true,"a":0,"e":"s","es":3,"n":0,"t":1785474038,"tf":24}
+{"name":"prompt: wakes the screensaver","hold_ms":7000,"s":12.0,"sr":280,"w":14.0,"wr":8985,"st":"allowed","ok":true,"a":1,"e":"p","es":4,"n":1,"t":1785474090,"tf":24}
+{"name":"needs you: attention","hold_ms":9000,"s":13.0,"sr":279,"w":14.0,"wr":8984,"st":"allowed","ok":true,"a":1,"e":"p","es":4,"n":1,"m":"Bash: pio run -e waveshare_amoled_216","b":true,"t":1785474097,"tf":24}
+{"name":"session moved on: clear","hold_ms":6000,"s":13.0,"sr":278,"w":14.0,"wr":8983,"st":"allowed","ok":true,"a":1,"e":"p","es":4,"n":1,"x":true,"t":1785474106,"tf":24}
+{"name":"94% and counting","hold_ms":3000,"s":94.0,"sr":1,"w":40.0,"wr":8000,"st":"allowed","ok":true,"a":1,"e":"p","es":4,"n":1,"t":1785474112,"tf":24}
+{"name":"fresh window: jumping happy","hold_ms":8000,"s":0.0,"sr":300,"w":40.0,"wr":7999,"st":"allowed","ok":true,"c":true,"a":0,"e":"s","es":5,"n":1,"t":1785474115,"tf":24}

@@ -198,5 +198,3 @@ int io_expander_battery_mv(void) {
     float v = (total / (float)n) * CH32_ADC_REF_V / 1023.0f * CH32_BAT_DIVIDER;
     return (int)(v * 1000.0f + 0.5f);
 }
-
-uint8_t io_expander_addr(void) { return expander_addr; }

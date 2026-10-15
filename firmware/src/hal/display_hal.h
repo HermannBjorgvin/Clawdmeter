@@ -15,7 +15,6 @@ void display_hal_init(void);
 void display_hal_begin(void);
 
 void display_hal_set_brightness(uint8_t level);  // 0..255 (driver-defined scale)
-void display_hal_fill_screen(uint16_t color565);
 
 // Write a w×h RGB565 bitmap at (x, y). Boards with software rotation
 // (e.g. CO5300) transform (x, y, w, h) and the pixel buffer here before

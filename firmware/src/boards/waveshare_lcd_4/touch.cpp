@@ -5,8 +5,8 @@
 #include <TouchDrvGT911.hpp>
 
 // GT911 via SensorLib. Address is latched from INT at reset — probe 0x5D
-// then fall back to 0x14. Polled (no IRQ): Waveshare's INT pin is GPIO 16
-// but the original lcd4 port treated it as unused and polling is reliable.
+// then fall back to 0x14. Polled (no IRQ): Waveshare's INT pin is GPIO 16,
+// left unused because polling is reliable.
 
 static TouchDrvGT911 touch;
 

@@ -1,0 +1,33 @@
+name: Set up PlatformIO
+description: >
+  Python + a pinned PlatformIO Core and esptool, with the toolchain/framework
+  packages cached under a caller-chosen key (one per board family keeps the
+  Xtensa and RISC-V toolchains in separate caches).
+
+inputs:
+  cache-key:
+    description: Distinguishes caches, e.g. the PlatformIO board id or "native".
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      with:
+        python-version: "3.12"
+
+    - name: Install PlatformIO Core + esptool
+      shell: bash
+      # Pinned to what the pioarduino 55.03.38 platform is developed against;
+      # bump together with the platform URL in firmware/platformio.ini.
+      run: python -m pip install --disable-pip-version-check platformio==6.1.19 esptool==5.2.0
+
+    - name: Cache PlatformIO packages
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          ~/.platformio/packages
+          ~/.platformio/platforms
+        key: pio-${{ runner.os }}-${{ inputs.cache-key }}-${{ hashFiles('firmware/platformio.ini') }}
+        restore-keys: |
+          pio-${{ runner.os }}-${{ inputs.cache-key }}-

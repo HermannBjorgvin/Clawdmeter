@@ -48,7 +48,7 @@
 #define SND_I2S_DOUT         12     // ESP → ES8311 (speaker)
 #define SND_I2S_DIN          -1     // unused
 #define SND_PA_PIN           7      // power-amp enable (HIGH = on)
-#define SND_SAMPLE_RATE      44100  // must match the embedded PCM (bell_pcm.h)
+#define SND_SAMPLE_RATE      44100  // I2S rate the ding is synthesized at
 #define SND_ES8311_ADDR      0x18
 
 // ---- Buttons (active-LOW GPIOs, from the Waveshare button example) ----

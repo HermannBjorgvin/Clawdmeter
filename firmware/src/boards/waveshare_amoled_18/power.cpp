@@ -44,6 +44,13 @@ void power_hal_init(void) {
 
     pmu.enableBattDetection();
     pmu.enableBattVoltageMeasure();
+
+    // The AXP2101 estimates % from the battery voltage and can latch into a
+    // bad state (frozen, or stuck near zero) that a power cycle doesn't
+    // clear: the gauge lives in the always-on domain the battery keeps
+    // alive. Reset it at boot so it recalibrates from the current voltage.
+    pmu.enableGauge();
+    pmu.resetGauge();
     // No PMU IRQ wiring — PWR comes via io_expander_get() below.
 
     cached_charging = pmu.isCharging();

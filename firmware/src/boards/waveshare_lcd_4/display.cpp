@@ -85,10 +85,6 @@ void lcd4_reapply_brightness(void) {
     display_hal_set_brightness(requested_level);
 }
 
-void display_hal_fill_screen(uint16_t color) {
-    if (gfx) gfx->fillScreen(color);
-}
-
 // Logical (LVGL) pixel (x, y) lands on panel pixel:
 //   1: (W-1-y, x)   2: (W-1-x, H-1-y)   3: (y, H-1-x)
 void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,

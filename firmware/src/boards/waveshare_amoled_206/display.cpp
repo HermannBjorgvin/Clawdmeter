@@ -33,10 +33,6 @@ void display_hal_set_brightness(uint8_t level) {
     if (gfx) gfx->setBrightness(level);
 }
 
-void display_hal_fill_screen(uint16_t color) {
-    if (gfx) gfx->fillScreen(color);
-}
-
 void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
                              const uint16_t* pixels) {
     if (gfx) gfx->draw16bitRGBBitmap(x, y, (uint16_t*)pixels, w, h);

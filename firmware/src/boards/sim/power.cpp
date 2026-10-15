@@ -1,3 +1,4 @@
+#include "../../hal/board_caps.h"
 #include "../../hal/power_hal.h"
 #include "sim_platform.h"
 
@@ -6,8 +7,9 @@ void power_hal_tick(void) {}
 
 int  power_hal_battery_pct(void) { return sim_battery_pct(); }
 bool power_hal_is_charging(void) { return sim_charging(); }
-bool power_hal_is_vbus_in(void)  { return sim_charging(); }
+bool power_hal_is_vbus_in(void)  { return sim_vbus_in(); }
 
-bool power_hal_pwr_pressed(void)      { return sim_take_pwr_pressed(); }
-bool power_hal_pwr_long_pressed(void) { return sim_take_pwr_long(); }
-bool power_hal_pwr_released(void)     { return sim_take_pwr_released(); }
+// Without a PWR button (SIM_NO_PWR) the edges are still drained, never seen.
+bool power_hal_pwr_pressed(void)      { return sim_take_pwr_pressed() && board_caps().has_pwr_button; }
+bool power_hal_pwr_long_pressed(void) { return sim_take_pwr_long() && board_caps().has_pwr_button; }
+bool power_hal_pwr_released(void)     { return sim_take_pwr_released() && board_caps().has_pwr_button; }

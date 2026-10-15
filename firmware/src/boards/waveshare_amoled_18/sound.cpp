@@ -12,10 +12,9 @@
 //
 // The amp enable is GPIO 46 ONLY. Do NOT drive XCA9554 EXIO2 low here: on the
 // SH8601+FT3168 revision, pulling EXIO2 low takes the FT3168 touch controller
-// off the I2C bus until EXIO2 is raised again (verified on hardware by
-// bisection — an earlier "drive both amp candidates, the unused one is
-// harmless" version of this hook silently killed touch for the whole session,
-// since amp_enable(false) runs at chime_init to park the amp off).
+// off the I2C bus until EXIO2 is raised again (verified on hardware).
+// amp_enable(false) runs at chime_init to park the amp off, so driving EXIO2
+// here would kill touch for the whole session.
 // io_expander_init() parks EXIO2 HIGH and it must stay that way.
 
 static void amp_enable(bool on) {
@@ -26,12 +25,13 @@ void sound_hal_init(void) {
     pinMode(SND_PA_PIN, OUTPUT);
     const ChimeConfig cfg = {
         SND_I2S_MCLK, SND_I2S_BCLK, SND_I2S_WS, SND_I2S_DOUT, SND_I2S_DIN,
-        SND_SAMPLE_RATE, SND_ES8311_ADDR, 65, amp_enable
+        SND_SAMPLE_RATE, SND_ES8311_ADDR, 75, amp_enable
     };
     chime_init(cfg);
 }
 
-void sound_hal_play_reset(void) { chime_play(); }
+void sound_hal_chime(void) { chime_play(); }
+void sound_hal_tune(float gain, int volume) { chime_tune(gain, volume); }
 void sound_hal_tick(void)       { chime_tick(); }
 
 #endif  // BOARD_HAS_SOUND
