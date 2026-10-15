@@ -163,7 +163,6 @@ static void sample(void) {
     static uint32_t last_log_ms = 0;
     static bool first = true;
     bool changed = lcd4_on_battery() != was_on_battery;
-    // New power source: let the percentage re-settle from the smoothed value.
     // New power source: re-settle (on battery the voltage relaxes over ~30 s;
     // the only-down rule then walks the number down to it).
     if (changed && battery_present()) {

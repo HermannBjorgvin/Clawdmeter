@@ -182,8 +182,10 @@ int io_expander_charging(void) {
     return -1;
 }
 
+bool io_expander_has_battery(void) { return expander_addr && is_ch32; }
+
 int io_expander_battery_mv(void) {
-    if (!expander_addr || !is_ch32) return -1;
+    if (!io_expander_has_battery()) return -1;
     uint32_t total = 0;
     int n = 0;
     for (int i = 0; i < 8; i++) {
