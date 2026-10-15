@@ -17,13 +17,14 @@ static uint32_t fade_started_ms  = 0;
 static uint32_t fade_last_step_ms = 0;
 static uint8_t  fade_from = DISPLAY_DEFAULT_BRIGHTNESS;
 static uint8_t  fade_to   = 0;
+static uint8_t  awake_brightness = DISPLAY_DEFAULT_BRIGHTNESS;  // user-set "full" level (brightness.cpp)
 
 static void apply_brightness(uint8_t b) {
     display_hal_set_brightness(b);
 }
 
 static void begin_fade(uint8_t to, uint32_t now) {
-    fade_from = (to == 0) ? DISPLAY_DEFAULT_BRIGHTNESS : 0;
+    fade_from = (to == 0) ? awake_brightness : 0;
     fade_to   = to;
     fade_started_ms = now;
     fade_last_step_ms = now;
@@ -32,7 +33,14 @@ static void begin_fade(uint8_t to, uint32_t now) {
 void idle_init(void) {
     state = STATE_AWAKE;
     last_activity_ms = millis();
-    apply_brightness(DISPLAY_DEFAULT_BRIGHTNESS);
+    apply_brightness(awake_brightness);
+}
+
+void idle_set_awake_brightness(uint8_t level) {
+    awake_brightness = level;
+    // Apply now if fully awake so a button press is visible immediately;
+    // during fades/sleep the next fade-in picks it up.
+    if (state == STATE_AWAKE) apply_brightness(level);
 }
 
 void idle_note_activity(void) {
@@ -41,7 +49,7 @@ void idle_note_activity(void) {
     if (state == STATE_AWAKE) return;
     // Asleep/fading-out shouldn't reach here in normal flow (callers gate via
     // idle_consume_wake_press first), but if it does: trigger a wake.
-    begin_fade(DISPLAY_DEFAULT_BRIGHTNESS, last_activity_ms);
+    begin_fade(awake_brightness, last_activity_ms);
     state = STATE_FADING_IN;
 }
 
@@ -49,7 +57,7 @@ bool idle_consume_wake_press(void) {
     if (state == STATE_ASLEEP || state == STATE_FADING_OUT) {
         uint32_t now = millis();
         last_activity_ms = now;
-        begin_fade(DISPLAY_DEFAULT_BRIGHTNESS, now);
+        begin_fade(awake_brightness, now);
         state = STATE_FADING_IN;
         return true;
     }
@@ -75,7 +83,7 @@ void idle_tick(void) {
     if (!IDLE_SLEEP_WHEN_CHARGING && power_hal_is_vbus_in()) {
         last_activity_ms = now;
         if (state == STATE_ASLEEP || state == STATE_FADING_OUT) {
-            begin_fade(DISPLAY_DEFAULT_BRIGHTNESS, now);
+            begin_fade(awake_brightness, now);
             state = STATE_FADING_IN;
         }
     }

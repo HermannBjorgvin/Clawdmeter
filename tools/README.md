@@ -1,53 +1,40 @@
-# Splash animation tools
+# Asset tools
 
-Two-step pipeline for getting third-party 20×20 pixel animations onto the device.
+Run the commands from the repository root. They need Node.js; the splash
+converter also needs ImageMagick, and the icon converter `pngjs`
+(`npm install --no-save pngjs` in `tools/`, which is git-ignored).
 
-## 1. Scrape
-
-```bash
-node scrape_claudepix.js
-```
-
-Fetches the manifest from `claudepix.vercel.app/app.js`, then each animation's
-HTML file, evaluates the embedded JS in a Node VM context (loading the same
-`creature-engine.js` the site uses), and writes resolved frame data to
-`tools/claudepix_data/*.json`.
-
-Each output file looks like:
-```json
-{
-  "filename": "idle_breathe.html",
-  "name": "idle breathe",
-  "category": "Idle",
-  "description": "...",
-  "frame_count": 17,
-  "frames": [{ "hold": 500, "grid": [[0,0,...],[0,1,1,...],...] }, ...]
-}
-```
-
-Override URL or output dir with `--base` and `--out`.
-
-## 2. Convert to C
+## Splash animations
 
 ```bash
-node convert_to_c.js
+node tools/convert_official_clawd.js
+node tools/convert_official_clawd.js --verify /tmp/verify   # + per-animation PNGs
 ```
 
-Reads `tools/claudepix_data/*.json` and emits a single
-`firmware/src/splash_animations.h` with:
-- `splash_<ident>_frames[N][400]` — per-frame cell codes (0 = empty, 1 = body, 2 = eye)
-- `splash_<ident>_holds[N]` — per-frame hold time in ms
-- `splash_anims[]` — master table with name, category, frame count, pointers
-- `SPLASH_ANIM_COUNT`
+Converts the official Anthropic Clawd animations archived in
+`research/clawd-official/` (GIFs decoded via ImageMagick, the Laptop and
+Soccer Lottie exports read directly) into a single
+`firmware/src/splash_animations.h`:
 
-The firmware (`splash.cpp`) consumes this header to render and animate.
+- frames as bounding-box crops on the shared 55×37 art stage, one byte per
+  cell into a per-animation ≤16-color RGB565 palette (index 0 = background)
+- per-frame hold in ms, with consecutive duplicate frames collapsed
+- a detected loop region per animation (gait cycles, scene middles) that the
+  engine can hold or release for walk-to-target and timed scenes
+- the eyes — transparent holes in the source GIFs — inked as `#141413`
+- contrast recolors (trumpet notes → ivory, magnifier fedora → gray) and the
+  sailing-loop cross-match that defines the sailing scene's loop window
 
-## Re-running
+See `research/clawd-official/CLAUDE.md` for asset provenance and the format
+details, and `--in` / `--out` to override paths. Rebuild firmware after
+running.
 
-The scraper is idempotent — re-run any time the source library updates. The
-converter overwrites the header. Rebuild firmware after running both.
+## Icons
 
-## License note
+```bash
+node tools/png_to_lvgl.js input.png symbol_name [W_MACRO] [H_MACRO] [--tint=RRGGBB | --no-tint]
+```
 
-The scraper hits a public site without a stated license. Confirm reuse is
-appropriate for your case before redistributing the output.
+Converts an alpha PNG to an LVGL RGB565A8 C array. Default tint is white —
+Lucide PNGs ship black-on-transparent and would render invisible without it.
+Paste the output into `firmware/src/icons.h`.

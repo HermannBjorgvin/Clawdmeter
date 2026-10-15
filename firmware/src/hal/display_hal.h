@@ -1,6 +1,5 @@
 #pragma once
 #include <stdint.h>
-#include <lvgl.h>
 
 // Display abstraction. The board provides the QSPI bus, panel driver, and any
 // CPU-side rotation. Shared code (main.cpp, LVGL glue) never sees the GFX
@@ -16,7 +15,6 @@ void display_hal_init(void);
 void display_hal_begin(void);
 
 void display_hal_set_brightness(uint8_t level);  // 0..255 (driver-defined scale)
-void display_hal_fill_screen(uint16_t color565);
 
 // Write a w×h RGB565 bitmap at (x, y). Boards with software rotation
 // (e.g. CO5300) transform (x, y, w, h) and the pixel buffer here before
@@ -31,11 +29,3 @@ void display_hal_tick(void);
 
 // LVGL flush regions must be even-aligned on the CO5300; harmless on others.
 void display_hal_round_area(int32_t* x1, int32_t* y1, int32_t* x2, int32_t* y2);
-
-// LVGL pixel format the board expects. Most boards return
-// LV_COLOR_FORMAT_RGB565 (LVGL writes pixels in host-endian, board's
-// draw_bitmap byte-swaps when sending to the panel). Boards with a
-// MIPI-SPI controller that consumes pixels in big-endian byte order
-// can return LV_COLOR_FORMAT_RGB565_SWAPPED to let LVGL pre-swap and
-// avoid an extra pass in draw_bitmap.
-lv_color_format_t display_hal_lv_color_format(void);

@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+exclude = ["vendor"]
+members = [
+    "crates/clawdmeter-core",
+    "crates/clawdmeter-ble",
+    "crates/clawdmeter-flash",
+    "crates/clawdmeter-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.88"
+repository = "https://github.com/HermannBjorgvin/Clawdmeter"
+
+[workspace.dependencies]
+clawdmeter-core = { path = "crates/clawdmeter-core" }
+clawdmeter-ble = { path = "crates/clawdmeter-ble" }
+clawdmeter-flash = { path = "crates/clawdmeter-flash" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
+dirs = "6"
+log = "0.4"
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "time", "sync", "signal"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+uuid = "1"
+btleplug = "0.13"
+sha2 = "0.10"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+espflash = { version = "~4.5", default-features = false, features = ["serialport"] }
+serialport = { version = "4", default-features = false }
+unicode-normalization = "0.1"
+
+# gpui 0.2.2 pulls xattr 0.2.3 (via zed-async-tar), which no longer builds
+# against current libc on Linux (ENOATTR was removed; it is ENODATA there).
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

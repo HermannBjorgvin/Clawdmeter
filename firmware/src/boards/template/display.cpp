@@ -28,11 +28,6 @@ void display_hal_set_brightness(uint8_t level) {
     // gfx->setBrightness(level);
 }
 
-void display_hal_fill_screen(uint16_t color) {
-    (void)color;
-    // gfx->fillScreen(color);
-}
-
 void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
                              const uint16_t* pixels) {
     (void)x; (void)y; (void)w; (void)h; (void)pixels;
@@ -47,14 +42,6 @@ void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
 void display_hal_tick(void) {
     // Only needed for boards that animate the brightness ramp during a
     // CPU-rotation transition (see the 2.16 reference port).
-}
-
-lv_color_format_t display_hal_lv_color_format(void) {
-    // Most boards: LVGL writes RGB565 in host-endian and the board's
-    // draw_bitmap byte-swaps for the panel. If your controller wants
-    // big-endian bytes, return LV_COLOR_FORMAT_RGB565_SWAPPED and skip
-    // the byte-swap in draw_bitmap.
-    return LV_COLOR_FORMAT_RGB565;
 }
 
 void display_hal_round_area(int32_t* x1, int32_t* y1, int32_t* x2, int32_t* y2) {

@@ -9,7 +9,8 @@ static const BoardCaps caps = {
     .has_rotation = false,
     .has_battery = true,
     .has_imu = true,
-    .has_touch = true,        // FT3168 cap touch
+    .minimal_ui   = false,   // full animated UI; true for e-ink / slow panels
+    .has_pwr_button = true,  // XCA9554 EXIO4
 };
 
 const BoardCaps& board_caps(void) { return caps; }

@@ -1,0 +1,87 @@
+[package]
+name = "clawdmeter-app"
+description = "Desktop companion for the Clawdmeter Claude Code usage display"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# tray-icon 0.26 / muda 0.21 need 1.90.
+rust-version = "1.90"
+
+[lib]
+name = "clawdmeter_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "clawdmeter"
+path = "src/main.rs"
+
+[dependencies]
+clawdmeter-core.workspace = true
+clawdmeter-ble.workspace = true
+clawdmeter-flash.workspace = true
+tokio.workspace = true
+log.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+futures.workspace = true
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
+# The desktop chime: a synthesized ding through the default output (ALSA on
+# Linux). Playback only, no decoders.
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+dbus = "0.9"
+# Already in the tree through gpui: asks the compositor whether it draws
+# window frames (xdg-decoration) before the window opens.
+wayland-client = "0.31"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tray-icon = { version = "0.26", default-features = false }
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Console"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = { version = "0.26", default-features = false }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication"] }
+dispatch2 = "0.3"
+
+# Embeds the app icon and manifest in clawdmeter.exe (build.rs). Host-gated: only a
+# Windows build machine compiles it.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+
+[dev-dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "wayland", "x11", "test-support"] }
+
+# `cargo deb -p clawdmeter-app` (release.yml). Icons and the .desktop entry
+# live in tools/packaging/; tools/packaging/make_icons.py renders the icons.
+[package.metadata.deb]
+name = "clawdmeter"
+maintainer = "Hermann Björgvin Haraldsson <hermann@hermann.is>"
+copyright = "Hermann Björgvin Haraldsson and contributors"
+section = "utils"
+priority = "optional"
+extended-description = """\
+Desktop companion for the Clawdmeter, a desk-side Claude Code usage monitor. \
+Reads usage from the Claude Code CLI, follows its hook events, and sends both \
+to the device over Bluetooth Low Energy. Bluetooth needs BlueZ and a D-Bus \
+session; the tray needs a StatusNotifierItem host."""
+# $auto covers the linked libraries (libxcb, libxkbcommon(-x11), libdbus-1,
+# libasound2 for the desktop chime).
+# GPUI loads Vulkan and the Wayland client at runtime, so name those too.
+depends = "$auto, libvulkan1, libwayland-client0"
+recommends = "bluez"
+assets = [
+    ["target/release/clawdmeter", "usr/bin/", "755"],
+    ["../../../tools/packaging/linux/clawdmeter.desktop", "usr/share/applications/", "644"],
+    ["../../../tools/packaging/icons/clawdmeter-16.png", "usr/share/icons/hicolor/16x16/apps/clawdmeter.png", "644"],
+    ["../../../tools/packaging/icons/clawdmeter-24.png", "usr/share/icons/hicolor/24x24/apps/clawdmeter.png", "644"],
+    ["../../../tools/packaging/icons/clawdmeter-32.png", "usr/share/icons/hicolor/32x32/apps/clawdmeter.png", "644"],
+    ["../../../tools/packaging/icons/clawdmeter-48.png", "usr/share/icons/hicolor/48x48/apps/clawdmeter.png", "644"],
+    ["../../../tools/packaging/icons/clawdmeter-64.png", "usr/share/icons/hicolor/64x64/apps/clawdmeter.png", "644"],
+    ["../../../tools/packaging/icons/clawdmeter-128.png", "usr/share/icons/hicolor/128x128/apps/clawdmeter.png", "644"],
+    ["../../../tools/packaging/icons/clawdmeter-256.png", "usr/share/icons/hicolor/256x256/apps/clawdmeter.png", "644"],
+    ["../../../tools/packaging/icons/clawdmeter-512.png", "usr/share/icons/hicolor/512x512/apps/clawdmeter.png", "644"],
+]

@@ -1,0 +1,121 @@
+name: Firmware
+
+on:
+  pull_request:
+    paths:
+      - "firmware/**"
+      - "tools/ci/**"
+      - ".github/workflows/firmware.yml"
+      - ".github/actions/setup-pio/**"
+  push:
+    branches: [main]
+    paths:
+      - "firmware/**"
+      - "tools/ci/**"
+      - ".github/workflows/firmware.yml"
+      - ".github/actions/setup-pio/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  envs:
+    name: List hardware envs
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.envs.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - id: envs
+        run: echo "matrix=$(python3 tools/ci/hardware_envs.py --matrix)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.env }}
+    needs: envs
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.envs.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup-pio
+        with:
+          cache-key: ${{ matrix.board }}
+      - name: pio run
+        env:
+          PLATFORMIO_BUILD_FLAGS: -DCLAWD_VERSION=\"ci-${{ github.sha }}\"
+        run: pio run -d firmware -e "${{ matrix.env }}"
+      - name: Merge flashable image
+        env:
+          PLATFORMIO_BUILD_FLAGS: -DCLAWD_VERSION=\"ci-${{ github.sha }}\"
+        run: >-
+          python tools/ci/merge_firmware.py --env "${{ matrix.env }}"
+          --version "ci-${GITHUB_SHA::7}" --out-dir dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: firmware-${{ matrix.env }}
+          path: dist/
+          retention-days: 7
+
+  sim:
+    name: Simulator screenshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup-pio
+        with:
+          cache-key: native
+      - run: sudo apt-get update -q && sudo apt-get install -y --no-install-recommends libsdl2-dev
+      - run: pio run -d firmware -e sim
+      - name: Headless autoshot
+        working-directory: firmware
+        env:
+          SDL_VIDEODRIVER: dummy
+          SIM_AUTOSHOT_MS: "6000"
+          SIM_AUTOSHOT_PATH: ${{ github.workspace }}/sim-autoshot.bmp
+        run: |
+          timeout 120 .pio/build/sim/program
+          test -s "$SIM_AUTOSHOT_PATH"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sim-autoshot
+          path: sim-autoshot.bmp
+          retention-days: 14
+
+  unit-tests:
+    name: Firmware unit tests (host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup-pio
+        with:
+          cache-key: native
+      - name: pio test (every native env except the simulator; today that is `native`)
+        run: |
+          envs=$(python3 tools/ci/hardware_envs.py --native \
+            | python3 -c 'import json,sys; print(" ".join(e for e in json.load(sys.stdin) if e != "sim"))')
+          if [ -z "$envs" ]; then
+            echo "::error::no native test env (platform = native, not sim) in firmware/platformio.ini"
+            exit 1
+          fi
+          for env in $envs; do
+            echo "::group::pio test -e $env"
+            pio test -d firmware -e "$env"
+            echo "::endgroup::"
+          done
+
+  ci-tools:
+    name: Release tooling tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tools/ci/tests -v

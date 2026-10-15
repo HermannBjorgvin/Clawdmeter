@@ -1,39 +1,37 @@
 #pragma once
-#include <Arduino.h>
+#include <stdint.h>
+
+// Plain data, no Arduino types, so payload parsing and the signal logic can be
+// unit-tested on the host (test/test_signals).
 
 struct UsageData {
-    float session_pct;       // Claude 5-hour window utilization (0-100)
-    int session_reset_mins;  // minutes until Claude session resets
-    float weekly_pct;        // Claude 7-day window utilization (0-100)
-    int weekly_reset_mins;   // minutes until Claude weekly resets
-    char status[16];         // "allowed" or "limited"
+    float session_pct;       // utilization 0-100 (5h window Pro/Max; spending % Enterprise)
+    int session_reset_mins;  // minutes until reset
+    float weekly_pct;        // 7-day utilization (Pro/Max only; 0 for Enterprise)
+    int weekly_reset_mins;   // minutes until weekly reset (Pro/Max only)
+    char status[16];         // "allowed", "limited", etc.
+    bool chime;              // play the session-reset chime; false unless the app opts in
+    bool beep;               // Claude needs attention: play the chime once for this packet
+    char alert_msg[128];     // attention message for the status line; empty = no alert
+    bool alert_clear;        // the session moved on: end the alert
+    bool enterprise;         // true = Enterprise spending-limit account
+    int time_pct;            // 0-100: fraction of billing period elapsed (Enterprise)
+    int period_days;         // total billing period length in days (Enterprise)
+    char reset_date[12];     // formatted reset date e.g. "Jul 1" (Enterprise)
+    long clock_epoch;        // local wall-clock epoch (s) from the app; 0 = not provided
+    int  clock_fmt;          // 12 or 24 (hour format from the app); defaults to 24
+    // ---- Fast clock (Claude Code hooks via the app). All optional: an older
+    // app sends none of them and the fields read as "absent" below, which
+    // the signal logic treats exactly like "no hooks installed".
+    int8_t   activity;       // `a`  0-3 tool-call activity level; -1 = absent
+    char     event;          // `e`  latest hook event: 'p' prompt, 's' stop,
+                             //      'b' back after a gap; '\0' = absent. Other
+                             //      chars pass through for forward compat.
+    bool     has_event_seq;  // `es` present
+    uint32_t event_seq;      // `es` sequence number; react once per change
+    int16_t  sessions;       // `n`  sessions with a hook event in the last 5 min; -1 = absent
+    bool     replay;         // `rp` 1 = heartbeat replay of the last payload;
+                             //      the rate math and reset detection skip it
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
-
-    // Codex (OpenAI / ChatGPT subscription) usage — optional. Daemon
-    // populates these from x-codex-primary-*-percent / -reset-after-seconds
-    // headers on chatgpt.com/backend-api/codex/responses. -1 = no data
-    // (e.g. Codex CLI not installed or daemon doesn't have access).
-    float codex_session_pct;
-    int   codex_session_reset_mins;
-    float codex_weekly_pct;
-    int   codex_weekly_reset_mins;
-    bool  codex_valid;        // true once first Codex payload received
-
-    // Antigravity (Google's agent IDE) — monthly prompt + flow credits
-    // pulled from the local language_server's GetUserStatus RPC.
-    float antig_session_pct;       // prompt-credit % used
-    int   antig_session_reset_mins;
-    float antig_weekly_pct;        // flow-credit % used
-    int   antig_weekly_reset_mins;
-    char  antig_plan[16];          // short plan name, e.g. "Ultra" / "Pro"
-    char  antig_prompt_count[24];  // pre-formatted "500/50K"
-    char  antig_flow_count[24];    // pre-formatted "100/150K"
-    bool  antig_valid;
-
-    // Per-model quota lines — daemon pre-formats each entry as
-    // "Model Name|status" e.g. "Claude Sonnet|ok" or "Gemini 3.5 H|47m".
-    // Up to 8 models. Empty strings mark unused slots.
-    char  antig_model_lines[8][32];
-    uint8_t antig_model_count;
 };

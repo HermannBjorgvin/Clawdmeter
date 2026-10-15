@@ -1,0 +1,18 @@
+[package]
+name = "clawdmeter-core"
+description = "Pure logic for the Clawdmeter desktop daemon: config, /usage parsing, hooks, cadence, payload."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+dirs.workspace = true
+log.workspace = true
+unicode-normalization.workspace = true
+ureq.workspace = true
+sha2.workspace = true

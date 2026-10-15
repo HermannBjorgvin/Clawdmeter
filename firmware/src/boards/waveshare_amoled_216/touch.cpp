@@ -1,5 +1,6 @@
 #include "../../hal/touch_hal.h"
 #include "board.h"
+#include "../../hal/imu_hal.h"
 #include <Arduino.h>
 #include <Wire.h>
 #include <TouchDrvCSTXXX.hpp>
@@ -29,6 +30,20 @@ void touch_hal_init(void) {
     Serial.println("Touch init OK");
 }
 
+// display.cpp rotates LVGL's strips in software (rotate_strip), but the
+// CST9220 keeps reporting in the panel's unrotated frame. Map the point back
+// through the inverse of rotate_strip so hit-tests line up in every quadrant.
+static void to_display_frame(uint16_t* x, uint16_t* y) {
+    const uint16_t N = LCD_WIDTH - 1;   // square panel
+    const uint16_t tx = *x > N ? N : *x, ty = *y > N ? N : *y;
+    switch (imu_hal_rotation_quadrant()) {
+    case 1: *x = ty;     *y = N - tx; break;   // drawn (x,y) -> (N-y, x)
+    case 2: *x = N - tx; *y = N - ty; break;   // drawn (x,y) -> (N-x, N-y)
+    case 3: *x = N - ty; *y = tx;     break;   // drawn (x,y) -> (y, N-x)
+    default: break;
+    }
+}
+
 void touch_hal_read(uint16_t* x, uint16_t* y, bool* pressed) {
     if (touch_data_ready) {
         touch_data_ready = false;
@@ -44,5 +59,6 @@ void touch_hal_read(uint16_t* x, uint16_t* y, bool* pressed) {
     }
     *x = touch_x;
     *y = touch_y;
+    to_display_frame(x, y);
     *pressed = touch_pressed;
 }

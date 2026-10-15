@@ -1,5 +1,6 @@
 #include "../../hal/display_hal.h"
 #include "../../hal/imu_hal.h"
+#include "../../brightness.h"
 #include "board.h"
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
@@ -34,10 +35,6 @@ void display_hal_begin(void) {
 
 void display_hal_set_brightness(uint8_t level) {
     if (gfx) gfx->setBrightness(level);
-}
-
-void display_hal_fill_screen(uint16_t color) {
-    if (gfx) gfx->fillScreen(color);
 }
 
 // Rotate a w×h strip into rot_buf and compute destination coordinates on the
@@ -119,14 +116,13 @@ void display_hal_tick(void) {
     if (now - ramp_last < 25) return;
     ramp_last = now;
 
-    static const uint8_t levels[] = {60, 120, 170, 200};
-    display_hal_set_brightness(levels[ramp_step - 1]);
+    // Ramp back to the user's chosen brightness (not a hardcoded level), so a
+    // physical rotation doesn't reset what they set via PWR-short-press.
+    static const uint8_t pct[] = {30, 60, 85, 100};
+    uint8_t target = brightness_get();
+    display_hal_set_brightness((uint8_t)(((uint16_t)target * pct[ramp_step - 1]) / 100));
     if (ramp_step >= 4) ramp_step = 0;
     else                ramp_step++;
-}
-
-lv_color_format_t display_hal_lv_color_format(void) {
-    return LV_COLOR_FORMAT_RGB565;
 }
 
 // CO5300 requires even-aligned flush regions.
