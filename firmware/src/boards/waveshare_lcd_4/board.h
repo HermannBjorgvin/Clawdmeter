@@ -16,6 +16,11 @@
 // ---- Display geometry ----
 #define LCD_WIDTH            480
 #define LCD_HEIGHT           480
+// Fixed UI orientation, in quarter turns clockwise of the image on the panel:
+//   0 = native, 1 = 90° CW (USB port at the bottom), 2 = 180°, 3 = 270° CW.
+// Applied in display.cpp (per-strip pixel remap) and touch.cpp (inverse map);
+// the panel is square so LVGL's W×H is unchanged.
+#define LCD_ROTATION         0
 
 // ---- RGB panel pins (ST7701) ----
 #define LCD_DE               40
@@ -51,12 +56,51 @@
 // ---- Touch (GT911, polled — INT is GPIO 16 on the wiki but unused here) ----
 #define TP_INT               16
 
-// ---- IO expander (TCA9554 / CH32V003-as-expander) ----
-// Controls display power rails and backlight (EXIO2). Must be programmed
-// before gfx->begin() or the panel stays dark.
+// ---- IO expander ----
+// Two board revisions, same job (display power/reset, touch reset, buzzer).
+// Must be programmed before gfx->begin() or the panel stays dark.
+//
+// CH32V003 microcontroller-as-expander @ 0x24 (current boards). Register and
+// pin map from Waveshare's own WS_CH32_IO library for this board:
 #define IO_EXPANDER_ADDR     0x24
+#define CH32_REG_DIRECTION   0x02  // 1 = output
+#define CH32_REG_OUTPUT      0x03
+#define CH32_REG_PWM         0x05  // backlight PWM 0..255, inverted: higher = dimmer
+#define CH32_REG_ADC         0x06  // battery ADC, 2 bytes little-endian, 10-bit
+#define CH32_ADC_REF_V       3.3f
+#define CH32_BAT_DIVIDER     3.0f  // VBAT = ADC volts × 3 (Waveshare WS_CH32_IO)
+#define CH32_REG_INPUT       0x04
+#define CH32_PIN_CHG_STAT    0     // input: ETA6098 charger STAT (low = charging), V4.0 schematic
+#define CH32_PIN_TOUCH_RST   1
+#define CH32_PIN_LCD_RST     3
+#define CH32_PIN_SYS_EN      5
+#define CH32_PIN_BUZZER      6     // BEE_EN — keep LOW
+#define CH32_PIN_RTC_INT     7
+//
+// TCA9554 @ 0x20 (earlier boards). Pin map from the Waveshare wiki table
+// (0-based EXIO0..7). Untested here — no TCA board on hand.
 #define IO_EXPANDER_ADDR_ALT 0x20
-#define IOX_PIN_BACKLIGHT    2     // Waveshare wiki: expander pin 2 = backlight
+#define TCA_REG_OUTPUT       0x01
+#define TCA_REG_CONFIG       0x03  // 1 = input
+#define TCA_PIN_TP_RST       0
+#define TCA_PIN_BACKLIGHT    1     // BL_EN
+#define TCA_PIN_LCD_RST      2
+#define TCA_PIN_SD_CS        3
+#define TCA_PIN_BLC          4
+#define TCA_PIN_BUZZER       5     // BEE_EN — keep LOW
+#define TCA_PIN_RTC_INT      6
+
+// ---- Battery charger (SW6106) ----
+// Power-bank chip with "light load detection": if the board's draw looks too
+// small it cuts battery output — i.e. the board dies the moment USB is pulled.
+// Waveshare FAQ fix: write 0x0A to reg 0x38 at every power-on, and/or 0x01 to
+// reg 0x03 every ~1 s. We do both.
+#define SW6106_ADDR          0x3C
+#define SW6106_REG_LIGHTLOAD 0x38
+#define SW6106_LIGHTLOAD_OFF 0x0A
+#define SW6106_REG_KEEPALIVE 0x03
+#define SW6106_KEEPALIVE     0x01
+#define SW6106_KEEPALIVE_MS  1000
 
 // ---- Buttons ----
 #define BTN_BACK_GPIO        0     // BOOT — primary, Space (PTT)
@@ -67,6 +111,6 @@
 #define BOARD_HAS_SECONDARY_BUTTON 0
 #define BOARD_HAS_ROTATION         0
 #define BOARD_HAS_IMU              0
-#define BOARD_HAS_BATTERY          0
+#define BOARD_HAS_BATTERY          1   // optional 3.7 V LiPo on the PH2.0 jack
 #define BOARD_HAS_IO_EXPANDER      1
 #define BOARD_HAS_SOUND            0
