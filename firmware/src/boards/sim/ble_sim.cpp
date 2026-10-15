@@ -1,5 +1,5 @@
 // BLE stub + scenario playback. Implements ble.h without any transport: a
-// JSONL scenario file stands in for the daemon, delivered through the same
+// JSONL scenario file stands in for the app, delivered through the same
 // ble_has_data()/ble_get_data() path main.cpp uses on hardware — so JSON
 // parsing, usage-rate tracking, and the chime trigger all run for real.
 #include "../../ble.h"
@@ -26,6 +26,16 @@ static bool     playing = true;
 static bool     connected = true;
 static bool     pending = false;      // a state is queued for main's next poll
 static uint32_t delivered_ms = 0;
+
+// Keyboard-injected payloads (sim_inject_*): the current state's payload with
+// a few fast-clock keys overlaid, delivered ahead of the scenario.
+#define MAX_INJECT 4
+static char     inject_q[MAX_INJECT][MAX_LINE];
+static int      inject_n = 0;
+static bool     es_delivered = false;   // some payload carried `es` (signals has a baseline)
+static uint32_t inject_es = 9000;
+static int      inject_activity = 0;
+static bool     inject_alert = false;
 
 static const char* FALLBACK[] = {
     "{\"name\":\"fresh\",\"s\":3.0,\"sr\":295,\"w\":12.0,\"wr\":9000,\"st\":\"allowed\",\"ok\":true}",
@@ -107,17 +117,28 @@ const char* ble_get_device_name(void) { return "Clawdmeter (sim)"; }
 const char* ble_get_mac_address(void) { return "00:51:4D:00:00:01"; }
 
 void ble_clear_bonds(void) { printf("[sim] pair gesture completed — bonds cleared\n"); }
-bool ble_has_bonds(void)   { return true; }
+void ble_print_status(void) { printf("BLE status: state=%s (sim)\n", connected ? "CONNECTED" : "ADVERTISING"); }
+void ble_disconnect_all(void) { printf("[sim] disconnect\n"); }
 
-bool ble_has_data(void) { return connected && pending; }
+bool ble_has_data(void) { return connected && (pending || inject_n > 0); }
 const char* ble_get_data(void) {
-    pending = false;
-    delivered_ms = millis();
-    return states[cur].json;
+    static char out[MAX_LINE];
+    if (inject_n > 0) {
+        memcpy(out, inject_q[0], MAX_LINE);
+        for (int i = 1; i < inject_n; i++) memcpy(inject_q[i - 1], inject_q[i], MAX_LINE);
+        inject_n--;
+    } else {
+        pending = false;
+        delivered_ms = millis();
+        memcpy(out, states[cur].json, MAX_LINE);
+    }
+    if (strstr(out, "\"es\"")) es_delivered = true;
+    return out;
 }
 void ble_send_ack(void)  {}
 void ble_send_nack(void) { printf("[sim] payload NACKed — check the scenario JSON\n"); }
 void ble_request_refresh(void) {}
+void ble_send_dismiss(void) { printf("[sim] TX {\"dismiss\":true}\n"); }
 void ble_set_battery_level(int pct) { (void)pct; }
 
 void ble_keyboard_press(uint8_t key, uint8_t modifier) {
@@ -148,4 +169,56 @@ void sim_playback_jump(int idx) {
 void sim_playback_toggle_link(void) {
     connected = !connected;
     refresh_title();
+}
+
+// ---- Keyboard injection (sim_platform.cpp key map) ----
+static void inject(void (*edit)(JsonDocument&)) {
+    if (inject_n >= MAX_INJECT || n_states == 0) return;
+    JsonDocument doc;
+    if (deserializeJson(doc, states[cur].json) != DeserializationError::Ok) return;
+    doc.remove("c");                  // never re-trigger a scenario chime / alert
+    doc.remove("b");
+    doc.remove("m");
+    doc.remove("x");
+    doc["rp"] = false;
+    edit(doc);
+    serializeJson(doc, inject_q[inject_n], MAX_LINE);
+    inject_n++;
+}
+
+static char ev_char = 'p';
+static void set_event(JsonDocument& d) {
+    static char ev[2];
+    ev[0] = ev_char; ev[1] = 0;
+    d["e"] = (const char*)ev;
+    d["es"] = inject_es;
+}
+
+void sim_inject_event(char ev) {
+    ev_char = ev;
+    if (!es_delivered) {              // signals treats the first `es` as a baseline
+        inject_es++;
+        inject(set_event);
+        es_delivered = true;
+    }
+    inject_es++;
+    inject(set_event);
+    printf("[sim] inject hook event '%c' (es %lu)\n", ev, (unsigned long)inject_es);
+}
+
+static void set_activity(JsonDocument& d) { d["a"] = inject_activity; }
+void sim_inject_activity_cycle(void) {
+    inject_activity = (inject_activity + 1) % 4;
+    inject(set_activity);
+    printf("[sim] inject activity a=%d\n", inject_activity);
+}
+
+static void set_alert(JsonDocument& d) {
+    if (inject_alert) { d["m"] = "Bash: pio run -e waveshare_amoled_216"; d["b"] = true; }
+    else              d["x"] = true;
+}
+void sim_inject_alert_toggle(void) {
+    inject_alert = !inject_alert;
+    inject(set_alert);
+    printf("[sim] inject attention %s\n", inject_alert ? "alert" : "clear");
 }

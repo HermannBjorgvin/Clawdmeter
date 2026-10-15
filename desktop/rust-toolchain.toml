@@ -1,0 +1,7 @@
+# The toolchain CI lints, tests and releases with; local cargo picks it up
+# too, so clippy agrees with CI. Bump deliberately (new lints land with new
+# releases). The crates' MSRV (rust-version) is separate.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

@@ -32,6 +32,13 @@ void power_hal_init(void) {
     pmu.enableBattDetection();
     pmu.enableBattVoltageMeasure();
 
+    // The AXP2101 estimates % from the battery voltage and can latch into a
+    // bad state (frozen, or stuck near zero) that a power cycle doesn't
+    // clear: the gauge lives in the always-on domain the battery keeps
+    // alive. Reset it at boot so it recalibrates from the current voltage.
+    pmu.enableGauge();
+    pmu.resetGauge();
+
     // Mirror the Waveshare XiaoZhi BSP charging config so the on-chip
     // fuel gauge has the right reference numbers. Without these,
     // getBatteryPercent() returns -1 / shows "---" on the UI.

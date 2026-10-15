@@ -37,10 +37,6 @@ void display_hal_set_brightness(uint8_t level) {
     if (gfx) gfx->setBrightness(level);
 }
 
-void display_hal_fill_screen(uint16_t color) {
-    if (gfx) gfx->fillScreen(color);
-}
-
 // Rotate a w×h strip into rot_buf and compute destination coordinates on the
 // 480×480 panel. Src is row-major over the rectangle (sx, sy, w, h).
 static void rotate_strip(const uint16_t* src, int32_t w, int32_t h,

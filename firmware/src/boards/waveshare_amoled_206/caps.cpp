@@ -9,6 +9,8 @@ static const BoardCaps caps = {
     .has_rotation = false,
     .has_battery = true,
     .has_imu = true,
+    .minimal_ui   = false,   // full animated UI; true for e-ink / slow panels
+    .has_pwr_button = true,  // AXP2101 PKEY
 };
 
 const BoardCaps& board_caps(void) { return caps; }

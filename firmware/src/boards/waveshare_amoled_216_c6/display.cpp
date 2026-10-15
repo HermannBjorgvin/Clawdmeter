@@ -33,13 +33,10 @@ void display_hal_init(void) {
 // format, brightness-control, DISPON and a default MADCTL. The ONLY thing it
 // does not set is this panel's manufacturer page-0x20 driving-voltage
 // registers (0x19/0x1C) — without them the panel stays black even with the
-// rails up. Set just those; everything else the SH8601-era hack also wrote
-// (0xC4/0x53/0x51/0x63/0x29) is now covered by the class init, and we override
-// MADCTL below to fix orientation.
+// rails up. Set just those, and override MADCTL below to fix orientation.
 // The CO5300 class default (rotation-0, MADCTL 0x00) leaves the panel
-// sideways on this board — confirmed on hardware. Restore the MV+ML
-// transpose (MADCTL 0x30) that the pre-CO5300-rebase SH8601-hack version
-// used to write; touch mapping in touch.cpp is calibrated to match.
+// sideways on this board — confirmed on hardware. MADCTL 0x30 (MV+ML
+// transpose) fixes it; touch mapping in touch.cpp is calibrated to match.
 static void send_panel_driving_init(Arduino_DataBus* b) {
     b->beginWrite();
     b->writeC8D8(0xFE, 0x20);    // enter manufacturer command page 0x20
@@ -60,10 +57,6 @@ void display_hal_begin(void) {
 
 void display_hal_set_brightness(uint8_t level) {
     if (gfx) gfx->setBrightness(level);
-}
-
-void display_hal_fill_screen(uint16_t color) {
-    if (gfx) gfx->fillScreen(color);
 }
 
 void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,

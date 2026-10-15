@@ -57,7 +57,7 @@
 #define SND_I2S_DOUT         8      // ESP → ES8311 (speaker)
 #define SND_I2S_DIN          10     // ES8311 → ESP (mic; unused, set for STD mode)
 #define SND_PA_PIN           46     // V2 direct-GPIO amp enable (HIGH = on)
-#define SND_SAMPLE_RATE      44100  // must match the embedded PCM (bell_pcm.h)
+#define SND_SAMPLE_RATE      44100  // I2S rate the ding is synthesized at
 #define SND_ES8311_ADDR      0x18
 
 // ---- Buttons ----

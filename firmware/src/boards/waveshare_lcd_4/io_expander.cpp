@@ -58,5 +58,3 @@ void io_expander_set_backlight(bool on) {
     else    output_latch &= ~(1u << IOX_PIN_BACKLIGHT);
     iox_commit_output();
 }
-
-uint8_t io_expander_addr(void) { return expander_addr; }

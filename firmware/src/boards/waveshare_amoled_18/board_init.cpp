@@ -31,3 +31,10 @@ extern "C" void board_init(void) {
         Serial.println("Board revision: SH8601 + FT3168");
     }
 }
+
+// Optional HAL hook (hal/board_info_hal.h): reported by the `info` command so
+// the desktop flasher can tell the two panel revisions apart.
+#include "../../hal/board_info_hal.h"
+const char* board_hal_rev(void) {
+    return g_rev == REV_CO5300_CST816 ? "co5300_cst816" : "sh8601_ft3168";
+}

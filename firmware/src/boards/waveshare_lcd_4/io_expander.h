@@ -7,4 +7,3 @@
 
 void io_expander_init(void);
 void io_expander_set_backlight(bool on);
-uint8_t io_expander_addr(void);  // 0 if probe failed

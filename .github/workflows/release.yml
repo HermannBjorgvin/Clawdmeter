@@ -1,0 +1,277 @@
+name: Release
+
+# Push a tag like v1.9.0 to publish a GitHub Release with:
+#   <env>-<tag>.bin           one merged image per hardware env, flashed at 0x0
+#   manifest.json             {version, boards: [{env, chip, flash_size,
+#                             display_name, file, offset, size, sha256}]}
+#   webtools-<env>.json       ESP Web Tools manifest per board (browser flasher)
+#   clawdmeter-<tag>-*.tar.gz / .zip   desktop app: Linux binary, macOS
+#                             Clawdmeter.app (universal), Windows .exe
+#   clawdmeter-<tag>-macos-universal.dmg     the same app, drag to Applications
+#   clawdmeter-<tag>-windows-x86_64.msi      per-user installer (WiX)
+#   clawdmeter_<version>_amd64.deb           Debian/Ubuntu package (cargo-deb)
+#   clawdmeter-<tag>-x86_64.AppImage         portable Linux build
+#   SHA256SUMS
+# Nothing is signed beyond the ad-hoc macOS signature; the README says how
+# to get past Gatekeeper and SmartScreen. Icons and the .desktop entry live in
+# tools/packaging/.
+# Tags with a hyphen (v1.9.0-rc.1) publish as prereleases, which the desktop
+# app's "latest release" check skips.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Run steps read the tag from this variable instead of an inline expression.
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  envs:
+    name: List hardware envs
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.envs.outputs.matrix }}
+      names: ${{ steps.envs.outputs.names }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check the tag is a version
+        # The firmware, manifest.json and the app's update check all compare
+        # this numerically; `v*` alone would also match e.g. `very-old`.
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::tag '$TAG' is not vMAJOR.MINOR.PATCH[-prerelease]"
+            exit 1
+          fi
+      - id: envs
+        run: |
+          echo "matrix=$(python3 tools/ci/hardware_envs.py --matrix)" >> "$GITHUB_OUTPUT"
+          echo "names=$(python3 tools/ci/hardware_envs.py)" >> "$GITHUB_OUTPUT"
+
+  firmware:
+    name: Firmware ${{ matrix.env }}
+    needs: envs
+    runs-on: ubuntu-latest
+    strategy:
+      # One board's failure shouldn't hide the others'; publish needs all.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.envs.outputs.matrix) }}
+    env:
+      # Baked into the image; the firmware's serial `info` command reports it
+      # and the desktop app compares it with manifest.json's version.
+      PLATFORMIO_BUILD_FLAGS: -DCLAWD_VERSION=\"${{ github.ref_name }}\"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup-pio
+        with:
+          cache-key: ${{ matrix.board }}
+      - run: pio run -d firmware -e "${{ matrix.env }}"
+      - name: Merge bootloader + partitions + boot_app0 + app
+        run: >-
+          python tools/ci/merge_firmware.py --env "${{ matrix.env }}"
+          --version "$TAG" --out-dir dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: firmware-${{ matrix.env }}
+          path: dist/
+          if-no-files-found: error
+
+  desktop:
+    name: Desktop ${{ matrix.name }}
+    needs: envs   # only for the tag check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform's failure shouldn't hide the others'; publish needs all.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            targets: x86_64-unknown-linux-gnu
+          - name: macos-universal
+            os: macos-14
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - name: windows-x86_64
+            os: windows-latest
+            targets: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - if: runner.os == 'Linux'
+        uses: ./.github/actions/linux-desktop-deps
+      # The toolchain from desktop/rust-toolchain.toml, plus the targets.
+      - name: Rust toolchain
+        shell: bash
+        working-directory: desktop
+        run: |
+          rustup toolchain install
+          rustup target add ${TARGETS//,/ }
+        env:
+          TARGETS: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: desktop
+          key: release-${{ matrix.name }}
+      - name: cargo build --release
+        shell: bash
+        working-directory: desktop
+        run: |
+          # `clawdmeter --version`, the logs and the settings sidebar report
+          # this (clawdmeter_app::version()); without it they fall back to
+          # the crate version.
+          export CLAWDMETER_VERSION="${TAG#v}"
+          IFS=, read -ra targets <<< "${{ matrix.targets }}"
+          for t in "${targets[@]}"; do
+            cargo build --release --locked -p clawdmeter-app --target "$t"
+          done
+      - name: Run Windows executable
+        if: runner.os == 'Windows'
+        shell: bash
+        run: desktop/target/x86_64-pc-windows-msvc/release/clawdmeter.exe --version
+      - name: Package
+        shell: bash
+        run: |
+          tag="$TAG"
+          mkdir -p dist stage
+          cp README.md stage/
+          case "${{ matrix.name }}" in
+            linux-*)
+              cp desktop/target/x86_64-unknown-linux-gnu/release/clawdmeter stage/
+              tar -C stage -czf "dist/clawdmeter-$tag-${{ matrix.name }}.tar.gz" .
+              ;;
+            macos-*)
+              # An app bundle, not a bare binary: CoreBluetooth needs
+              # NSBluetoothAlwaysUsageDescription in the responsible app's
+              # Info.plist, or macOS kills the process when it runs under the
+              # LaunchAgent. LSUIElement keeps the tray app out of the Dock.
+              # Ad-hoc signed only (no Developer ID), so Gatekeeper asks once.
+              app=stage/Clawdmeter.app
+              mkdir -p "$app/Contents/MacOS"
+              lipo -create -output "$app/Contents/MacOS/clawdmeter" \
+                desktop/target/aarch64-apple-darwin/release/clawdmeter \
+                desktop/target/x86_64-apple-darwin/release/clawdmeter
+              lipo -info "$app/Contents/MacOS/clawdmeter"
+              mkdir -p "$app/Contents/Resources"
+              cp tools/packaging/icons/clawdmeter.icns "$app/Contents/Resources/"
+              ver="${tag#v}"
+              {
+                echo '<?xml version="1.0" encoding="UTF-8"?>'
+                echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+                echo '<plist version="1.0"><dict>'
+              echo '  <key>CFBundleIconFile</key><string>clawdmeter</string>'
+                echo '  <key>CFBundleIdentifier</key><string>com.clawdmeter.app</string>'
+                echo '  <key>CFBundleName</key><string>Clawdmeter</string>'
+                echo '  <key>CFBundleExecutable</key><string>clawdmeter</string>'
+                echo '  <key>CFBundlePackageType</key><string>APPL</string>'
+                echo "  <key>CFBundleShortVersionString</key><string>$ver</string>"
+                echo "  <key>CFBundleVersion</key><string>$ver</string>"
+                echo '  <key>LSMinimumSystemVersion</key><string>11.0</string>'
+                echo '  <key>LSUIElement</key><true/>'
+                echo '  <key>NSBluetoothAlwaysUsageDescription</key><string>Clawdmeter sends your Claude Code usage to your Clawdmeter over Bluetooth.</string>'
+                echo '</dict></plist>'
+              } > "$app/Contents/Info.plist"
+              plutil -lint "$app/Contents/Info.plist"
+              codesign --force --sign - "$app"
+              codesign --verify --verbose "$app"
+              tar -C stage -czf "dist/clawdmeter-$tag-${{ matrix.name }}.tar.gz" .
+              # Drag-to-Applications disk image of the same signed bundle.
+              mkdir dmgroot
+              ditto "$app" dmgroot/Clawdmeter.app
+              ln -s /Applications dmgroot/Applications
+              dmg="dist/clawdmeter-$tag-${{ matrix.name }}.dmg"
+              # hdiutil sometimes reports "Resource busy" on hosted runners.
+              for i in 1 2 3; do
+                hdiutil create -volname Clawdmeter -srcfolder dmgroot -fs HFS+ \
+                  -format UDZO -ov "$dmg" && break
+                [ "$i" = 3 ] && exit 1
+                sleep 5
+              done
+              hdiutil verify "$dmg"
+              ;;
+            windows-*)
+              cp desktop/target/x86_64-pc-windows-msvc/release/clawdmeter.exe stage/
+              (cd stage && 7z a -tzip "../dist/clawdmeter-$tag-${{ matrix.name }}.zip" .)
+              ;;
+          esac
+          ls -l stage dist
+      - name: Linux .deb + AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          ver="${TAG#v}"
+          bin=desktop/target/x86_64-unknown-linux-gnu/release/clawdmeter
+          # The committed icons must match the firmware's art.
+          python3 tools/packaging/make_icons.py --check
+          cargo install --locked cargo-deb@3.8.0
+          # Debian sorts 1.2.0~rc.1 before 1.2.0; the file keeps the tag's spelling.
+          debver=$(printf '%s' "$ver" | sed 's/-/~/')
+          (cd desktop && cargo deb -p clawdmeter-app --no-build \
+            --target x86_64-unknown-linux-gnu --deb-version "$debver" \
+            --output "../dist/clawdmeter_${ver}_amd64.deb")
+          dpkg-deb -I "dist/clawdmeter_${ver}_amd64.deb"
+          dpkg-deb -c "dist/clawdmeter_${ver}_amd64.deb"
+          tools/packaging/appimage.sh "$bin" "dist/clawdmeter-$TAG-x86_64.AppImage" \
+            "$RUNNER_TEMP/appimage"
+          "dist/clawdmeter-$TAG-x86_64.AppImage" --appimage-extract-and-run --version
+      - name: Windows .msi
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          # WiX 5 targets .NET 6; let it run on the runner's newer runtime.
+          DOTNET_ROLL_FORWARD: Major
+        run: |
+          # MSI versions are numeric: v1.2.0-rc.1 installs as 1.2.0, and the
+          # final 1.2.0 still replaces it (AllowSameVersionUpgrades).
+          ver="${TAG#v}"
+          ver="${ver%%-*}"
+          wix="$(cygpath -u "$RUNNER_TEMP")/wix"
+          dotnet tool install wix --version 5.0.2 --tool-path "$wix"
+          "$wix/wix" extension add -g WixToolset.Util.wixext/5.0.2
+          "$wix/wix" build tools/packaging/wix/clawdmeter.wxs -arch x64 \
+            -d "Version=$ver" \
+            -d "Exe=desktop/target/x86_64-pc-windows-msvc/release/clawdmeter.exe" \
+            -d "Icon=tools/packaging/icons/clawdmeter.ico" \
+            -ext WixToolset.Util.wixext \
+            -o "dist/clawdmeter-$TAG-${{ matrix.name }}.msi"
+          rm -f dist/*.wixpdb
+          ls -l dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [envs, firmware, desktop]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: manifest.json + ESP Web Tools manifests
+        run: |
+          python3 tools/ci/make_manifest.py --version "$TAG" \
+            --dist dist --expect '${{ needs.envs.outputs.names }}'
+          python3 tools/ci/make_webtools_manifest.py --dist dist
+          rm -f dist/*-"$TAG".json   # per-env sidecars, folded into manifest.json
+          (cd dist && sha256sum -- * > SHA256SUMS)
+          cat dist/manifest.json
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true

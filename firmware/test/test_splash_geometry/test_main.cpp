@@ -1,22 +1,15 @@
 // Host unit test for splash_compute_geometry — the pure sizing decision behind
-// the splash canvas. No Arduino/LVGL/hardware deps, so it runs on any host:
+// the splash canvas. No Arduino/LVGL/hardware deps:
 //
-//   g++ -std=c++17 -I ../../src test_main.cpp -o t && ./t
-//
-// (No compiler is bundled on the dev box used to author this; run it wherever
-// a host g++/clang++ is available, or via a PlatformIO `native` env.)
+//   pio test -d firmware -e native -f test_splash_geometry
 
 #include "splash_geometry.h"
-#include <cstdio>
+#include <unity.h>
 
-static int failures = 0;
-#define CHECK(cond)                                                            \
-    do {                                                                       \
-        if (!(cond)) {                                                         \
-            printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);             \
-            ++failures;                                                        \
-        }                                                                      \
-    } while (0)
+#define CHECK(cond) TEST_ASSERT_TRUE(cond)
+
+void setUp(void) {}
+void tearDown(void) {}
 
 static void should_render_full_size_with_no_scaling_when_psram_present() {
     SplashGeometry g = splash_compute_geometry(480, 480, /*has_psram=*/true);
@@ -49,15 +42,10 @@ static void should_clamp_cell_to_at_least_one_on_tiny_panel() {
 }
 
 int main() {
-    should_render_full_size_with_no_scaling_when_psram_present();
-    should_render_tiny_buffer_and_scale_up_when_no_psram();
-    should_size_from_smaller_dimension_on_portrait_panel();
-    should_clamp_cell_to_at_least_one_on_tiny_panel();
-
-    if (failures) {
-        printf("%d check(s) failed\n", failures);
-        return 1;
-    }
-    printf("all splash geometry checks passed\n");
-    return 0;
+    UNITY_BEGIN();
+    RUN_TEST(should_render_full_size_with_no_scaling_when_psram_present);
+    RUN_TEST(should_render_tiny_buffer_and_scale_up_when_no_psram);
+    RUN_TEST(should_size_from_smaller_dimension_on_portrait_panel);
+    RUN_TEST(should_clamp_cell_to_at_least_one_on_tiny_panel);
+    return UNITY_END();
 }

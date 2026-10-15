@@ -37,7 +37,7 @@
 #define BTN_FWD_GPIO         18    // secondary, Shift+Tab (mode toggle)
 
 // ---- Audio (ES8311 mono codec + onboard speaker, I2S) ----
-// Used to chime on session-usage reset. Pins + codec verified against
+// Plays the ding for alerts and session resets. Pins + codec verified against
 // Waveshare's factory 07_ES8311 example for this exact board. The ES8311 shares
 // the I2C bus above (addr 0x18); the external power amp is gated by SND_PA_PIN
 // (drive HIGH to enable). MCLK/WS/PA sit on strapping-capable pins (42/45/46)

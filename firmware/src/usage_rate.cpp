@@ -1,77 +1,100 @@
 #include "usage_rate.h"
-#include <Arduino.h>
 
-// Thresholds in %/min. A 5-hour (300 min) session ÷ 100% = 0.33 %/min to fill
-// exactly at the same pace as the session itself resets — the user wants the
-// "heavy" tier to start right there (filling in 4–5 hours).
-//   < 0.10  →  Idle    (17h+ to fill, basically dormant)
-//   < 0.20  →  Normal  (8–17h to fill, slow steady use)
-//   < 0.33  →  Active  (5–8h, heavy but not yet pace-matching)
-//   >=0.33  →  Heavy   (≤5h, matching or beating the session reset)
-#define RATE_THRESH_NORMAL  0.10f
-#define RATE_THRESH_ACTIVE  0.20f
-#define RATE_THRESH_HEAVY   0.33f
+// Pure: no Arduino. See usage_rate.h for the model.
 
-// Minimum span between oldest and newest sample before we trust the computed
-// rate. The whole point of the ring buffer is to smooth out single-sample
-// jitter — at 60s daemon polling, a 1% bump between two consecutive samples
-// looks like 1 %/min (Heavy) but really just means you grew 1% in the last
-// minute. We require ~4 min of accumulated history so the rate reflects a
-// real trend, not one noisy delta. Side-effect: ~4 min warm-up after boot
-// during which we report Idle.
-#define MIN_WINDOW_MS       240000UL
+#define RATE_NORMAL_PCT_H   5.0f
+#define RATE_ACTIVE_PCT_H  10.0f
+#define RATE_HEAVY_PCT_H   20.0f
+#define RESET_DROP_PCT      5.0f
 
-#define RING_SIZE 6
+// Samples closer than this to the newest entry update its % in place instead
+// of taking a slot (a prompt poll and a Stop poll 10 s apart, a reconnect
+// burst). That bounds ring density at 2/min, so RING_SIZE entries always
+// cover more than one window.
+#define MERGE_MS        30000UL
+#define RING_SIZE       40
 
 struct Sample { uint32_t ms; float pct; };
 
-static Sample ring[RING_SIZE];
-static uint8_t count = 0;
-static uint8_t head  = 0;  // index of next write slot
+static Sample   ring[RING_SIZE];
+static uint8_t  count = 0;
+static uint8_t  head  = 0;          // next write slot
 
-static inline uint8_t oldest_idx(void) {
-    return (head + RING_SIZE - count) % RING_SIZE;
+static int      act_level = -1;
+static uint32_t act_ms    = 0;
+
+static inline const Sample& at_age(uint8_t i) {   // 0 = newest
+    return ring[(head + RING_SIZE - 1 - i) % RING_SIZE];
 }
 
-static void usage_rate_reset(void) {
+void usage_rate_clear(void) {
     count = 0;
     head  = 0;
+    act_level = -1;
+    act_ms = 0;
 }
 
-bool usage_rate_sample(float session_pct) {
-    uint32_t now = millis();
-    bool was_reset = false;
+bool usage_rate_sample_at(uint32_t now_ms, float session_pct, bool replay) {
+    if (replay) return false;
 
+    bool was_reset = false;
     if (count > 0) {
-        uint8_t latest = (head + RING_SIZE - 1) % RING_SIZE;
-        // Session reset: pct dropped substantially. Restart tracking.
-        if (session_pct + 5.0f < ring[latest].pct) {
-            usage_rate_reset();
+        const Sample& newest = at_age(0);
+        if (session_pct + RESET_DROP_PCT < newest.pct) {
+            count = 0;              // restart tracking from the new window
+            head  = 0;
             was_reset = true;
+        } else if ((uint32_t)(now_ms - newest.ms) < MERGE_MS) {
+            ring[(head + RING_SIZE - 1) % RING_SIZE].pct = session_pct;
+            return false;
         }
     }
 
-    ring[head] = { now, session_pct };
+    ring[head] = { now_ms, session_pct };
     head = (head + 1) % RING_SIZE;
     if (count < RING_SIZE) count++;
-
     return was_reset;
 }
 
-int usage_rate_group(void) {
-    if (count < 2) return 0;
+float usage_rate_pct_per_hour_at(uint32_t now_ms) {
+    if (count < 2) return 0.0f;
 
-    uint8_t o = oldest_idx();
-    uint8_t l = (head + RING_SIZE - 1) % RING_SIZE;
-    uint32_t dt = ring[l].ms - ring[o].ms;
-    if (dt < MIN_WINDOW_MS) return 0;
+    // Baseline: newest sample at least a window old; else the oldest we have.
+    const Sample* base = &at_age(count - 1);
+    for (uint8_t i = 0; i < count; i++) {
+        const Sample& s = at_age(i);
+        if ((uint32_t)(now_ms - s.ms) >= USAGE_RATE_WINDOW_MS) { base = &s; break; }
+    }
 
-    float dp = ring[l].pct - ring[o].pct;
-    if (dp < 0.0f) dp = 0.0f;
-    float rate = dp * 60000.0f / (float)dt;
+    uint32_t dt = now_ms - base->ms;
+    if (dt < USAGE_RATE_WINDOW_MS) dt = USAGE_RATE_WINDOW_MS;
+    float dp = at_age(0).pct - base->pct;
+    if (dp <= 0.0f) return 0.0f;
+    return dp * 3600000.0f / (float)dt;
+}
 
-    if (rate < RATE_THRESH_NORMAL) return 0;
-    if (rate < RATE_THRESH_ACTIVE) return 1;
-    if (rate < RATE_THRESH_HEAVY)  return 2;
-    return 3;
+int usage_rate_base_group_at(uint32_t now_ms) {
+    const float r = usage_rate_pct_per_hour_at(now_ms);
+    if (r < RATE_NORMAL_PCT_H) return RATE_IDLE;
+    if (r < RATE_ACTIVE_PCT_H) return RATE_NORMAL;
+    if (r < RATE_HEAVY_PCT_H)  return RATE_ACTIVE;
+    return RATE_HEAVY;
+}
+
+void usage_rate_set_activity_at(uint32_t now_ms, int level) {
+    if (level < 0) { act_level = -1; return; }
+    act_level = level > 3 ? 3 : level;
+    act_ms = now_ms;
+}
+
+int usage_rate_activity_at(uint32_t now_ms) {
+    if (act_level < 0) return -1;
+    if ((uint32_t)(now_ms - act_ms) >= USAGE_RATE_ACTIVITY_TTL_MS) return -1;
+    return act_level;
+}
+
+int usage_rate_group_at(uint32_t now_ms) {
+    const int base = usage_rate_base_group_at(now_ms);
+    const int act  = usage_rate_activity_at(now_ms);
+    return act > base ? act : base;
 }

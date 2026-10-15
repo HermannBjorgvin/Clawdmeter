@@ -1,0 +1,24 @@
+name: Linux desktop build deps
+description: >
+  System libraries the desktop app links against on Linux: GPUI (X11/Wayland,
+  xkbcommon, Vulkan via blade, fontconfig/freetype; clang for its bindgen
+  build step), btleplug/BlueZ plus the ksni tray (both plain D-Bus), and
+  ALSA for the desktop chime (rodio/cpal).
+  Nothing here pulls GTK: tray-icon is built with its `ksni` backend, and
+  serialport is built without libudev. Keep this list in sync with
+  `cargo tree --target x86_64-unknown-linux-gnu` when Linux deps change.
+
+runs:
+  using: composite
+  steps:
+    - name: apt install
+      shell: bash
+      run: |
+        sudo apt-get update -q
+        sudo apt-get install -y --no-install-recommends \
+          pkg-config clang libclang-dev \
+          libdbus-1-dev \
+          libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+          libx11-dev libx11-xcb-dev libxcb1-dev libvulkan-dev \
+          libfontconfig1-dev libfreetype-dev \
+          libasound2-dev

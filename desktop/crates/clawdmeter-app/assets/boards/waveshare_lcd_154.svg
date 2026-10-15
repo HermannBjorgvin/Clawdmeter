@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="126" height="142" viewBox="-53.25 -76.34 126.18 142.37">
+<title>Waveshare ESP32-S3-Touch-LCD-1.54</title>
+<ellipse cx="9.84" cy="58.04" rx="52.99" ry="4.5" fill="#000" opacity="0.14"/>
+<g transform="matrix(2.01 0.25 0 2.11 -50.25 -59.04)"><path d="M6.5 6.5 L16.3 -0.41 L53.3 -0.41 L53.3 36.59 L43.5 43.5 L6.5 43.5Z" fill="#dedcd6" stroke="#dedcd6" stroke-width="13" stroke-linejoin="round"/></g>
+<g transform="matrix(2.01 0.25 0.89 -0.55 -50.25 -59.04)"><rect x="6.5" y="0" width="37" height="22" rx="0" fill="#f4f3ef"/></g>
+<g transform="matrix(0.89 -0.55 0 2.11 50.25 -46.7)"><rect x="0" y="6.5" width="22" height="37" rx="0" fill="#cfccc5"/></g>
+<g transform="matrix(2.01 0.25 0.89 -0.55 -50.25 -59.04)"><rect x="6.5" y="13.64" width="37" height="0.35" rx="0" fill="#d6d3cc"/></g>
+<g transform="matrix(0.89 -0.55 0 2.11 50.25 -46.7)"><rect x="13.64" y="6.5" width="0.35" height="37" rx="0" fill="#bdb9b1"/></g>
+<g transform="matrix(2.01 0.25 0.89 -0.55 -50.25 -59.04)"><rect x="11.8" y="3.76" width="6.4" height="4.8" rx="2.4" fill="#c9c6be"/></g>
+<g transform="matrix(2.01 0.25 0.89 -0.55 -50.25 -60.94)"><rect x="12" y="3.56" width="6" height="4.4" rx="2.2" fill="#ffffff"/></g>
+<g transform="matrix(2.01 0.25 0.89 -0.55 -50.25 -59.04)"><rect x="21.8" y="3.76" width="6.4" height="4.8" rx="2.4" fill="#c9c6be"/></g>
+<g transform="matrix(2.01 0.25 0.89 -0.55 -50.25 -60.94)"><rect x="22" y="3.56" width="6" height="4.4" rx="2.2" fill="#ffffff"/></g>
+<g transform="matrix(2.01 0.25 0.89 -0.55 -50.25 -59.04)"><rect x="31.8" y="3.76" width="6.4" height="4.8" rx="2.4" fill="#c9c6be"/></g>
+<g transform="matrix(2.01 0.25 0.89 -0.55 -50.25 -60.94)"><rect x="32" y="3.56" width="6" height="4.4" rx="2.2" fill="#ffffff"/></g>
+<g transform="matrix(0.89 -0.55 0 2.11 50.25 -46.7)"><rect x="7.47" y="22" width="0.9" height="6" rx="0.45" fill="#8f8b83"/></g>
+<g transform="matrix(0.89 -0.55 0 2.11 50.25 -46.7)"><rect x="9.17" y="22" width="0.9" height="6" rx="0.45" fill="#8f8b83"/></g>
+<g transform="matrix(0.89 -0.55 0 2.11 50.25 -46.7)"><rect x="10.87" y="22" width="0.9" height="6" rx="0.45" fill="#8f8b83"/></g>
+<g transform="matrix(0.89 -0.55 0 2.11 50.25 -46.7)"><rect x="12.57" y="22" width="0.9" height="6" rx="0.45" fill="#8f8b83"/></g>
+<g transform="matrix(0.89 -0.55 0 2.11 50.25 -46.7)"><circle cx="8.8" cy="10" r="0.55" fill="#8f8b83"/></g>
+<g transform="matrix(2.01 0.25 0 2.11 -50.25 -59.04)"><rect x="0" y="0" width="50" height="50" rx="6.5" fill="#fbfaf7"/><rect x="0.15" y="0.15" width="49.7" height="49.7" rx="6.5" fill="none" stroke="#e2dfd8" stroke-width="0.3"/><rect x="8.3" y="7.5" width="33.4" height="33.4" rx="2.4" fill="#ecebe6"/><rect x="9.5" y="8.7" width="31" height="31" rx="1.2" fill="#000000"/><path d="M21.72 15.5h6.57v0.82h-6.57zM21.72 16.32h0.82v0.82h-0.82zM23.36 16.32h3.28v0.82h-3.28zM27.46 16.32h0.82v0.82h-0.82zM20.08 17.14h9.85v0.82h-9.85zM20.08 17.96h9.85v0.82h-9.85zM21.72 18.78h6.57v0.82h-6.57zM21.72 19.6h6.57v0.82h-6.57zM21.72 20.42h0.82v0.82h-0.82zM23.36 20.42h0.82v0.82h-0.82zM25.82 20.42h0.82v0.82h-0.82zM27.46 20.42h0.82v0.82h-0.82zM21.72 21.24h0.82v0.82h-0.82zM23.36 21.24h0.82v0.82h-0.82zM25.82 21.24h0.82v0.82h-0.82zM27.46 21.24h0.82v0.82h-0.82z" fill="#d97757"/><path d="M22.54 16.32h0.82v0.82h-0.82zM26.64 16.32h0.82v0.82h-0.82z" fill="#141413"/><rect x="15.43" y="25.36" width="19.14" height="1.36" rx="0.68" fill="#2a2a28"/><rect x="15.43" y="25.36" width="6.51" height="1.36" rx="0.68" fill="#788c5d"/><rect x="15.43" y="29.13" width="19.14" height="1.36" rx="0.68" fill="#2a2a28"/><rect x="15.43" y="29.13" width="11.87" height="1.36" rx="0.68" fill="#d97757"/></g>
+</svg>

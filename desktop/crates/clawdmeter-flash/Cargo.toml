@@ -1,0 +1,17 @@
+[package]
+name = "clawdmeter-flash"
+description = "Release manifest, firmware download/verify, and espflash writer for Clawdmeter boards."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clawdmeter-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ureq.workspace = true
+espflash.workspace = true
+serialport.workspace = true
+log.workspace = true

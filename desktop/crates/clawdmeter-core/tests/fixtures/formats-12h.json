@@ -1,0 +1,67 @@
+{
+ "is_error": false,
+ "duration_api_ms": 0,
+ "num_turns": 0,
+ "stop_reason": null,
+ "session_id": "2400a4d7-7a08-4113-854e-6275df01e5f9",
+ "total_cost_usd": 0,
+ "usage": {
+  "output_tokens_details": {
+   "thinking_tokens": 0
+  },
+  "input_tokens": 0,
+  "cache_creation_input_tokens": 0,
+  "cache_read_input_tokens": 0,
+  "output_tokens": 0,
+  "server_tool_use": {
+   "web_search_requests": 0,
+   "web_fetch_requests": 0
+  },
+  "service_tier": "standard",
+  "cache_creation": {
+   "ephemeral_1h_input_tokens": 0,
+   "ephemeral_5m_input_tokens": 0
+  },
+  "inference_geo": "",
+  "iterations": [],
+  "speed": "standard",
+  "fallback_credit": null
+ },
+ "modelUsage": {},
+ "permission_denials": [],
+ "fast_mode_state": "off",
+ "fast_mode_disabled_reason": "sdk_opt_in_required",
+ "subagent_stats": {
+  "spawned": 0,
+  "requested": {
+   "background": 0,
+   "foreground": 0,
+   "unset": 0
+  },
+  "started_in_background": 0,
+  "max_depth": 0,
+  "spawned_by_subagents": 0,
+  "completed": 0,
+  "failed": 0,
+  "killed": {
+   "parent": 0,
+   "user": 0,
+   "system": 0
+  },
+  "refused": {
+   "depth_limit": 0,
+   "concurrency_limit": 0,
+   "budget": 0
+  },
+  "by_type": {}
+ },
+ "safety_stops": 0,
+ "subtype": "success",
+ "result": "You are currently using your subscription to power your Claude Code usage\n\nCurrent session: 99.6% used · resets Oct 13, 7 PM (Asia/Tokyo)\nCurrent week (all models): 100% used · resets Oct 19, 12:00 a.m. (Asia/Tokyo)\n",
+ "local_command": "usage",
+ "type": "result",
+ "duration_ms": 276,
+ "uuid": "1bf19f08-d601-4402-a663-50e75ac3164b",
+ "queued_turn_count": 0,
+ "result_index": 0
+}

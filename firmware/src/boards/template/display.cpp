@@ -28,11 +28,6 @@ void display_hal_set_brightness(uint8_t level) {
     // gfx->setBrightness(level);
 }
 
-void display_hal_fill_screen(uint16_t color) {
-    (void)color;
-    // gfx->fillScreen(color);
-}
-
 void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
                              const uint16_t* pixels) {
     (void)x; (void)y; (void)w; (void)h; (void)pixels;

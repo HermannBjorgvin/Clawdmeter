@@ -1,7 +1,6 @@
 #pragma once
 
-// Power / battery / power-button abstraction. Replaces the legacy power.h
-// API but keeps the same shape so existing call sites stay clean.
+// Power / battery / power-button abstraction.
 //
 // Some boards (AMOLED-2.16) wire PWR through the PMU's PKEY IRQ; others
 // (AMOLED-1.8) route it through an IO expander. The HAL hides which

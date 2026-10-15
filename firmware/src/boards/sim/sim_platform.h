@@ -18,9 +18,18 @@ bool sim_take_pwr_long(void);
 bool sim_take_pwr_released(void);
 int  sim_battery_pct(void);
 bool sim_charging(void);
+bool sim_vbus_in(void);     // USB power present (charging, or no battery fitted)
 
 // Scenario playback controls, implemented in ble_sim.cpp.
 void sim_playback_toggle(void);
 void sim_playback_step(int dir);
 void sim_playback_jump(int idx);      // 0-based
 void sim_playback_toggle_link(void);  // BLE connected <-> disconnected
+
+// Fast-clock injection (keys e / t / a / m), implemented in ble_sim.cpp.
+void sim_inject_event(char ev);         // 'p' prompt, 's' stop
+void sim_inject_activity_cycle(void);   // a = 0 → 1 → 2 → 3 → 0
+void sim_inject_alert_toggle(void);     // attention alert / clear
+
+// Scripted touch for headless runs (SIM_TAPS), read by touch.cpp.
+bool sim_scripted_touch(uint16_t* x, uint16_t* y);

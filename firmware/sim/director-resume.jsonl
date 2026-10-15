@@ -1,0 +1,11 @@
+# Director walkthrough, part 2: the interruptions. Drive it with SIM_CMDS:
+#   SIM_FAST=1 SIM_SCENARIO=sim/director-resume.jsonl \
+#   SIM_CMDS="2500:clawd lurk;5200:prompt;34000:alert;67500:pwr;80000:prompt" \
+#   .pio/build/sim/program
+# 2.5 s  a lurk trip starts; 5.2 s a prompt: he cuts it short, hurries back, points
+# ~20 s  quiet: the screensaver (face, then a calm dip)
+# 34 s   attention interrupts it; nobody comes, so after the 20 s (fast) timeout
+#        the big Clawd leaves, the small one stays out and the face comes back up
+# 67.5 s PWR during a calm dip steps to the other calm scene, never a lively one
+# 80 s   a prompt wakes it (and would light a dimmed panel)
+{"name":"quiet desk (hooks on)","hold_ms":120000,"s":3.0,"sr":295,"w":12.0,"wr":9000,"st":"allowed","ok":true,"t":1785474000,"tf":24,"a":0,"e":"s","es":1,"n":1}

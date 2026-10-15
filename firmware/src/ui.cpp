@@ -1,7 +1,13 @@
 #include "ui.h"
 #include "splash.h"
+#include "mascot.h"
+#include "clawd_anim.h"
+#include "clawd_policy.h"
+#include "minimal_mode.h"
 #include <lvgl.h>
 #include <time.h>
+#include <stdio.h>
+#include <Arduino.h>
 #include "logo.h"
 #include "clawd_still.h"
 #include "icons.h"
@@ -42,7 +48,7 @@ struct Layout {
     const lv_font_t* title_font;     // screen title / clock
     const lv_font_t* pct_font;       // big percentage number
     const lv_font_t* ent_pct_font;   // enterprise spending number
-    const lv_font_t* pill_font;      // "Current" / "Weekly" pill
+    const lv_font_t* pill_font;      // "Session" / "Weekly" pill
     const lv_font_t* reset_font;     // "Resets in ..." line
     const lv_font_t* pace_font;      // enterprise "Under/On/Over pace" line
     const lv_font_t* anim_font;      // animated status line
@@ -53,9 +59,8 @@ struct Layout {
     int16_t batt_y;                  // battery icon top edge
     int16_t batt_w;                  // battery icon width, for position math
 
-    // Pairing hint / idle screen
-    int16_t pair_y1, pair_y2, pair_y3;
-    int16_t idle_px;                 // sleeping-creature size on the idle screen
+    // Pairing hint
+    int16_t pair_y1, pair_y2, pair_y3, pair_y4;
 
     // Bluetooth screen
     int16_t bt_info_panel_h;
@@ -101,7 +106,7 @@ static void compute_layout(const BoardCaps& c) {
     L.pair_y1 = 40;
     L.pair_y2 = 120;
     L.pair_y3 = 160;
-    L.idle_px = 160;
+    L.pair_y4 = 230;
 
     if (c.height >= 460) {
         // Large layout — tuned for 480x480 (AMOLED-2.16).
@@ -118,8 +123,10 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_credit_1_font = &font_styrene_24;
         L.bt_credit_2_font = &font_styrene_20;
     } else if (c.height >= 300) {
-        // Compact layout — tuned for 368x448 (AMOLED-1.8).
-        L.content_y = 85;
+        // Compact layout — tuned for 368x448 (AMOLED-1.8). The panels start
+        // low enough that the corner Clawd's jump (30 cells x 3 px) clears
+        // the top edge from a seat that still sits above the first panel.
+        L.content_y = 96;
         L.usage_panel_h = 130;
         L.usage_panel_gap = 12;
         L.usage_bar_y = 48;
@@ -165,7 +172,7 @@ static void compute_layout(const BoardCaps& c) {
         L.pair_y1 = 12;
         L.pair_y2 = 56;
         L.pair_y3 = 80;
-        L.idle_px = 96;
+        L.pair_y4 = 112;
         L.bt_info_panel_h = 90;
         L.bt_reset_zone_h = 60;
         L.bt_title_font    = &font_tiempos_34;
@@ -201,6 +208,10 @@ static int      clock_fmt = 24;   // 12 or 24, set from the daemon payload
 static int      clock_last_min = -1;   // last rendered minute; avoids redrawing the title every tick
 static lv_obj_t* usage_group;   // the two usage panels — shown when connected
 static lv_obj_t* pair_group;    // pairing hint — shown when disconnected
+static lv_obj_t* pair_lines[4]; // its lines: heading, two steps, the hold note
+static PairHint  pair_hint = PAIR_HINT_NORMAL;
+static uint32_t  pair_hint_since = 0;
+#define PAIR_CLEARED_SHOW_MS 8000   // "Ready to pair" stays this long
 static lv_obj_t* bar_session;
 static lv_obj_t* lbl_session_pct;
 static lv_obj_t* lbl_session_label;
@@ -213,29 +224,30 @@ static lv_obj_t* panel_session = nullptr;
 static lv_obj_t* panel_weekly = nullptr;
 // Enterprise-only widgets inside panel_session
 static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
-static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
+static lv_obj_t* lbl_spending_desc = nullptr;     // "of spending limit"
 static lv_obj_t* lbl_spending_status = nullptr;   // "Under pace" / "On pace" / "Over pace"
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
 static lv_obj_t* logo_img;
-static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
+static lv_image_dsc_t battery_dscs[6];  // empty, low, medium, full, charging, plug-zap (no battery)
 
 // ---- Live-data freshness → which usage sub-view to show ----
-// usage panels when data is flowing, an idle "Zzz" screen when the host is
-// connected but no usage update landed within DATA_FRESH_MS, the pairing hint
-// when BLE is down. Re-evaluated every loop in ui_tick_anim().
-static lv_obj_t* idle_group;            // the "Zzz" idle screen
+// Live meters when data is flowing; the same meters dimmed when the host is
+// connected but no usage update landed within DATA_FRESH_MS (stale: the last
+// numbers stay, visibly not live, and the status line says so); the pairing
+// hint when BLE is down. The corner Clawd stays in his seat in all three:
+// there is only ever one Clawd. Re-evaluated every loop in ui_tick_anim().
+#define STALE_OPA LV_OPA_40
 static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage update landed
 static bool      data_received = false; // any valid update since boot
 static bool      data_ok = true;        // last payload's ok flag; a {"ok":false} beat = "no fresh data"
-static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage
+static int       view_state = -1;       // -1 unknown / 0 pair / 1 stale / 2 live
 static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within this window (daemon sends ~60s)
 
 // ---- Shared ----
 static lv_image_dsc_t logo_dsc;
-static screen_t current_screen = SCREEN_USAGE;
 static bool     s_ble_connected = false;   // cached BLE connection state
 static uint32_t connected_at_ms = 0;       // when we last entered CONNECTED ("Connected" dwell)
 
@@ -299,9 +311,11 @@ static lv_color_t pct_color(float pct) {
     return COL_GREEN;
 }
 
-static void format_reset_time(int mins, char* buf, size_t len) {
+// `none`: what a missing reset time means (-1 in the payload): the session
+// window hasn't started, the weekly one is unknown.
+static void format_reset_time(int mins, char* buf, size_t len, const char* none) {
     if (mins < 0) {
-        snprintf(buf, len, "---");
+        snprintf(buf, len, "%s", none);
     } else if (mins < 60) {
         snprintf(buf, len, "Resets in %dm", mins);
     } else if (mins < 1440) {
@@ -310,9 +324,6 @@ static void format_reset_time(int mins, char* buf, size_t len) {
         snprintf(buf, len, "Resets in %dd %dh", mins / 1440, (mins % 1440) / 60);
     }
 }
-
-// Forward decls — callbacks defined near ui_show_screen below
-static void global_click_cb(lv_event_t* e);
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -377,6 +388,7 @@ static void init_battery_icons(void) {
         init_icon_dsc_rgb565a8(&battery_dscs[2], ICON_BATTERY_MEDIUM_SMALL_W, ICON_BATTERY_MEDIUM_SMALL_H, icon_battery_medium_small_data);
         init_icon_dsc_rgb565a8(&battery_dscs[3], ICON_BATTERY_FULL_SMALL_W, ICON_BATTERY_FULL_SMALL_H, icon_battery_full_small_data);
         init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_SMALL_W, ICON_BATTERY_CHARGING_SMALL_H, icon_battery_charging_small_data);
+        init_icon_dsc_rgb565a8(&battery_dscs[5], ICON_PLUG_ZAP_SMALL_W, ICON_PLUG_ZAP_SMALL_H, icon_plug_zap_small_data);
         return;
     }
     init_icon_dsc_rgb565a8(&battery_dscs[0], ICON_BATTERY_W, ICON_BATTERY_H, icon_battery_data);
@@ -384,6 +396,7 @@ static void init_battery_icons(void) {
     init_icon_dsc_rgb565a8(&battery_dscs[2], ICON_BATTERY_MEDIUM_W, ICON_BATTERY_MEDIUM_H, icon_battery_medium_data);
     init_icon_dsc_rgb565a8(&battery_dscs[3], ICON_BATTERY_FULL_W, ICON_BATTERY_FULL_H, icon_battery_full_data);
     init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_W, ICON_BATTERY_CHARGING_H, icon_battery_charging_data);
+    init_icon_dsc_rgb565a8(&battery_dscs[5], ICON_PLUG_ZAP_W, ICON_PLUG_ZAP_H, icon_plug_zap_data);
 }
 
 // ======== Usage Screen ========
@@ -394,7 +407,7 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
     lv_obj_t* panel = make_panel(parent, L.margin, y, L.content_w, L.usage_panel_h);
 
     *out_pct = lv_label_create(panel);
-    lv_label_set_text(*out_pct, "---%");
+    lv_label_set_text(*out_pct, "--%");
     lv_obj_set_style_text_font(*out_pct, L.pct_font, 0);
     lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
     lv_obj_set_pos(*out_pct, 0, 0);
@@ -415,7 +428,41 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
 }
 
 // Pairing hint — shown when disconnected so the screen isn't empty and the
-// user knows how to (re)pair. Wording matches the 3-second release gesture.
+// user knows how to (re)pair. Boards with a PWR button name the 3-second
+// release gesture (main.cpp pair_tick); boards without one (LCD-4) name the
+// 5 s touch hold on this hint that clears an old pairing (pair_hold.h), and
+// only those lines change while the hold runs and after a clear.
+static void apply_pair_text(void) {
+    if (!pair_lines[0]) return;
+    const bool pwr = board_caps().has_pwr_button;
+    const char* l1 = "To pair";
+    const char* l2 = pwr ? "hold the power button" : "touch and hold here";
+    const char* l3 = pwr ? "for 3 seconds, then release" : "for 5 seconds";
+    const char* l4 = "";
+    // Only the touch hold talks back; the PWR hint stays as it is.
+    if (!pwr && pair_hint == PAIR_HINT_HOLDING) {
+        l4 = "keep holding...";
+    } else if (!pwr && pair_hint == PAIR_HINT_CLEARED) {
+        l1 = "Ready to pair";
+        l2 = "choose Clawdmeter";
+        l3 = "on your computer";
+    }
+    lv_label_set_text(pair_lines[0], l1);
+    lv_label_set_text(pair_lines[1], l2);
+    lv_label_set_text(pair_lines[2], l3);
+    lv_label_set_text(pair_lines[3], l4);
+    lv_obj_set_style_text_color(pair_lines[3], pair_hint == PAIR_HINT_NORMAL ? COL_DIM : COL_ACCENT, 0);
+}
+
+static lv_obj_t* make_pair_line(const lv_font_t* font, lv_color_t color, int16_t y) {
+    lv_obj_t* l = lv_label_create(pair_group);
+    lv_label_set_text(l, "");
+    lv_obj_set_style_text_font(l, font, 0);
+    lv_obj_set_style_text_color(l, color, 0);
+    lv_obj_align(l, LV_ALIGN_TOP_MID, 0, y);
+    return l;
+}
+
 static void build_pair_group(lv_obj_t* parent) {
     pair_group = lv_obj_create(parent);
     lv_obj_set_size(pair_group, L.scr_w, L.scr_h - L.content_y);
@@ -426,47 +473,22 @@ static void build_pair_group(lv_obj_t* parent) {
     lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    lv_obj_t* l1 = lv_label_create(pair_group);
-    lv_label_set_text(l1, "To pair");
-    lv_obj_set_style_text_font(l1, L.bt_status_font, 0);
-    lv_obj_set_style_text_color(l1, COL_TEXT, 0);
-    lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, L.pair_y1);
-
-    lv_obj_t* l2 = lv_label_create(pair_group);
-    lv_label_set_text(l2, "hold the power button");
-    lv_obj_set_style_text_font(l2, L.bt_device_font, 0);
-    lv_obj_set_style_text_color(l2, COL_DIM, 0);
-    lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, L.pair_y2);
-
-    lv_obj_t* l3 = lv_label_create(pair_group);
-    lv_label_set_text(l3, "for 3 seconds, then release");
-    lv_obj_set_style_text_font(l3, L.bt_device_font, 0);
-    lv_obj_set_style_text_color(l3, COL_DIM, 0);
-    lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, L.pair_y3);
+    pair_lines[0] = make_pair_line(L.bt_status_font, COL_TEXT, L.pair_y1);
+    pair_lines[1] = make_pair_line(L.bt_device_font, COL_DIM, L.pair_y2);
+    pair_lines[2] = make_pair_line(L.bt_device_font, COL_DIM, L.pair_y3);
+    pair_lines[3] = make_pair_line(L.bt_credit_2_font, COL_DIM, L.pair_y4);
+    apply_pair_text();
 
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);  // ui_update_ble_status decides
 }
 
-// Idle "Zzz" screen — shown when the host is connected but no usage update has
-// landed recently (token expired, daemon down, host asleep…). Full-screen, like
-// the pairing hint, so we never render hours-old numbers as if they were live.
-static void build_idle_group(lv_obj_t* parent) {
-    idle_group = lv_obj_create(parent);
-    lv_obj_set_size(idle_group, L.scr_w, L.scr_h - L.content_y);
-    lv_obj_set_pos(idle_group, 0, L.content_y);
-    lv_obj_set_style_bg_opa(idle_group, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(idle_group, 0, 0);
-    lv_obj_set_style_pad_all(idle_group, 0, 0);
-    lv_obj_clear_flag(idle_group, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(idle_group, LV_OBJ_FLAG_EVENT_BUBBLE);
+bool ui_pair_hint_visible(void) { return view_state == 0; }
 
-    // A shrunk-down resting creature (the official cloud-ride animation)
-    // sits between the header and the status line; the animated "Listening…"
-    // status line carries the words, so no extra text is needed here.
-    lv_obj_t* creature = splash_mini_create(idle_group, "cloud", L.idle_px);
-    if (creature) lv_obj_align(creature, LV_ALIGN_CENTER, 0, -20);
-
-    lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
+void ui_set_pair_hint(PairHint hint) {
+    if (hint == pair_hint) return;
+    pair_hint = hint;
+    pair_hint_since = lv_tick_get();
+    apply_pair_text();
 }
 
 static void init_usage_screen(lv_obj_t* scr) {
@@ -477,7 +499,6 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_border_width(usage_container, 0, 0);
     lv_obj_set_style_pad_all(usage_container, 0, 0);
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
@@ -498,7 +519,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    panel_session = make_usage_panel(usage_group, L.content_y, "Current",
+    panel_session = make_usage_panel(usage_group, L.content_y, "Session",
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
 
@@ -510,7 +531,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
 
     lbl_spending_desc = lv_label_create(panel_session);
-    lv_label_set_text(lbl_spending_desc, "of your monthly budget");
+    lv_label_set_text(lbl_spending_desc, "of spending limit");
     lv_obj_set_style_text_font(lbl_spending_desc, L.reset_font, 0);
     lv_obj_set_style_text_color(lbl_spending_desc, COL_DIM, 0);
     lv_obj_set_pos(lbl_spending_desc, 0, L.usage_reset_y);
@@ -530,7 +551,6 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_label_set_recolor(lbl_weekly_reset, true);
 
     build_pair_group(usage_container);
-    build_idle_group(usage_container);
 
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
@@ -540,29 +560,9 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
 }
 
-// ---- Attention: the mascot walk-on (splash_mascot_attention) plus the
-// message on the status line. Ends on a tap, after 2 minutes, or ui_hide_alert().
-static const uint32_t ALERT_TIMEOUT_MS = 120000;
-static bool        alert_active = false;
-static lv_timer_t* alert_timer;
-
-static void alert_timer_cb(lv_timer_t* t) { (void)t; ui_hide_alert(); }
-
-// Registered on the input device, so it sees every tap. A tap that dismisses
-// does nothing else.
-static void alert_tap_cb(lv_event_t* e) {
-    if (!alert_active) return;
-    ui_hide_alert();
-    lv_indev_stop_processing((lv_indev_t*)lv_event_get_user_data(e));
-}
-
-static void init_alert(void) {
-    alert_timer = lv_timer_create(alert_timer_cb, ALERT_TIMEOUT_MS, NULL);
-    lv_timer_pause(alert_timer);
-    lv_indev_t* indev = lv_indev_get_next(NULL);
-    if (indev) lv_indev_add_event_cb(indev, alert_tap_cb, LV_EVENT_CLICKED, indev);
-    lv_obj_set_style_text_align(lbl_anim, LV_TEXT_ALIGN_CENTER, 0);
-}
+// ---- Attention message on the status line (the director sequences the rest).
+static bool alert_active = false;
+static const char* still_shown = nullptr;   // minimal mode: status word on screen
 
 // ======== Public API ========
 
@@ -572,19 +572,30 @@ void ui_init(void) {
     lv_obj_t* scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    // The screen is a fixed room, not a scroll view. Left scrollable (the
+    // LVGL default), it grows a theme scrollbar (a faint 4 px grey bar ~6 px
+    // above the bottom edge) whenever Clawd walks past an edge, e.g. on a
+    // lurk trip or the screensaver's walk-off, and a drag could scroll it.
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
 
-#ifndef BOARD_HAS_PSRAM
-    // Static corner mascot (see clawd_still.h) — the animated one needs PSRAM.
+    // Static corner mascot (see clawd_still.h): fallback when the animated
+    // one can't get its buffer.
     if (L.small_icons) init_icon_dsc_rgb565a8(&logo_dsc, CLAWD_STILL_SMALL_W, CLAWD_STILL_SMALL_H, clawd_still_small_data);
     else               init_icon_dsc_rgb565a8(&logo_dsc, CLAWD_STILL_W, CLAWD_STILL_H, clawd_still_data);
-#endif
     init_battery_icons();
 
     init_usage_screen(scr);
-    splash_init(scr);
+    splash_init(scr);       // the stage room sits above the meters when open
 
-    if (splash_get_root()) {
-        lv_obj_add_event_cb(splash_get_root(), global_click_cb, LV_EVENT_CLICKED, NULL);
+    battery_img = lv_image_create(scr);
+    lv_image_set_src(battery_img, &battery_dscs[0]);
+    lv_obj_set_pos(battery_img, L.scr_w - L.batt_w - L.margin, L.batt_y);
+    // Boards without battery telemetry never show the indicator (per the HAL
+    // contract).
+    if (!board_caps().has_battery) {
+        lv_obj_del(battery_img);
+        battery_img = nullptr;
     }
 
     // Corner mascot in the old logo slot. The still Clawd is shorter than the
@@ -593,27 +604,26 @@ void ui_init(void) {
         const int slot  = L.small_icons ? LOGO_SMALL_HEIGHT : LOGO_HEIGHT;
         const int art_h = L.small_icons ? CLAWD_STILL_SMALL_H : CLAWD_STILL_H;
         const int top   = L.logo_y + (slot - art_h) / 2;
-#ifdef BOARD_HAS_PSRAM
-        // Animated: idles, does acts, and takes walk-off/lurk trips.
-        splash_mascot_create(scr, L.margin, top + art_h, L.small_icons ? 2 : 3);
-#else
-        logo_img = lv_image_create(scr);
-        lv_image_set_src(logo_img, &logo_dsc);
-        lv_obj_set_pos(logo_img, L.margin, top);
-#endif
+        const int cell  = L.small_icons ? 2 : 3;
+        // His tallest act (jumping happy, the fresh-window joy) rises well
+        // above the idle pose. Lower the seat just enough for it to clear the
+        // top edge, without sitting on the first panel. Where the layout has
+        // no room for that (240 px panels) the mascot swaps in a shorter
+        // official act instead of clipping (mascot.cpp).
+        const ClawdAnim* jump = clawd_anim("jumping happy");
+        const int feet = jump ? corner_seat_feet(top + art_h, jump->h * cell, L.content_y - 4, 2)
+                              : top + art_h;
+        // Animated: idles, does acts, and takes walk-off/lurk trips (the
+        // trips need PSRAM; without it he stays in his seat).
+        // Created last so he walks over the battery and the stage.
+        if (!mascot_create(scr, L.margin, feet, cell)) {
+            logo_img = lv_image_create(scr);
+            lv_image_set_src(logo_img, &logo_dsc);
+            lv_obj_set_pos(logo_img, L.margin, top);
+        }
     }
 
-    battery_img = lv_image_create(scr);
-    lv_image_set_src(battery_img, &battery_dscs[0]);
-    lv_obj_set_pos(battery_img, L.scr_w - L.batt_w - L.margin, L.batt_y);
-    // Boards without battery telemetry never show the indicator (per the HAL
-    // contract; previously every board drew the empty-battery glyph).
-    if (!board_caps().has_battery) {
-        lv_obj_del(battery_img);
-        battery_img = nullptr;
-    }
-
-    init_alert();
+    lv_obj_set_style_text_align(lbl_anim, LV_TEXT_ALIGN_CENTER, 0);
 }
 
 void ui_update(const UsageData* data) {
@@ -646,7 +656,7 @@ void ui_update(const UsageData* data) {
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_set_style_text_font(lbl_session_pct, L.pct_font, 0);
-        lv_label_set_text(lbl_session_label, "Current");
+        lv_label_set_text(lbl_session_label, "Session");
         lv_obj_clear_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
@@ -672,7 +682,7 @@ void ui_update(const UsageData* data) {
                         LV_ALIGN_OUT_RIGHT_TOP, 4, 12);
     } else {
         lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
-        format_reset_time(data->session_reset_mins, buf, sizeof(buf));
+        format_reset_time(data->session_reset_mins, buf, sizeof(buf), "Not started");
         lv_label_set_text(lbl_session_reset, buf);
     }
 
@@ -696,38 +706,46 @@ void ui_update(const UsageData* data) {
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
         lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
         lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
-        format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
+        format_reset_time(data->weekly_reset_mins, buf, sizeof(buf), "---");
         lv_label_set_text(lbl_weekly_reset, buf);
     }
 }
 
-// Pick the usage-view sub-screen: pairing hint (BLE down), the idle "Zzz" screen
-// (connected but data has gone stale), or the live usage panels. Only re-lays-out
-// on an actual change. The animated status line stays visible everywhere — it
-// reads "Listening…" on the idle screen, keeping it alive rather than frozen.
+// Pick the usage-view sub-screen: pairing hint (BLE down), stale meters
+// (connected but data has gone stale: dimmed, last values kept), or the live
+// meters. Only restyles on an actual change. The animated status line stays
+// visible everywhere and names the state.
 static void update_view_state(void) {
-    if (!usage_group || !pair_group || !idle_group) return;
+    if (!usage_group || !pair_group) return;
     int v;
     if (!s_ble_connected) {
         v = 0;  // pairing hint
     } else if (data_received && data_ok && (lv_tick_get() - last_data_ms) < DATA_FRESH_MS) {
         v = 2;  // live usage
     } else {
-        v = 1;  // idle / Zzz
+        v = 1;  // stale
     }
     if (v == view_state) return;
     view_state = v;
-    lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group : usage_group,
-                      LV_OBJ_FLAG_HIDDEN);
+    if (v == 0) {
+        lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
+        // `opa` (not `opa_layered`) scales every draw of the group and its
+        // children: no layer buffer, so it costs nothing on the C6.
+        lv_obj_set_style_opa(usage_group, v == 1 ? STALE_OPA : LV_OPA_COVER, 0);
+    }
 }
 
+bool ui_meters_live(void) { return view_state == 2; }
+
 void ui_tick_anim(void) {
-    if (current_screen != SCREEN_USAGE) return;
     update_view_state();
-    if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
+    if (pair_hint == PAIR_HINT_CLEARED && lv_tick_get() - pair_hint_since >= PAIR_CLEARED_SHOW_MS)
+        ui_set_pair_hint(PAIR_HINT_NORMAL);
+    const bool still = minimal_mode();   // minimal: nothing moves but the numbers
 
     uint32_t now = lv_tick_get();
 
@@ -754,6 +772,19 @@ void ui_tick_anim(void) {
 
     if (alert_active) return;          // the status line holds the alert message
 
+    if (still) {
+        // One glyph, one word per state; redrawn only when it changes.
+        const char* text = !s_ble_connected ? "Waiting"
+                         : view_state == 1 ? (data_received ? "Stale" : "No data") : "Connected";
+        if (text != still_shown) {
+            still_shown = text;
+            static char sbuf[40];
+            snprintf(sbuf, sizeof(sbuf), "%s %s", spinner_frames[1], text);
+            lv_label_set_text(lbl_anim, sbuf);
+        }
+        return;
+    }
+
     if (now - anim_msg_start >= ANIM_MSG_MS) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
         anim_msg_start = now;
@@ -769,8 +800,8 @@ void ui_tick_anim(void) {
     const char* text;
     if (!s_ble_connected) {
         text = "Waiting";              // advertising / waiting for a host connection
-    } else if (view_state == 1) {      // idle — alternate so it reads as alive AND data-less
-        text = (anim_msg_idx & 1) ? "No data" : "Listening";
+    } else if (view_state == 1) {      // stale — alternate so it reads as alive AND not live
+        text = (anim_msg_idx & 1) ? (data_received ? "Stale" : "No data") : "Listening";
     } else if (now - connected_at_ms < 5000) {
         text = "Connected";
     } else {
@@ -784,47 +815,8 @@ void ui_tick_anim(void) {
     lv_label_set_text(lbl_anim, buf);
 }
 
-static screen_t prev_non_splash_screen = SCREEN_USAGE;
 static void apply_battery_visibility(void) {
-    if (!battery_img) return;
-    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-    else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-}
-
-static void global_click_cb(lv_event_t* e) {
-    (void)e;
-    if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
-    else                                  ui_show_screen(SCREEN_SPLASH);
-}
-
-void ui_show_screen(screen_t screen) {
-    lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
-    splash_hide();
-
-    switch (screen) {
-    case SCREEN_SPLASH:  splash_show(); break;
-    case SCREEN_USAGE:   lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
-    default: break;
-    }
-
-    splash_mascot_set_visible(screen != SCREEN_SPLASH);
-    if (logo_img) {
-        if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-    }
-
-    if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
-    current_screen = screen;
-    apply_battery_visibility();
-}
-
-void ui_toggle_splash(void) {
-    if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
-    else                                  ui_show_screen(SCREEN_SPLASH);
-}
-
-screen_t ui_get_current_screen(void) {
-    return current_screen;
+    if (battery_img) lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
 void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) {
@@ -837,10 +829,12 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
     update_view_state();
 }
 
-void ui_update_battery(int percent, bool charging) {
+void ui_update_battery(int percent, bool charging, bool usb_power) {
     if (!battery_img) return;
     int idx;
-    if (charging) {
+    if (percent < 0 && usb_power) {
+        idx = 5;   // no battery, running on USB: show the plug-zap glyph, not an empty battery
+    } else if (charging) {
         idx = 4;
     } else if (percent < 0) {
         idx = 0;
@@ -857,22 +851,20 @@ void ui_update_battery(int percent, bool charging) {
     apply_battery_visibility();
 }
 
-void ui_show_alert(const char* message) {
-    alert_active = true;
-    if (current_screen == SCREEN_SPLASH) ui_show_screen(SCREEN_USAGE);
-    splash_mascot_attention(true);
-    lv_label_set_long_mode(lbl_anim, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_obj_set_width(lbl_anim, L.content_w);
-    lv_label_set_text(lbl_anim, message);
-    lv_timer_reset(alert_timer);
-    lv_timer_resume(alert_timer);
-}
-
-void ui_hide_alert(void) {
+void ui_set_alert_text(const char* message) {
+    if (message && message[0]) {
+        alert_active = true;
+        // Minimal mode: nothing moves, so a long message is cut, not scrolled.
+        lv_label_set_long_mode(lbl_anim, minimal_mode() ? LV_LABEL_LONG_DOT
+                                                        : LV_LABEL_LONG_SCROLL_CIRCULAR);
+        lv_obj_set_width(lbl_anim, L.content_w);
+        lv_label_set_text(lbl_anim, message);
+        return;
+    }
     if (!alert_active) return;
     alert_active = false;
-    splash_mascot_attention(false);
     lv_label_set_long_mode(lbl_anim, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl_anim, LV_SIZE_CONTENT);
-    lv_timer_pause(alert_timer);
+    anim_last_ms = 0;          // whimsical line redraws on the next tick
+    still_shown = nullptr;
 }

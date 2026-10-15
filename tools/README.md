@@ -1,10 +1,14 @@
 # Asset tools
 
+Run the commands from the repository root. They need Node.js; the splash
+converter also needs ImageMagick, and the icon converter `pngjs`
+(`npm install --no-save pngjs` in `tools/`, which is git-ignored).
+
 ## Splash animations
 
 ```bash
-node convert_official_clawd.js
-node convert_official_clawd.js --verify /tmp/verify   # + per-animation PNGs
+node tools/convert_official_clawd.js
+node tools/convert_official_clawd.js --verify /tmp/verify   # + per-animation PNGs
 ```
 
 Converts the official Anthropic Clawd animations archived in
@@ -28,7 +32,7 @@ running.
 ## Icons
 
 ```bash
-node png_to_lvgl.js input.png symbol_name [W_MACRO] [H_MACRO] [--tint=RRGGBB | --no-tint]
+node tools/png_to_lvgl.js input.png symbol_name [W_MACRO] [H_MACRO] [--tint=RRGGBB | --no-tint]
 ```
 
 Converts an alpha PNG to an LVGL RGB565A8 C array. Default tint is white —

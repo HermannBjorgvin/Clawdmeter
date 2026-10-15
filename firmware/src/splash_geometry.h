@@ -6,7 +6,7 @@
 // test/test_splash_geometry/). Decides the in-buffer pixel size of each grid
 // cell and the LVGL image scale needed to fill the panel.
 //
-// PSRAM boards render the canvas at full panel size (scale = 1.0x) as before.
+// PSRAM boards render the canvas at full panel size (scale = 1.0x).
 // PSRAM-less boards (e.g. the ESP32-C6 sibling) cannot hold a 480x480 RGB565
 // framebuffer (460 KB) in internal SRAM, so they render a tiny 60x60 buffer
 // (~7 KB) and let LVGL upscale it with nearest-neighbour. A full-screen
