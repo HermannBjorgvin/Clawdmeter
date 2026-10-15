@@ -1,11 +1,12 @@
 //! The handful of controls the window needs, drawn with the design tokens:
-//! buttons, pills, toggles, segmented choices, setting rows, icons and Clawd.
+//! buttons, pills, toggles, segmented choices, a stepped slider, setting
+//! rows, icons and Clawd.
 
 use std::time::Duration;
 
 use gpui::{
-    canvas, div, fill, percentage, point, prelude::*, px, rgb, size, svg, Animation, AnimationExt as _, AnyView, App,
-    Bounds, ClickEvent, ElementId, Hsla, Rgba, SharedString, Svg, Transformation, Window,
+    canvas, div, fill, percentage, point, prelude::*, px, relative, rgb, size, svg, Animation, AnimationExt as _,
+    AnyView, App, Bounds, ClickEvent, ElementId, Hsla, MouseButton, Rgba, SharedString, Svg, Transformation, Window,
 };
 
 use super::theme::{Theme, FONT_BODY, FONT_DISPLAY, FONT_MONO, R_ITEM, R_M, R_PILL, R_S};
@@ -368,6 +369,128 @@ pub fn segmented<V: Clone + PartialEq + 'static>(
         row = row.child(seg);
     }
     row
+}
+
+/// A slider over a few fixed stops (1..=`count`), the knob on `selected`.
+/// It fills its row (up to a comfortable width) and centres there. Press a
+/// stop to pick it, or drag across them. `labels` name some stops
+/// underneath: the first and last line up with the end stops, the others
+/// sit centred under theirs.
+pub fn stepped_slider(
+    t: &Theme,
+    id: &str,
+    count: u8,
+    selected: u8,
+    labels: &[(u8, &str)],
+    enabled: bool,
+    on_select: impl Fn(u8, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    const MAX_W: f32 = 560.;
+    const KNOB: f32 = 18.;
+    const DOT: f32 = 6.;
+    const TRACK_H: f32 = 4.;
+    const LABEL_Y: f32 = 28.;
+    const LABEL_W: f32 = 160.;
+    let count = count.max(2);
+    let selected = selected.clamp(1, count);
+    // Stops as fractions of the rail, which runs between the end stops'
+    // centres (inset by half a knob, so the knob never pokes out).
+    let at = |i: u8| (i - 1) as f32 / (count - 1) as f32;
+    let half_step = 0.5 / (count - 1) as f32;
+    let ink = if enabled { t.accent } else { t.mute };
+    let track_y = (KNOB - TRACK_H) / 2.;
+    let h = LABEL_Y + 16.;
+
+    let mut rail = div()
+        .absolute()
+        .left(px(KNOB / 2.))
+        .right(px(KNOB / 2.))
+        .top(px(0.))
+        .h(px(h))
+        // The track, and the part of it up to the knob.
+        .child(div().absolute().left_0().top(px(track_y)).w_full().h(px(TRACK_H)).rounded(px(R_PILL)).bg(t.track))
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top(px(track_y))
+                .w(relative(at(selected)))
+                .h(px(TRACK_H))
+                .rounded(px(R_PILL))
+                .bg(ink),
+        );
+    for i in 1..=count {
+        rail = rail.child(
+            div()
+                .absolute()
+                .left(relative(at(i)))
+                .ml(px(-DOT / 2.))
+                .top(px((KNOB - DOT) / 2.))
+                .size(px(DOT))
+                .rounded(px(R_PILL))
+                .bg(if i <= selected { ink } else { t.line }),
+        );
+    }
+    rail = rail.child(
+        div()
+            .absolute()
+            .left(relative(at(selected)))
+            .ml(px(-KNOB / 2.))
+            .top(px(0.))
+            .size(px(KNOB))
+            .rounded(px(R_PILL))
+            .border_3()
+            .border_color(t.surface)
+            .bg(ink),
+    );
+    for &(i, text) in labels {
+        let on = i == selected;
+        let label = div()
+            .absolute()
+            .top(px(LABEL_Y))
+            .flex()
+            .text_size(px(12.5))
+            .whitespace_nowrap()
+            .text_color(if on && enabled { t.text } else { t.mute })
+            .child(SharedString::from(text.to_string()));
+        rail = rail.child(if i == 1 {
+            label.left(px(-KNOB / 2.))
+        } else if i == count {
+            label.right(px(-KNOB / 2.))
+        } else {
+            label.left(relative(at(i))).ml(px(-LABEL_W / 2.)).w(px(LABEL_W)).justify_center()
+        });
+    }
+    if enabled {
+        let on_select = std::rc::Rc::new(on_select);
+        for i in 1..=count {
+            let (press, drag) = (on_select.clone(), on_select.clone());
+            let from = (at(i) - half_step).max(0.);
+            let to = (at(i) + half_step).min(1.);
+            rail = rail.child(
+                div()
+                    .id(SharedString::from(format!("{id}-{i}")))
+                    .debug_selector(|| format!("{id}-{i}"))
+                    .absolute()
+                    .left(relative(from))
+                    .top(px(0.))
+                    .w(relative(to - from))
+                    .h(px(h))
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_, w, cx| {
+                        if i != selected {
+                            press(i, w, cx)
+                        }
+                    })
+                    .on_mouse_move(move |e, w, cx| {
+                        if e.pressed_button == Some(MouseButton::Left) && i != selected {
+                            drag(i, w, cx)
+                        }
+                    }),
+            );
+        }
+    }
+    div().id(SharedString::from(id.to_string())).relative().w_full().max_w(px(MAX_W)).h(px(h)).child(rail)
 }
 
 /// A settings row: label + help on the left, the control on the right.

@@ -1,7 +1,7 @@
 #pragma once
 
 // Native desktop simulator "board" — an SDL2 window standing in for the
-// 480×480 AMOLED so shared code (main.cpp, ui.cpp, splash.cpp) can be
+// 480×480 AMOLED so shared code (main.cpp, ui.cpp, the director) can be
 // developed without hardware. No pins here, just geometry and the key map.
 //
 //   mouse / left-drag    touch (on the meters he reacts; elsewhere "show me the meters")
@@ -31,7 +31,9 @@
 // SIM_TAPS="ms@x,y;ms@x,y+hold" presses the panel at those times (120 ms, or
 // `hold` ms); SIM_NO_PWR=1 plays a board without a PWR button; SIM_FAST=1
 // compresses the director's minutes into seconds (sim/director.jsonl);
-// SIM_MINIMAL=1 plays a minimal-mode board. SIM_CMDS="ms:cmd;ms:cmd" types
+// SIM_MINIMAL=1 plays a minimal-mode board, SIM_CIRCLE=1 a round panel,
+// SIM_BUTTONS=1 a board with BOOT only. SIM_CTRL_FD hands the sim to a
+// controller (sim_ctrl.cpp, tools/simgrid). SIM_CMDS="ms:cmd;ms:cmd" types
 // serial commands at those times (`pwr`, `prompt`, `stop`, `alert` are the
 // PWR button, the e / t hook events and the m alert toggle). SIM_TRACE=1 prints every director step.
 

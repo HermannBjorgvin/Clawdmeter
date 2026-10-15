@@ -28,8 +28,9 @@ static bool     pending = false;      // a state is queued for main's next poll
 static uint32_t delivered_ms = 0;
 
 // Keyboard-injected payloads (sim_inject_*): the current state's payload with
-// a few fast-clock keys overlaid, delivered ahead of the scenario.
-#define MAX_INJECT 4
+// a few fast-clock keys overlaid, delivered ahead of the scenario. Under a
+// controller every payload comes this way (sim_ble_push), with no scenario.
+#define MAX_INJECT 8
 static char     inject_q[MAX_INJECT][MAX_LINE];
 static int      inject_n = 0;
 static bool     es_delivered = false;   // some payload carried `es` (signals has a baseline)
@@ -96,10 +97,19 @@ static void refresh_title(void) {
 }
 
 void ble_init(void) {
+    if (sim_ctrl_active()) return;   // payloads arrive through sim_ble_push()
     load_scenario();
     pending = true;
     refresh_title();
 }
+
+void sim_ble_push(const char* json) {
+    if (inject_n >= MAX_INJECT) return;
+    snprintf(inject_q[inject_n], MAX_LINE, "%s", json);
+    inject_n++;
+}
+
+void sim_ble_set_link(bool c) { connected = c; }
 
 void ble_tick(void) {
     if (!connected || pending || !playing || n_states == 0) return;

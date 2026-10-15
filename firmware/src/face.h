@@ -9,8 +9,8 @@
 // board, PSRAM or not. Rising and dropping redraw only the rows the field
 // gains or loses plus the eyes, not the whole face, every frame.
 //
-// It is both a room (the screensaver) and the curtain the other rooms change
-// behind: it rises from behind the bottom bezel and drops back below it,
+// It's Clawd come up to the glass: the screensaver, and the peek when you
+// tap the meters. It rises from behind the bottom bezel and drops back below it,
 // straight up and down with a flat top edge, arms on the rise, squash and
 // stretch and follow-through (face_motion.h). Owned and sequenced by the
 // director.
@@ -24,11 +24,10 @@ void face_drop(void);          // anticipation hop, then down behind the bezel; 
 void face_hide_now(void);      // no animation (mode switch / reset only)
 
 bool face_visible(void);       // any part of it on screen
-bool face_up(void);            // fully up and not moving
 bool face_moving(void);        // rising (until settled) or dropping
 bool face_busy(void);          // moving, blinking or glancing
 
-void face_blink(bool twice);   // the noticing beat; also used as the curtain blink
+void face_blink(bool twice);   // the noticing beat
 void face_set_resting(bool on);// irregular blinks + glances while up
 // Look toward screen x (a tap): the eyes glance proportionally (up to 1.5x
 // the resting glance, far eye 1.5x on top), hold for hold_ms, then come back

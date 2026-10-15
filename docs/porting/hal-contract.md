@@ -101,18 +101,17 @@ function in your board folder only when it has something to report.
 | `unpair`                  | clears every BLE bond and re-advertises. Replies `{"unpair":true}`. |
 | `ble`                     | `BLE status:` lines: state, bond count, owner, then each connected peer's address, identity address, encryption and bond flags. |
 | `disconnect`              | drops every BLE connection (no reply); the board re-advertises. |
-| `perf`                    | prints the redraw cost (refreshes, time, pixels sent, longest gap) of the last face rise, settle, drop and streak. |
+| `perf`                    | prints the redraw cost (refreshes, time, pixels sent, longest gap) of the last face rise, settle, drop and performance. |
 | `info`                    | one JSON line: `{"env":"waveshare_amoled_18","ver":"v1.9.0","rev":"co5300_cst816","link":"ble"}`. `env` comes from `-DCLAWD_ENV` (set per env in `platformio.ini` from `${this.__env__}`), `ver` from `-DCLAWD_VERSION` (defaults to `dev`; CI sets `PLATFORMIO_BUILD_FLAGS='-DCLAWD_VERSION=\"vX.Y.Z\"'`), `rev` from `board_hal_rev()`. |
 | `clawd <beat>`            | starts a Clawd beat now, for `screenshot` QA without waiting for the situation: `show`, `screensaver`, `attention`, `joy`, `lurk` (a lurk trip, PSRAM boards), `peek [x]` (curious face), `home` (return home). Replies `{"clawd":"show","ok":true}`. See `docs/clawd-director.md`. |
 
 ## Layout and visual checks
 
-`ui.cpp::compute_layout()` uses the board dimensions. It includes a small
-layout for 240-pixel panels, a compact portrait layout, and a large layout
-for heights of at least 460 pixels. Inspect the function when adding a
-size; sharing a breakpoint does not guarantee that every label fits.
+The meters layout comes from `BoardCaps.width`, `height` and `round_panel`
+(`layout.cpp`, described in [Add a board](adding-a-board.md#the-meters-layout)).
+Add the panel's size to `test_layout` to check that every label fits.
 
-The stage uses a 60×60-cell coordinate system, with cell size derived from
+Clawd's full-size performances use a 60×60-cell coordinate system, with cell size derived from
 `min(width, height) / 60`. Corner Clawd has a separate seat and scale.
 Check meters, spend-only accounts, pairing, stale data, attention, the
 face, and minimal display on the new panel. Use `perf` to inspect redraw

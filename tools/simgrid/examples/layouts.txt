@@ -1,0 +1,16 @@
+# The meters, a spend-capped account, the pairing hint and minimal attention
+# on every board: a quick layout review.
+#   python3 tools/simgrid/simgrid.py run tools/simgrid/examples/layouts.txt
+step 6000
+shot /tmp/simgrid-meters.png
+clock 12
+step 1000
+shot /tmp/simgrid-meters-12h.png
+clock 24
+preset enterprise
+step 1000
+shot /tmp/simgrid-enterprise.png
+preset usage
+link false
+step 1000
+shot /tmp/simgrid-pairing.png

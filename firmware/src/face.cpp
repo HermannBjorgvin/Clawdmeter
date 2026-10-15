@@ -45,7 +45,6 @@ static bool     settling = false;   // the rise reached rest; perf's settle wind
 static int      anim_var;           // lv_anim's handle for the motion
 
 static bool moving = false;
-static bool rising = false;
 static bool visible = false;
 static bool resting = false;
 
@@ -284,7 +283,7 @@ static void start_motion(FaceMove m) {
     if (moving) perf_end(perf_window());
     if (!visible) {
         // Coming up from all the way down: nothing on screen yet, so it
-        // shows and goes on top of the streak without a redraw.
+        // shows and goes on top of the overlay layer without a redraw.
         pose = gone_pose();
         apply_pose();
         field_show(&field);
@@ -312,7 +311,6 @@ static void start_motion(FaceMove m) {
 
 static void rise(int interest) {
     if (!root) return;
-    rising = true;
     interest_g = interest;
     blink_phase = 0; glance_phase = 0;
     set_squint(false);
@@ -333,7 +331,6 @@ void face_rise_toward(int x) {
 
 void face_drop(void) {
     if (!root || !visible) return;
-    rising = false;
     resting = false;
     // Eyes open and front-facing as it goes: he's looking at you, then away.
     blink_phase = 0;
@@ -349,7 +346,7 @@ void face_hide_now(void) {
     lv_anim_delete(&anim_var, NULL);
     lv_anim_delete(&glance_cur, NULL);
     if (moving) perf_end(perf_window());
-    moving = false; rising = false; resting = false;
+    moving = false; resting = false;
     blink_phase = 0; glance_phase = 0; glance_cur = 0; interest_g = 0;
     set_squint(false);
     rest_hidden();
@@ -357,7 +354,6 @@ void face_hide_now(void) {
 
 bool face_visible(void) { return visible; }
 bool face_moving(void)  { return moving; }
-bool face_up(void)      { return visible && !moving && rising; }
 bool face_busy(void)    { return moving || blink_phase != 0 || glance_phase != 0; }
 
 void face_blink(bool twice) {

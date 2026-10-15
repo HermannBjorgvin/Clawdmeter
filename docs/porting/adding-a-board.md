@@ -33,7 +33,8 @@ the corresponding capabilities accurately.
 
 1. Copy `firmware/src/boards/template` to a new board folder.
 2. Fill in `board.h`: pins, I2C addresses, display dimensions, and flags.
-   Keep these local to the board.
+   Keep these local to the board. In `caps.cpp`, set `round_panel = true`
+   if the glass is round (see [the meters layout](#the-meters-layout)).
 3. Implement `board_init.cpp` and the display, touch, input, power, IMU,
    sound, and capability sources. Release reset lines and enable power
    rails before initializing the display or touch controller.
@@ -51,6 +52,50 @@ the corresponding capabilities accurately.
    snapshots; inspect the physical display. Simulator captures supplement
    hardware checks but do not replace them.
 
+## The meters layout
+
+A board gets its layout from its shape alone: `layout_compute()` in
+`firmware/src/layout.cpp` takes `BoardCaps.width`, `height` and
+`round_panel` and places the header, the two cards, the status line and
+the pairing hint. There is no per-board layout code, and `ui.cpp` only
+draws what the layout says.
+
+Three tuned designs set the type and spacing: large (480×480), compact
+(368×448) and small (240×240). A panel takes the largest one whose cards,
+title and status line fit, measured with the real fonts. Then, by shape:
+
+- **Narrow** (cards too narrow for their rows): short pill labels ("5h",
+  "7d"), tighter margins, smaller pill and reset text, then smaller
+  numbers. The title steps down a size, or hides where the header has no
+  room for it; the pairing hint wraps.
+- **Tall**: height beyond a comfortable band under the cards goes to taller
+  cards, a wider gap and a lower start.
+- **Short** (under the small design's 240 px): the status line, cards and
+  gaps squeeze.
+- **Round** (`round_panel`): the cards are centred and as wide as the
+  circle allows at their corners; the header sits right above them and the
+  status line right under them, both inside the circle (the small header
+  when the large one doesn't fit the chord).
+
+Any text that might not fit is planned for: the 12-hour clock and the
+spend-capped period line take a smaller size when their widest string
+doesn't fit, and status-line verbs too wide for the panel are skipped. The
+strings the layout sizes for live in `firmware/src/ui_text.h`.
+
+To check a new size, add it to `PANELS` in
+`firmware/test/test_layout/test_main.cpp` and run
+`pio test -d firmware -e native -f test_layout`. The test fails on anything
+off the glass, overlapping, or too wide for its slot. Then capture it in the
+simulator (`SIM_LCD_W` / `SIM_LCD_H`, plus `SIM_CIRCLE=1` for a round
+panel) and look at the meters, the pairing hint, a spend-capped account,
+stale data, attention and minimal mode.
+
+Add a rule to `layout.cpp` only when a whole class of panel looks wrong and
+the test can say why. Key it on shape (narrow, short, aspect, round), never
+on exact dimensions or a board name, and add a `PANELS` entry that needs it.
+A landscape strip with side-by-side cards would be such a rule: another
+arrangement of the cards, chosen when stacking them doesn't fit.
+
 ## Include the board in the app and docs
 
 A new port must include:
@@ -63,9 +108,13 @@ A new port must include:
   `desktop/crates/clawdmeter-app/src/boards.rs`, plus the SVG registration
   in `desktop/crates/clawdmeter-app/src/ui/mod.rs`.
 - An entry with the display name and buy link in the README's
-  **Supported boards** table. Waveshare product links must include
+  **Supported boards** table (new ports start under **Experimental**; a
+  report in the "Board support reports" discussion moves them to Stable).
+  Waveshare product links must include
   `?aff_id=149786` (or `&aff_id=149786` when a query already exists).
-  Other vendors use a plain product link. Apply this to the app entry too.
+  Other vendors use a plain product link to the maker's own store. When
+  the maker has no store of its own, a marketplace listing (Amazon,
+  AliExpress) is fine. Apply this to the app entry too.
 - A display-name entry in `tools/ci/make_manifest.py`'s `DISPLAY_NAMES`.
   Confirm that the environment, release manifest, and app catalog agree.
 
@@ -85,7 +134,7 @@ human-involvement notes.
 | RGB tearing or crash | Follow the LCD-4 bounce-buffer setup. Do not create a second RGB panel by calling `getFrameBuffer()` after initialization. |
 | Battery brownout on LCD-1.54 | Drive its power-hold line HIGH early in board initialization. |
 | Wrong implementation linked | Check `build_src_filter` order: exclude all board folders, then include exactly one. |
-| Animation clips | Inspect `compute_layout()` at the actual dimensions. Keep display-size decisions there; use capabilities for hardware differences. |
+| Text clipped or overlapping | Add the panel to `test_layout`'s `PANELS`; the failure names the element. Fix it with a shape rule in `layout.cpp`, not a board check. |
 
 Choose drivers compatible with the project's dependency policy. A small
 independently implemented I2C reader may be appropriate when no suitable

@@ -5,7 +5,7 @@
 #include <XPowersLib.h>
 
 // PWR button comes from AXP2101 PKEY IRQs:
-//   SHORT    — quick tap (cycle splash animations)
+//   SHORT    — quick tap (cycle brightness)
 //   LONG     — ~1.5s mark, starts the hold-to-pair countdown
 //   POSITIVE — release edge, completes/cancels the gesture
 

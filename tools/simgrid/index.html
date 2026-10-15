@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clawdmeter sim grid</title>
+<style>
+  :root { --bg: #161616; --panel: #1f1f1f; --line: #333; --text: #e8e6e1; --dim: #9a9893; --accent: #d97757; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, sans-serif; display: flex; height: 100vh; }
+  aside { width: 300px; flex: none; overflow-y: auto; background: var(--panel); border-right: 1px solid var(--line); padding: 10px 12px 40px; }
+  main { flex: 1; overflow: auto; padding: 14px; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 18px; }
+  h1 { font-size: 15px; margin: 0 0 6px; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin: 14px 0 6px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 6px; }
+  button { background: #2b2b2b; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 9px; font: inherit; cursor: pointer; }
+  button:hover { border-color: #555; }
+  button.on { background: var(--accent); border-color: var(--accent); color: #141413; }
+  input, select { background: #111; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font: inherit; min-width: 0; }
+  input[type=range] { flex: 1; }
+  label { color: var(--dim); }
+  #clock { font: 600 22px/1 ui-monospace, monospace; }
+  #err { color: #e06c5a; min-height: 1.2em; white-space: pre-wrap; }
+  .cell { display: flex; flex-direction: column; gap: 4px; }
+  .cell .name { font-weight: 600; }
+  .cell .boards { color: var(--dim); font-size: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cell img { display: block; image-rendering: pixelated; cursor: crosshair; background: #000; user-select: none; -webkit-user-drag: none; }
+  .cell img.round { border-radius: 50%; }
+  .cell .tag { color: var(--accent); font-size: 11px; }
+  #menu { position: fixed; display: none; background: var(--panel); border: 1px solid #444; border-radius: 8px; padding: 4px; z-index: 10; min-width: 190px; box-shadow: 0 6px 20px #0008; }
+  #menu div { padding: 6px 10px; border-radius: 5px; cursor: pointer; }
+  #menu div:hover { background: #333; }
+  #menu .head { color: var(--dim); cursor: default; font-size: 12px; }
+  #menu .head:hover { background: none; }
+</style>
+</head>
+<body>
+<aside>
+  <h1>Clawdmeter sim grid</h1>
+  <div class="row"><span id="clock">0.0 s</span></div>
+  <div class="row">
+    <button id="play">Play</button>
+    <button data-step="100">+0.1 s</button><button data-step="1000">+1 s</button><button data-step="10000">+10 s</button><button data-step="60000">+1 min</button>
+  </div>
+  <div id="err"></div>
+
+  <h2>Usage</h2>
+  <div class="row" id="presets"></div>
+  <div class="row"><label>Session</label><input type="range" id="s" min="0" max="100" value="42"><span id="sv">42</span></div>
+  <div class="row"><label>Weekly</label><input type="range" id="w" min="0" max="100" value="33"><span id="wv">33</span></div>
+  <div class="row"><button id="stale">Stop heartbeat (stale)</button><button id="clock12">12-hour clock</button></div>
+
+  <h2>Hooks and attention</h2>
+  <div class="row"><label>Activity</label><button data-act="0">0</button><button data-act="1">1</button><button data-act="2">2</button><button data-act="3">3</button></div>
+  <div class="row"><button data-ev="p">Prompt event</button><button data-ev="s">Stop event</button></div>
+  <div class="row"><input id="msg" value="Claude needs your permission" style="flex:1"></div>
+  <div class="row"><button id="alert">Alert</button><button id="clear">Clear</button></div>
+
+  <h2>Clawd</h2>
+  <div class="row" id="beats"></div>
+  <div class="row"><label>Liveliness</label><span id="lv"></span></div>
+
+  <h2>Device</h2>
+  <div class="row"><button id="link" class="on">BLE link</button></div>
+  <div class="row"><label>Battery</label><input type="range" id="bat" min="0" max="100" value="87"><span id="batv">87</span></div>
+  <div class="row"><button id="chg">Charging</button><button id="usb">USB only</button></div>
+  <div class="row"><input id="serial" placeholder="serial command, e.g. clawd peek 100" style="flex:1"><button id="send">Send</button></div>
+
+  <h2>Scenario</h2>
+  <div class="row"><input id="scn" value="sim/scenario.jsonl" style="flex:1"><button id="load">Load</button></div>
+  <div class="row"><button id="splay">Play</button><button id="spause">Pause</button><button data-sstep="-1">◀</button><button data-sstep="1">▶</button></div>
+  <div class="row"><span id="scene" style="color:var(--dim)"></span></div>
+
+  <h2>Record</h2>
+  <div class="row"><select id="target"><option value="">Whole grid</option></select></div>
+  <div class="row"><input id="shotpath" value="/tmp/simgrid.png" style="flex:1"><button id="shot">Screenshot</button></div>
+  <div class="row"><input id="recpath" value="/tmp/simgrid.gif" style="flex:1"><button id="rec">Record</button></div>
+  <div class="row"><label>fps</label><input id="fps" type="number" value="15" style="width:56px"><label>scale</label><input id="rscale" type="number" value="0.5" step="0.1" style="width:56px"></div>
+
+  <h2>View</h2>
+  <div class="row"><label>Zoom</label><select id="zoom"><option>0.5</option><option selected>0.75</option><option>1</option><option>1.5</option></select></div>
+  <p style="color:var(--dim)">Click a panel to touch it (hold for a long touch); right-click for its buttons.</p>
+</aside>
+<main id="grid"></main>
+<div id="menu"></div>
+<script>
+const $ = id => document.getElementById(id);
+let status = null, cells = {}, zoom = 0.75;
+
+async function api(action, kwargs = {}, args = []) {
+  const r = await fetch('/api/' + action, { method: 'POST', body: JSON.stringify({ args, kwargs }) });
+  const j = await r.json();
+  $('err').textContent = r.ok ? '' : (j.error || 'error');
+  return j;
+}
+
+function build(st) {
+  const grid = $('grid');
+  grid.innerHTML = '';
+  for (const b of st.boards) {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    const img = document.createElement('img');
+    img.className = b.round ? 'round' : '';
+    img.width = Math.round(b.w * zoom); img.height = Math.round(b.h * zoom);
+    img.draggable = false;
+    const [name, boards] = b.label.split(' · ');
+    cell.innerHTML = `<div class="name">${name} · ${b.id} ${b.on_main ? '' : '<span class="tag">port PR</span>'}</div><div class="boards" title="${boards}">${boards}</div>`;
+    cell.style.width = img.width + 'px';
+    cell.appendChild(img);
+    grid.appendChild(cell);
+    cells[b.id] = { b, img, version: -1, loading: false };
+    touchable(b, img);
+    img.addEventListener('contextmenu', e => { e.preventDefault(); menu(b, e.clientX, e.clientY); });
+    const opt = document.createElement('option');
+    opt.value = b.id; opt.textContent = `${b.id} (${b.w}×${b.h})`;
+    $('target').appendChild(opt);
+  }
+}
+
+function touchable(b, img) {
+  let down = false;
+  const at = e => {
+    const r = img.getBoundingClientRect();
+    return { x: Math.round((e.clientX - r.left) / r.width * b.w), y: Math.round((e.clientY - r.top) / r.height * b.h) };
+  };
+  img.addEventListener('mousedown', e => { if (e.button) return; down = true; api('touch', { board: b.id, ...at(e), down: true }); });
+  img.addEventListener('mousemove', e => { if (down) api('touch', { board: b.id, ...at(e), down: true }); });
+  const up = e => { if (!down) return; down = false; api('touch', { board: b.id, ...at(e), down: false }); };
+  img.addEventListener('mouseup', up);
+  img.addEventListener('mouseleave', up);
+}
+
+function menu(b, x, y) {
+  const m = $('menu');
+  const items = [['boot', 'BOOT']];
+  if (b.buttons >= 2) items.push(['secondary', 'Secondary']);
+  if (b.pwr) items.push(['pwr', 'PWR']);
+  m.innerHTML = `<div class="head">${b.id} buttons</div>`;
+  for (const [id, name] of items) {
+    const press = document.createElement('div');
+    press.textContent = `${name}: press`;
+    press.onclick = () => push(b, id, 150);
+    m.appendChild(press);
+    if (id !== 'secondary') {
+      const hold = document.createElement('div');
+      hold.textContent = id === 'pwr' ? `${name}: hold 3 s (pair)` : `${name}: hold 2 s`;
+      hold.onclick = () => push(b, id, id === 'pwr' ? 3200 : 2000);
+      m.appendChild(hold);
+    }
+  }
+  m.style.left = x + 'px'; m.style.top = y + 'px'; m.style.display = 'block';
+}
+document.addEventListener('click', e => { if (!$('menu').contains(e.target)) $('menu').style.display = 'none'; });
+
+// A press that follows the clock: real time while playing, a stepped press when paused.
+function push(b, name, ms) {
+  $('menu').style.display = 'none';
+  if (status && status.playing) {
+    api('button', { board: b.id, name, down: true });
+    setTimeout(() => api('button', { board: b.id, name, down: false }), ms);
+  } else {
+    api('press', { board: b.id, name, hold_ms: ms });
+  }
+}
+
+function refresh(st) {
+  $('clock').textContent = (st.now / 1000).toFixed(1) + ' s';
+  $('play').textContent = st.playing ? 'Pause' : 'Play';
+  $('play').classList.toggle('on', st.playing);
+  $('link').classList.toggle('on', st.link);
+  $('stale').classList.toggle('on', !st.heartbeat);
+  $('clock12').classList.toggle('on', st.payload.tf === 12);
+  $('chg').classList.toggle('on', st.battery[1]);
+  $('usb').classList.toggle('on', st.battery[2]);
+  $('rec').textContent = st.recording ? 'Stop recording' : 'Record';
+  $('rec').classList.toggle('on', !!st.recording);
+  for (const btn of document.querySelectorAll('[data-lv]')) btn.classList.toggle('on', +btn.dataset.lv === st.payload.lv);
+  for (const btn of document.querySelectorAll('[data-act]')) btn.classList.toggle('on', +btn.dataset.act === (st.payload.a || 0));
+  const sc = st.scenario;
+  $('scene').textContent = sc.states.length ? `${sc.scene + 1}/${sc.states.length} ${sc.states[sc.scene] || ''} ${sc.playing ? '▶' : '⏸'}` : '';
+  for (const b of st.boards) {
+    const c = cells[b.id];
+    if (!c || c.loading || c.version === b.version) continue;
+    c.loading = true;
+    const v = b.version;
+    const img = new Image();
+    img.onload = () => { c.img.src = img.src; c.version = v; c.loading = false; };
+    img.onerror = () => { c.loading = false; };
+    img.src = `/frame/${b.id}.png?v=${v}`;
+  }
+}
+
+async function poll() {
+  try {
+    const r = await fetch('/api/status');
+    status = await r.json();
+    if (!Object.keys(cells).length) build(status);
+    refresh(status);
+  } catch (e) { $('err').textContent = 'grid not reachable'; }
+  setTimeout(poll, 60);
+}
+
+$('play').onclick = () => fetch(status && status.playing ? '/api/pause' : '/api/play', { method: 'POST', body: '{}' });
+for (const b of document.querySelectorAll('[data-step]')) b.onclick = () => api('step', { ms: +b.dataset.step });
+for (const name of ['usage', 'fresh', 'high', 'maxed', 'enterprise', 'not-started', 'nodata']) {
+  const b = document.createElement('button'); b.textContent = name; b.onclick = () => api('preset', { name }); $('presets').appendChild(b);
+}
+for (const id of ['s', 'w']) {
+  $(id).oninput = () => { $(id + 'v').textContent = $(id).value; };
+  $(id).onchange = () => api('payload', { [id]: +$(id).value });
+}
+$('stale').onclick = () => api('stale', { on: status.heartbeat });
+$('clock12').onclick = () => api('clock', { fmt: status.payload.tf === 12 ? 24 : 12 });
+for (const b of document.querySelectorAll('[data-act]')) b.onclick = () => api('activity', { level: +b.dataset.act });
+for (const b of document.querySelectorAll('[data-ev]')) b.onclick = () => api('event', { kind: b.dataset.ev });
+$('alert').onclick = () => api('alert', { message: $('msg').value });
+$('clear').onclick = () => api('clear');
+for (const name of ['show', 'screensaver', 'attention', 'joy', 'lurk', 'peek', 'home']) {
+  const b = document.createElement('button'); b.textContent = name; b.onclick = () => api('beat', { name }); $('beats').appendChild(b);
+}
+for (let i = 1; i <= 5; i++) {
+  const b = document.createElement('button'); b.textContent = i; b.dataset.lv = i; b.onclick = () => api('liveliness', { level: i }); $('lv').appendChild(b);
+}
+$('link').onclick = () => api('link', { on: !status.link });
+const battery = () => api('battery', { pct: +$('bat').value, charging: $('chg').classList.contains('on'), usb: $('usb').classList.contains('on') });
+$('bat').oninput = () => { $('batv').textContent = $('bat').value; };
+$('bat').onchange = battery;
+$('chg').onclick = () => { $('chg').classList.toggle('on'); battery(); };
+$('usb').onclick = () => { $('usb').classList.toggle('on'); battery(); };
+$('send').onclick = () => api('serial', { line: $('serial').value });
+$('serial').onkeydown = e => { if (e.key === 'Enter') $('send').onclick(); };
+$('load').onclick = () => api('scenario', { path: $('scn').value });
+$('splay').onclick = () => api('scenario_play');
+$('spause').onclick = () => api('scenario_pause');
+for (const b of document.querySelectorAll('[data-sstep]')) b.onclick = () => api('scenario_step', { by: +b.dataset.sstep });
+$('shot').onclick = async () => { const j = await api('shot', { path: $('shotpath').value, board: $('target').value }); if (j.path) $('err').textContent = 'saved ' + j.path; };
+$('rec').onclick = async () => {
+  if (status.recording) { const j = await api('record_stop'); if (j.path) $('err').textContent = `saved ${j.path} (${j.frames} frames)`; }
+  else api('record', { path: $('recpath').value, board: $('target').value, fps: +$('fps').value, scale: +$('rscale').value });
+};
+$('zoom').onchange = () => { zoom = +$('zoom').value; cells = {}; $('target').length = 1; build(status); };
+poll();
+</script>
+</body>
+</html>

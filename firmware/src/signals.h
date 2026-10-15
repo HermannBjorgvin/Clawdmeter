@@ -45,13 +45,7 @@ bool     signals_hooks_seen(void);
 int      signals_activity_at(uint32_t now_ms);    // 0-3, -1 unknown/expired
 int      signals_sessions(void);                  // -1 unknown
 char     signals_last_event(void);                // '\0' none since boot
-// ms since the last fired event (or since the last real usage sample);
-// UINT32_MAX when there hasn't been one.
-uint32_t signals_ms_since_event_at(uint32_t now_ms);
-uint32_t signals_ms_since_sample_at(uint32_t now_ms);
 
 // ---- millis() wrappers (usage_rate_clock.cpp) ----
 SignalsUpdate signals_ingest(const UsageData* d);
 int      signals_activity(void);
-uint32_t signals_ms_since_event(void);
-uint32_t signals_ms_since_sample(void);

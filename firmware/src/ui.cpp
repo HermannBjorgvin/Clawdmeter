@@ -1,5 +1,5 @@
 #include "ui.h"
-#include "splash.h"
+#include "performer.h"
 #include "mascot.h"
 #include "clawd_anim.h"
 #include "clawd_policy.h"
@@ -12,178 +12,17 @@
 #include "clawd_still.h"
 #include "icons.h"
 #include "hal/board_caps.h"
+#include "layout.h"
+#include "ui_text.h"
 
-// Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
-LV_FONT_DECLARE(font_tiempos_56);
-LV_FONT_DECLARE(font_tiempos_34);
-LV_FONT_DECLARE(font_styrene_48);
-LV_FONT_DECLARE(font_styrene_28);
-LV_FONT_DECLARE(font_styrene_24);
-LV_FONT_DECLARE(font_styrene_20);
-LV_FONT_DECLARE(font_styrene_16);
-LV_FONT_DECLARE(font_styrene_14);
-LV_FONT_DECLARE(font_styrene_12);
-LV_FONT_DECLARE(font_mono_32);
-LV_FONT_DECLARE(font_mono_18);
-
-// Layout values computed from the active board's geometry. Populated once
-// in ui_init() and treated as const for the rest of the program. Adding a
-// new display size means extending compute_layout() with another
-// breakpoint — never editing the screen-builder functions below.
-struct Layout {
-    int16_t scr_w, scr_h;
-    int16_t margin;
-    int16_t title_y;
-    int16_t content_y;
-    int16_t content_w;
-
-    // Usage screen
-    int16_t usage_panel_h;
-    int16_t usage_panel_gap;
-    int16_t usage_bar_y;
-    int16_t usage_reset_y;
-    int16_t bar_h;
-    int16_t panel_pad_x, panel_pad_y;
-    int16_t pill_pad_x, pill_pad_y;
-    const lv_font_t* title_font;     // screen title / clock
-    const lv_font_t* pct_font;       // big percentage number
-    const lv_font_t* ent_pct_font;   // enterprise spending number
-    const lv_font_t* pill_font;      // "Session" / "Weekly" pill
-    const lv_font_t* reset_font;     // "Resets in ..." line
-    const lv_font_t* pace_font;      // enterprise "Under/On/Over pace" line
-    const lv_font_t* anim_font;      // animated status line
-    int16_t anim_y;                  // status line offset from bottom
-    bool    small_icons;             // 40px logo + 24px battery (vs 80/48) on small screens
-    int16_t title_nudge;             // title x-shift balancing the corner logo
-    int16_t logo_y;                  // logo top edge
-    int16_t batt_y;                  // battery icon top edge
-    int16_t batt_w;                  // battery icon width, for position math
-
-    // Pairing hint
-    int16_t pair_y1, pair_y2, pair_y3, pair_y4;
-
-    // Bluetooth screen
-    int16_t bt_info_panel_h;
-    int16_t bt_reset_zone_h;
-    const lv_font_t* bt_title_font;
-    const lv_font_t* bt_status_font;
-    const lv_font_t* bt_device_font;
-    const lv_font_t* bt_credit_1_font;
-    const lv_font_t* bt_credit_2_font;
-};
+// Where everything goes, from the panel's shape (layout.h). Computed once in
+// ui_init() and treated as const for the rest of the program; a new panel
+// size never needs an edit to the screen builders below.
 static Layout L = {};
 
-// Pick layout values from the active board's pixel dimensions. The two
-// existing boards happen to land on the two breakpoints below; new ports
-// inherit the closer one — visually OK, may need a polish pass for
-// pixel-perfect alignment but never blocks the port from booting.
-static void compute_layout(const BoardCaps& c) {
-    L.scr_w = c.width;
-    L.scr_h = c.height;
-    L.margin = 20;
-    L.title_y = 30;
-
-    // Values shared by the two original breakpoints; the small branch below
-    // overrides them wholesale.
-    L.bar_h = 24;
-    L.panel_pad_x = 16;
-    L.panel_pad_y = 12;
-    L.pill_pad_x = 18;
-    L.pill_pad_y = 6;
-    L.title_font   = &font_tiempos_56;
-    L.pct_font     = &font_styrene_48;
-    L.ent_pct_font = &font_tiempos_56;
-    L.pill_font    = &font_styrene_28;
-    L.reset_font   = &font_styrene_28;
-    L.pace_font    = &font_styrene_16;
-    L.anim_font    = &font_mono_32;
-    L.anim_y = -15;
-    L.small_icons = false;
-    L.title_nudge = 16;
-    L.logo_y = L.title_y - 10;
-    L.batt_y = L.title_y;
-    L.batt_w = ICON_BATTERY_W;
-    L.pair_y1 = 40;
-    L.pair_y2 = 120;
-    L.pair_y3 = 160;
-    L.pair_y4 = 230;
-
-    if (c.height >= 460) {
-        // Large layout — tuned for 480x480 (AMOLED-2.16).
-        L.content_y = 100;
-        L.usage_panel_h = 150;
-        L.usage_panel_gap = 16;
-        L.usage_bar_y = 56;
-        L.usage_reset_y = 94;
-        L.bt_info_panel_h = 160;
-        L.bt_reset_zone_h = 110;
-        L.bt_title_font    = &font_tiempos_56;
-        L.bt_status_font   = &font_styrene_48;
-        L.bt_device_font   = &font_styrene_28;
-        L.bt_credit_1_font = &font_styrene_24;
-        L.bt_credit_2_font = &font_styrene_20;
-    } else if (c.height >= 300) {
-        // Compact layout — tuned for 368x448 (AMOLED-1.8). The panels start
-        // low enough that the corner Clawd's jump (30 cells x 3 px) clears
-        // the top edge from a seat that still sits above the first panel.
-        L.content_y = 96;
-        L.usage_panel_h = 130;
-        L.usage_panel_gap = 12;
-        L.usage_bar_y = 48;
-        L.usage_reset_y = 78;
-        L.bt_info_panel_h = 140;
-        L.bt_reset_zone_h = 90;
-        L.bt_title_font    = &font_tiempos_34;
-        L.bt_status_font   = &font_styrene_28;
-        L.bt_device_font   = &font_styrene_20;
-        L.bt_credit_1_font = &font_styrene_16;
-        L.bt_credit_2_font = &font_styrene_14;
-    } else {
-        // Small layout — tuned for 240x240 (LCD-1.54 and similar square TFTs).
-        // Everything shrinks: fonts two steps down, panels ~half height, and
-        // the corner logo/battery switch to the 40px/24px small assets.
-        L.margin = 8;
-        L.title_y = 4;
-        L.content_y = 44;
-        L.usage_panel_h = 74;
-        L.usage_panel_gap = 6;
-        L.usage_bar_y = 30;
-        L.usage_reset_y = 46;
-        L.bar_h = 12;
-        L.panel_pad_x = 10;
-        L.panel_pad_y = 6;
-        L.pill_pad_x = 8;
-        L.pill_pad_y = 2;
-        L.title_font   = &font_tiempos_34;
-        L.pct_font     = &font_styrene_24;
-        L.ent_pct_font = &font_tiempos_34;
-        L.pill_font    = &font_styrene_14;
-        L.reset_font   = &font_styrene_14;
-        L.pace_font    = &font_styrene_12;
-        L.anim_font    = &font_mono_18;
-        // Center the status line in the strip below the weekly panel; flush
-        // against the bottom edge it reads as unevenly spaced.
-        L.anim_y = -10;
-        L.small_icons = true;
-        L.title_nudge = 8;
-        L.logo_y = 2;
-        L.batt_y = 10;
-        L.batt_w = ICON_BATTERY_SMALL_W;
-        L.pair_y1 = 12;
-        L.pair_y2 = 56;
-        L.pair_y3 = 80;
-        L.pair_y4 = 112;
-        L.bt_info_panel_h = 90;
-        L.bt_reset_zone_h = 60;
-        L.bt_title_font    = &font_tiempos_34;
-        L.bt_status_font   = &font_styrene_20;
-        L.bt_device_font   = &font_styrene_14;
-        L.bt_credit_1_font = &font_styrene_12;
-        L.bt_credit_2_font = &font_styrene_12;
-    }
-
-    L.content_w = L.scr_w - 2 * L.margin;
-}
+static_assert(LAYOUT_LOGO_SLOT == LOGO_HEIGHT && LAYOUT_LOGO_SLOT_SMALL == LOGO_SMALL_HEIGHT, "logo slot");
+static_assert(LAYOUT_LOGO_W == CLAWD_STILL_W && LAYOUT_LOGO_W_SMALL == CLAWD_STILL_SMALL_W, "corner Clawd");
+static_assert(LAYOUT_BATT_W == ICON_BATTERY_W && LAYOUT_BATT_W_SMALL == ICON_BATTERY_SMALL_W, "battery icon");
 
 // Anthropic brand palette — design tokens live in theme.h
 #include "theme.h"
@@ -255,9 +94,10 @@ static uint32_t connected_at_ms = 0;       // when we last entered CONNECTED ("C
 static uint32_t anim_last_ms = 0;
 static uint8_t anim_spinner_idx = 0;
 static uint8_t anim_phase = 0;
-static uint8_t anim_msg_idx = 0;
+static uint8_t anim_msg_idx = 0;    // counts verb changes (the stale line alternates on it)
+static uint8_t anim_verb_idx = 0;   // the verb shown: the next one that fits the line
 static uint32_t anim_msg_start = 0;
-#define ANIM_MSG_MS     4000
+static const char* frozen_shown = nullptr;   // spinner held still: the word on screen
 
 static const char* const spinner_frames[] = {
     "\xC2\xB7", "\xE2\x9C\xBB", "\xE2\x9C\xBD",
@@ -305,6 +145,17 @@ static const char* const anim_messages[] = {
 };
 #define ANIM_MSG_COUNT (sizeof(anim_messages) / sizeof(anim_messages[0]))
 
+// The first verb from `i` on that fits the status line as "<glyph> <verb>…";
+// a narrow panel skips the long ones rather than clipping them.
+static uint8_t fitting_verb(uint8_t i) {
+    for (uint8_t n = 0; n < ANIM_MSG_COUNT; n++, i = (i + 1) % ANIM_MSG_COUNT) {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6", spinner_frames[1], anim_messages[i]);
+        if (layout_text_width(L.status_font, buf) <= L.status_w) return i;
+    }
+    return i;
+}
+
 static lv_color_t pct_color(float pct) {
     if (pct >= 80.0f) return COL_RED;
     if (pct >= 50.0f) return COL_AMBER;
@@ -333,10 +184,10 @@ static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(panel, 8, 0);
     lv_obj_set_style_border_width(panel, 0, 0);
-    lv_obj_set_style_pad_left(panel, L.panel_pad_x, 0);
-    lv_obj_set_style_pad_right(panel, L.panel_pad_x, 0);
-    lv_obj_set_style_pad_top(panel, L.panel_pad_y, 0);
-    lv_obj_set_style_pad_bottom(panel, L.panel_pad_y, 0);
+    lv_obj_set_style_pad_left(panel, L.pad_x, 0);
+    lv_obj_set_style_pad_right(panel, L.pad_x, 0);
+    lv_obj_set_style_pad_top(panel, L.pad_y, 0);
+    lv_obj_set_style_pad_bottom(panel, L.pad_y, 0);
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(panel, LV_OBJ_FLAG_EVENT_BUBBLE);
     return panel;
@@ -401,10 +252,10 @@ static void init_battery_icons(void) {
 
 // ======== Usage Screen ========
 
-static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
+static lv_obj_t* make_usage_panel(lv_obj_t* parent, const LayoutRect& r, const char* pill_text,
                                   lv_obj_t** out_pct, lv_obj_t** out_pill,
                                   lv_obj_t** out_bar, lv_obj_t** out_reset) {
-    lv_obj_t* panel = make_panel(parent, L.margin, y, L.content_w, L.usage_panel_h);
+    lv_obj_t* panel = make_panel(parent, r.x, r.y, r.w, r.h);
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "--%");
@@ -415,14 +266,13 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
     *out_pill = make_pill(panel, pill_text);
     lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
 
-    *out_bar = make_bar(panel, 0, L.usage_bar_y,
-                        L.content_w - 2 * L.panel_pad_x, L.bar_h);
+    *out_bar = make_bar(panel, 0, L.bar_y, r.w - 2 * L.pad_x, L.bar_h);
 
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
     lv_obj_set_style_text_font(*out_reset, L.reset_font, 0);
     lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
-    lv_obj_set_pos(*out_reset, 0, L.usage_reset_y);
+    lv_obj_set_pos(*out_reset, 0, L.reset_y);
 
     return panel;
 }
@@ -435,48 +285,44 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
 static void apply_pair_text(void) {
     if (!pair_lines[0]) return;
     const bool pwr = board_caps().has_pwr_button;
-    const char* l1 = "To pair";
-    const char* l2 = pwr ? "hold the power button" : "touch and hold here";
-    const char* l3 = pwr ? "for 3 seconds, then release" : "for 5 seconds";
-    const char* l4 = "";
+    const char* const* lines = pwr ? PAIR_TEXT_PWR : PAIR_TEXT_TOUCH;
+    const char* note = "";
     // Only the touch hold talks back; the PWR hint stays as it is.
-    if (!pwr && pair_hint == PAIR_HINT_HOLDING) {
-        l4 = "keep holding...";
-    } else if (!pwr && pair_hint == PAIR_HINT_CLEARED) {
-        l1 = "Ready to pair";
-        l2 = "choose Clawdmeter";
-        l3 = "on your computer";
-    }
-    lv_label_set_text(pair_lines[0], l1);
-    lv_label_set_text(pair_lines[1], l2);
-    lv_label_set_text(pair_lines[2], l3);
-    lv_label_set_text(pair_lines[3], l4);
+    if (!pwr && pair_hint == PAIR_HINT_HOLDING) note = PAIR_TEXT_HOLDING;
+    else if (!pwr && pair_hint == PAIR_HINT_CLEARED) lines = PAIR_TEXT_CLEARED;
+    for (int i = 0; i < 3; i++) lv_label_set_text(pair_lines[i], lines[i]);
+    lv_label_set_text(pair_lines[3], note);
     lv_obj_set_style_text_color(pair_lines[3], pair_hint == PAIR_HINT_NORMAL ? COL_DIM : COL_ACCENT, 0);
 }
 
-static lv_obj_t* make_pair_line(const lv_font_t* font, lv_color_t color, int16_t y) {
+// A centred line; on panels where the steps wrap, it wraps at pair_w.
+static lv_obj_t* make_pair_line(int i, lv_color_t color) {
     lv_obj_t* l = lv_label_create(pair_group);
     lv_label_set_text(l, "");
-    lv_obj_set_style_text_font(l, font, 0);
+    lv_obj_set_style_text_font(l, L.pair_font[i], 0);
     lv_obj_set_style_text_color(l, color, 0);
-    lv_obj_align(l, LV_ALIGN_TOP_MID, 0, y);
+    if (L.pair_wrap) {
+        lv_obj_set_width(l, L.pair_w);
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    }
+    lv_obj_align(l, LV_ALIGN_TOP_MID, 0, L.pair_line_y[i]);
     return l;
 }
 
 static void build_pair_group(lv_obj_t* parent) {
     pair_group = lv_obj_create(parent);
-    lv_obj_set_size(pair_group, L.scr_w, L.scr_h - L.content_y);
-    lv_obj_set_pos(pair_group, 0, L.content_y);
+    lv_obj_set_size(pair_group, L.w, L.h - L.pair_y);
+    lv_obj_set_pos(pair_group, 0, L.pair_y);
     lv_obj_set_style_bg_opa(pair_group, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(pair_group, 0, 0);
     lv_obj_set_style_pad_all(pair_group, 0, 0);
     lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    pair_lines[0] = make_pair_line(L.bt_status_font, COL_TEXT, L.pair_y1);
-    pair_lines[1] = make_pair_line(L.bt_device_font, COL_DIM, L.pair_y2);
-    pair_lines[2] = make_pair_line(L.bt_device_font, COL_DIM, L.pair_y3);
-    pair_lines[3] = make_pair_line(L.bt_credit_2_font, COL_DIM, L.pair_y4);
+    pair_lines[0] = make_pair_line(0, COL_TEXT);
+    pair_lines[1] = make_pair_line(1, COL_DIM);
+    pair_lines[2] = make_pair_line(2, COL_DIM);
+    pair_lines[3] = make_pair_line(3, COL_DIM);
     apply_pair_text();
 
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);  // ui_update_ble_status decides
@@ -491,9 +337,23 @@ void ui_set_pair_hint(PairHint hint) {
     apply_pair_text();
 }
 
+// The title's font follows the clock format (a 12-hour clock may need a
+// smaller one); hidden where the header has no room for it at all.
+static void apply_title_font(void) {
+    const int fmt = clock_base_epoch > 0 && clock_fmt == 12 ? 1 : 0;
+    const lv_font_t* f = L.title_font[fmt];
+    if (!f) {
+        lv_obj_add_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_set_style_text_font(lbl_title, f, 0);
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, L.title_cx - L.w / 2, L.title_y[fmt]);
+    lv_obj_clear_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void init_usage_screen(lv_obj_t* scr) {
     usage_container = lv_obj_create(scr);
-    lv_obj_set_size(usage_container, L.scr_w, L.scr_h);
+    lv_obj_set_size(usage_container, L.w, L.h);
     lv_obj_set_pos(usage_container, 0, 0);
     lv_obj_set_style_bg_opa(usage_container, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(usage_container, 0, 0);
@@ -502,16 +362,13 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
-    lv_obj_set_style_text_font(lbl_title, L.title_font, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    // The nudge balances the corner logo on the left; smaller on small
-    // screens where the logo is 40px and the battery icon sits closer.
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, L.title_nudge, L.title_y);
+    apply_title_font();
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
     usage_group = lv_obj_create(usage_container);
-    lv_obj_set_size(usage_group, L.scr_w, L.scr_h);
+    lv_obj_set_size(usage_group, L.w, L.h);
     lv_obj_set_pos(usage_group, 0, 0);
     lv_obj_set_style_bg_opa(usage_group, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(usage_group, 0, 0);
@@ -519,7 +376,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    panel_session = make_usage_panel(usage_group, L.content_y, "Session",
+    panel_session = make_usage_panel(usage_group, L.card[0], L.pills[0],
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
 
@@ -534,17 +391,16 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_spending_desc, "of spending limit");
     lv_obj_set_style_text_font(lbl_spending_desc, L.reset_font, 0);
     lv_obj_set_style_text_color(lbl_spending_desc, COL_DIM, 0);
-    lv_obj_set_pos(lbl_spending_desc, 0, L.usage_reset_y);
+    lv_obj_set_pos(lbl_spending_desc, 0, L.reset_y);
     lv_obj_add_flag(lbl_spending_desc, LV_OBJ_FLAG_HIDDEN);
 
     lbl_spending_status = lv_label_create(panel_session);
     lv_label_set_text(lbl_spending_status, "");
     lv_obj_set_style_text_font(lbl_spending_status, L.pace_font, 0);
-    lv_obj_set_pos(lbl_spending_status, 0, L.usage_reset_y + 20);
+    lv_obj_set_pos(lbl_spending_status, 0, L.reset_y + 20);
     lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
 
-    panel_weekly = make_usage_panel(usage_group,
-                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
+    panel_weekly = make_usage_panel(usage_group, L.card[1], L.pills[1],
                      &lbl_weekly_pct, &lbl_weekly_label,
                      &bar_weekly, &lbl_weekly_reset);
     // Recolor enabled so enterprise period box can color pace and reset separately
@@ -555,9 +411,9 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
-    lv_obj_set_style_text_font(lbl_anim, L.anim_font, 0);
+    lv_obj_set_style_text_font(lbl_anim, L.status_font, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
-    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
+    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.status_y);
 }
 
 // ---- Attention message on the status line (the director sequences the rest).
@@ -567,7 +423,8 @@ static const char* still_shown = nullptr;   // minimal mode: status word on scre
 // ======== Public API ========
 
 void ui_init(void) {
-    compute_layout(board_caps());
+    const BoardCaps& caps = board_caps();
+    L = layout_compute({ caps.width, caps.height, caps.round_panel });
 
     lv_obj_t* scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
@@ -586,11 +443,10 @@ void ui_init(void) {
     init_battery_icons();
 
     init_usage_screen(scr);
-    splash_init(scr);       // the stage room sits above the meters when open
 
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
-    lv_obj_set_pos(battery_img, L.scr_w - L.batt_w - L.margin, L.batt_y);
+    lv_obj_set_pos(battery_img, L.batt_x, L.batt_y);
     // Boards without battery telemetry never show the indicator (per the HAL
     // contract).
     if (!board_caps().has_battery) {
@@ -611,19 +467,26 @@ void ui_init(void) {
         // no room for that (240 px panels) the mascot swaps in a shorter
         // official act instead of clipping (mascot.cpp).
         const ClawdAnim* jump = clawd_anim("jumping happy");
-        const int feet = jump ? corner_seat_feet(top + art_h, jump->h * cell, L.content_y - 4, 2)
+        const int feet = jump ? corner_seat_feet(top + art_h, jump->h * cell, L.card[0].y - 4, 2)
                               : top + art_h;
         // Animated: idles, does acts, and takes walk-off/lurk trips (the
         // trips need PSRAM; without it he stays in his seat).
-        // Created last so he walks over the battery and the stage.
-        if (!mascot_create(scr, L.margin, feet, cell)) {
+        // Created after the panels so he walks over the battery.
+        if (!mascot_create(scr, L.logo_x, feet, cell)) {
             logo_img = lv_image_create(scr);
             lv_image_set_src(logo_img, &logo_dsc);
-            lv_obj_set_pos(logo_img, L.margin, top);
+            lv_obj_set_pos(logo_img, L.logo_x, top);
         }
     }
 
+    // Clawd performs in front of the meters, fully drawn, like the
+    // attention walk-on (a tap sends him off). Created last so he's on top
+    // of everything on the screen. His feet stand on the bottom edge of the
+    // last panel, clear of the (Clawd-orange) status line.
+    performer_init(scr, L.card[1].y + L.card[1].h);
+
     lv_obj_set_style_text_align(lbl_anim, LV_TEXT_ALIGN_CENTER, 0);
+    anim_verb_idx = fitting_verb(0);
 }
 
 void ui_update(const UsageData* data) {
@@ -634,13 +497,16 @@ void ui_update(const UsageData* data) {
     data_received = true;
 
     if (data->clock_epoch > 0) {    // daemon supplied wall-clock time → drive the title clock
+        if (clock_fmt != data->clock_fmt) clock_last_min = -1;
         clock_base_epoch = data->clock_epoch;
         clock_base_ms = last_data_ms;
         clock_fmt = data->clock_fmt;
+        apply_title_font();
     } else if (clock_base_epoch != 0) {   // clock turned off daemon-side → revert title to "Usage"
         clock_base_epoch = 0;
         clock_last_min = -1;
         lv_label_set_text(lbl_title, "Usage");
+        apply_title_font();
     }
 
     int s_pct = (int)(data->session_pct + 0.5f);
@@ -648,7 +514,7 @@ void ui_update(const UsageData* data) {
     if (data->enterprise) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
         lv_obj_set_style_text_font(lbl_session_pct, L.ent_pct_font, 0);
-        lv_label_set_text(lbl_session_label, "Spending");
+        lv_label_set_text(lbl_session_label, L.pills[2]);
         lv_obj_add_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
@@ -656,7 +522,7 @@ void ui_update(const UsageData* data) {
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_set_style_text_font(lbl_session_pct, L.pct_font, 0);
-        lv_label_set_text(lbl_session_label, "Session");
+        lv_label_set_text(lbl_session_label, L.pills[0]);
         lv_obj_clear_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
@@ -691,22 +557,28 @@ void ui_update(const UsageData* data) {
 
     if (data->enterprise) {
         // Period box: time % + dynamic pace color + "Resets <date>" label
-        lv_label_set_text(lbl_weekly_label, "Period");
+        lv_label_set_text(lbl_weekly_label, L.pills[3]);
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", data->time_pct);
         lv_bar_set_value(bar_weekly, data->time_pct, LV_ANIM_ON);
         lv_color_t bar_pace = (data->session_pct <= (float)data->time_pct) ? COL_GREEN :
                               (data->session_pct <= (float)data->time_pct + 15.0f) ? COL_AMBER :
                               COL_RED;
         lv_obj_set_style_bg_color(bar_weekly, bar_pace, LV_PART_INDICATOR);
-        snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Resets %s#",
-                 pace_hex, pace_text, data->reset_date);
+        if (L.period_short)
+            snprintf(buf, sizeof(buf), "#%s Resets %s#", pace_hex, data->reset_date);
+        else
+            snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Resets %s#",
+                     pace_hex, pace_text, data->reset_date);
+        lv_obj_set_style_text_font(lbl_weekly_reset, L.period_font, 0);
         lv_label_set_text(lbl_weekly_reset, buf);
     } else {
         int w_pct = (int)(data->weekly_pct + 0.5f);
+        lv_label_set_text(lbl_weekly_label, L.pills[1]);
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
         lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
         lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
         format_reset_time(data->weekly_reset_mins, buf, sizeof(buf), "---");
+        lv_obj_set_style_text_font(lbl_weekly_reset, L.reset_font, 0);
         lv_label_set_text(lbl_weekly_reset, buf);
     }
 }
@@ -785,16 +657,26 @@ void ui_tick_anim(void) {
         return;
     }
 
-    if (now - anim_msg_start >= ANIM_MSG_MS) {
+    // The verb changes every verb_ms; at No-nonsense that's once a minute
+    // and the spinner holds still, so the line only redraws when the word
+    // does (clawd_policy.h, liveliness).
+    const ClawdTuning& tune = clawd_tuning();
+    if (now - anim_msg_start >= tune.verb_ms) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
+        anim_verb_idx = fitting_verb((anim_verb_idx + 1) % ANIM_MSG_COUNT);
         anim_msg_start = now;
     }
 
-    if (now - anim_last_ms < spinner_ms[anim_spinner_idx]) return;
-    anim_last_ms = now;
-    anim_phase = (anim_phase + 1) % SPINNER_PHASES;
-    anim_spinner_idx = (anim_phase < SPINNER_COUNT) ? anim_phase
-                                                    : (SPINNER_PHASES - anim_phase);
+    if (tune.spinner) {
+        if (now - anim_last_ms < spinner_ms[anim_spinner_idx]) return;
+        anim_last_ms = now;
+        anim_phase = (anim_phase + 1) % SPINNER_PHASES;
+        anim_spinner_idx = (anim_phase < SPINNER_COUNT) ? anim_phase
+                                                        : (SPINNER_PHASES - anim_phase);
+        frozen_shown = nullptr;
+    } else {
+        anim_spinner_idx = 1;
+    }
 
     // Status text by priority. Whimsical messages only when connected & settled.
     const char* text;
@@ -805,7 +687,12 @@ void ui_tick_anim(void) {
     } else if (now - connected_at_ms < 5000) {
         text = "Connected";
     } else {
-        text = anim_messages[anim_msg_idx];
+        text = anim_messages[anim_verb_idx];
+    }
+
+    if (!tune.spinner) {
+        if (text == frozen_shown) return;
+        frozen_shown = text;
     }
 
     // All states share the whimsical style: "<glyph> <Title-case word>…"
@@ -857,14 +744,16 @@ void ui_set_alert_text(const char* message) {
         // Minimal mode: nothing moves, so a long message is cut, not scrolled.
         lv_label_set_long_mode(lbl_anim, minimal_mode() ? LV_LABEL_LONG_DOT
                                                         : LV_LABEL_LONG_SCROLL_CIRCULAR);
-        lv_obj_set_width(lbl_anim, L.content_w);
+        // One line: without a fixed height LONG_DOT would wrap onto the cards.
+        lv_obj_set_size(lbl_anim, L.status_w, lv_font_get_line_height(L.status_font));
         lv_label_set_text(lbl_anim, message);
         return;
     }
     if (!alert_active) return;
     alert_active = false;
     lv_label_set_long_mode(lbl_anim, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(lbl_anim, LV_SIZE_CONTENT);
+    lv_obj_set_size(lbl_anim, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     anim_last_ms = 0;          // whimsical line redraws on the next tick
     still_shown = nullptr;
+    frozen_shown = nullptr;
 }

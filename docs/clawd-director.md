@@ -1,12 +1,12 @@
 # Clawd's director: rooms, beats and the illusion of life
 
 This is the firmware side of design system v0.4, sections 05–10: one Clawd who
-lives on the meters, performs on the stage, and comes up to the glass to check
-on you. The behaviour depends on the situation (hook events, usage moving, a
-session reset, attention), not on gestures. A tap means one thing everywhere
-else: show me the meters. On the meters themselves a tap is tapping the
-aquarium: the face comes up to see what you want (see "A tap on the meters"
-below).
+lives on the meters, performs right there in front of them, and comes up to
+the glass to check on you. The behaviour depends on the situation (hook events,
+usage moving, a session reset, attention), not on gestures. A tap during a
+performance or on the face means one thing: show me the meters. On the
+meters themselves a tap is tapping the aquarium: the face comes up to see
+what you want (see "A tap on the meters" below).
 
 ## Modules
 
@@ -15,19 +15,17 @@ below).
 | `firmware/src/clawd_director.{h,cpp}` | Owns the rooms and runs the beats. It is the only module that decides what Clawd does next. |
 | `firmware/src/clawd_policy.{h,cpp}` | Pure decision rules, unit-tested in `test/test_clawd_policy`: show gate and show group, screensaver gate, where attention returns to, how long a reaction waits for him, the corner seat's headroom, turn tracker, no-repeat picker, jitter, the resting face's rhythm, what a tap on the meters earns (the peek, how he sets off), where the face looks and how long it stays curious, and all tunables (`ClawdTuning`). |
 | `firmware/src/mascot.{h,cpp}` | Clawd on the meters: the corner Clawd in his seat, plus the full-size sprite used for the lurk trip and the attention walk-on. Does in-room secondary action (idle acts, lurk trips) when the director allows it. |
-| `firmware/src/splash.{h,cpp}` | The stage room: a full-screen 60×60-cell stage with one performer who stands, walks, or performs a scene. |
-| `firmware/src/face.{h,cpp}` | The #198 face: a field on `lv_layer_top()` with the eyes as small LVGL rectangles on it. It is the screensaver, the held peek, and the curtain that rooms change behind. |
+| `firmware/src/performer.{h,cpp}` | Clawd performing on the meters: the official scenes at full size on a 60×60-cell grid, in front of the meters. He stands, walks on and off through either edge, or performs a scene. PSRAM only. |
+| `firmware/src/face.{h,cpp}` | The #198 face: a field on `lv_layer_top()` with the eyes as small LVGL rectangles on it. It is the screensaver and the held peek. |
 | `firmware/src/face_motion.{h,cpp}` | The face's rise and drop as a pure function of time (vertical only, one size: overshoot and settle, anticipation, follow-through; see "The face's motion"), unit-tested in `test/test_face_motion`. |
-| `firmware/src/streak.{h,cpp}` | The orange streak: a field that sweeps right to left and clips the stage so the meters show behind it. |
-| `firmware/src/field.{h,cpp}` | A flat-colour shape on an overlay layer (a rectangle plus two small extra rectangles) that redraws only the strips that change colour (see "Redraw cost and frame rate"). The face and the streak are fields. |
-| `firmware/src/perf.{h,cpp}` | The `perf` serial command: refresh count, timing and pixels sent for the last face rise, its settle, face drop and streak. |
+| `firmware/src/field.{h,cpp}` | A flat-colour shape on an overlay layer (a rectangle plus two small extra rectangles) that redraws only the strips that change colour (see "Redraw cost and frame rate"). The face is a field. |
+| `firmware/src/perf.{h,cpp}` | The `perf` serial command: refresh count, timing and pixels sent for the last face rise, its settle, face drop and performance. |
 | `firmware/src/clawd_anim.{h,cpp}` | Read-only view of the official animations. It is the only translation unit that includes `splash_animations.h` (about 400 KB of static data). |
 | `firmware/src/ui.{h,cpp}` | Draws the meters only: cards, clock, status line, battery, the seat. Stale data dims the meters (see below); it never adds a second creature. |
 
 `main.cpp` feeds the director per payload (`director_on_payload` after
 `signals_ingest`, then `director_alert` / `director_alert_clear`), on buttons
-(`director_button`, or `director_stage_next` for PWR while the stage is up),
-and once per loop (`director_tick`). A prompt or back-after-gap event (`e:"p"`
+(`director_button`), and once per loop (`director_tick`). A prompt or back-after-gap event (`e:"p"`
 / `e:"b"`) also calls `idle_note_activity()` first, so a dimmed or dark panel
 fades back in before he notices you; an alert already did. A Stop or tool
 activity does not wake the panel: Claude working alone isn't you. Taps come straight
@@ -37,25 +35,40 @@ next frame, not on release.
 ## Rooms
 
 - **Meters**: home, the default, and where every path ends. The corner Clawd
-  sits in his seat (3 px cells on a 480 panel).
-- **Stage**: the splash container (8 px cells). It opens only behind the face,
-  and closes behind the face or the streak.
+  sits in his seat (3 px cells on a 480 panel). He also performs here, full
+  size (8 px cells), in front of the panels (below).
 - **Face**: an overlay on `lv_layer_top()`. It rises from behind the bottom
   bezel, overshoots and settles (at rest after ~595 ms, still after 860 ms),
   and drops after a little anticipation hop (510 ms). See "The face's motion".
 
+**Performing on the meters.** The performer is the topmost object on the
+meters screen and fully opaque, like the attention walk-on: he's never
+dimmed or see-through, and while he performs he covers part of the panels
+(mostly the weekly one). That's a deliberate trade for the illusion of life:
+a show lasts about 20 s and a tap sends him off at once. His feet stand on
+the bottom edge of the last panel (`performer_init`'s
+`feet_y`), clear of the status line, which is Clawd-orange too. The
+performer's image is hidden whenever he's off screen, so the meters' own
+redraws never blend a screen-sized transparent image, and each frame
+invalidates only the cells that changed.
+
+![A show on the meters (simulator)](../screenshots/director/06-show-scene.png)
+
 Continuity rules, as the code enforces them:
 
-- There is only ever one Clawd. The corner sprite, the full-size sprite and
-  the stage performer are never on screen together; each beat waits for one to
-  be off screen (`mascot_away()`, `splash_performer_visible()`) before the next
-  appears.
+- There is only ever one Clawd. The corner sprite, the full-size sprite, the
+  performer and the face are never on screen together; each beat waits for
+  one to be off screen (`mascot_away()`, `performer_visible()`, the face's
+  drop) before the next appears. `test/test_director` runs the real director
+  against timed stand-ins for these actors and checks this on every tick
+  through a seeded fuzz of everything that can happen.
 - He enters and leaves through an edge. Walks use the official walking gait
   with foot-locked translation (`clawd_gait_cells`) and mirror when heading
-  left. When the corner leaves, he takes the nearest edge.
-- The screen never cuts. `splash_open()` is only called while the face covers
-  the screen. `splash_close()` happens behind the face or once the streak has
-  passed.
+  left. When the corner leaves, he takes the nearest edge; the performer
+  comes on and goes off through the left edge, where the corner Clawd left
+  and comes back.
+- The screen never cuts. The face rises over the meters only once he's gone,
+  and drops back onto them before he walks on.
 - The normal status line rotates Claude Code's whimsical thinking verbs as
   the all-is-well indicator. This is the owner's chosen behavior, not an
   activity report. Keep the spinner and ellipsis. Disconnected is "Waiting";
@@ -71,8 +84,8 @@ Continuity rules, as the code enforces them:
 ## Beats
 
 The director runs one beat at a time. A beat is a list of steps, and each step
-issues commands. The next step starts once every actor has settled (face and
-streak not moving, stage and mascot not busy) and any explicit pause has
+issues commands. The next step starts once every actor has settled (face
+not moving, performer and mascot not busy) and any explicit pause has
 passed. Beat changes always print; every step prints too after
 `director_set_trace(true)` (the sim turns it on with `SIM_TRACE=1`).
 
@@ -80,12 +93,12 @@ passed. Beat changes always print; every step prints too after
 |---|---|---|
 | `home` | default | Corner autonomy on: jittered idle gaps (±40 % of 10 / 7 / 5 / 3.5 s by mood), mood-picked acts, never the same act twice running, and lurk trips (PSRAM). Also checks the gates below. |
 | `corner` | notice, wave, joy, or after a transition | Waits for the commanded corner act or walk to finish, then `home`. |
-| `show` | `a == 3` held for 5 min; at most one per 15 min; hooks seen; meters live | Points at the bar (or, if he's out on a lurk trip, heads straight out), walks off at 1.5×, face rises, blinks, stage is set behind it, face drops, walks on from the right at 1.5×, one scene (loop held 16 s, so about 20 s), waves, walks off right, face rises, blinks, meters are set behind it, face drops, corner walks back to his seat. |
-| `screensaver` | 10 min with no engagement; needs hooks seen or a window that hasn't started; meters live | Walks off through the nearest edge (a lurk trip finishes its peek first), face rises and rests (blinks every 2–6 s, about one in five a double, glances where the far eye travels 1.5×). Every 3–5 min: the stage is set behind the face with Clawd at home, the face drops, one calm scene plays (magnifier or walking, alternating), the face rises, the meters are set behind it, and he rests again. |
-| `face-home` | tap, prompt, button or attention while the screensaver face is up; a tap, attention or the end of its curiosity while the peek face is up | If woken by a prompt or tapped during a peek, he blinks first (noticing), then the stage closes behind the face, the face drops into the meters, and the corner hurries home at 1.5×. |
-| `streak-home` | tap, prompt or attention while on the stage | The scene releases to the idle pose on the spot, holds 200 ms, runs off right, ramping from 1.5× to 3× over 400 ms. The streak starts as soon as his last cell leaves the stage: 380 ms, ease in-out, the stage clipped to its left. Then the stage closes and the corner walks home at 1.5×. |
+| `show` | `a == 3` held for 5 min; at most one per 15 min; hooks seen; meters live | Points at the bar (or, if he's out on a lurk trip, heads straight out), walks off left at 1.5×, walks back on full size at 1.5×, one scene (loop held 16 s, so about 20 s), waves, walks off left, and the corner Clawd walks back in to his seat. Without the performer (no PSRAM): points, then dances twice (jumps for joy twice when usage is Heavy) and waves, all in his seat. |
+| `screensaver` | 10 min with no engagement; needs hooks seen or a window that hasn't started; meters live | Walks off through the nearest edge (a lurk trip finishes its peek first), face rises and rests (blinks every 2–6 s, about one in five a double, glances where the far eye travels 1.5×). Every 3–5 min, a calm dip: the face drops onto the meters, he walks on, plays one calm scene (magnifier or walking, alternating) and walks off, then the face rises and he rests again. Without the performer the corner Clawd walks back to his seat, sits for the scene's length and walks off again. |
+| `face-home` | tap, prompt, button or attention while the screensaver face is up; a tap, attention or the end of its curiosity while the peek face is up | If woken by a prompt or tapped during a peek, he blinks first (noticing), then the face drops into the meters, and the corner hurries home at 1.5×. |
+| `run-home` | tap or attention during a performance; a tap, prompt, button or usage moving during a calm dip | The scene releases to the idle pose on the spot, holds 200 ms, and he runs off left, ramping from 1.5× to 3× over 400 ms. Once he's gone, the corner walks home at 1.5×. |
 | `peek` | any tap on the meters (`home` or `corner`), live or stale (below) | Seated: a startled hop (`jumping` from its crouch, 2×), then he ducks out through the nearest edge at 4×; already moving or out: straight out at 4×. The face rises, eyes glance toward the tap's x and hold 1.6–2.4 s, a blink (30 % double), the look comes back to you, and the face stays up, curious, for 5 min: resting like the screensaver face (blinks every 2–6 s, some double), its glances going back toward the tap most of the time. Then it goes back on its own; a tap sends it back right away (with the acknowledging blink). Both go through `face-home`: the drop, and he walks back to his seat at 1.5×. (below: what else happens while it's up) |
-| `attention` | `m` (alert) in a payload | The corner walks off at 2×, the big Clawd (12 px cells) walks on at 2×, then waves and points alternately. A tap, `x` (clear) or 2 min sends the big one off left. Interrupts a show or the screensaver through `face-home` / `streak-home`, and then returns to where it left off (below). |
+| `attention` | `m` (alert) in a payload | The corner walks off at 2×, the big Clawd (12 px cells) walks on at 2×, then waves and points alternately (no PSRAM: he waves and points in his seat). The alert lasts until a tap, `x` (clear) or 2 min; his animation lasts the **attention animation** time (below), 2 min by default, after which the big one walks off left and the corner Clawd sits in his seat while the alert stays up. Off: no animation, he sits in his seat. A new alert animates again. Interrupts a show or the screensaver through `face-home` / `run-home`, and then returns to where it left off (below). |
 
 **Which scene a show plays.** The trigger (activity 3) lifts the live mood
 group to Heavy, so the show reads the usage-only base group instead, floored
@@ -179,8 +192,8 @@ counted from when it starts to rise; `peek_hold`):
 - The 30-minute idle fade still applies (in practice the face is long gone
   by then), and a waking tap only wakes the panel.
 
-Unchanged: a tap during attention dismisses it, and a tap on the stage or the
-screensaver face still means "show me the meters". In minimal mode the tap
+Unchanged: a tap during attention dismisses it, and a tap during a
+performance or on the screensaver face still means "show me the meters". In minimal mode the tap
 does nothing (he stays on the still frame). On the C6 it all works: the face
 is LVGL rectangles and the corner sprite has its internal-RAM buffer. A tap
 that wakes a dark panel is swallowed by `idle_consume_wake_press` (it never
@@ -206,14 +219,14 @@ also wakes the screensaver, which covers the slow-clock-only case.
 
 | Principle | Implementation |
 |---|---|
-| Anticipation | Pointing before a show and on a prompt, a blink before the face drops on a wake, the face's crouch-and-hop before it drops, a beat before the stage run-off, a turn toward the edge (walking intro frames) before every exit. |
+| Anticipation | Pointing before a show and on a prompt, a blink before the face drops on a wake, the face's crouch-and-hop before it drops, a beat before the run-off, a turn toward the edge (walking intro frames) before every exit. |
 | Follow-through, overlapping action | The face's eyes lag its body, vertically, so they reach rest a beat later. |
-| Timing | Taps act on `LV_EVENT_PRESSED`. `splash_release()` snaps to the idle pose in the same frame. |
+| Timing | Taps act on `LV_EVENT_PRESSED`. `performer_release()` snaps to the idle pose in the same frame. |
 | Secondary action | `clawd_jitter` for idle gaps, `clawd_pick_no_repeat` for acts and scenes, `face_plan_next` for irregular and double blinks and glances. |
-| Staging | The meters never animate while he performs: the stage and face cover them, and there's one actor at a time. |
-| Slow in, slow out | Ease-out into the face's overshoot, ease-in for its fall, `ease_in_out` for the streak, the stage run-off's speed ramp. Walks begin on intro frames and end on the outro. |
+| Staging | The meters hold still while he performs behind them (only the clock and the status line tick), and there's one actor at a time. |
+| Slow in, slow out | Ease-out into the face's overshoot, ease-in for its fall, the run-off's speed ramp. Walks begin on intro frames and end on the outro. |
 | Exaggeration | Wave for a long turn, show for a busy stretch, jumping happy for a reset, the big Clawd for attention. |
-| Appeal | The face appears for the screensaver, as the show's curtain, and when you tap the meters: you drew his attention, so he comes up to look. |
+| Appeal | The face appears for the screensaver and when you tap the meters: you drew his attention, so he comes up to look. |
 
 ## The face's motion
 
@@ -240,7 +253,7 @@ position alone:
 - **Follow-through** is vertical lag: the eyes trail the body by 40 ms
   (clamped), so they keep going when the body stops and catch up after.
 
-**The rise** (peek, show curtain, screensaver), 860 ms in all:
+**The rise** (peek, screensaver), 860 ms in all:
 
 1. 0–500 ms, *up with slow-out*: ease-out from below the bezel to 44 px (on
    480) past the rest position.
@@ -249,11 +262,11 @@ position alone:
    12 px of black at the top edge) and back. The eyes reach rest a beat
    after the body.
 
-`face_moving()` stays true through the settle, so nothing behind the curtain
-changes while the dip shows a sliver of the room. The director's next step
+`face_moving()` stays true through the settle, so nothing behind the face
+changes while the dip shows a sliver of the meters. The director's next step
 (a blink, a glance) starts once he's still.
 
-**The drop** (wake, show curtain, calm dip, peek over), 510 ms, full width
+**The drop** (wake, calm dip, peek over), 510 ms, full width
 the whole way:
 
 1. 0–150 ms, *anticipation*: a quick crouch (6 px down), then a little hop
@@ -272,10 +285,23 @@ and frame rate"). `perf` reports the rise up to the moment he first reaches rest
 (`face-rise`), the settle after it (`face-settle`), and the drop
 (`face-drop`).
 
-**The stage Clawd's run-off** (`streak-home`) gets follow-through through
+**The performer's run-off** (`run-home`) gets follow-through through
 timing only, never new frames: the scene releases to the idle pose and holds
 a beat (anticipation), then the walk-off ramps from 1.5× to 3× over its first
 400 ms (ease-in) instead of starting at full speed.
+
+## Round panels
+
+With `BoardCaps.round_panel` the glass is the circle inscribed in the
+panel, so Clawd walks on and off along it. `panel_row_span()` in
+`splash_geometry.h` gives the visible span of a row (the whole width on a
+rectangular panel, the circle's chord on a round one) and every entrance
+uses it at the row he walks on: the corner Clawd leaving and coming back
+(`mascot.cpp`: `off_left_x` / `off_right_x`), the full-size attention walk-on
+and walk-off, the lurk peek, and the performer's walks (`performer.cpp`: the
+grid cells on the glass at his floor row). None of them spends time walking
+where there is no glass, and nobody starts at the bounding box's edge.
+Rectangular panels are unchanged. Unit-tested in `test/test_splash_geometry`.
 
 ## Alert dismissal and expiry
 
@@ -284,7 +310,16 @@ sends `{"dismiss":true}` on BLE TX (`…-0003`). The app clears the alert it
 sent, including its tray state, without echoing a clear back. A host `x`
 clear ends the device alert without a dismissal notification.
 
-The app also expires uncleared alerts after 10 minutes; Hooks test alerts
+On a board without a touchscreen (`BoardCaps.has_touch` false) the main
+button is the dismiss gesture: BOOT, or the PWR key when it is the board's
+only button (`button_count` 0). `director_button(true)` ends an active alert
+the same way a tap does and reports the press as consumed, so `main.cpp`
+doesn't send push to talk (or cycle brightness) for it. With no alert up
+the button keeps its normal role. A board with neither touch nor a button
+lets the alert time out. `SIM_NO_TOUCH=1` plays such a board in the
+simulator.
+
+The app also expires uncleared alerts after 2 minutes; Hooks test alerts
 expire after 30 seconds. If the alert was sent, app expiry queues a clear
 for the device. These app limits are separate from the device's 2-minute
 attention timer (`SIM_FAST` compresses that device timer to 20 seconds).
@@ -295,8 +330,7 @@ When `BoardCaps.minimal_ui` is true, `minimal_mode()` returns true. This is
 a board capability, with no NVS override, desktop setting, or serial toggle.
 `SIM_MINIMAL=1` sets the simulator capability at startup. In this mode:
 
-- One room. No stage, face, streak, lurk trip, idle acts, noticing, wave or
-  joy.
+- No performances, face, lurk trip, idle acts, noticing, wave or joy.
 - The corner Clawd stays on the official still frame (walking frame 0).
 - Attention: a held pointing frame (pointing frame 16) in the seat, and the
   message in the status line, truncated rather than scrolled. A tap dismisses
@@ -308,28 +342,26 @@ a board capability, with no NVS override, desktop setting, or serial toggle.
 
 - Corner Clawd: animated. Its buffer, sized for the largest corner act
   (jumping happy, 28×30 cells × 3 px, about 23 KB), falls back to internal RAM.
-- Face and streak: plain LVGL objects, the same as on S3.
-- Stage: the direct-to-panel draw path. While the face or streak covers it
-  (`splash_set_occluded`), panel writes pause. When it's uncovered, LVGL is
-  flushed (`lv_refr_now`) and the stage repaints in full.
+- Face: plain LVGL objects, the same as on S3.
+- No performer (its buffer is about 690 KB): a show is corner acts (pointing,
+  dancing or jumping happy twice, a wave) and a calm dip is the corner Clawd
+  walking back to his seat for a while (see Beats).
 - No full-size sprite (about 250 KB), so there's no lurk trip, and attention
-  is message-only: the corner stays in his seat.
+  is a wave and point in his seat (he walks back to it first if he's out),
+  for the attention animation's time.
 
 ## Buttons
 
 - BOOT (Space) and SECONDARY (Shift+Tab): unchanged. They also count as
   engagement and wake the screensaver.
-- PWR short press: on the stage it swaps to the next scene and stays in the
-  room. During a show that's the next scene in the show's group; during a
-  screensaver calm dip it's the other calm scene, never a lively one, and the
-  screensaver carries on. Everywhere else it cycles brightness and counts as
-  engagement (waking the screensaver face). Hold to pair is unchanged.
-- The stage is earned rather than opened by tapping. On
-  the LCD-4, which has only BOOT, a tap no longer opens the splash.
+- PWR short press: cycles brightness and counts as engagement (waking the
+  screensaver, face or calm dip). Hold to pair is unchanged.
+- Shows are earned rather than opened by a button or a tap.
 
 ## Tunables
 
-`ClawdTuning` in `clawd_policy.h` holds all the timings: show after 5 min,
+`ClawdTuning` in `clawd_policy.h` holds all the timings (the numbers here
+are Some-nonsense, liveliness 3; see "Liveliness" below): show after 5 min,
 cooldown 15 min, show scene loop 16 s, quiet 10 min, calm dip every 3–5 min,
 calm scene loop 10 s, alert timeout 2 min, long turn 2 min, joy wait 5 min,
 reaction wait 15 s, blinks every 2–6 s, peek look 1.6–2.4 s, peek
@@ -338,13 +370,58 @@ tap 60 %. `clawd_tuning_fast()` compresses them for the sim (`SIM_FAST=1`;
 the peek's curiosity becomes 12 s, under the 15 s quiet time as in the
 defaults).
 
+## Liveliness
+
+The app's **Animation silliness** slider (config `liveliness`, payload `lv`, 1–5,
+default 3) sets how lively Clawd is. The device stores the last value in
+NVS (`clawd_prefs.cpp`, key `lively`) so it applies from boot. One pure
+function, `clawd_tuning_scaled()`, turns the base tuning (the defaults, or
+`SIM_FAST`'s) into the effective one; the director, the corner and the
+status line read nothing else, and `director_set_liveliness()` applies a
+change at once (a show or screensaver the new level rules out goes home).
+
+| Level | What changes |
+|---|---|
+| 1 No-nonsense | No shows, screensaver, idle acts or lurk trips, and no reactions (noticing, long-turn wave, fresh-window joy). The status line's verb changes once a minute and the spinner holds still, so with no taps or alerts only the clock and that word redraw. A tap still gets the peek, an alert still gets the attention walk-on. |
+| 2 | Rate-like timings ÷ 0.6: show after ~8.3 min, cooldown 25 min, calm dips every 5–8.3 min, corner still time ×1.67, wave after a 3.3-min turn. |
+| 3 Some-nonsense | The base timings above. |
+| 4 | ÷ 1.8: show after ~2.8 min, cooldown ~8.3 min, calm dips every ~1.7–2.8 min, still time ×0.56, wave after ~67 s. |
+| 5 All-nonsense | ÷ 3: show after 100 s of activity **2** or more (not just 3), cooldown 5 min, calm dips every 1–1.7 min, still time ×0.33 (never under 1.5 s), wave after a 40-s turn. |
+
+The quiet time before the screensaver (10 min) doesn't scale: it measures
+you being away, not him. Levels 2 and 4 sit between their neighbours on a
+log scale (0.6 / 1 / 1.8 / 3). Native tests: `test_clawd_policy` (the
+scaling), `test_director` (No-nonsense sits still through activity, prompts,
+stops, usage and a reset but still peeks on a tap; turning it down mid-show
+ends the show; the one-Clawd fuzz at every level). In the sim:
+`SIM_CMDS="300:liveliness 1"`, or `"lv":1` in a scenario line.
+
+## Attention animation
+
+The app's **Attention animation** (config `attention_anim` = `off`, `10s`,
+`30s` or `2m`; payload `aa` in seconds, 0 / 10 / 30 / 120) sets how long
+Clawd points and waves for an alert. It's stored in NVS (`clawd_prefs.cpp`,
+key `attn_anim`) and liveliness doesn't touch it. Only his animation stops:
+the message, the dismissing tap, `x`, the 2-minute alert timeout and the
+`{"dismiss":true}` notify are unchanged. When the time is up the big Clawd
+walks off and the corner Clawd walks home to his seat (no PSRAM: the seat's
+wave stops); he sits still there until the alert ends. `clawd_attn_anim_ms()`
+maps the setting onto the tuning's alert timeout (2 min = the whole alert),
+so under `SIM_FAST` 30 s is 5 s of the 20 s alert. Native tests: Off and a
+10 s setting, with and without the full-size sprite, and the one-Clawd fuzz
+at Off / 10 s / 30 s (`test_director`). In the sim:
+`SIM_CMDS="300:attention_anim 0"`, or `"aa":0` in a scenario line.
+
 ## QA
 
-- Native: `pio test -d firmware -e native -f test_clawd_policy`.
+- Native: `pio test -d firmware -e native -f test_clawd_policy` (the rules)
+  and `-f test_director` (the director against timed stand-ins for its
+  actors: one Clawd on screen at every tick of a seeded fuzz, every beat
+  reached, and nothing left hanging once the input stops).
 - Sim: `SIM_FAST=1 SIM_SCENARIO=sim/director.jsonl`, plus `SIM_SHOTS` /
   `SIM_TAPS` for headless capture (see `SIM-USAGE.md`) and `SIM_TRACE=1` for
   the per-step trace. The interruptions (lurk cut short, attention resuming
-  the screensaver, PWR on a calm dip, wake) have their own scenario, driven by
+  the screensaver, PWR during a calm dip, wake) have their own scenario, driven by
   `SIM_CMDS` (scripted serial commands; `pwr`, `prompt`, `stop` and `alert`
   stand for the PWR button, the `e` / `t` keys and the `m` key):
 
@@ -354,10 +431,13 @@ defaults).
   .pio/build/sim/program
   ```
 
-  A reference set of captures is in `screenshots/director/` (01–25 the main
-  walkthrough, 26 stale data, 27–29 a lurk cut short, 30–31 attention handing
-  back to the screensaver, 32 PWR on a calm dip, 33–34 the jump at 368×448 and
-  its 240×240 fallback, 35-peek-* a tap on the meters: crouch, hop, ducks
+  A reference set of captures is in `screenshots/director/`, all simulator
+  output (01–25 the main walkthrough, 26 stale data, 27–29 a lurk cut short,
+  30–31 attention handing back to the screensaver, 32 PWR during a calm dip,
+  33–34 the jump at 368×448 and its 240×240 fallback, 37–38 a show at
+  368×448 and 240×240, 39 No-nonsense mid-walkthrough (he sits still), 40–42 the attention
+animation at 30 s (waving, then back in his seat with the alert still up)
+and Off, 35-peek-* a tap on the meters: crouch, hop, ducks
   out, face rises, looks toward the tap, blinks, still up seconds later (a
   glance back toward the tap, a blink), the tap on the face blinks and drops
   it, back in his seat; then a tap on stale meters (12–13) and while pairing
@@ -388,30 +468,29 @@ defaults).
   or `clawd home` on the serial console, then `screenshot`
   (`./screenshot.sh`). This replaces swapping the boot screen in `main.cpp`.
   The device boots to the meters. `perf` prints the redraw cost of the last
-  face rise, face drop and streak (below).
+  face rise, face drop and performance (below).
 
 ## Redraw cost and frame rate
 
-The face and the streak are big flat rectangles that move. As ordinary LVGL
+The face is a big flat rectangle that moves. As an ordinary LVGL
 objects every move invalidates their whole old and new area, so each frame of
 the rise was a near full-screen render plus a full panel flush (about 460 KB
 over QSPI on the 2.16), and LVGL's default 33 ms refresh capped it at 30 fps.
 On hardware that read as choppy.
 
-- **Fields** (`field.{h,cpp}`): the face's orange and the streak's band are a
-  full-screen object that never moves and draws its rectangle in
-  `LV_EVENT_DRAW_MAIN`. Moving the rectangle invalidates only old XOR new: the
-  rows the rising face just covered, the columns the band gained and lost.
-  The face's eyes are small children that move normally. At rest a field is
-  `LV_OBJ_FLAG_HIDDEN` with an empty rectangle. Showing, hiding or restacking
-  a full-screen object would invalidate the whole screen even when it draws
-  nothing, so those (and the streak's per-frame narrowing of the stage, whose
-  pixels are all under the band or in a column the band just left) run with
+- **Fields** (`field.{h,cpp}`): the face's orange is a full-screen object
+  that never moves and draws its rectangle in `LV_EVENT_DRAW_MAIN`. Moving
+  the rectangle invalidates only old XOR new: the rows the rising face just
+  covered. The face's eyes are small children that move normally. At rest a
+  field is `LV_OBJ_FLAG_HIDDEN` with an empty rectangle. Showing, hiding or
+  restacking a full-screen object would invalidate the whole screen even
+  when it draws nothing, so those run with
   `lv_display_enable_invalidation(false)` around them (`field_quietly`).
-- **The stage canvas** (PSRAM boards) repaints only the cells that changed
-  and invalidates their bounding box, instead of the whole 480×480 canvas
-  every stage frame. That was most of the streak's cost: the walk-off keeps
-  stepping after his last cell leaves.
+- **The performer** (PSRAM boards) repaints only the cells that changed and
+  invalidates their bounding box, instead of the whole screen-sized image
+  every frame, and is hidden (quietly, the same way) whenever he's off
+  screen. A show in the sim averages about 18 k px/frame (7.7 % of the
+  panel).
 - **Refresh period 16 ms** (`-DLV_DEF_REFR_PERIOD=16` in every env, which also
   sets the animation and touch-read timers). It's a cap, not a cost: LVGL
   only renders what was invalidated, and a frame that takes longer than the
@@ -430,14 +509,14 @@ On hardware that read as choppy.
   squinting eye's box isn't solid (the chevron) and moves the ordinary way.
 
 Measured in the sim (`SIM_FAST=1`, a peek and a tap; pixels per frame is the
-bus-independent part):
+bus-independent part; the first two columns are earlier implementations,
+kept for comparison):
 
 | | plain LVGL objects | fields, plain slide | fields, face motion |
 |---|---|---|---|
 | face rise (to rest) | 18 frames, 154 k px/frame (67 % of the panel) | 600 ms: 35 frames, 22 k px/frame (9.5 %) | ~600 ms: 35 frames, 11–11.5 k px/frame (4.9 %) |
 | face settle | | | ~260 ms: 15 frames, 5 k px/frame (2.2 %) |
 | face drop | 13 frames, 162 k px/frame (70 %) | 480 ms: 27 frames, 25 k px/frame (11 %) | ~515 ms: 29 frames, 11.5–12.5 k px/frame (5.2 %) |
-| streak (380 ms) | 13 frames, 161 k px/frame (70 %) | 22 frames, 25 k px/frame (11 %) | unchanged |
 
 `SIM_ROUND_EVEN=1` (the CO5300's even-aligned flushes) changes the face
 numbers by under 1 k px/frame.

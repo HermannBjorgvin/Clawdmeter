@@ -85,6 +85,30 @@ static void test_fast_clock_clamps(void) {
     TEST_ASSERT_EQUAL_INT(0, d.activity);
 }
 
+static void test_attention_animation(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{\"s\":1}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.attn_anim_s);      // absent: keep the saved setting
+    TEST_ASSERT_TRUE(payload_parse("{\"aa\":0}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(0, d.attn_anim_s);       // off
+    TEST_ASSERT_TRUE(payload_parse("{\"aa\":30}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(30, d.attn_anim_s);
+    TEST_ASSERT_TRUE(payload_parse("{\"aa\":999}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(120, d.attn_anim_s);
+}
+
+static void test_liveliness(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.liveliness);       // absent: keep the saved level
+    TEST_ASSERT_TRUE(payload_parse("{\"lv\":1}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(1, d.liveliness);
+    TEST_ASSERT_TRUE(payload_parse("{\"lv\":9}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(5, d.liveliness);
+    TEST_ASSERT_TRUE(payload_parse("{\"lv\":0}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(1, d.liveliness);
+}
+
 static void test_long_strings_truncate(void) {
     UsageData d;
     TEST_ASSERT_TRUE(payload_parse("{\"st\":\"abcdefghijklmnopqrstuvwxyz\"}", &d, nullptr));
@@ -98,6 +122,8 @@ int main(void) {
     RUN_TEST(test_legacy_fields);
     RUN_TEST(test_fast_clock_fields);
     RUN_TEST(test_fast_clock_clamps);
+    RUN_TEST(test_liveliness);
+    RUN_TEST(test_attention_animation);
     RUN_TEST(test_long_strings_truncate);
     return UNITY_END();
 }

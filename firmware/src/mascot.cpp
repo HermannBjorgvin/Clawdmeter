@@ -16,10 +16,10 @@ static lv_obj_t*      big_img = NULL;    // lurk + attention Clawd (PSRAM only)
 static uint8_t*       big_buf = NULL;
 static lv_image_dsc_t big_dsc;
 
-static int cell = 3, slot_x = 0, feet_y = 0, screen_w = 480;
+static int cell = 3, slot_x = 0, feet_y = 0, screen_w = 480, screen_h = 480;
+static bool round_panel = false;
 static int lurk_cell = 8, lurk_feet_y = 384;
 static int big_cell = 12, big_x0 = 0, big_feet_y = 420;
-static bool visible = true;
 
 // ─── State ───────────────────────────────────────────────────────────────────
 enum Mode {
@@ -32,6 +32,7 @@ enum Mode {
     M_BIG_ACT,    // ... waving / pointing
     M_BIG_OUT,    // ... walking off
     M_HELD,       // minimal mode attention: a held pointing frame
+    M_SEAT_ATTN,  // attention without the full-size sprite: waving / pointing in his seat
 };
 enum After { AFTER_SEAT, AFTER_AWAY, AFTER_LURK, AFTER_BIG };
 
@@ -58,7 +59,7 @@ static uint32_t seated_since = 0;
 static uint32_t idle_gap = 7000;
 static const char* last_act = NULL;
 static int      big_dx = 0;
-static uint8_t  big_act = 0;           // 0 waving, 1 pointing
+static uint8_t  big_act = 0;           // 0 waving, 1 pointing (attention, either size)
 static ClawdRng rng;
 
 // Per mood group: how long he sits between acts and which acts he picks.
@@ -115,9 +116,14 @@ static void render(const ClawdAnim* a, uint16_t f, bool mirror, lv_image_dsc_t* 
 
 static void show(lv_obj_t* o, bool on) {
     if (!o) return;
-    if (on && visible) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+    if (on) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
     else               lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
 }
+
+// Where the glass ends on a row: the panel's edge, or the circle's on a round
+// panel, so nobody walks on or off through the part that isn't there.
+static int  left_edge(int y)  { int a, b; panel_row_span(screen_w, screen_h, round_panel, y, &a, &b); return a; }
+static int  right_edge(int y) { int a, b; panel_row_span(screen_w, screen_h, round_panel, y, &a, &b); return b; }
 
 static void draw_corner(void) {
     render(anim, frame, facing < 0, &dsc, buf, img, cell, x, feet_y);
@@ -130,11 +136,13 @@ static void draw_lurk(void) {
     // He left stage left, so he peeks in from the RIGHT edge — mirrored (the
     // art is authored hanging off the left edge).
     render(anim, frame, true, &big_dsc, big_buf, big_img, lurk_cell,
-           screen_w - anim->w * lurk_cell, lurk_feet_y);
+           right_edge(lurk_feet_y) - anim->w * lurk_cell, lurk_feet_y);
 }
 
-static int  off_left_x(void)  { return walk_anim ? -walk_anim->w * cell : -100; }
-static int  off_right_x(void) { return screen_w; }
+static int  off_left_x(void) {
+    return offstage_left_x(screen_w, screen_h, round_panel, feet_y, walk_anim ? walk_anim->w * cell : 100);
+}
+static int  off_right_x(void) { return offstage_right_x(screen_w, screen_h, round_panel, feet_y); }
 
 static void seat(void) {
     mode = M_SEATED;
@@ -146,7 +154,11 @@ static void seat(void) {
     seated_since = millis();
     int g = usage_rate_group();
     if (g < 0 || g > 3) g = 0;
-    idle_gap = clawd_jitter(STILL_MS_BY_RATE[g], &rng);
+    // Liveliness scales the still time; never under 1.5 s, so even
+    // All-nonsense lets him land between acts.
+    uint32_t still = (uint32_t)STILL_MS_BY_RATE[g] * clawd_tuning().idle_gap_pct / 100;
+    if (still < 1500) still = 1500;
+    idle_gap = clawd_jitter(still, &rng);
     show(img, true);
     draw_corner();
 }
@@ -176,10 +188,20 @@ static void big_enter(void) {
     start_frames(walk_anim);
     frame = walk_anim->loop_start;   // mid-stride: the earlier frames play off screen
     speed = 200;
-    big_dx = -(big_x0 + (walk_anim->ox + walk_anim->w) * big_cell);
+    big_dx = left_edge(big_feet_y) - (big_x0 + (walk_anim->ox + walk_anim->w) * big_cell);
     show(big_img, true);
     lv_obj_move_foreground(big_img);
     draw_big();
+}
+
+static void seat_attention(void) {
+    big_act = 0;
+    start_frames(clawd_anim("waving"));
+    speed = 100;
+    facing = +1;
+    x = slot_x;
+    mode = M_SEAT_ATTN;
+    draw_corner();
 }
 
 static void lurk_start(void) {
@@ -198,6 +220,8 @@ lv_obj_t* mascot_create(lv_obj_t* parent, int sx, int feet, int c) {
     cell = c; slot_x = sx; feet_y = feet;
     const BoardCaps& caps = board_caps();
     screen_w = caps.width;
+    screen_h = caps.height;
+    round_panel = caps.round_panel;
     walk_anim = clawd_anim("walking");
     if (!walk_anim) return NULL;
     clawd_rng_seed(&rng, millis() ^ 0xC1A3D);
@@ -246,7 +270,6 @@ lv_obj_t* mascot_create(lv_obj_t* parent, int sx, int feet, int c) {
     return img;
 }
 
-bool mascot_has_big(void) { return big_img != NULL; }
 bool mascot_seated(void)  { return img && mode == M_SEATED; }
 // Without a corner sprite (allocation failed, static logo instead) he counts
 // as away, so the director's beats never wait on him.
@@ -262,16 +285,7 @@ bool mascot_out(void) {
 }
 bool mascot_in_attention(void) {
     return attn || mode == M_BIG_IN || mode == M_BIG_ACT || mode == M_BIG_OUT ||
-           mode == M_HELD || (mode == M_WALK && after == AFTER_BIG);
-}
-
-void mascot_set_visible(bool v) {
-    visible = v;
-    if (!img) return;
-    const bool corner_on = mode == M_SEATED || mode == M_ACT || mode == M_WALK || mode == M_HELD;
-    const bool big_on = mode == M_LURK || mode == M_BIG_IN || mode == M_BIG_ACT || mode == M_BIG_OUT;
-    show(img, corner_on);
-    show(big_img, big_on);
+           mode == M_HELD || mode == M_SEAT_ATTN || (mode == M_WALK && after == AFTER_BIG);
 }
 
 void mascot_autonomy(bool on) {
@@ -405,11 +419,15 @@ void mascot_attention(bool on, bool to_seat) {
         }
         return;
     }
-    if (!big_img) {                                // no PSRAM: message-only
-        // He may have been placed away behind a curtain (attention cut a show
-        // or the screensaver short). Nothing walks on in his place, so the
-        // corner Clawd walks back to his seat instead of leaving it empty.
-        if (mode == M_AWAY || (mode == M_WALK && after != AFTER_SEAT)) mascot_return(-1, 150);
+    if (!big_img) {                                // no PSRAM: he waves and points from his seat
+        if (on) {
+            // He may be out (attention cut a show short): he walks back to
+            // his seat first, and mascot_tick starts the wave there.
+            if (mode == M_SEATED || mode == M_ACT) seat_attention();
+            else mascot_return(-1, 150);
+        } else if (mode == M_SEAT_ATTN) {
+            seat();
+        }
         return;
     }
     if (on) {
@@ -458,7 +476,11 @@ static void seated_tick(uint32_t now) {
 void mascot_tick(void) {
     if (!img || !anim) return;
     const uint32_t now = millis();
-    if (mode == M_SEATED) { seated_tick(now); return; }
+    if (mode == M_SEATED) {
+        if (attn && !big_img && !minimal) { seat_attention(); return; }   // back in his seat for the alert
+        seated_tick(now);
+        return;
+    }
     if (mode == M_AWAY || mode == M_HELD) return;
 
     const ClawdAnim* a = anim;
@@ -470,11 +492,12 @@ void mascot_tick(void) {
     if (walking && frame == a->loop_end) next = a->loop_start;   // hold the gait loop
 
     if (next >= a->frame_count) {
-        if (mode == M_BIG_ACT) {                       // wave, point, wave, ...
+        if (mode == M_BIG_ACT || mode == M_SEAT_ATTN) {   // wave, point, wave, ...
             big_act ^= 1;
             start_frames(clawd_anim(big_act ? "pointing" : "waving"));
             speed = 100;
-            draw_big();
+            if (mode == M_BIG_ACT) draw_big();
+            else                   draw_corner();
             return;
         }
         if (mode == M_LURK) {                          // back in from the right
@@ -511,7 +534,7 @@ void mascot_tick(void) {
                 draw_big();
                 return;
             }
-            if (mode == M_BIG_OUT && big_x0 + (a->ox + a->w) * big_cell + big_dx <= 0) {
+            if (mode == M_BIG_OUT && big_x0 + (a->ox + a->w) * big_cell + big_dx <= left_edge(big_feet_y)) {
                 show(big_img, false);                  // gone: the small one walks home
                 x = off_left_x();
                 if (!attn_to_seat) { mode = M_AWAY; return; }   // ...or stays out (screensaver resumes)

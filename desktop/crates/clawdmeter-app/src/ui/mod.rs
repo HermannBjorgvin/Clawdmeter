@@ -62,6 +62,24 @@ const ASSETS: &[(&str, &[u8])] = bundled![
         "waveshare_amoled_206",
         "waveshare_lcd_154",
         "waveshare_lcd_4",
+        "lilygo_t4s3",
+        "waveshare_lcd_183",
+        "esp32_s3_4848s040",
+        "waveshare_amoled_143",
+        "waveshare_amoled_132",
+        "esp32_2432s024c",
+        "esp32_2432s024c_landscape",
+        "esp32_2432s028r",
+        "esp32_2432s028r_landscape",
+        "m5sticks3",
+        "m5stack_fire",
+        "lilygo_t_display_s3",
+        "waveshare_lcd_2",
+        "waveshare_epaper_154",
+        "xingzhi_cube_183",
+        "freenove_s3_display_nontouch",
+        "sensecap_indicator_d1l",
+        "spotpear_s3_154",
     ],
     "icons": [
         "gauge",
@@ -138,6 +156,16 @@ pub fn run(page: Option<Page>, paths: Paths, args: WindowArgs) -> i32 {
 /// Run GPUI with the bundled fonts and images, open the app window with the
 /// root `build` makes, and return when it closes.
 pub fn open(build: impl FnOnce(&mut Window, &mut gpui::Context<app::AppView>) -> app::AppView + 'static) {
+    open_with_height(None, build)
+}
+
+/// [`open`] with the window `height` px tall instead of the default (the
+/// demo's `--height`, for screenshots of a whole page).
+pub fn open_with_height(
+    height: Option<f32>,
+    build: impl FnOnce(&mut Window, &mut gpui::Context<app::AppView>) -> app::AppView + 'static,
+) {
+    let height = height.unwrap_or(SIZE.1).max(MIN_SIZE.1);
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
         if let Err(e) = cx.text_system().add_fonts(FONTS.iter().map(|f| Cow::Borrowed(*f)).collect()) {
             log::warn!("bundled fonts not registered ({e}); using system fonts");
@@ -150,7 +178,7 @@ pub fn open(build: impl FnOnce(&mut Window, &mut gpui::Context<app::AppView>) ->
         })
         .detach();
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(SIZE.0), px(SIZE.1)), cx))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(SIZE.0), px(height)), cx))),
             titlebar: Some(TitlebarOptions { title: Some("Clawdmeter".into()), ..Default::default() }),
             app_id: Some("clawdmeter".into()),
             is_resizable: true,

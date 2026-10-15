@@ -7,10 +7,6 @@ static bool     hooks_seen = false;
 static bool     have_seq   = false;
 static uint32_t last_seq   = 0;
 static char     last_event = '\0';
-static bool     have_event_ms = false;
-static uint32_t event_ms   = 0;
-static bool     have_sample_ms = false;
-static uint32_t sample_ms  = 0;
 static int      sessions   = -1;
 
 void signals_clear(void) {
@@ -18,10 +14,6 @@ void signals_clear(void) {
     have_seq = false;
     last_seq = 0;
     last_event = '\0';
-    have_event_ms = false;
-    event_ms = 0;
-    have_sample_ms = false;
-    sample_ms = 0;
     sessions = -1;
     usage_rate_clear();
 }
@@ -43,7 +35,6 @@ SignalsUpdate signals_ingest_at(const UsageData* d, uint32_t now_ms) {
     // reset detector (it would read as a fresh window and fire the chime).
     const bool real_sample = d->ok && !d->replay;
     u.session_reset = usage_rate_sample_at(now_ms, d->session_pct, !real_sample);
-    if (real_sample) { have_sample_ms = true; sample_ms = now_ms; }
 
     if (d->has_event_seq) {
         hooks_seen = true;
@@ -57,8 +48,6 @@ SignalsUpdate signals_ingest_at(const UsageData* d, uint32_t now_ms) {
                 u.event = d->event;
                 u.event_seq = d->event_seq;
                 last_event = d->event;
-                have_event_ms = true;
-                event_ms = now_ms;
             }
         }
     }
@@ -79,10 +68,3 @@ bool     signals_hooks_seen(void) { return hooks_seen; }
 int      signals_activity_at(uint32_t now_ms) { return usage_rate_activity_at(now_ms); }
 int      signals_sessions(void) { return sessions; }
 char     signals_last_event(void) { return last_event; }
-
-uint32_t signals_ms_since_event_at(uint32_t now_ms) {
-    return have_event_ms ? (uint32_t)(now_ms - event_ms) : UINT32_MAX;
-}
-uint32_t signals_ms_since_sample_at(uint32_t now_ms) {
-    return have_sample_ms ? (uint32_t)(now_ms - sample_ms) : UINT32_MAX;
-}

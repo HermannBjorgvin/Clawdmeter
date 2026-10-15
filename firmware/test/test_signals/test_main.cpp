@@ -28,8 +28,6 @@ static void test_old_daemon_payload_fires_nothing(void) {
     TEST_ASSERT_FALSE(signals_hooks_seen());
     TEST_ASSERT_EQUAL_INT(-1, signals_activity_at(1000));
     TEST_ASSERT_EQUAL_INT(-1, signals_sessions());
-    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, signals_ms_since_event_at(1000));
-    TEST_ASSERT_EQUAL_UINT32(0, signals_ms_since_sample_at(1000));
 }
 
 static void test_first_seq_is_baseline_then_fires_once(void) {
@@ -43,7 +41,6 @@ static void test_first_seq_is_baseline_then_fires_once(void) {
     TEST_ASSERT_EQUAL_CHAR('s', u.event);
     TEST_ASSERT_EQUAL_UINT32(8, u.event_seq);
     TEST_ASSERT_EQUAL_CHAR('s', signals_last_event());
-    TEST_ASSERT_EQUAL_UINT32(500, signals_ms_since_event_at(2500));
 
     // Same es again (poll payload carrying the same event): no re-fire.
     TEST_ASSERT_FALSE(signals_ingest_at(&d, 3000).event_fired);
@@ -84,7 +81,6 @@ static void test_replay_skips_rate_but_keeps_activity(void) {
     d = parse("{\"s\":40,\"a\":1,\"rp\":1,\"ok\":true}");
     SignalsUpdate u = signals_ingest_at(&d, 1000 + 15 * MIN);
     TEST_ASSERT_EQUAL_INT(RATE_NORMAL, u.group_after);   // lift only; 40% ignored
-    TEST_ASSERT_EQUAL_UINT32(15 * MIN, signals_ms_since_sample_at(1000 + 15 * MIN));
 }
 
 static void test_session_reset_through_signals(void) {
@@ -104,7 +100,6 @@ static void test_no_data_beat_is_not_a_sample(void) {
     d = parse("{\"ok\":false,\"m\":\"Needs you\"}");
     SignalsUpdate u = signals_ingest_at(&d, 2000);
     TEST_ASSERT_FALSE(u.session_reset);
-    TEST_ASSERT_EQUAL_UINT32(1000, signals_ms_since_sample_at(2000));
     d = parse("{\"s\":61,\"ok\":true}");
     TEST_ASSERT_FALSE(signals_ingest_at(&d, 3000 + 15 * MIN).session_reset);
     TEST_ASSERT_EQUAL_INT(RATE_IDLE, usage_rate_base_group_at(3000 + 15 * MIN));

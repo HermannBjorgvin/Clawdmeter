@@ -22,6 +22,12 @@ pub const DEFAULT_HEARTBEAT_INTERVAL: u64 = 60;
 pub const MIN_INTERVAL: u64 = 10;
 /// GitHub repo the flasher reads releases from.
 pub const DEFAULT_RELEASE_REPO: &str = "HermannBjorgvin/Clawdmeter";
+/// How lively Clawd is on the device, 1 (No-nonsense) to 5 (All-nonsense).
+pub const LIVELINESS_MIN: u8 = 1;
+/// See [`LIVELINESS_MIN`].
+pub const LIVELINESS_MAX: u8 = 5;
+/// Some-nonsense: the director's own timings.
+pub const DEFAULT_LIVELINESS: u8 = 3;
 
 /// A config file held as its original lines.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -173,6 +179,57 @@ impl ClockMode {
     }
 }
 
+/// `attention_anim`: how long Clawd points and waves on the device when
+/// Claude needs you. Only his animation: the alert itself is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AttentionAnim {
+    /// The whole alert, 2 minutes (default).
+    #[default]
+    Min2,
+    /// 30 seconds.
+    S30,
+    /// 10 seconds.
+    S10,
+    /// No animation.
+    Off,
+}
+
+impl AttentionAnim {
+    /// Every option, in the order the Device page shows them.
+    pub const ALL: [AttentionAnim; 4] =
+        [AttentionAnim::Off, AttentionAnim::S10, AttentionAnim::S30, AttentionAnim::Min2];
+
+    /// Parse a config value; anything unknown is the default.
+    pub fn parse(v: &str) -> Self {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "30s" => AttentionAnim::S30,
+            "10s" => AttentionAnim::S10,
+            "off" => AttentionAnim::Off,
+            _ => AttentionAnim::Min2,
+        }
+    }
+
+    /// The config-file spelling, also the Device page's label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AttentionAnim::Min2 => "2m",
+            AttentionAnim::S30 => "30s",
+            AttentionAnim::S10 => "10s",
+            AttentionAnim::Off => "off",
+        }
+    }
+
+    /// The payload's `aa`: seconds, 0 = off.
+    pub fn seconds(self) -> u16 {
+        match self {
+            AttentionAnim::Min2 => 120,
+            AttentionAnim::S30 => 30,
+            AttentionAnim::S10 => 10,
+            AttentionAnim::Off => 0,
+        }
+    }
+}
+
 /// Typed view of the config, with the old daemons' defaults and clamps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -203,6 +260,10 @@ pub struct Settings {
     pub update_check: bool,
     /// Which kinds of "Claude needs you" alert reach the device and tray.
     pub alert_on: AlertOn,
+    /// How lively Clawd is on the device (`lv`, 1-5, default 3).
+    pub liveliness: u8,
+    /// How long Clawd points and waves for an alert (`aa`, default 2m).
+    pub attention_anim: AttentionAnim,
 }
 
 /// `alert_on`: the alert kinds that show, as a comma list of `permission`,
@@ -272,6 +333,15 @@ impl AlertOn {
     }
 }
 
+/// Parse `liveliness`: a whole number, clamped to 1-5; anything else is the
+/// default.
+pub fn parse_liveliness(v: &str) -> u8 {
+    match v.trim().parse::<i64>() {
+        Ok(n) => n.clamp(LIVELINESS_MIN as i64, LIVELINESS_MAX as i64) as u8,
+        Err(_) => DEFAULT_LIVELINESS,
+    }
+}
+
 /// Parse an interval like the bash daemon: digits only, clamped to >= 10.
 pub fn parse_interval(v: &str) -> Option<u64> {
     let v = v.trim();
@@ -319,6 +389,8 @@ impl Settings {
             claude_path: cfg.get("claude_path").filter(|s| !s.is_empty()).map(|s| paths.expand_tilde(s)),
             update_check: on_off(cfg.get("update_check"), true),
             alert_on: cfg.get("alert_on").map(AlertOn::parse).unwrap_or_default(),
+            liveliness: cfg.get("liveliness").map(parse_liveliness).unwrap_or(DEFAULT_LIVELINESS),
+            attention_anim: cfg.get("attention_anim").map(AttentionAnim::parse).unwrap_or_default(),
         }
     }
 
@@ -401,6 +473,12 @@ impl Settings {
         }
         if current.alert_on != self.alert_on {
             cfg.set("alert_on", &self.alert_on.as_config());
+        }
+        if current.liveliness != self.liveliness {
+            cfg.set("liveliness", &self.liveliness.to_string());
+        }
+        if current.attention_anim != self.attention_anim {
+            cfg.set("attention_anim", self.attention_anim.as_str());
         }
     }
 }
@@ -529,6 +607,47 @@ mod tests {
         assert_eq!(settings("").release_repo, DEFAULT_RELEASE_REPO);
         assert_eq!(settings("release_repo = me/fork").release_repo, "me/fork");
         assert_eq!(settings("release_repo = nonsense").release_repo, DEFAULT_RELEASE_REPO);
+    }
+
+    #[test]
+    fn liveliness() {
+        assert_eq!(settings("").liveliness, DEFAULT_LIVELINESS);
+        assert_eq!(settings("liveliness = 5\n").liveliness, 5);
+        assert_eq!(settings("liveliness = 0\n").liveliness, 1, "clamped");
+        assert_eq!(settings("liveliness = 9\n").liveliness, 5, "clamped");
+        assert_eq!(settings("liveliness = lots\n").liveliness, DEFAULT_LIVELINESS);
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("liveliness").is_none(), "the default stays out of the file");
+        s.liveliness = 1;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("liveliness"), Some("1"));
+        assert_eq!(Settings::from_config(&cfg, &paths(), None).liveliness, 1);
+    }
+
+    #[test]
+    fn attention_anim() {
+        assert_eq!(settings("").attention_anim, AttentionAnim::Min2);
+        assert_eq!(settings("attention_anim = 30s\n").attention_anim, AttentionAnim::S30);
+        assert_eq!(settings("attention_anim = 10S\n").attention_anim, AttentionAnim::S10);
+        assert_eq!(settings("attention_anim = off\n").attention_anim, AttentionAnim::Off);
+        assert_eq!(settings("attention_anim = forever\n").attention_anim, AttentionAnim::Min2);
+        let secs: Vec<u16> = AttentionAnim::ALL.iter().map(|a| a.seconds()).collect();
+        assert_eq!(secs, [0, 10, 30, 120]);
+        for a in AttentionAnim::ALL {
+            assert_eq!(AttentionAnim::parse(a.as_str()), a, "round trip");
+        }
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("attention_anim").is_none(), "the default stays out of the file");
+        s.attention_anim = AttentionAnim::Off;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("attention_anim"), Some("off"));
+        assert_eq!(Settings::from_config(&cfg, &paths(), None).attention_anim, AttentionAnim::Off);
     }
 
     #[test]

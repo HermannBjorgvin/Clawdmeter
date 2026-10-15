@@ -139,6 +139,10 @@ pub struct Engine {
     sent_a: Option<u8>,
     sent_a_at: i64,
     sent_n: Option<u32>,
+    /// The liveliness the device last got (`lv`).
+    sent_lv: Option<u8>,
+    /// The attention animation the device last got (`aa`).
+    sent_aa: Option<u16>,
     last_event_ts: Option<i64>,
     /// Latest prompt or tool activity that names no configured account.
     unattributed_activity: Option<i64>,
@@ -174,6 +178,8 @@ impl Engine {
             sent_a: None,
             sent_a_at: i64::MIN / 2,
             sent_n: None,
+            sent_lv: None,
+            sent_aa: None,
             last_event_ts: None,
             unattributed_activity: None,
             claude_found: true,
@@ -268,6 +274,8 @@ impl Engine {
         self.attention.reset();
         self.sent_a = None;
         self.sent_n = None;
+        self.sent_lv = None;
+        self.sent_aa = None;
         if self.active.is_some() || self.logged_out {
             self.fresh_poll = true;
         }
@@ -450,6 +458,9 @@ impl Engine {
         let new_event = event_fresh && self.activity.seq != self.sent_seq;
         let a_changed = hooks && self.sent_a != Some(level) && now - self.sent_a_at >= ACTIVITY_MIN_INTERVAL;
         let n_changed = hooks && self.sent_n != Some(sessions);
+        // A new liveliness or attention animation goes out right away, like an event.
+        let aa = self.settings.attention_anim.seconds();
+        let prefs_changed = self.sent_lv != Some(self.settings.liveliness) || self.sent_aa != Some(aa);
 
         let (mut payload, kind) = if self.logged_out {
             if !(self.fresh_poll || self.attention.pending()) {
@@ -463,7 +474,7 @@ impl Engine {
                 WriteKind::Poll
             } else if self.attention.pending() {
                 WriteKind::Attention
-            } else if (new_event || a_changed || n_changed) && !self.stale(now) {
+            } else if (new_event || a_changed || n_changed || prefs_changed) && !self.stale(now) {
                 // Any ok payload refreshes the device's DATA_FRESH_MS, so
                 // while the numbers are stale only alerts and polls go out
                 // and the device can show its stale state.
@@ -484,6 +495,8 @@ impl Engine {
             if kind != WriteKind::Poll {
                 p.rp = Some(1);
             }
+            p.lv = Some(self.settings.liveliness);
+            p.aa = Some(aa);
             (p, kind)
         };
 
@@ -526,6 +539,12 @@ impl Engine {
         }
         if let Some(n) = w.payload.n {
             self.sent_n = Some(n);
+        }
+        if let Some(lv) = w.payload.lv {
+            self.sent_lv = Some(lv);
+        }
+        if let Some(aa) = w.payload.aa {
+            self.sent_aa = Some(aa);
         }
     }
 
@@ -618,7 +637,10 @@ mod tests {
         e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
         let w = write(&mut e, T0).unwrap();
         assert_eq!(w.kind, WriteKind::Poll);
-        assert_eq!(w.payload.to_json(), r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true}"#);
+        assert_eq!(
+            w.payload.to_json(),
+            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120}"#
+        );
         assert!(write(&mut e, T0 + 1).is_none());
     }
 
@@ -634,7 +656,7 @@ mod tests {
         assert_eq!(hb.kind, WriteKind::Heartbeat);
         assert_eq!(
             hb.payload.to_json(),
-            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1}"#
+            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120}"#
         );
         // Three misses: stale, heartbeats stop so the device's freshness lapses.
         for i in 1..=3 {
@@ -1089,6 +1111,35 @@ mod tests {
         assert_eq!((errs.len(), errs[0].retrying), (1, false));
         e.on_poll_results(T0 + 700, vec![(a, Err(UsageError::NotLoggedIn("x".into())))]);
         assert!(e.status(T0 + 700).logged_out);
+    }
+
+    #[test]
+    fn liveliness_goes_out_with_the_data_and_when_it_changes() {
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        let w = write(&mut e, T0).unwrap();
+        assert_eq!(w.payload.lv, Some(3), "every data payload carries it");
+        assert!(write(&mut e, T0 + 1).is_none(), "nothing new");
+        e.update_settings(settings("liveliness = 1\n"));
+        let w = write(&mut e, T0 + 2).expect("a new liveliness is sent right away");
+        assert_eq!((w.kind, w.payload.lv, w.payload.rp), (WriteKind::Event, Some(1), Some(1)));
+        assert!(write(&mut e, T0 + 3).is_none());
+        e.on_connected();
+        assert_eq!(write(&mut e, T0 + 4).unwrap().payload.lv, Some(1), "resent on a reconnect");
+    }
+
+    #[test]
+    fn attention_animation_goes_out_with_the_data_and_when_it_changes() {
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.aa, Some(120), "every data payload carries it");
+        assert!(write(&mut e, T0 + 1).is_none(), "nothing new");
+        e.update_settings(settings("attention_anim = off\n"));
+        let w = write(&mut e, T0 + 2).expect("a new setting is sent right away");
+        assert_eq!((w.kind, w.payload.aa, w.payload.rp), (WriteKind::Event, Some(0), Some(1)));
+        assert!(write(&mut e, T0 + 3).is_none());
+        e.on_connected();
+        assert_eq!(write(&mut e, T0 + 4).unwrap().payload.aa, Some(0), "resent on a reconnect");
     }
 
     #[test]

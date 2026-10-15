@@ -3,26 +3,27 @@
 #include "data.h"
 #include "signals.h"
 
-// The director: one Clawd, three rooms, driven by the situation.
+// The director: one Clawd, on the meters, driven by the situation.
 //
 //   meters  home and default; every path ends here. The corner Clawd sits in
-//           his seat and does small acts (mascot.h).
-//   stage   where he performs a scene (splash.h). A treat after a busy
+//           his seat and does small acts (mascot.h). He also performs here,
+//           full size in front of them (performer.h): a treat after a busy
 //           stretch, or a calm dip during the screensaver.
 //   face    the #198 face resting on the glass (face.h): the screensaver,
-//           and the curtain rooms change behind.
+//           and the peek when you tap the meters.
 //
-// Rules of continuity: only ever one Clawd; he enters and leaves through an
-// edge; the screen never hard-cuts (rooms change behind the face, or behind
-// the orange streak on a tap). A tap means "show me the meters" everywhere
-// else; on the meters themselves it's tapping the aquarium: he reacts.
+// Rules of continuity: only ever one Clawd (corner sprite, full-size sprite,
+// performer or face); he enters and leaves through an edge; the screen never
+// hard-cuts. A tap during a performance or on the face means "show me the
+// meters"; on the meters themselves it's tapping the aquarium: he reacts.
 //
 // Beats (design system §09): notice, show, tap → meters, screensaver + wake,
-// attention, fresh-window joy, long-turn wave, and the tap-on-the-meters peek. The lurk trip and idle acts
-// are the corner's own secondary action. Minimal mode collapses all of it to
-// one room with a still Clawd. See docs/clawd-director.md.
+// attention, fresh-window joy, long-turn wave, and the tap-on-the-meters
+// peek. The lurk trip and idle acts are the corner's own secondary action.
+// Minimal mode collapses all of it to a still Clawd. See
+// docs/clawd-director.md.
 
-enum DirectorRoom { ROOM_METERS, ROOM_STAGE, ROOM_FACE };
+enum DirectorRoom { ROOM_METERS, ROOM_FACE };
 
 void director_init(void);          // after ui_init()
 void director_tick(void);
@@ -42,8 +43,20 @@ void director_tap(int x);
 // being here and dismisses an alert, but Clawd doesn't peek, so the hint
 // stays in view for the hold.
 void director_set_pairing_touch(bool on);
-void director_button(void);        // a physical button press: you're here
-void director_stage_next(void);    // PWR while the stage is up: next scene, same room
+// A physical button press: you're here. `main_button` is BOOT, or the PWR
+// key on a board whose only button it is. On a board without a touchscreen
+// that press first dismisses an active alert and returns true (the caller
+// then skips the button's normal action, push to talk or brightness);
+// otherwise false.
+bool director_button(bool main_button);
+// Apply a liveliness level (clawd_policy.h) now: the tuning changes, and
+// what the new level rules out (a show, the screensaver, idle acts, a
+// pending reaction) stops.
+void director_set_liveliness(int level);
+
+// How long Clawd's attention animation runs, in seconds (clawd_policy.h;
+// 0 = off). The alert itself is unchanged.
+void director_set_attn_anim(int seconds);
 
 // Print every beat step with a timestamp (the sim turns it on with
 // SIM_TRACE=1 for walkthrough timings). Beat changes always print.

@@ -8,7 +8,7 @@
 //!   cargo run -p clawdmeter-app --example demo -- [--page PAGE] [--status connected|off]
 //!   [--board none|fresh|current|old] [--setup welcome|board|flash|pair|hooks|done] [--hooks-preview]
 //!   [--flash-to identify|firmware|flash|done] [--shop] [--accounts retrying] [--refresh wait|checking]
-//!   [--advanced] [--session idle]
+//!   [--advanced] [--session idle] [--height PX]
 //! ```
 //!
 //! `--accounts retrying` adds a second account that is being rate-limited;
@@ -180,8 +180,10 @@ fn main() {
     let hooks_preview = args.iter().any(|a| a == "--hooks-preview");
     let shop = args.iter().any(|a| a == "--shop");
     let advanced = args.iter().any(|a| a == "--advanced");
+    // A taller window, so a long page fits one screenshot.
+    let height = arg(&args, "--height").and_then(|h| h.parse::<f32>().ok());
 
-    clawdmeter_app::ui::open(move |window, cx| {
+    clawdmeter_app::ui::open_with_height(height, move |window, cx| {
         let p = paths.clone();
         let hw: Arc<dyn FlashHardware> = Arc::new(FakeBoard { kind: board });
         let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));

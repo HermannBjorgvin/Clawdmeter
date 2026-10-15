@@ -1,8 +1,9 @@
 //! The JSON written to the device's RX characteristic.
 //!
-//! Keys match `parse_json()` in `firmware/src/main.cpp`, in the order the old
-//! daemons wrote them, plus the additive fast-clock fields `a`, `e`, `es`,
-//! `n`, `rp` (old firmware ignores unknown keys).
+//! Keys match `payload_parse()` in `firmware/src/payload.cpp`, in the order
+//! the old daemons wrote them, plus the additive fast-clock fields `a`, `e`,
+//! `es`, `n`, `rp` and Clawd's settings `lv` and `aa` (old firmware ignores
+//! unknown keys).
 
 use chrono::{DateTime, Datelike, Months, TimeZone, Utc};
 use serde::Serialize;
@@ -76,12 +77,20 @@ pub struct Payload {
     /// 1 = heartbeat/replay (no fresh poll): the rate math ignores it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rp: Option<u8>,
+    /// How lively Clawd is, 1 (No-nonsense) to 5 (All-nonsense). The device
+    /// keeps the last value it got across reboots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lv: Option<u8>,
+    /// Seconds Clawd points and waves for an alert, 0 = no animation (the
+    /// alert itself is unchanged). The device keeps the last value it got.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aa: Option<u16>,
 }
 
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
     "s", "sr", "w", "wr", "st", "acct", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x", "a", "e", "es", "n",
-    "rp",
+    "rp", "lv", "aa",
 ];
 /// The fast-clock keys added in v0.4 (old firmware ignores them).
 pub const ADDITIVE_KEYS: &[&str] = &["a", "e", "es", "n", "rp"];
@@ -489,6 +498,8 @@ mod tests {
             es: Some(7),
             n: Some(1),
             rp: Some(1),
+            lv: Some(3),
+            aa: Some(120),
         };
         let v: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&pl.to_json()).unwrap();
         // serde_json's Map is sorted without preserve_order; check membership.

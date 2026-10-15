@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <Arduino.h>
 #include "../../clawd_director.h"
+#include "../../hal/board_caps.h"
 
 static SDL_Window*   win = NULL;
 static SDL_Renderer* ren = NULL;
@@ -14,6 +15,13 @@ static SDL_Texture*  tex = NULL;
 static uint16_t*     shadow = NULL;   // full-frame RGB565 — what the panel "shows"
 static uint8_t       brightness = 200;
 static bool          dirty = false;
+static uint32_t      frame_version = 0;   // moves with every flush and brightness change
+
+const uint16_t* sim_display_pixels(uint8_t* bright, uint32_t* version) {
+    *bright = brightness;
+    *version = frame_version;
+    return shadow;
+}
 
 // SIM_EDGE_WATCH=1: log whenever what the bottom EDGE_ROWS rows and the
 // right EDGE_ROWS columns show changes (non-black pixel counts), with the
@@ -44,6 +52,7 @@ static void edge_watch(void) {
 }
 
 static void present(void) {
+    if (sim_ctrl_active()) { dirty = false; return; }   // the host reads sim_display_pixels()
     edge_watch();
     SDL_UpdateTexture(tex, NULL, shadow, LCD_WIDTH * 2);
     // AMOLED brightness → linear dim of the whole frame.
@@ -78,9 +87,23 @@ void display_hal_begin(void) { present(); }
 void display_hal_set_brightness(uint8_t level) {
     if (level == brightness) return;
     brightness = level;
+    frame_version++;
     // Present immediately so idle fades stay visible even while main.cpp
     // skips display_hal_tick() (asleep).
     present();
+}
+
+// A round panel (SIM_CIRCLE=1) shows only the inscribed circle: what LVGL
+// draws past it is replaced by a grey bezel, so the window and screenshots
+// show what the glass would.
+#define BEZEL 0x2945
+static bool off_glass(int32_t px, int32_t py) {
+    static int round = -1;
+    if (round < 0) round = board_caps().round_panel;
+    if (!round) return false;
+    const int32_t d = LCD_WIDTH < LCD_HEIGHT ? LCD_WIDTH : LCD_HEIGHT;
+    const int32_t dx = 2 * px + 1 - LCD_WIDTH, dy = 2 * py + 1 - LCD_HEIGHT;
+    return dx * dx + dy * dy > d * d;
 }
 
 void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
@@ -94,8 +117,11 @@ void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
         if (cw <= 0) continue;
         memcpy(&shadow[dy * LCD_WIDTH + x + sx], &pixels[(size_t)row * w + sx],
                (size_t)cw * 2);
+        for (int32_t px = x + sx; px < x + sx + cw; px++)
+            if (off_glass(px, dy)) shadow[dy * LCD_WIDTH + px] = BEZEL;
     }
     dirty = true;
+    frame_version++;
 }
 
 void display_hal_tick(void) {

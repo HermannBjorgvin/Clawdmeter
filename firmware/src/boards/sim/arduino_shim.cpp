@@ -4,25 +4,36 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "sim_platform.h"
+
 static uint64_t now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
 }
 
+// Under a controller (SIM_CTRL_FD, sim_ctrl.cpp) time is virtual: it starts
+// at 0 and moves only through delay(), so a run is the same every time.
+static uint64_t virtual_ms = 0;
+
 unsigned long millis(void) {
+    if (sim_ctrl_active()) return (unsigned long)virtual_ms;
     static uint64_t t0 = now_ms();
     return (unsigned long)(now_ms() - t0);
 }
 
 unsigned long micros(void) {
+    if (sim_ctrl_active()) return (unsigned long)(virtual_ms * 1000ull);
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     static uint64_t t0 = (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
     return (unsigned long)((uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull - t0);
 }
 
-void delay(unsigned long ms) { usleep(ms * 1000); }
+void delay(unsigned long ms) {
+    if (sim_ctrl_active()) virtual_ms += ms;
+    else usleep(ms * 1000);
+}
 
 size_t SimSerial::write(const uint8_t* buf, size_t len) {
     return fwrite(buf, 1, len, stdout);

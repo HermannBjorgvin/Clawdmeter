@@ -5,7 +5,7 @@
 //
 // splash_animations.h defines ~400 KB of `static const` frame data, so it may
 // only be included by ONE translation unit (clawd_anim.cpp); every other
-// module (stage, corner mascot, director) reaches the art through this view.
+// module (performer, corner mascot, director) reaches the art through this view.
 //
 // Geometry: every frame is a bounding-box crop of the shared 55x37 art stage,
 // placed at (ox, oy). All animations end at stage row 37 (feet line), and the

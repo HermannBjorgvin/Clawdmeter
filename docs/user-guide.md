@@ -111,10 +111,23 @@ entry on Windows.
 
 | Meters | Show | Screensaver | Attention |
 | --- | --- | --- | --- |
-| ![Meters](../screenshots/director/01-home-meters.png) | ![Show](../screenshots/director/09-show-scene.png) | ![Screensaver](../screenshots/director/15-screensaver-face.png) | ![Attention](../screenshots/director/20-attention-waves.png) |
+| ![Meters](../screenshots/director/01-home-meters.png) | ![Show](../screenshots/director/06-show-scene.png) | ![Screensaver](../screenshots/director/15-screensaver-face.png) | ![Attention](../screenshots/director/20-attention-waves.png) |
 | Session and weekly usage | After sustained activity | After a quiet stretch | A session needs an answer |
 
-The device boots to the meters. Tap a show or screensaver to return to them.
+**Animation silliness** on the Device page sets how lively Clawd is. **No-nonsense**
+keeps him still in his corner: no shows, no screensaver, no idle acts or
+reactions, and the status line changes its word once a minute with a still
+spinner. Taps and alerts still get their reaction. **Some-nonsense** (the
+default) is the behaviour described here. **All-nonsense** earns shows
+sooner, on lighter work, and has him act up far more often. A line under
+the slider says what the chosen level does. **Attention animation** sets how
+long he points and waves when Claude needs you (off, 10 or 30 seconds, or 2
+minutes, the default); the alert itself stays up until you tap it either
+way. The device remembers both settings across restarts.
+
+The device boots to the meters. Clawd performs his shows right on them,
+in front of the panels. Tap a show or the screensaver to send him back to
+his seat.
 Tap the meters to bring Clawd's face up to the glass; tap again to send him
 back. A tap that wakes a sleeping panel only wakes it.
 
@@ -129,6 +142,8 @@ alerts expire after 30 seconds. C6 boards show the message without the
 full-size Clawd. Optional alert and reset chimes work on boards with an implemented audio output; those boards also ding once when they start.
 Boards with the **minimal display** capability keep the meters and a still
 Clawd, with no animated scenes. This is a board capability, not a user setting.
+C6 boards have no room for the full-size Clawd: their shows are acts in his
+corner seat.
 
 The status line rotates through Claude Code's whimsical thinking verbs when
 all is well. It shows **Waiting** without a connection, **No data** before a
@@ -146,7 +161,7 @@ and character rules.
 | --- | --- |
 | BOOT | Hold to send Space to the focused window, for Claude Code voice input. GPIO 0 on S3; GPIO 9 on C6. |
 | Secondary, where fitted | Send Shift+Tab to the focused window. S3 2.16: GPIO 18; C6 2.16: GPIO 10; LCD-1.54: GPIO 5. |
-| PWR, where software-controlled | Short press: next scene on the stage, brightness elsewhere. Hold about 3 seconds and release: clear pairing. |
+| PWR, where software-controlled | Short press: brightness. Hold about 3 seconds and release: clear pairing. |
 
 The LCD-4 has one user button, BOOT. Its PWR key is a hardware reset.
 
@@ -165,6 +180,8 @@ seconds and preserves comments and unknown keys when saving.
 | `alert_chime` | `off` | Chime on the device when Claude needs you (boards with a speaker). The older `beep` key still works. |
 | `desktop_chime` | `off` | Play the same chime on this computer when Claude needs you. Follows `alert_on`. |
 | `clock` | `off` | `auto`, `12`, or `24` replaces the device's Usage title with a clock. |
+| `liveliness` | `3` | How lively Clawd is, `1` (No-nonsense) to `5` (All-nonsense). Set with **Animation silliness** on the Device page. |
+| `attention_anim` | `2m` | How long Clawd points and waves for an alert: `off`, `10s`, `30s` or `2m`. The alert itself is unchanged. Set with **Attention animation** on the Device page. |
 | `poll_interval` | automatic | Override working and no-hooks polling intervals, in seconds. The scheduler enforces at least 120 seconds per account. Quiet and other-account schedules still apply. |
 | `heartbeat_interval` | `60` | Resend cached readings between usage checks. This does not fetch usage. Keep the default unless diagnosing the connection. |
 | `claude_path` | found on `PATH` | Full path to the Claude Code executable, if detection fails. |

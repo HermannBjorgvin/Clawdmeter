@@ -25,6 +25,14 @@ void clawd_tuning_defaults(ClawdTuning* t) {
     t->peek_curious_ms  = 5 * MIN;
     t->peek_double_pct  = 30;
     t->peek_toward_pct  = 60;
+    t->shows             = true;
+    t->screensaver       = true;
+    t->idle_acts         = true;
+    t->reactions         = true;
+    t->show_min_activity = 3;
+    t->idle_gap_pct      = 100;
+    t->verb_ms           = 4 * SEC;
+    t->spinner           = true;
 }
 
 void clawd_tuning_fast(ClawdTuning* t) {
@@ -42,12 +50,87 @@ void clawd_tuning_fast(ClawdTuning* t) {
     t->peek_curious_ms  = 12 * SEC;   // under quiet_ms, as the defaults are
 }
 
-ClawdTuning& clawd_tuning(void) {
-    static ClawdTuning t;
-    static bool init = false;
-    if (!init) { clawd_tuning_defaults(&t); init = true; }
-    return t;
+// ─── Liveliness ──────────────────────────────────────────────────────────────
+// Rate per level, permille: the rate-like timings divide by it.
+static const uint16_t LIVELY_RATE[CLAWD_LIVELINESS_MAX + 1] = { 0, 0, 600, 1000, 1800, 3000 };
+
+int clawd_liveliness_clamp(int level) {
+    if (level < CLAWD_LIVELINESS_MIN) return CLAWD_LIVELINESS_MIN;
+    if (level > CLAWD_LIVELINESS_MAX) return CLAWD_LIVELINESS_MAX;
+    return level;
 }
+
+static uint32_t per_rate(uint32_t ms, uint16_t rate) { return (uint32_t)((uint64_t)ms * 1000 / rate); }
+
+void clawd_tuning_scaled(const ClawdTuning* base, int level, ClawdTuning* out) {
+    *out = *base;
+    level = clawd_liveliness_clamp(level);
+    if (level == 1) {
+        out->shows = false;
+        out->screensaver = false;
+        out->idle_acts = false;
+        out->reactions = false;
+        out->verb_ms = 60 * SEC;
+        out->spinner = false;
+        return;
+    }
+    const uint16_t r = LIVELY_RATE[level];
+    out->show_after_ms    = per_rate(base->show_after_ms, r);
+    out->show_cooldown_ms = per_rate(base->show_cooldown_ms, r);
+    out->calm_min_ms      = per_rate(base->calm_min_ms, r);
+    out->calm_max_ms      = per_rate(base->calm_max_ms, r);
+    out->long_turn_ms     = per_rate(base->long_turn_ms, r);
+    out->idle_gap_pct     = (uint16_t)(base->idle_gap_pct * 1000UL / r);
+    if (level == CLAWD_LIVELINESS_MAX && base->show_min_activity > 2)
+        out->show_min_activity = 2;              // a lighter busy stretch counts too
+}
+
+static ClawdTuning tuning_base, tuning_now;
+static int  liveliness = CLAWD_LIVELINESS_DEFAULT;
+static bool tuning_init = false;
+
+static void tuning_ready(void) {
+    if (tuning_init) return;
+    clawd_tuning_defaults(&tuning_base);
+    clawd_tuning_scaled(&tuning_base, liveliness, &tuning_now);
+    tuning_init = true;
+}
+
+ClawdTuning& clawd_tuning(void) {
+    tuning_ready();
+    return tuning_now;
+}
+
+void clawd_tuning_set_base(const ClawdTuning* base) {
+    tuning_ready();
+    tuning_base = *base;
+    clawd_tuning_scaled(&tuning_base, liveliness, &tuning_now);
+}
+
+void clawd_set_liveliness(int level) {
+    tuning_ready();
+    liveliness = clawd_liveliness_clamp(level);
+    clawd_tuning_scaled(&tuning_base, liveliness, &tuning_now);
+}
+
+int clawd_liveliness(void) { return liveliness; }
+
+// ─── Attention animation ─────────────────────────────────────────────────────
+static int attn_anim_s = CLAWD_ATTN_ANIM_DEFAULT_S;
+
+int clawd_attn_anim_clamp(int seconds) {
+    if (seconds < 0) return 0;
+    if (seconds > CLAWD_ATTN_ANIM_MAX_S) return CLAWD_ATTN_ANIM_MAX_S;
+    return seconds;
+}
+
+uint32_t clawd_attn_anim_ms(int seconds, uint32_t alert_timeout_ms) {
+    seconds = clawd_attn_anim_clamp(seconds);
+    return (uint32_t)((uint64_t)alert_timeout_ms * seconds / CLAWD_ATTN_ANIM_MAX_S);
+}
+
+void clawd_set_attn_anim(int seconds) { attn_anim_s = clawd_attn_anim_clamp(seconds); }
+int  clawd_attn_anim(void) { return attn_anim_s; }
 
 // ─── Randomness ──────────────────────────────────────────────────────────────
 void clawd_rng_seed(ClawdRng* r, uint32_t seed) { r->s = seed ? seed : 0x9E3779B9u; }
@@ -91,8 +174,8 @@ uint32_t clawd_jitter(uint32_t base_ms, ClawdRng* r) {
 // ─── Show gate ───────────────────────────────────────────────────────────────
 void show_gate_clear(ShowGate* g) { memset(g, 0, sizeof(*g)); }
 
-void show_gate_update(ShowGate* g, uint32_t now, int activity) {
-    if (activity >= 3) {
+void show_gate_update(ShowGate* g, uint32_t now, int activity, const ClawdTuning* t) {
+    if (activity >= 0 && activity >= t->show_min_activity) {
         if (!g->busy) { g->busy = true; g->busy_since = now; }
     } else {
         g->busy = false;
@@ -100,7 +183,7 @@ void show_gate_update(ShowGate* g, uint32_t now, int activity) {
 }
 
 bool show_gate_ready(const ShowGate* g, uint32_t now, const ClawdTuning* t) {
-    if (!g->busy) return false;
+    if (!t->shows || !g->busy) return false;
     if ((uint32_t)(now - g->busy_since) < t->show_after_ms) return false;
     if (g->shown && (uint32_t)(now - g->last_show) < t->show_cooldown_ms) return false;
     return true;
@@ -114,7 +197,7 @@ void show_gate_mark_shown(ShowGate* g, uint32_t now) {
 
 // ─── Screensaver gate ────────────────────────────────────────────────────────
 bool screensaver_ready(const QuietInput* in, const ClawdTuning* t) {
-    if (!in->meters_live) return false;
+    if (!t->screensaver || !in->meters_live) return false;
     if (!in->hooks_seen && !in->window_not_started) return false;
     return (uint32_t)(in->now - in->last_engagement) >= t->quiet_ms;
 }

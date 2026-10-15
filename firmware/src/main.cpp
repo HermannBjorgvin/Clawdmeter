@@ -7,7 +7,7 @@
 #include "data.h"
 #include "ui.h"
 #include "ble.h"
-#include "splash.h"
+#include "performer.h"
 #include "mascot.h"
 #include "clawd_director.h"
 #include "usage_rate.h"
@@ -18,6 +18,7 @@
 #include "idle.h"
 #include "idle_cfg.h"
 #include "brightness.h"
+#include "clawd_prefs.h"
 #include "perf.h"
 #include "pair_hold.h"
 
@@ -208,6 +209,16 @@ static void check_serial_cmd() {
                 clear_pairing("serial");
                 Serial.println("{\"unpair\":true}");
             }
+            else if (strcmp(cmd_buf, "liveliness") == 0 || strncmp(cmd_buf, "liveliness ", 11) == 0) {
+                // QA: `liveliness [1-5]` (until the app sends its own).
+                if (cmd_buf[10] == ' ') liveliness_set(atoi(cmd_buf + 11));
+                Serial.printf("{\"liveliness\":%d}\n", liveliness_get());
+            }
+            else if (strcmp(cmd_buf, "attention_anim") == 0 || strncmp(cmd_buf, "attention_anim ", 15) == 0) {
+                // QA: `attention_anim [seconds]` (0 = off; until the app sends its own).
+                if (cmd_buf[14] == ' ') attn_anim_set(atoi(cmd_buf + 15));
+                Serial.printf("{\"attention_anim\":%d}\n", attn_anim_get());
+            }
             else if (strncmp(cmd_buf, "clawd ", 6) == 0) {
                 const bool ok = director_debug(cmd_buf + 6);
                 Serial.printf("{\"clawd\":\"%s\",\"ok\":%s}\n", cmd_buf + 6, ok ? "true" : "false");
@@ -271,6 +282,7 @@ void setup() {
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging(), power_hal_is_vbus_in());
     director_init();    // rooms + beats; boots on the meters (home)
+    clawd_prefs_init();  // the saved liveliness and attention animation, before the app says otherwise
 
     Serial.printf("Dashboard ready (%s, %dx%d) %lu ms after boot, waiting for data on BLE...\n",
         board_caps().name, W, H, (unsigned long)millis());
@@ -358,7 +370,7 @@ void loop() {
     power_hal_tick();
     imu_hal_tick();
     sound_hal_tick();
-    splash_tick();
+    performer_tick();
     mascot_tick();
     director_tick();
     if (director_take_dismissed()) ble_send_dismiss();
@@ -370,8 +382,7 @@ void loop() {
     // ---- Physical buttons ----
     //   PRIMARY   → HID Space  (Claude Code voice-mode PTT)
     //   SECONDARY → HID Shift+Tab  (mode toggle; only if the board has one)
-    //   PWR       → on the stage: next scene in the group; elsewhere: cycle
-    //               brightness; hold ~3s + release: pairing mode
+    //   PWR       → cycle brightness; hold ~3s + release: pairing mode
     // Any press also tells the director you're here (wakes the screensaver).
     // First press from sleep is consumed as a wake-only event by
     // idle_consume_wake_press(); the normal action fires from the second
@@ -384,7 +395,10 @@ void loop() {
         if (primary_now != primary_was) {
             if (primary_now) {
                 if (idle_consume_wake_press()) primary_wake_swallowed = true;
-                else { ble_keyboard_press(0x2C, 0); director_button(); }  // HID Space, no mods
+                // No touchscreen: BOOT dismisses an active alert first and is
+                // not a push-to-talk press then.
+                else if (director_button(true)) primary_wake_swallowed = true;
+                else { ble_keyboard_press(0x2C, 0); }                     // HID Space, no mods
             } else {
                 if (primary_wake_swallowed) primary_wake_swallowed = false;
                 else                        ble_keyboard_release();
@@ -399,7 +413,7 @@ void loop() {
             if (secondary_now != secondary_was) {
                 if (secondary_now) {
                     if (idle_consume_wake_press()) secondary_wake_swallowed = true;
-                    else { ble_keyboard_press(0x2B, 0x02); director_button(); }  // HID Tab + LEFT_SHIFT
+                    else { ble_keyboard_press(0x2B, 0x02); director_button(false); }  // HID Tab + LEFT_SHIFT
                 } else {
                     if (secondary_wake_swallowed) secondary_wake_swallowed = false;
                     else                          ble_keyboard_release();
@@ -410,11 +424,10 @@ void loop() {
 
         if (power_hal_pwr_pressed()) {
             if (!idle_consume_wake_press()) {
-                // On the stage PWR swaps the scene and stays in the room (a
-                // screensaver calm dip steps to the other calm scene);
-                // anywhere else it cycles brightness and counts as you being here.
-                if (director_room() == ROOM_STAGE) director_stage_next();
-                else { brightness_cycle(); director_button(); }
+                // Counts as you being here. On a touchless board whose only
+                // button this is, it dismisses an active alert first; else it
+                // cycles brightness.
+                if (!director_button(board_caps().button_count == 0)) brightness_cycle();
             }
         }
 
@@ -475,6 +488,8 @@ void loop() {
             // Stop or tool activity doesn't: Claude working alone isn't you.
             if (sig.event_fired && (sig.event == 'p' || sig.event == 'b'))
                 idle_note_activity();
+            if (usage.liveliness > 0) liveliness_set(usage.liveliness);
+            if (usage.attn_anim_s >= 0) attn_anim_set(usage.attn_anim_s);
             director_on_payload(&usage, &sig);
             if (usage.alert_msg[0]) {
                 Serial.println("attention — mascot");
@@ -493,7 +508,7 @@ void loop() {
 
     // The mood group also moves without a payload: the 15-min window decays
     // to Idle on its own and a hook activity lift expires. Nothing needs to
-    // react (the corner and the stage read the group when they pick), but log
+    // react (the corner and the performer read the group when they pick), but log
     // it so the serial trace matches what Clawd does.
     {
         static uint32_t last_check = 0;
