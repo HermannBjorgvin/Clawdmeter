@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use clawdmeter_ble::{
-    should_wake, AddressCache, DeviceEvent, DeviceEvents, DeviceLink, LinkError, LinkOptions, Reconnect, Sighting,
-    MAX_WRITE,
+    should_wake, AddressCache, Bluetooth, DeviceEvent, DeviceEvents, DeviceLink, LinkError, LinkOptions, Reconnect,
+    Sighting, MAX_WRITE,
 };
 use clawdmeter_core::attention::AttentionInbox;
 use clawdmeter_core::backoff;
@@ -167,10 +167,15 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let mut link: Option<DeviceLink> = None;
     let mut device_events: Option<DeviceEvents> = None;
     let mut connecting: Option<JoinHandle<ConnectResult>> = None;
+    // A zombie link's disconnect, still running.
+    let mut closing: Option<JoinHandle<()>> = None;
     let mut polling: Option<JoinHandle<PollResults>> = None;
     let mut link_state = LinkState::Starting;
     let mut reconnect = Reconnect::default();
-    let mut wakeups = clawdmeter_ble::spawn_watcher();
+    // One btleplug manager for the daemon's lifetime: each one holds a
+    // system D-Bus connection on Linux for good (`clawdmeter_ble::Bluetooth`).
+    let bluetooth = Bluetooth::default();
+    let mut wakeups = clawdmeter_ble::spawn_watcher(bluetooth.clone());
     let mut last_settings = unix_now();
     let mut last_link_check = unix_now();
     let mut last_write_at = None;
@@ -213,6 +218,12 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                 Ok(Command::Shutdown) | Err(mpsc::error::TryRecvError::Disconnected) => {
                     if let Some(l) = link.take() {
                         l.close().await;
+                    }
+                    // A zombie left half-open would be reused on the next
+                    // start. (Never both: a link exists only once the last
+                    // close finished. Each is bounded at 5 s.)
+                    if let Some(c) = closing.take() {
+                        let _ = c.await;
                     }
                     log::info!("daemon stopped");
                     return;
@@ -330,22 +341,23 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             if link.is_some() || !should_wake(&w, cache.load().as_deref()) {
                 continue;
             }
-            if connecting.is_none() && !reconnect.due(now) {
+            if reconnect.wake(now, connecting.is_some(), w.sighting) {
                 let how = match w.sighting {
                     Sighting::Connected => "connected at the OS level",
                     Sighting::Advertising => "advertising",
                 };
-                log::info!("device {} {how}; reconnecting now", w.key);
+                let when = if closed(&closing) { "now" } else { "once the old link is closed" };
+                log::info!("device {} {how}; reconnecting {when}", w.key);
             }
-            reconnect.wake(now, connecting.is_some());
         }
-        if link.is_none() && connecting.is_none() && reconnect.due(now) {
+        if link.is_none() && connecting.is_none() && closed(&closing) && reconnect.due(now) {
+            closing = None;
             if link_state == LinkState::Starting {
                 link_state = LinkState::Connecting;
             }
-            let (cache, opts) = (cache.clone(), link_opts.clone());
+            let (bluetooth, cache, opts) = (bluetooth.clone(), cache.clone(), link_opts.clone());
             connecting = Some(tokio::spawn(async move {
-                let adapter = clawdmeter_ble::adapter().await?;
+                let adapter = bluetooth.adapter().await?;
                 DeviceLink::open(&adapter, &cache, &opts).await
             }));
         }
@@ -354,7 +366,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                 last_link_check = now;
                 if !l.is_connected().await {
                     log::info!("device disconnected, reconnecting...");
-                    link = None;
+                    drop_link(&mut link, &mut closing);
                     device_events = None;
                     link_state = LinkState::Searching;
                     reconnect.retry_in(now, 2);
@@ -384,7 +396,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     Err(e) => {
                         log::warn!("write failed: {e}");
                         if !l.is_connected().await {
-                            link = None;
+                            drop_link(&mut link, &mut closing);
                             device_events = None;
                             link_state = LinkState::Searching;
                             reconnect.retry_in(now, 2);
@@ -401,6 +413,21 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             claude: claude.clone(),
         });
     }
+}
+
+/// Drop a link that stopped working. The stack still reports a zombie
+/// connected, so it is disconnected first, or the next attempt would reuse
+/// it; that runs in the background so the tick loop keeps going, and the
+/// next attempt waits for it (`closed`).
+fn drop_link(link: &mut Option<DeviceLink>, closing: &mut Option<JoinHandle<()>>) {
+    if let Some(l) = link.take().filter(DeviceLink::is_zombie) {
+        *closing = Some(tokio::spawn(async move { l.close().await }));
+    }
+}
+
+/// No disconnect is pending.
+fn closed(closing: &Option<JoinHandle<()>>) -> bool {
+    closing.as_ref().is_none_or(JoinHandle::is_finished)
 }
 
 /// One poll of every account, printed as the payload the device would get

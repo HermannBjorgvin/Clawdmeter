@@ -16,6 +16,8 @@ log.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = "0.9"
+# btleplug's BlueZ backend; named to read the D-Bus error inside its errors.
+bluez-async = "0.9"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

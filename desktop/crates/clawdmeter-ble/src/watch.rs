@@ -24,7 +24,8 @@ use btleplug::platform::PeripheralId;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-use crate::{accept, adapter, describe};
+use crate::bluetooth::Replacements;
+use crate::{accept, describe, Bluetooth};
 
 /// How the device showed up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,16 +81,16 @@ const ADVERT_DEBOUNCE: Duration = Duration::from_secs(2);
 /// Wait before reopening the event stream after the adapter went away.
 const REOPEN_AFTER: Duration = Duration::from_secs(5);
 
-/// Watch the first adapter for sightings of a Clawdmeter. Runs until the
-/// receiver is dropped; reopens the stream when the adapter or the Bluetooth
-/// service goes away. Must be called inside a tokio runtime.
-pub fn spawn_watcher() -> Wakeups {
+/// Watch `bluetooth`'s adapter for sightings of a Clawdmeter. Runs until the
+/// receiver is dropped; reopens the stream when it ends or `bluetooth`
+/// replaces its adapter. Must be called inside a tokio runtime.
+pub fn spawn_watcher(bluetooth: Bluetooth) -> Wakeups {
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 () = tx.closed() => return,
-                () = watch_once(&tx) => {}
+                () = watch_once(&bluetooth, &tx) => {}
             }
             tokio::select! {
                 () = tx.closed() => return,
@@ -100,12 +101,18 @@ pub fn spawn_watcher() -> Wakeups {
     rx
 }
 
-async fn watch_once(tx: &mpsc::UnboundedSender<Wake>) {
-    let adapter = match adapter().await {
-        Ok(a) => a,
-        Err(e) => {
-            log::debug!("wakeup watcher: {e}");
-            return;
+async fn watch_once(bluetooth: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
+    let mut replaced = bluetooth.replaced();
+    // Watch only an adapter that is still current once subscribed; a lookup
+    // that raced a replacement is repeated.
+    let (adapter, opened_on) = loop {
+        match bluetooth.adapter_at().await {
+            Ok((a, at)) if *replaced.borrow_and_update() == at => break (a, at),
+            Ok(_) => continue,
+            Err(e) => {
+                log::debug!("wakeup watcher: {e}");
+                return;
+            }
         }
     };
     let mut events = match adapter.events().await {
@@ -116,7 +123,20 @@ async fn watch_once(tx: &mpsc::UnboundedSender<Wake>) {
         }
     };
     let mut last_advert: HashMap<PeripheralId, Instant> = HashMap::new();
-    while let Some(ev) = events.next().await {
+    loop {
+        let ev = tokio::select! {
+            ev = events.next() => match ev {
+                Some(ev) => ev,
+                None => {
+                    log::debug!("wakeup watcher: event stream ended");
+                    break;
+                }
+            },
+            _ = replaced.changed() => {
+                log::debug!("wakeup watcher: adapter replaced; reopening");
+                break;
+            }
+        };
         let Some((id, kind)) = sighting(&ev) else { continue };
         if kind == Sighting::Advertising {
             let now = Instant::now();
@@ -132,10 +152,22 @@ async fn watch_once(tx: &mpsc::UnboundedSender<Wake>) {
         }
         log::debug!("wakeup: {} {:?}", c.key, kind);
         if tx.send(Wake { key: c.key, sighting: kind }).is_err() {
-            return;
+            break;
         }
     }
-    log::debug!("wakeup watcher: event stream ended");
+    if must_leak(&opened_on, &replaced.borrow()) {
+        std::mem::forget(events);
+    }
+}
+
+/// Must a stream opened at `opened_on` be leaked rather than dropped, now
+/// that the count is `now`? Once its manager lost its D-Bus connection,
+/// dropping a BlueZ stream unwraps a failing `RemoveMatch` and aborts the
+/// app; a dead connection delivers nothing, so the leak costs one idle stream
+/// per lost connection. (At quit the watcher is cancelled while the runtime
+/// shuts down, which never runs that call.)
+fn must_leak(opened_on: &Replacements, now: &Replacements) -> bool {
+    now.lost_connections != opened_on.lost_connections
 }
 
 #[cfg(test)]
@@ -144,6 +176,15 @@ mod tests {
 
     fn wake(key: &str, sighting: Sighting) -> Wake {
         Wake { key: key.into(), sighting }
+    }
+
+    #[test]
+    fn only_streams_of_a_lost_connection_are_leaked() {
+        let opened = Replacements { lost_connections: 1, adapters: 3 };
+        assert!(!must_leak(&opened, &opened));
+        // A new adapter on the same live connection: dropped as usual.
+        assert!(!must_leak(&opened, &Replacements { adapters: 4, ..opened }));
+        assert!(must_leak(&opened, &Replacements { lost_connections: 2, ..opened }));
     }
 
     #[test]
