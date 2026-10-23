@@ -416,16 +416,13 @@ impl std::fmt::Debug for DeviceLink {
 }
 
 impl DeviceLink {
-    /// Find, connect, discover and subscribe, on `bluetooth`'s adapter. On a
-    /// failed connect the address cache is dropped (if it pointed at that
-    /// device).
+    /// Find, connect, discover and subscribe. On a failed connect the address
+    /// cache is dropped (if it pointed at that device).
     pub async fn open(
-        bluetooth: &Bluetooth,
+        adapter: &Adapter,
         cache: &AddressCache,
         opts: &LinkOptions,
     ) -> Result<(DeviceLink, DeviceEvents), LinkError> {
-        bluetooth.clear_own_connects();
-        let adapter = &bluetooth.adapter().await?;
         // The adapter is kept for the app's lifetime, and WinRT's keeps every
         // peripheral it handed out, with its device session, connected flag
         // and discovered services. Start each attempt from fresh ones, so a
@@ -445,7 +442,7 @@ impl DeviceLink {
         }
         let mut last_err = LinkError::NotFound;
         for cand in connect_order(&cands, cached.as_deref()) {
-            match Self::connect(bluetooth, cand.clone(), opts).await {
+            match Self::connect(cand.clone(), opts).await {
                 Ok(ok) => {
                     if cached.as_deref() != Some(cand.key.as_str()) {
                         let _ = cache.save(&cand.key);
@@ -467,21 +464,13 @@ impl DeviceLink {
     }
 
     /// Connect to a specific candidate.
-    pub async fn connect(
-        bluetooth: &Bluetooth,
-        cand: Candidate,
-        opts: &LinkOptions,
-    ) -> Result<(DeviceLink, DeviceEvents), LinkError> {
+    pub async fn connect(cand: Candidate, opts: &LinkOptions) -> Result<(DeviceLink, DeviceEvents), LinkError> {
         let p = cand.peripheral;
         if !p.is_connected().await.unwrap_or(false) {
-            // The stack reports this connect like the device coming back by
-            // itself; the wakeup watcher skips it.
-            bluetooth.expect_own_connect(&cand.key);
             let r = match tokio::time::timeout(opts.connect_timeout, p.connect()).await {
                 Ok(r) => r.map_err(LinkError::Ble),
                 Err(_) => Err(LinkError::Timeout("connect")),
             };
-            bluetooth.own_connect_returned(&cand.key);
             if let Err(e) = r {
                 // Cancel BlueZ's pending Connect, or the next attempt fails
                 // with "Operation already in progress".

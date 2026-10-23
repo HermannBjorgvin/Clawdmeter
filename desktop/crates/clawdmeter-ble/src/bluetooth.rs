@@ -10,48 +10,23 @@
 //! failure:
 //!
 //! * the manager when listing fails because its D-Bus connection is gone
-//!   (the system bus restarted). Errors that came back over a live
-//!   connection, such as bluetoothd not running, keep it. As a backstop for
-//!   a dead connection that fails some other way, [`BACKSTOP_FAILURES`]
-//!   unexplained failures in a row (timeouts, unrecognised errors) replace
-//!   it too, keeping each manager at least [`BACKSTOP_FIRST`], doubling
-//!   each time until a listing succeeds: a bus that hangs for good costs at
-//!   most one connection per 10 min, then 20, 40, … (7 in the first day).
-//!   A stopped bluetoothd answers (`ServiceUnknown`), so it costs none;
-//! * the adapter when it can't be reached after it has worked (macOS: its
-//!   CoreBluetooth thread is gone), at most once per [`ERROR_RELIST_EVERY`],
-//!   or (Linux and Windows, where listing is cheap) when it reads as off;
-//!   BlueZ reports an unplugged adapter as off, so the next one is picked up.
+//!   (the system bus restarted). Every other error keeps it: a stopped or
+//!   hung bluetoothd answers or times out over a live connection, and a new
+//!   connection to the same bus wouldn't help;
+//! * the adapter, on Linux and Windows (where listing is cheap), when it
+//!   reads as off: BlueZ reports an unplugged adapter as off, so the next one
+//!   is picked up. On macOS off just means off.
 //!
 //! The wakeup watcher reopens its event stream whenever either is replaced
-//! ([`Bluetooth::replaced`]); BlueZ streams never end on their own. It also
-//! skips the stack's report of a connect the daemon made itself
-//! ([`Bluetooth::expect_own_connect`]), which would otherwise read as the
-//! device coming back.
+//! ([`Bluetooth::replaced`]); BlueZ streams never end on their own.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use btleplug::api::{Central, CentralState, Manager as _};
 use btleplug::platform::{Adapter, Manager};
 use tokio::sync::{watch, Mutex};
 
 use crate::LinkError;
-
-/// Unexplained listing failures in a row before the backstop replaces the
-/// manager.
-pub const BACKSTOP_FAILURES: u32 = 5;
-/// Shortest time a manager is kept before the backstop may replace it; it
-/// doubles with each backstop replacement until a listing succeeds.
-pub const BACKSTOP_FIRST: Duration = Duration::from_secs(10 * 60);
-/// Shortest time between listing adapters again because the kept one can't
-/// be reached (each listing is a thread for good on macOS).
-pub const ERROR_RELIST_EVERY: Duration = Duration::from_secs(10 * 60);
-/// How long after the daemon's own connect call returns its report still
-/// counts as the daemon's: BlueZ can report the link up and fail the call
-/// right after. A report later than this is the device coming back.
-pub const OWN_CONNECT_REPORT_WINDOW: Duration = Duration::from_secs(3);
 
 /// The shared stack handle; clones share one manager and adapter. On Linux
 /// the D-Bus connection's I/O task runs on the runtime of the first
@@ -85,88 +60,22 @@ impl Bluetooth {
     pub(crate) fn replaced(&self) -> watch::Receiver<Replacements> {
         self.shared.generation.subscribe()
     }
-
-    /// The daemon is about to connect to the device with this key: the
-    /// stack's report of that connect is not a wakeup.
-    pub(crate) fn expect_own_connect(&self, key: &str) {
-        self.shared.own.expect(key);
-    }
-
-    /// The connect call returned (either way): its report is the daemon's
-    /// for [`OWN_CONNECT_REPORT_WINDOW`] more.
-    pub(crate) fn own_connect_returned(&self, key: &str) {
-        self.shared.own.returned(key, Instant::now());
-    }
-
-    /// A new attempt starts: reports the last one expected and never got are
-    /// not coming.
-    pub(crate) fn clear_own_connects(&self) {
-        self.shared.own.clear();
-    }
-
-    /// Is this report of a connect to `key` the daemon's own? Consumes it.
-    pub(crate) fn take_own_connect(&self, key: &str) -> bool {
-        self.shared.own.take(key, Instant::now())
-    }
-}
-
-/// Devices the daemon is connecting itself, by key: `None` while the connect
-/// call runs, else when its report stops counting as the daemon's.
-#[derive(Default)]
-struct OwnConnects(std::sync::Mutex<HashMap<String, Option<Instant>>>);
-
-impl OwnConnects {
-    fn keys(&self) -> std::sync::MutexGuard<'_, HashMap<String, Option<Instant>>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn expect(&self, key: &str) {
-        self.keys().insert(key.to_ascii_uppercase(), None);
-    }
-
-    fn returned(&self, key: &str, now: Instant) {
-        if let Some(until) = self.keys().get_mut(&key.to_ascii_uppercase()) {
-            *until = Some(now + OWN_CONNECT_REPORT_WINDOW);
-        }
-    }
-
-    fn clear(&self) {
-        self.keys().clear();
-    }
-
-    fn take(&self, key: &str, now: Instant) -> bool {
-        self.keys().remove(&key.to_ascii_uppercase()).is_some_and(|until| until.is_none_or(|t| now <= t))
-    }
 }
 
 /// How often the manager and the adapter have been replaced.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub(crate) struct Replacements {
-    /// Managers dropped because their D-Bus connection was (or may have
-    /// been) gone.
-    pub(crate) lost_managers: u64,
+    /// Managers dropped because their D-Bus connection was gone.
+    pub(crate) lost_connections: u64,
     /// Adapters listed and kept.
     pub(crate) adapters: u64,
-}
-
-/// Why listing adapters failed.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // only BlueZ errors are told apart
-enum Failure {
-    /// The manager's connection is gone.
-    ConnectionLost,
-    /// The error came back over a live connection (bluetoothd not running,
-    /// a BlueZ error): the manager is fine.
-    Answered,
-    /// No answer, or an error this code doesn't recognise. Counts towards
-    /// the backstop.
-    Unexplained,
 }
 
 /// A failed adapter listing.
 struct ListError {
     message: String,
-    failure: Failure,
+    /// The manager's D-Bus connection is gone.
+    connection_lost: bool,
 }
 
 /// What [`Shared`] needs from a Bluetooth stack (btleplug, or a fake in
@@ -177,10 +86,9 @@ trait Stack {
     /// Listing adapters costs nothing lasting, so an adapter that reads as
     /// off is listed again in case it was unplugged.
     fn relist_when_off(&self) -> bool;
-    fn now(&self) -> Instant;
     async fn manager(&self) -> Result<Self::Manager, String>;
     async fn adapters(&self, manager: &Self::Manager) -> Result<Vec<Self::Adapter>, ListError>;
-    async fn state(&self, adapter: &Self::Adapter) -> Result<CentralState, String>;
+    async fn state(&self, adapter: &Self::Adapter) -> CentralState;
 }
 
 struct Btleplug;
@@ -193,103 +101,62 @@ impl Stack for Btleplug {
         !cfg!(target_os = "macos")
     }
 
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-
     async fn manager(&self) -> Result<Manager, String> {
         Manager::new().await.map_err(|e| e.to_string())
     }
 
     async fn adapters(&self, manager: &Manager) -> Result<Vec<Adapter>, ListError> {
-        manager.adapters().await.map_err(|e| ListError { message: e.to_string(), failure: failure(&e) })
+        manager.adapters().await.map_err(|e| ListError { message: e.to_string(), connection_lost: connection_lost(&e) })
     }
 
-    async fn state(&self, adapter: &Adapter) -> Result<CentralState, String> {
-        adapter.adapter_state().await.map_err(|e| e.to_string())
+    /// btleplug 0.13 can't fail this: BlueZ reports any error as off, WinRT
+    /// can't fail, and CoreBluetooth only if its thread died (the thread
+    /// never ends otherwise).
+    async fn state(&self, adapter: &Adapter) -> CentralState {
+        adapter.adapter_state().await.unwrap_or(CentralState::Unknown)
     }
 }
 
-/// Classify a BlueZ listing error. btleplug boxes bluez-async's error into
-/// `Error::Other`; its D-Bus errors carry the error name.
+/// Is this listing error the manager's D-Bus connection being gone? btleplug
+/// boxes bluez-async's error into `Error::Other`; its D-Bus error carries the
+/// name. `Disconnected`, or dbus-rs's own "Failed to send message" (what a
+/// dead connection returns once its first calls have timed out), mean gone.
+/// Anything else came back over a live bus (`ServiceUnknown`: bluetoothd
+/// isn't running) or timed out on one.
 #[cfg(target_os = "linux")]
-fn failure(e: &btleplug::Error) -> Failure {
-    let btleplug::Error::Other(inner) = e else { return Failure::Unexplained };
-    match inner.downcast_ref::<bluez_async::BluetoothError>() {
-        Some(bluez_async::BluetoothError::DbusError(d)) => dbus_failure(d),
-        // Parsed a reply: the connection works.
-        Some(_) => Failure::Answered,
-        None => Failure::Unexplained,
+fn connection_lost(e: &btleplug::Error) -> bool {
+    let btleplug::Error::Other(inner) = e else { return false };
+    let Some(bluez_async::BluetoothError::DbusError(d)) = inner.downcast_ref::<bluez_async::BluetoothError>() else {
+        return false;
+    };
+    match d.name() {
+        Some("org.freedesktop.DBus.Error.Disconnected") => true,
+        Some("org.freedesktop.DBus.Error.Failed") => d.message() == Some("Failed to send message"),
+        _ => false,
     }
 }
 
-/// Elsewhere the manager holds nothing, and replacing it buys nothing.
+/// Elsewhere the manager holds nothing to lose.
 #[cfg(not(target_os = "linux"))]
-fn failure(_: &btleplug::Error) -> Failure {
-    Failure::Answered
-}
-
-/// `Disconnected`, and dbus-rs's own "Failed to send message" (returned once
-/// the connection's I/O task has ended), mean the connection is gone.
-/// `Timeout` and `NoReply` are also what a hung or crashing bluetoothd gives
-/// on a live bus, so they only count towards the backstop. Any other error
-/// was sent back over the bus (`ServiceUnknown`: bluetoothd isn't running).
-#[cfg(target_os = "linux")]
-fn dbus_failure(e: &dbus::Error) -> Failure {
-    match e.name() {
-        Some("org.freedesktop.DBus.Error.Disconnected") => Failure::ConnectionLost,
-        Some("org.freedesktop.DBus.Error.Failed") if e.message() == Some("Failed to send message") => {
-            Failure::ConnectionLost
-        }
-        Some(
-            "org.freedesktop.DBus.Error.Timeout"
-            | "org.freedesktop.DBus.Error.NoReply"
-            | "org.freedesktop.DBus.Error.Failed",
-        )
-        | None => Failure::Unexplained,
-        Some(_) => Failure::Answered,
-    }
+fn connection_lost(_: &btleplug::Error) -> bool {
+    false
 }
 
 struct Shared<S: Stack> {
     stack: S,
     slot: Mutex<Slot<S>>,
     generation: watch::Sender<Replacements>,
-    own: OwnConnects,
 }
 
 struct Slot<S: Stack> {
     manager: Option<Arc<S::Manager>>,
     adapter: Option<Arc<S::Adapter>>,
-    /// When the kept manager was made.
-    manager_since: Instant,
-    /// Unexplained listing failures in a row.
-    unexplained: u32,
-    /// How long a manager is kept before the backstop may replace it.
-    backstop_after: Duration,
-    /// The kept adapter's state has been read since it was listed.
-    adapter_worked: bool,
-    /// When an unreachable adapter was last listed again.
-    error_relisted_at: Option<Instant>,
 }
 
 impl<S: Stack> Shared<S> {
     fn new(stack: S) -> Self {
-        let slot = Slot {
-            manager: None,
-            adapter: None,
-            manager_since: stack.now(),
-            unexplained: 0,
-            backstop_after: BACKSTOP_FIRST,
-            adapter_worked: false,
-            error_relisted_at: None,
-        };
-        Shared {
-            stack,
-            slot: Mutex::new(slot),
-            generation: watch::Sender::new(Replacements::default()),
-            own: OwnConnects::default(),
-        }
+        let slot = Slot { manager: None, adapter: None };
+        Shared { stack, slot: Mutex::new(slot), generation: watch::Sender::new(Replacements::default()) }
     }
 
     async fn adapter(&self) -> Result<S::Adapter, LinkError> {
@@ -304,59 +171,22 @@ impl<S: Stack> Shared<S> {
             (slot.adapter.clone(), *self.generation.borrow())
         };
         if let Some(a) = &kept {
-            let state = self.stack.state(a).await;
-            if state.is_ok() {
-                self.worked(a).await;
-            }
-            match state {
-                Ok(CentralState::PoweredOff) if !self.stack.relist_when_off() => return Err(powered_off()),
-                Ok(CentralState::PoweredOff) => {}
-                Ok(_) => return Ok((S::Adapter::clone(a), current)),
-                Err(e) if self.may_relist_unreachable(a).await => {
-                    log::debug!("Bluetooth adapter unreachable ({e}); listing adapters again");
-                }
-                // Not since it last worked, or too soon: keep it and let the
-                // connect find out.
-                Err(_) => return Ok((S::Adapter::clone(a), current)),
+            match self.stack.state(a).await {
+                CentralState::PoweredOff if !self.stack.relist_when_off() => return Err(powered_off()),
+                CentralState::PoweredOff => {}
+                _ => return Ok((S::Adapter::clone(a), current)),
             }
         }
         let (adapter, current) = self.relist(kept.as_ref()).await?;
-        let state = self.stack.state(&adapter).await;
-        if state.is_ok() {
-            self.worked(&adapter).await;
-        }
-        if let Ok(CentralState::PoweredOff) = state {
+        if self.stack.state(&adapter).await == CentralState::PoweredOff {
             return Err(powered_off());
         }
         Ok((S::Adapter::clone(&adapter), current))
     }
 
-    /// `adapter`'s state was read.
-    async fn worked(&self, adapter: &Arc<S::Adapter>) {
-        let mut slot = self.slot.lock().await;
-        if slot.adapter.as_ref().is_some_and(|a| Arc::ptr_eq(a, adapter)) {
-            slot.adapter_worked = true;
-        }
-    }
-
-    /// May the unreachable `adapter` be listed again? Only one that worked
-    /// since it was listed, and at most once per [`ERROR_RELIST_EVERY`]: an
-    /// adapter that never answers would otherwise be listed on every lookup.
-    async fn may_relist_unreachable(&self, adapter: &Arc<S::Adapter>) -> bool {
-        let mut slot = self.slot.lock().await;
-        let now = self.stack.now();
-        let ok = slot.adapter.as_ref().is_some_and(|a| Arc::ptr_eq(a, adapter))
-            && slot.adapter_worked
-            && slot.error_relisted_at.is_none_or(|t| now.duration_since(t) >= ERROR_RELIST_EVERY);
-        if ok {
-            slot.error_relisted_at = Some(now);
-        }
-        ok
-    }
-
-    /// Replace `stale` (the kept adapter the caller found unusable, if any)
-    /// with the first one listed. Holds the lock throughout, so lookups that
-    /// fail together make one adapter between them.
+    /// Replace `stale` (the kept adapter the caller found off, if any) with
+    /// the first one listed. Holds the lock throughout, so lookups that fail
+    /// together make one adapter between them.
     async fn relist(&self, stale: Option<&Arc<S::Adapter>>) -> Result<(Arc<S::Adapter>, Replacements), LinkError> {
         let mut slot = self.slot.lock().await;
         if let Some(a) = &slot.adapter {
@@ -371,55 +201,24 @@ impl<S: Stack> Shared<S> {
             None => {
                 let m = Arc::new(self.stack.manager().await.map_err(LinkError::NoAdapter)?);
                 slot.manager = Some(Arc::clone(&m));
-                slot.manager_since = self.stack.now();
                 m
             }
         };
         let list = match self.stack.adapters(&manager).await {
             Ok(list) => list,
             Err(e) => {
-                self.listing_failed(&mut slot, &e);
+                if e.connection_lost {
+                    log::info!("Bluetooth: lost the system bus connection ({}); reconnecting", e.message);
+                    slot.manager = None;
+                    self.generation.send_modify(|g| g.lost_connections += 1);
+                }
                 return Err(LinkError::NoAdapter(e.message));
             }
         };
-        slot.unexplained = 0;
-        slot.backstop_after = BACKSTOP_FIRST;
         let a = Arc::new(list.into_iter().next().ok_or_else(|| LinkError::NoAdapter("none present".into()))?);
         slot.adapter = Some(Arc::clone(&a));
-        slot.adapter_worked = false;
         self.generation.send_modify(|g| g.adapters += 1);
         Ok((a, *self.generation.borrow()))
-    }
-
-    fn listing_failed(&self, slot: &mut Slot<S>, e: &ListError) {
-        let replace = match e.failure {
-            Failure::ConnectionLost => {
-                log::info!("Bluetooth: lost the system bus connection ({}); reconnecting", e.message);
-                true
-            }
-            Failure::Answered => {
-                slot.unexplained = 0;
-                false
-            }
-            Failure::Unexplained => {
-                slot.unexplained += 1;
-                let due = slot.unexplained >= BACKSTOP_FAILURES
-                    && self.stack.now().duration_since(slot.manager_since) >= slot.backstop_after;
-                if due {
-                    log::info!(
-                        "Bluetooth: adapter listing keeps failing ({}); reconnecting to the system bus",
-                        e.message
-                    );
-                    slot.backstop_after *= 2;
-                }
-                due
-            }
-        };
-        if replace {
-            slot.manager = None;
-            slot.unexplained = 0;
-            self.generation.send_modify(|g| g.lost_managers += 1);
-        }
     }
 }
 
@@ -430,37 +229,22 @@ fn powered_off() -> LinkError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    /// A list failure the fake can be told to return.
-    #[derive(Clone, Copy, PartialEq)]
-    enum Fail {
-        /// The bus connection is gone.
-        Lost,
-        /// bluetoothd isn't running (on a live connection).
-        NoService,
-        /// No answer (a hung bluetoothd, or a dead bus failing oddly).
-        Hung,
-    }
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Counts the managers and listings made. `adapters` lists the plugged-in
     /// adapters as (id, powered); like btleplug on Linux and Windows, an
-    /// adapter that is gone reads as off. `unreachable` makes `state` fail
-    /// (macOS: the CoreBluetooth thread is gone). `manager_failures` makes
-    /// the first managers fail (no system bus yet); `fail` makes listings on
-    /// the managers made so far fail.
+    /// adapter that is gone reads as off. `manager_failures` makes the first
+    /// managers fail (no system bus yet); `fail` makes listings fail, on the
+    /// managers made so far if the connection is lost.
     #[derive(Default)]
     struct Fake {
         relist_when_off: bool,
         managers: AtomicUsize,
         lists: AtomicUsize,
         manager_failures: AtomicUsize,
-        unreachable: AtomicBool,
         adapters: std::sync::Mutex<Vec<(usize, bool)>>,
-        fail: std::sync::Mutex<Option<(Fail, usize)>>,
-        /// Minutes since the fake's clock started.
-        minutes: AtomicUsize,
-        start: std::sync::OnceLock<Instant>,
+        /// (connection lost, up to which manager).
+        fail: std::sync::Mutex<Option<(bool, usize)>>,
     }
 
     impl Fake {
@@ -478,17 +262,11 @@ mod tests {
             *self.adapters.lock().unwrap() = adapters.to_vec();
         }
 
-        fn fail(&self, how: Option<Fail>) {
-            *self.fail.lock().unwrap() = how.map(|h| (h, self.managers.load(Ordering::SeqCst)));
-        }
-
-        /// Fail every listing, on any manager.
-        fn fail_all(&self, how: Fail) {
-            *self.fail.lock().unwrap() = Some((how, usize::MAX));
-        }
-
-        fn wait_minutes(&self, m: usize) {
-            self.minutes.fetch_add(m, Ordering::SeqCst);
+        /// Listings fail: with the connection lost (on the managers made so
+        /// far), or with an error over a live bus (on every manager).
+        fn fail(&self, connection_lost: Option<bool>) {
+            let upto = |lost| if lost { self.managers.load(Ordering::SeqCst) } else { usize::MAX };
+            *self.fail.lock().unwrap() = connection_lost.map(|lost| (lost, upto(lost)));
         }
     }
 
@@ -499,11 +277,6 @@ mod tests {
 
         fn relist_when_off(&self) -> bool {
             self.relist_when_off
-        }
-
-        fn now(&self) -> Instant {
-            let start = *self.start.get_or_init(Instant::now);
-            start + Duration::from_secs(60 * self.minutes.load(Ordering::SeqCst) as u64)
         }
 
         async fn manager(&self) -> Result<usize, String> {
@@ -518,28 +291,22 @@ mod tests {
             // Let a concurrent lookup reach the lock before this one returns.
             tokio::task::yield_now().await;
             self.lists.fetch_add(1, Ordering::SeqCst);
-            let fail = *self.fail.lock().unwrap();
-            match fail {
-                Some((Fail::Lost, upto)) if *manager <= upto => {
-                    Err(ListError { message: "Failed to send message".into(), failure: Failure::ConnectionLost })
-                }
-                Some((Fail::Hung, upto)) if *manager <= upto => {
-                    Err(ListError { message: "Timeout waiting for reply".into(), failure: Failure::Unexplained })
-                }
-                Some((Fail::NoService, _)) => {
-                    Err(ListError { message: "org.bluez not provided".into(), failure: Failure::Answered })
+            match *self.fail.lock().unwrap() {
+                Some((connection_lost, upto)) if *manager <= upto => {
+                    Err(ListError { message: "listing failed".into(), connection_lost })
                 }
                 _ => Ok(self.adapters.lock().unwrap().iter().map(|a| a.0).collect()),
             }
         }
 
-        async fn state(&self, adapter: &usize) -> Result<CentralState, String> {
+        async fn state(&self, adapter: &usize) -> CentralState {
             tokio::task::yield_now().await;
-            if self.unreachable.load(Ordering::SeqCst) {
-                return Err("adapter thread gone".into());
-            }
             let powered = self.adapters.lock().unwrap().iter().any(|a| a == &(*adapter, true));
-            Ok(if powered { CentralState::PoweredOn } else { CentralState::PoweredOff })
+            if powered {
+                CentralState::PoweredOn
+            } else {
+                CentralState::PoweredOff
+            }
         }
     }
 
@@ -634,71 +401,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_adapter_that_never_answers_is_listed_once() {
-        let s = Shared::new(Fake::mac(&[(0, true)]));
-        s.stack.unreachable.store(true, Ordering::SeqCst);
-        for _ in 0..50 {
-            s.stack.wait_minutes(1);
-            assert_eq!(s.adapter().await.ok(), Some(0));
-        }
-        assert_eq!(lists(&s), 1);
-    }
-
-    #[tokio::test]
-    async fn an_unreachable_adapter_is_listed_again_at_most_once_per_interval() {
-        let s = Shared::new(Fake::mac(&[(0, true)]));
-        assert_eq!(s.adapter().await.ok(), Some(0));
-        // Flaps: unreachable, then answers, then unreachable again.
-        for _ in 0..5 {
-            s.stack.unreachable.store(true, Ordering::SeqCst);
-            for _ in 0..10 {
-                assert!(s.adapter().await.is_ok());
-            }
-            s.stack.unreachable.store(false, Ordering::SeqCst);
-            assert!(s.adapter().await.is_ok());
-            s.stack.wait_minutes(1);
-        }
-        assert_eq!(lists(&s), 2, "one relist in the first 10 min");
-        s.stack.wait_minutes(10);
-        s.stack.unreachable.store(true, Ordering::SeqCst);
-        assert!(s.adapter().await.is_ok());
-        assert_eq!(lists(&s), 3);
-    }
-
-    #[tokio::test]
-    async fn an_unreachable_adapter_is_listed_again_once() {
-        let s = Shared::new(Fake::mac(&[(0, true)]));
-        assert_eq!(s.adapter().await.ok(), Some(0));
-        s.stack.unreachable.store(true, Ordering::SeqCst);
-        s.stack.plug(&[(1, true)]);
-        // The fresh adapter's own state check fails too, but it is kept.
-        assert_eq!(s.adapter().await.ok(), Some(1));
-        s.stack.unreachable.store(false, Ordering::SeqCst);
-        for _ in 0..10 {
-            assert_eq!(s.adapter().await.ok(), Some(1));
-        }
-        assert_eq!((managers(&s), lists(&s)), (1, 2));
-    }
-
-    #[tokio::test]
-    async fn the_watcher_hears_only_replacements() {
+    async fn the_lookup_says_which_generation_it_belongs_to() {
         let s = Shared::new(Fake::new(&[(0, true), (1, true)]));
-        assert_eq!(s.adapter().await.ok(), Some(0));
         let replaced = s.generation.subscribe();
+        let (a, at) = s.adapter_at().await.unwrap();
+        assert_eq!((a, at), (0, *s.generation.borrow()));
         for _ in 0..10 {
-            assert_eq!(s.adapter().await.ok(), Some(0));
+            assert_eq!(s.adapter_at().await.ok(), Some((0, at)));
         }
-        assert!(!replaced.has_changed().unwrap());
         s.stack.plug(&[(1, true)]);
-        assert_eq!(s.adapter().await.ok(), Some(1));
+        let (a, at) = s.adapter_at().await.unwrap();
+        assert_eq!((a, at), (1, *s.generation.borrow()));
+        assert_eq!((at.adapters, at.lost_connections), (2, 0));
         assert!(replaced.has_changed().unwrap());
-        assert_eq!(replaced.borrow().lost_managers, 0);
     }
 
     #[tokio::test]
-    async fn bluetoothd_down_keeps_the_manager() {
+    async fn errors_over_a_live_bus_keep_the_manager() {
+        // bluetoothd stopped (ServiceUnknown) or hung (timeouts).
         let s = Shared::new(Fake::new(&[]));
-        s.stack.fail(Some(Fail::NoService));
+        s.stack.fail(Some(false));
         for _ in 0..50 {
             assert!(matches!(s.adapter().await, Err(LinkError::NoAdapter(_))));
         }
@@ -714,11 +436,11 @@ mod tests {
         // connection also reads as off), so lookups list again and fail.
         let s = Shared::new(Fake::new(&[(0, false)]));
         assert!(is_off(s.adapter().await));
-        s.stack.fail(Some(Fail::Lost));
+        s.stack.fail(Some(true));
         // The watcher and the reconnect loop both hit the dead connection.
         let (a, b) = tokio::join!(s.adapter(), s.adapter());
         assert!(a.is_err() && b.is_err());
-        assert_eq!(s.generation.borrow().lost_managers, 1);
+        assert_eq!(s.generation.borrow().lost_connections, 1);
         s.stack.plug(&[(0, true)]);
         for _ in 0..50 {
             assert_eq!(s.adapter().await.ok(), Some(0));
@@ -726,121 +448,23 @@ mod tests {
         assert_eq!(managers(&s), 2);
     }
 
-    #[tokio::test]
-    async fn the_backstop_replaces_a_silent_manager_rarely() {
-        let s = Shared::new(Fake::new(&[]));
-        s.stack.fail_all(Fail::Hung);
-        // A fresh manager is kept for BACKSTOP_FIRST however often it fails.
-        for _ in 0..50 {
-            assert!(s.adapter().await.is_err());
-        }
-        assert_eq!(managers(&s), 1);
-        s.stack.wait_minutes(10);
-        for _ in 0..BACKSTOP_FAILURES {
-            assert!(s.adapter().await.is_err());
-        }
-        assert_eq!(s.generation.borrow().lost_managers, 1);
-        // The next one waits twice as long.
-        for _ in 0..50 {
-            assert!(s.adapter().await.is_err());
-        }
-        s.stack.wait_minutes(19);
-        for _ in 0..50 {
-            assert!(s.adapter().await.is_err());
-        }
-        assert_eq!(managers(&s), 2);
-        s.stack.wait_minutes(1);
-        for _ in 0..BACKSTOP_FAILURES {
-            assert!(s.adapter().await.is_err());
-        }
-        assert_eq!(s.generation.borrow().lost_managers, 2);
-        // A day of a hung bus: one manager per 10, 20, 40, … min.
-        for _ in 0..(24 * 60) {
-            s.stack.wait_minutes(1);
-            assert!(s.adapter().await.is_err());
-        }
-        assert_eq!(s.generation.borrow().lost_managers, 7);
-    }
-
-    #[tokio::test]
-    async fn the_backstop_ignores_answered_failures() {
-        let s = Shared::new(Fake::new(&[]));
-        s.stack.fail_all(Fail::NoService);
-        for _ in 0..(24 * 60) {
-            s.stack.wait_minutes(1);
-            assert!(s.adapter().await.is_err());
-        }
-        assert_eq!(managers(&s), 1);
-    }
-
-    #[tokio::test]
-    async fn the_lookup_says_which_generation_it_belongs_to() {
-        let s = Shared::new(Fake::new(&[(0, true), (1, true)]));
-        let (a, at) = s.adapter_at().await.unwrap();
-        assert_eq!((a, at), (0, *s.generation.borrow()));
-        s.stack.plug(&[(1, true)]);
-        let (a, at) = s.adapter_at().await.unwrap();
-        assert_eq!((a, at.adapters), (1, 2));
-        assert_eq!(at, *s.generation.borrow());
-    }
-
-    #[test]
-    fn own_connects_are_skipped_once() {
-        let own = OwnConnects::default();
-        let t = Instant::now();
-        const KEY: &str = "AA:BB:CC:DD:EE:FF";
-        own.expect("aa:bb:cc:dd:ee:ff");
-        assert!(!own.take("11:22:33:44:55:66", t), "another device");
-        assert!(own.take(KEY, t), "reported while connecting");
-        assert!(!own.take(KEY, t), "a later connect is the device's own");
-        own.expect(KEY);
-        own.clear();
-        assert!(!own.take(KEY, t), "a new attempt started");
-    }
-
-    #[test]
-    fn a_failed_connect_covers_only_its_own_report() {
-        let own = OwnConnects::default();
-        let t = Instant::now();
-        const KEY: &str = "AA:BB:CC:DD:EE:FF";
-        // BlueZ reports the link up, then fails the call; the report lands
-        // just after.
-        own.expect(KEY);
-        own.returned(KEY, t);
-        assert!(own.take(KEY, t + Duration::from_millis(200)));
-        // The link never came up; the board comes back during the backoff.
-        own.expect(KEY);
-        own.returned(KEY, t);
-        assert!(!own.take(KEY, t + OWN_CONNECT_REPORT_WINDOW + Duration::from_secs(1)));
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
-    fn listing_failures() {
+    fn lost_connections() {
         // Wrapped as btleplug wraps them: bluez-async's error, boxed.
         let dbus_err = |name: &str, msg: &str| {
-            failure(&btleplug::Error::from(bluez_async::BluetoothError::DbusError(dbus::Error::new_custom(name, msg))))
+            connection_lost(&btleplug::Error::from(bluez_async::BluetoothError::DbusError(dbus::Error::new_custom(
+                name, msg,
+            ))))
         };
-        assert_eq!(dbus_err("org.freedesktop.DBus.Error.Failed", "Failed to send message"), Failure::ConnectionLost);
-        assert_eq!(
-            dbus_err("org.freedesktop.DBus.Error.Disconnected", "Connection is closed"),
-            Failure::ConnectionLost
-        );
-        assert_eq!(
-            dbus_err("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.bluez was not provided"),
-            Failure::Answered
-        );
-        assert_eq!(dbus_err("org.bluez.Error.Failed", "Failed to send message"), Failure::Answered);
-        assert_eq!(dbus_err("org.freedesktop.DBus.Error.Timeout", "Timeout waiting for reply"), Failure::Unexplained);
-        assert_eq!(
-            dbus_err("org.freedesktop.DBus.Error.NoReply", "Message recipient disconnected"),
-            Failure::Unexplained
-        );
-        assert_eq!(dbus_err("org.freedesktop.DBus.Error.Failed", "Out of memory"), Failure::Unexplained);
-        assert_eq!(
-            failure(&btleplug::Error::from(bluez_async::BluetoothError::NoBluetoothAdapters)),
-            Failure::Answered
-        );
-        assert_eq!(failure(&btleplug::Error::NoAdapterAvailable), Failure::Unexplained);
+        assert!(dbus_err("org.freedesktop.DBus.Error.Failed", "Failed to send message"));
+        assert!(dbus_err("org.freedesktop.DBus.Error.Disconnected", "Connection is closed"));
+        assert!(!dbus_err("org.freedesktop.DBus.Error.ServiceUnknown", "The name org.bluez was not provided"));
+        assert!(!dbus_err("org.bluez.Error.Failed", "Failed to send message"));
+        assert!(!dbus_err("org.freedesktop.DBus.Error.Timeout", "Timeout waiting for reply"));
+        assert!(!dbus_err("org.freedesktop.DBus.Error.NoReply", "Message recipient disconnected"));
+        assert!(!dbus_err("org.freedesktop.DBus.Error.Failed", "Out of memory"));
+        assert!(!connection_lost(&btleplug::Error::from(bluez_async::BluetoothError::NoBluetoothAdapters)));
+        assert!(!connection_lost(&btleplug::Error::NoAdapterAvailable));
     }
 }

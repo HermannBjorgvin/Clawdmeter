@@ -17,13 +17,12 @@
 //! should wake the loop is [`should_wake`].
 
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use btleplug::api::{Central, CentralEvent};
 use btleplug::platform::PeripheralId;
-use futures::{Stream, StreamExt};
-use tokio::sync::{mpsc, watch};
+use futures::StreamExt;
+use tokio::sync::mpsc;
 
 use crate::bluetooth::Replacements;
 use crate::{accept, describe, Bluetooth};
@@ -117,7 +116,7 @@ async fn watch_once(bluetooth: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
         }
     };
     let mut events = match adapter.events().await {
-        Ok(s) => Events { stream: Some(s), replaced: replaced.clone(), opened_on: opened_on.lost_managers },
+        Ok(s) => s,
         Err(e) => {
             log::debug!("wakeup watcher: no event stream: {e}");
             return;
@@ -151,46 +150,24 @@ async fn watch_once(bluetooth: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
         if !accept(c.name.as_deref(), c.has_service) {
             continue;
         }
-        if kind == Sighting::Connected && bluetooth.take_own_connect(&c.key) {
-            log::debug!("wakeup watcher: {} connected by the daemon", c.key);
-            continue;
-        }
         log::debug!("wakeup: {} {:?}", c.key, kind);
         if tx.send(Wake { key: c.key, sighting: kind }).is_err() {
             break;
         }
     }
-}
-
-/// The watcher's event stream. Dropped as usual while its manager is
-/// current, however the watcher stops (including when its task is
-/// cancelled). Once the manager was replaced, its D-Bus connection may be
-/// dead, and dropping a BlueZ stream there unwraps a failing D-Bus call and
-/// aborts the app; the stream is retired into a task that drains it instead
-/// (idle for good on a dead connection). One per replaced manager.
-struct Events {
-    stream: Option<Pin<Box<dyn Stream<Item = CentralEvent> + Send>>>,
-    replaced: watch::Receiver<Replacements>,
-    opened_on: u64,
-}
-
-impl Events {
-    async fn next(&mut self) -> Option<CentralEvent> {
-        self.stream.as_mut()?.next().await
+    if must_leak(&opened_on, &replaced.borrow()) {
+        std::mem::forget(events);
     }
 }
 
-impl Drop for Events {
-    fn drop(&mut self) {
-        if self.replaced.borrow().lost_managers == self.opened_on {
-            return;
-        }
-        let Some(mut stream) = self.stream.take() else { return };
-        match tokio::runtime::Handle::try_current() {
-            Ok(rt) => drop(rt.spawn(async move { while stream.next().await.is_some() {} })),
-            Err(_) => std::mem::forget(stream),
-        }
-    }
+/// Must a stream opened at `opened_on` be leaked rather than dropped, now
+/// that the count is `now`? Once its manager lost its D-Bus connection,
+/// dropping a BlueZ stream unwraps a failing `RemoveMatch` and aborts the
+/// app; a dead connection delivers nothing, so the leak costs one idle stream
+/// per lost connection. (At quit the watcher is cancelled while the runtime
+/// shuts down, which never runs that call.)
+fn must_leak(opened_on: &Replacements, now: &Replacements) -> bool {
+    now.lost_connections != opened_on.lost_connections
 }
 
 #[cfg(test)]
@@ -199,6 +176,15 @@ mod tests {
 
     fn wake(key: &str, sighting: Sighting) -> Wake {
         Wake { key: key.into(), sighting }
+    }
+
+    #[test]
+    fn only_streams_of_a_lost_connection_are_leaked() {
+        let opened = Replacements { lost_connections: 1, adapters: 3 };
+        assert!(!must_leak(&opened, &opened));
+        // A new adapter on the same live connection: dropped as usual.
+        assert!(!must_leak(&opened, &Replacements { adapters: 4, ..opened }));
+        assert!(must_leak(&opened, &Replacements { lost_connections: 2, ..opened }));
     }
 
     #[test]

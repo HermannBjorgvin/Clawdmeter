@@ -9,9 +9,15 @@
 //!   next attempt due at once and resets the delay. A wakeup that lands while
 //!   an attempt is in flight is latched: if that attempt fails (it raced the
 //!   device coming back), the retry follows after [`WOKEN_RETRY`] instead of
-//!   the backoff. The daemon's own connects never reach this: the watcher
-//!   drops the sighting of a device the daemon is connecting itself
-//!   ([`crate::Bluetooth`] tracks those by key).
+//!   the backoff;
+//! * except the stack's report of the daemon's own connect: a "connected"
+//!   sighting while an attempt is in flight, or within
+//!   [`OWN_CONNECT_WINDOW`] after one failed (BlueZ can report the link up
+//!   and fail the call), is ignored, so a device that connects but then
+//!   fails discovery still backs off. A real comeback in that window waits
+//!   for the backoff.
+
+use crate::Sighting;
 
 /// Longest wait between attempts (s). Low enough that a board coming back
 /// unnoticed by the wakeup watcher (no BlueZ auto-connect, no scan running)
@@ -23,17 +29,22 @@ pub const BACKOFF_CAP: u64 = 15;
 /// device which advertises but won't take a connection can't spin the loop.
 pub const WOKEN_RETRY: u64 = 1;
 
+/// How long after a failed attempt a "connected" sighting still counts as
+/// that attempt's own (s).
+pub const OWN_CONNECT_WINDOW: i64 = 3;
+
 /// Reconnect scheduling state.
 #[derive(Debug, Clone)]
 pub struct Reconnect {
     delay: u64,
     next_at: i64,
     woken: bool,
+    failed_at: Option<i64>,
 }
 
 impl Default for Reconnect {
     fn default() -> Self {
-        Reconnect { delay: 1, next_at: 0, woken: false }
+        Reconnect { delay: 1, next_at: 0, woken: false, failed_at: None }
     }
 }
 
@@ -59,6 +70,7 @@ impl Reconnect {
             d
         };
         self.next_at = now + wait as i64;
+        self.failed_at = Some(now);
         wait
     }
 
@@ -78,7 +90,11 @@ impl Reconnect {
 
     /// The device showed up. `in_flight`: an attempt is running right now.
     /// True when this brought the next attempt forward.
-    pub fn wake(&mut self, now: i64, in_flight: bool) -> bool {
+    pub fn wake(&mut self, now: i64, in_flight: bool, sighting: Sighting) -> bool {
+        let just_failed = self.failed_at.is_some_and(|t| now - t < OWN_CONNECT_WINDOW);
+        if sighting == Sighting::Connected && (in_flight || just_failed) {
+            return false;
+        }
         self.delay = 1;
         if in_flight {
             self.woken = true;
@@ -121,9 +137,9 @@ mod tests {
             r.failed(100);
         }
         assert!(!r.due(101));
-        assert!(r.wake(101, false));
+        assert!(r.wake(101, false, Sighting::Advertising));
         assert!(r.due(101));
-        assert!(!r.wake(101, false), "already due");
+        assert!(!r.wake(101, false, Sighting::Advertising), "already due");
         // The attempt that wake triggered fails: backoff restarts at 1 s.
         assert_eq!(r.failed(102), 1);
         assert_eq!(r.failed(103), 2);
@@ -136,7 +152,7 @@ mod tests {
             r.failed(0);
         }
         // An attempt is running (started when due); the device comes back.
-        assert!(!r.wake(200, true));
+        assert!(!r.wake(200, true, Sighting::Advertising));
         // That attempt fails anyway: retry almost at once, not after 15 s.
         assert_eq!(r.failed(201), WOKEN_RETRY);
         assert!(r.due(201 + WOKEN_RETRY as i64));
@@ -146,9 +162,49 @@ mod tests {
     }
 
     #[test]
+    fn own_connects_dont_cut_the_backoff() {
+        // Each attempt connects at the link layer and then fails (discovery,
+        // or BlueZ failing the call): the watcher reports the device
+        // connected during the attempt or just after it.
+        for lag in [None, Some(0), Some(2)] {
+            let mut r = Reconnect::default();
+            let mut now = 100;
+            let mut waits = Vec::new();
+            for _ in 0..7 {
+                assert!(r.due(now));
+                if lag.is_none() {
+                    assert!(!r.wake(now, true, Sighting::Connected));
+                }
+                let wait = r.failed(now);
+                if let Some(lag) = lag {
+                    assert!(!r.wake(now + lag, false, Sighting::Connected));
+                }
+                waits.push(wait);
+                now += wait as i64;
+            }
+            assert_eq!(waits, [1, 2, 4, 8, 15, 15, 15], "report lag {lag:?}");
+        }
+    }
+
+    #[test]
+    fn a_comeback_after_the_window_cuts_the_backoff() {
+        let mut r = Reconnect::default();
+        for _ in 0..6 {
+            r.failed(100);
+        }
+        assert!(r.wake(100 + OWN_CONNECT_WINDOW, false, Sighting::Connected));
+        assert!(r.due(100 + OWN_CONNECT_WINDOW));
+        // Advertising is never the daemon's own doing.
+        let mut r = Reconnect::default();
+        r.failed(100);
+        assert!(!r.wake(100, true, Sighting::Advertising));
+        assert_eq!(r.failed(101), WOKEN_RETRY);
+    }
+
+    #[test]
     fn success_clears_a_latched_wake() {
         let mut r = Reconnect::default();
-        r.wake(0, true);
+        r.wake(0, true, Sighting::Advertising);
         r.connected();
         assert_eq!(r.failed(5), 1);
         assert_eq!(r.failed(6), 2);
@@ -158,7 +214,7 @@ mod tests {
     fn wake_never_postpones() {
         let mut r = Reconnect::default();
         r.retry_in(50, 2);
-        r.wake(10, false);
+        r.wake(10, false, Sighting::Advertising);
         assert_eq!(r.next_at(), 10);
     }
 
