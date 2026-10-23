@@ -481,6 +481,7 @@ impl DeviceLink {
                 Ok(r) => r.map_err(LinkError::Ble),
                 Err(_) => Err(LinkError::Timeout("connect")),
             };
+            bluetooth.own_connect_returned(&cand.key);
             if let Err(e) = r {
                 // Cancel BlueZ's pending Connect, or the next attempt fails
                 // with "Operation already in progress".

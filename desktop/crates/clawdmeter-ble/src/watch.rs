@@ -17,13 +17,15 @@
 //! should wake the loop is [`should_wake`].
 
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use btleplug::api::{Central, CentralEvent};
 use btleplug::platform::PeripheralId;
-use futures::StreamExt;
-use tokio::sync::mpsc;
+use futures::{Stream, StreamExt};
+use tokio::sync::{mpsc, watch};
 
+use crate::bluetooth::Replacements;
 use crate::{accept, describe, Bluetooth};
 
 /// How the device showed up.
@@ -115,7 +117,7 @@ async fn watch_once(bluetooth: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
         }
     };
     let mut events = match adapter.events().await {
-        Ok(s) => s,
+        Ok(s) => Events { stream: Some(s), replaced: replaced.clone(), opened_on: opened_on.lost_managers },
         Err(e) => {
             log::debug!("wakeup watcher: no event stream: {e}");
             return;
@@ -158,13 +160,36 @@ async fn watch_once(bluetooth: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
             break;
         }
     }
-    if replaced.borrow().lost_managers != opened_on.lost_managers {
-        // The stream's manager was dropped, maybe with its D-Bus connection
-        // dead. Dropping a BlueZ stream unwraps a D-Bus call, which fails on
-        // a dead connection and would abort the app, so retire it instead:
-        // drained if the connection still lives (the backstop replaced it),
-        // idle for good if not. One per replaced manager.
-        tokio::spawn(async move { while events.next().await.is_some() {} });
+}
+
+/// The watcher's event stream. Dropped as usual while its manager is
+/// current, however the watcher stops (including when its task is
+/// cancelled). Once the manager was replaced, its D-Bus connection may be
+/// dead, and dropping a BlueZ stream there unwraps a failing D-Bus call and
+/// aborts the app; the stream is retired into a task that drains it instead
+/// (idle for good on a dead connection). One per replaced manager.
+struct Events {
+    stream: Option<Pin<Box<dyn Stream<Item = CentralEvent> + Send>>>,
+    replaced: watch::Receiver<Replacements>,
+    opened_on: u64,
+}
+
+impl Events {
+    async fn next(&mut self) -> Option<CentralEvent> {
+        self.stream.as_mut()?.next().await
+    }
+}
+
+impl Drop for Events {
+    fn drop(&mut self) {
+        if self.replaced.borrow().lost_managers == self.opened_on {
+            return;
+        }
+        let Some(mut stream) = self.stream.take() else { return };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => drop(rt.spawn(async move { while stream.next().await.is_some() {} })),
+            Err(_) => std::mem::forget(stream),
+        }
     }
 }
 

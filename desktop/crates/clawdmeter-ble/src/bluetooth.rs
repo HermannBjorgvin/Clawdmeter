@@ -18,9 +18,10 @@
 //!   each time until a listing succeeds: a bus that hangs for good costs at
 //!   most one connection per 10 min, then 20, 40, … (7 in the first day).
 //!   A stopped bluetoothd answers (`ServiceUnknown`), so it costs none;
-//! * the adapter when it can't be reached, or (Linux and Windows, where
-//!   listing is cheap) when it reads as off; BlueZ reports an unplugged
-//!   adapter as off, so the next one is picked up.
+//! * the adapter when it can't be reached after it has worked (macOS: its
+//!   CoreBluetooth thread is gone), at most once per [`ERROR_RELIST_EVERY`],
+//!   or (Linux and Windows, where listing is cheap) when it reads as off;
+//!   BlueZ reports an unplugged adapter as off, so the next one is picked up.
 //!
 //! The wakeup watcher reopens its event stream whenever either is replaced
 //! ([`Bluetooth::replaced`]); BlueZ streams never end on their own. It also
@@ -28,7 +29,7 @@
 //! ([`Bluetooth::expect_own_connect`]), which would otherwise read as the
 //! device coming back.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -44,6 +45,13 @@ pub const BACKSTOP_FAILURES: u32 = 5;
 /// Shortest time a manager is kept before the backstop may replace it; it
 /// doubles with each backstop replacement until a listing succeeds.
 pub const BACKSTOP_FIRST: Duration = Duration::from_secs(10 * 60);
+/// Shortest time between listing adapters again because the kept one can't
+/// be reached (each listing is a thread for good on macOS).
+pub const ERROR_RELIST_EVERY: Duration = Duration::from_secs(10 * 60);
+/// How long after the daemon's own connect call returns its report still
+/// counts as the daemon's: BlueZ can report the link up and fail the call
+/// right after. A report later than this is the device coming back.
+pub const OWN_CONNECT_REPORT_WINDOW: Duration = Duration::from_secs(3);
 
 /// The shared stack handle; clones share one manager and adapter. On Linux
 /// the D-Bus connection's I/O task runs on the runtime of the first
@@ -52,14 +60,13 @@ pub const BACKSTOP_FIRST: Duration = Duration::from_secs(10 * 60);
 #[derive(Clone)]
 pub struct Bluetooth {
     shared: Arc<Shared<Btleplug>>,
-    own: Arc<OwnConnects>,
 }
 
 /// A handle with nothing created yet; the first [`Bluetooth::adapter`] call
 /// creates the manager and adapter.
 impl Default for Bluetooth {
     fn default() -> Self {
-        Bluetooth { shared: Arc::new(Shared::new(Btleplug)), own: Arc::default() }
+        Bluetooth { shared: Arc::new(Shared::new(Btleplug)) }
     }
 }
 
@@ -82,44 +89,53 @@ impl Bluetooth {
     /// The daemon is about to connect to the device with this key: the
     /// stack's report of that connect is not a wakeup.
     pub(crate) fn expect_own_connect(&self, key: &str) {
-        self.own.expect(key);
+        self.shared.own.expect(key);
     }
 
-    /// A new attempt starts: reports still expected from the last one never
-    /// came (its connect failed before the link came up, or the watcher
-    /// wasn't listening), so don't swallow a real one. A failed connect
-    /// keeps its record until then: BlueZ can report the link up and fail
-    /// the call right after, and that report must not cut the backoff.
+    /// The connect call returned (either way): its report is the daemon's
+    /// for [`OWN_CONNECT_REPORT_WINDOW`] more.
+    pub(crate) fn own_connect_returned(&self, key: &str) {
+        self.shared.own.returned(key, Instant::now());
+    }
+
+    /// A new attempt starts: reports the last one expected and never got are
+    /// not coming.
     pub(crate) fn clear_own_connects(&self) {
-        self.own.clear();
+        self.shared.own.clear();
     }
 
     /// Is this report of a connect to `key` the daemon's own? Consumes it.
     pub(crate) fn take_own_connect(&self, key: &str) -> bool {
-        self.own.take(key)
+        self.shared.own.take(key, Instant::now())
     }
 }
 
-/// Keys of devices the daemon is connecting itself, whose connect report
-/// hasn't arrived yet.
+/// Devices the daemon is connecting itself, by key: `None` while the connect
+/// call runs, else when its report stops counting as the daemon's.
 #[derive(Default)]
-struct OwnConnects(std::sync::Mutex<HashSet<String>>);
+struct OwnConnects(std::sync::Mutex<HashMap<String, Option<Instant>>>);
 
 impl OwnConnects {
-    fn keys(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+    fn keys(&self) -> std::sync::MutexGuard<'_, HashMap<String, Option<Instant>>> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn expect(&self, key: &str) {
-        self.keys().insert(key.to_ascii_uppercase());
+        self.keys().insert(key.to_ascii_uppercase(), None);
+    }
+
+    fn returned(&self, key: &str, now: Instant) {
+        if let Some(until) = self.keys().get_mut(&key.to_ascii_uppercase()) {
+            *until = Some(now + OWN_CONNECT_REPORT_WINDOW);
+        }
     }
 
     fn clear(&self) {
         self.keys().clear();
     }
 
-    fn take(&self, key: &str) -> bool {
-        self.keys().remove(&key.to_ascii_uppercase())
+    fn take(&self, key: &str, now: Instant) -> bool {
+        self.keys().remove(&key.to_ascii_uppercase()).is_some_and(|until| until.is_none_or(|t| now <= t))
     }
 }
 
@@ -239,6 +255,7 @@ struct Shared<S: Stack> {
     stack: S,
     slot: Mutex<Slot<S>>,
     generation: watch::Sender<Replacements>,
+    own: OwnConnects,
 }
 
 struct Slot<S: Stack> {
@@ -250,6 +267,10 @@ struct Slot<S: Stack> {
     unexplained: u32,
     /// How long a manager is kept before the backstop may replace it.
     backstop_after: Duration,
+    /// The kept adapter's state has been read since it was listed.
+    adapter_worked: bool,
+    /// When an unreachable adapter was last listed again.
+    error_relisted_at: Option<Instant>,
 }
 
 impl<S: Stack> Shared<S> {
@@ -260,8 +281,15 @@ impl<S: Stack> Shared<S> {
             manager_since: stack.now(),
             unexplained: 0,
             backstop_after: BACKSTOP_FIRST,
+            adapter_worked: false,
+            error_relisted_at: None,
         };
-        Shared { stack, slot: Mutex::new(slot), generation: watch::Sender::new(Replacements::default()) }
+        Shared {
+            stack,
+            slot: Mutex::new(slot),
+            generation: watch::Sender::new(Replacements::default()),
+            own: OwnConnects::default(),
+        }
     }
 
     async fn adapter(&self) -> Result<S::Adapter, LinkError> {
@@ -276,18 +304,54 @@ impl<S: Stack> Shared<S> {
             (slot.adapter.clone(), *self.generation.borrow())
         };
         if let Some(a) = &kept {
-            match self.stack.state(a).await {
+            let state = self.stack.state(a).await;
+            if state.is_ok() {
+                self.worked(a).await;
+            }
+            match state {
                 Ok(CentralState::PoweredOff) if !self.stack.relist_when_off() => return Err(powered_off()),
                 Ok(CentralState::PoweredOff) => {}
                 Ok(_) => return Ok((S::Adapter::clone(a), current)),
-                Err(e) => log::debug!("Bluetooth adapter unreachable ({e}); listing adapters again"),
+                Err(e) if self.may_relist_unreachable(a).await => {
+                    log::debug!("Bluetooth adapter unreachable ({e}); listing adapters again");
+                }
+                // Not since it last worked, or too soon: keep it and let the
+                // connect find out.
+                Err(_) => return Ok((S::Adapter::clone(a), current)),
             }
         }
         let (adapter, current) = self.relist(kept.as_ref()).await?;
-        if let Ok(CentralState::PoweredOff) = self.stack.state(&adapter).await {
+        let state = self.stack.state(&adapter).await;
+        if state.is_ok() {
+            self.worked(&adapter).await;
+        }
+        if let Ok(CentralState::PoweredOff) = state {
             return Err(powered_off());
         }
         Ok((S::Adapter::clone(&adapter), current))
+    }
+
+    /// `adapter`'s state was read.
+    async fn worked(&self, adapter: &Arc<S::Adapter>) {
+        let mut slot = self.slot.lock().await;
+        if slot.adapter.as_ref().is_some_and(|a| Arc::ptr_eq(a, adapter)) {
+            slot.adapter_worked = true;
+        }
+    }
+
+    /// May the unreachable `adapter` be listed again? Only one that worked
+    /// since it was listed, and at most once per [`ERROR_RELIST_EVERY`]: an
+    /// adapter that never answers would otherwise be listed on every lookup.
+    async fn may_relist_unreachable(&self, adapter: &Arc<S::Adapter>) -> bool {
+        let mut slot = self.slot.lock().await;
+        let now = self.stack.now();
+        let ok = slot.adapter.as_ref().is_some_and(|a| Arc::ptr_eq(a, adapter))
+            && slot.adapter_worked
+            && slot.error_relisted_at.is_none_or(|t| now.duration_since(t) >= ERROR_RELIST_EVERY);
+        if ok {
+            slot.error_relisted_at = Some(now);
+        }
+        ok
     }
 
     /// Replace `stale` (the kept adapter the caller found unusable, if any)
@@ -322,6 +386,7 @@ impl<S: Stack> Shared<S> {
         slot.backstop_after = BACKSTOP_FIRST;
         let a = Arc::new(list.into_iter().next().ok_or_else(|| LinkError::NoAdapter("none present".into()))?);
         slot.adapter = Some(Arc::clone(&a));
+        slot.adapter_worked = false;
         self.generation.send_modify(|g| g.adapters += 1);
         Ok((a, *self.generation.borrow()))
     }
@@ -569,6 +634,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_adapter_that_never_answers_is_listed_once() {
+        let s = Shared::new(Fake::mac(&[(0, true)]));
+        s.stack.unreachable.store(true, Ordering::SeqCst);
+        for _ in 0..50 {
+            s.stack.wait_minutes(1);
+            assert_eq!(s.adapter().await.ok(), Some(0));
+        }
+        assert_eq!(lists(&s), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_adapter_is_listed_again_at_most_once_per_interval() {
+        let s = Shared::new(Fake::mac(&[(0, true)]));
+        assert_eq!(s.adapter().await.ok(), Some(0));
+        // Flaps: unreachable, then answers, then unreachable again.
+        for _ in 0..5 {
+            s.stack.unreachable.store(true, Ordering::SeqCst);
+            for _ in 0..10 {
+                assert!(s.adapter().await.is_ok());
+            }
+            s.stack.unreachable.store(false, Ordering::SeqCst);
+            assert!(s.adapter().await.is_ok());
+            s.stack.wait_minutes(1);
+        }
+        assert_eq!(lists(&s), 2, "one relist in the first 10 min");
+        s.stack.wait_minutes(10);
+        s.stack.unreachable.store(true, Ordering::SeqCst);
+        assert!(s.adapter().await.is_ok());
+        assert_eq!(lists(&s), 3);
+    }
+
+    #[tokio::test]
     async fn an_unreachable_adapter_is_listed_again_once() {
         let s = Shared::new(Fake::mac(&[(0, true)]));
         assert_eq!(s.adapter().await.ok(), Some(0));
@@ -690,13 +787,31 @@ mod tests {
     #[test]
     fn own_connects_are_skipped_once() {
         let own = OwnConnects::default();
+        let t = Instant::now();
+        const KEY: &str = "AA:BB:CC:DD:EE:FF";
         own.expect("aa:bb:cc:dd:ee:ff");
-        assert!(!own.take("11:22:33:44:55:66"), "another device");
-        assert!(own.take("AA:BB:CC:DD:EE:FF"));
-        assert!(!own.take("AA:BB:CC:DD:EE:FF"), "a later connect is the device's own");
-        own.expect("AA:BB:CC:DD:EE:FF");
+        assert!(!own.take("11:22:33:44:55:66", t), "another device");
+        assert!(own.take(KEY, t), "reported while connecting");
+        assert!(!own.take(KEY, t), "a later connect is the device's own");
+        own.expect(KEY);
         own.clear();
-        assert!(!own.take("AA:BB:CC:DD:EE:FF"), "a new attempt started");
+        assert!(!own.take(KEY, t), "a new attempt started");
+    }
+
+    #[test]
+    fn a_failed_connect_covers_only_its_own_report() {
+        let own = OwnConnects::default();
+        let t = Instant::now();
+        const KEY: &str = "AA:BB:CC:DD:EE:FF";
+        // BlueZ reports the link up, then fails the call; the report lands
+        // just after.
+        own.expect(KEY);
+        own.returned(KEY, t);
+        assert!(own.take(KEY, t + Duration::from_millis(200)));
+        // The link never came up; the board comes back during the backoff.
+        own.expect(KEY);
+        own.returned(KEY, t);
+        assert!(!own.take(KEY, t + OWN_CONNECT_REPORT_WINDOW + Duration::from_secs(1)));
     }
 
     #[cfg(target_os = "linux")]

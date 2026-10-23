@@ -219,6 +219,10 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     if let Some(l) = link.take() {
                         l.close().await;
                     }
+                    // A zombie left half-open would be reused on the next start.
+                    if let Some(c) = closing.take() {
+                        let _ = tokio::time::timeout(Duration::from_secs(5), c).await;
+                    }
                     log::info!("daemon stopped");
                     return;
                 }
@@ -357,7 +361,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                 last_link_check = now;
                 if !l.is_connected().await {
                     log::info!("device disconnected, reconnecting...");
-                    closing = drop_link(&mut link).or(closing.take());
+                    drop_link(&mut link, &mut closing);
                     device_events = None;
                     link_state = LinkState::Searching;
                     reconnect.retry_in(now, 2);
@@ -387,7 +391,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     Err(e) => {
                         log::warn!("write failed: {e}");
                         if !l.is_connected().await {
-                            closing = drop_link(&mut link).or(closing.take());
+                            drop_link(&mut link, &mut closing);
                             device_events = None;
                             link_state = LinkState::Searching;
                             reconnect.retry_in(now, 2);
@@ -409,10 +413,17 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
 /// Drop a link that stopped working. A zombie is disconnected first, in the
 /// background so the tick loop keeps going: the stack still reports it
 /// connected, so the next attempt would reuse it instead of reconnecting.
-/// That attempt waits for the returned disconnect.
-fn drop_link(link: &mut Option<DeviceLink>) -> Option<JoinHandle<()>> {
-    let l = link.take().filter(DeviceLink::is_zombie)?;
-    Some(tokio::spawn(async move { l.close().await }))
+/// The next attempt waits for `closing`, which runs after any close still
+/// pending, so it covers them all.
+fn drop_link(link: &mut Option<DeviceLink>, closing: &mut Option<JoinHandle<()>>) {
+    let Some(l) = link.take().filter(DeviceLink::is_zombie) else { return };
+    let earlier = closing.take();
+    *closing = Some(tokio::spawn(async move {
+        if let Some(e) = earlier {
+            let _ = e.await;
+        }
+        l.close().await
+    }));
 }
 
 /// One poll of every account, printed as the payload the device would get
