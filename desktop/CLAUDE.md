@@ -37,8 +37,9 @@ is faked behind `FlashHardware`.
   zombie-write breaker, BlueZ trust, macOS stale-bond unpair via `blueutil`,
   Windows bonded-address fallback (PnP / `CLAWDMETER_BLE_ADDRESS`). Get
   adapters only through the daemon's one `Bluetooth` handle
-  (`bluetooth.rs`): each btleplug manager keeps a system D-Bus connection
-  (Linux) and each listed adapter a CoreBluetooth thread (macOS) for good.
+  (`bluetooth.rs`), which keeps one manager and adapter: each btleplug
+  manager holds a system D-Bus connection (Linux) and each listed adapter a
+  CoreBluetooth thread (macOS) for good.
 - `clawdmeter-flash`: downloads the release `manifest.json`, matches boards by
   chip + flash size, writes with espflash.
 - `clawdmeter-app`: the `clawdmeter` binary. Tray (`tray/`, ksni on Linux),

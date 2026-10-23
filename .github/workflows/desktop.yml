@@ -46,14 +46,18 @@ jobs:
 
   core-tests:
     # The pure-logic crate is where per-OS path/config/time handling lives;
-    # running it on macOS and Windows is cheap. The GUI/BLE/flash crates are
-    # covered by the release build on each OS.
+    # running it on macOS and Windows is cheap. On macOS the whole workspace
+    # is also linted: its CoreBluetooth paths can't be cross-checked from
+    # Linux (Windows can, see desktop/CLAUDE.md). Otherwise the GUI/BLE/flash
+    # crates are covered by the release build on each OS.
     name: clawdmeter-core tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        # macos-14: the image the release builds on (GPUI compiles Metal
+        # shaders with the Xcode it ships).
+        os: [macos-14, windows-latest]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: rustup toolchain install
@@ -61,3 +65,5 @@ jobs:
         with:
           workspaces: desktop
       - run: cargo test -p clawdmeter-core --locked
+      - if: runner.os == 'macOS'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

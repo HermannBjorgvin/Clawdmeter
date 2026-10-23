@@ -172,7 +172,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let mut reconnect = Reconnect::default();
     // One btleplug manager for the daemon's lifetime: each one holds a
     // system D-Bus connection on Linux for good (`clawdmeter_ble::Bluetooth`).
-    let bluetooth = Bluetooth::new();
+    let bluetooth = Bluetooth::default();
     let mut wakeups = clawdmeter_ble::spawn_watcher(bluetooth.clone());
     let mut last_settings = unix_now();
     let mut last_link_check = unix_now();
@@ -357,6 +357,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                 last_link_check = now;
                 if !l.is_connected().await {
                     log::info!("device disconnected, reconnecting...");
+                    close_if_zombie(l).await;
                     link = None;
                     device_events = None;
                     link_state = LinkState::Searching;
@@ -387,6 +388,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     Err(e) => {
                         log::warn!("write failed: {e}");
                         if !l.is_connected().await {
+                            close_if_zombie(l).await;
                             link = None;
                             device_events = None;
                             link_state = LinkState::Searching;
@@ -403,6 +405,14 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             last_write_at,
             claude: claude.clone(),
         });
+    }
+}
+
+/// Disconnect a zombie link before dropping it: the stack still reports it
+/// connected, so the next attempt would reuse it instead of reconnecting.
+async fn close_if_zombie(l: &DeviceLink) {
+    if l.is_zombie() {
+        l.close().await;
     }
 }
 

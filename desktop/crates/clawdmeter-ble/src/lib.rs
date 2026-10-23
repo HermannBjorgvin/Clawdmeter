@@ -32,7 +32,7 @@
 //! the OS sees the device come back (BlueZ auto-reconnecting the bonded
 //! device, or an advertisement during a scan). Both get their adapter from
 //! one [`Bluetooth`] handle, so reconnecting never creates another
-//! btleplug manager.
+//! btleplug manager or adapter.
 
 #![warn(missing_docs)]
 
@@ -423,6 +423,13 @@ impl DeviceLink {
         cache: &AddressCache,
         opts: &LinkOptions,
     ) -> Result<(DeviceLink, DeviceEvents), LinkError> {
+        // The adapter is kept for the app's lifetime, and WinRT's keeps every
+        // peripheral it handed out, with its device session, connected flag
+        // and discovered services. Start each attempt from fresh ones, so a
+        // link left half-open or a GATT table changed by a reflash isn't
+        // reused. (BlueZ and CoreBluetooth re-read these on every call.)
+        #[cfg(windows)]
+        let _ = adapter.clear_peripherals().await;
         // CLAWDMETER_BLE_ADDRESS pins the device to try first (the bash
         // daemon's DEVICE_MAC, the Windows daemon's override); else the cache.
         let cached = pinned_address().or_else(|| cache.load());
@@ -535,12 +542,21 @@ impl DeviceLink {
     /// Still connected? False once writes keep failing (a zombie link), so
     /// the caller drops it and reconnects.
     pub async fn is_connected(&self) -> bool {
-        !self.health.is_zombie() && self.peripheral.is_connected().await.unwrap_or(false)
+        !self.is_zombie() && self.peripheral.is_connected().await.unwrap_or(false)
     }
 
-    /// Drop the GATT connection (the OS may keep the HID link).
+    /// Writes keep failing on a link the stack still reports connected. The
+    /// stack keeps the peripheral, so [`DeviceLink::close`] it before
+    /// dropping the link, or the next attempt finds it "connected" and
+    /// skips the reconnect.
+    pub fn is_zombie(&self) -> bool {
+        self.health.is_zombie()
+    }
+
+    /// Drop the GATT connection (the OS may keep the HID link). Bounded;
+    /// errors are ignored.
     pub async fn close(&self) {
-        let _ = self.peripheral.disconnect().await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.peripheral.disconnect()).await;
     }
 
     /// Cache key (address).

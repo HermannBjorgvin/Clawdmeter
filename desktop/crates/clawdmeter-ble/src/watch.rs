@@ -81,8 +81,8 @@ const ADVERT_DEBOUNCE: Duration = Duration::from_secs(2);
 const REOPEN_AFTER: Duration = Duration::from_secs(5);
 
 /// Watch `bluetooth`'s adapter for sightings of a Clawdmeter. Runs until the
-/// receiver is dropped; reopens the stream when the adapter or the Bluetooth
-/// service goes away. Must be called inside a tokio runtime.
+/// receiver is dropped; reopens the stream when it ends or `bluetooth`
+/// replaces its adapter. Must be called inside a tokio runtime.
 pub fn spawn_watcher(bluetooth: Bluetooth) -> Wakeups {
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
@@ -101,6 +101,9 @@ pub fn spawn_watcher(bluetooth: Bluetooth) -> Wakeups {
 }
 
 async fn watch_once(bluetooth: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
+    // Subscribed first, so a replacement made while the lookup runs isn't
+    // missed (at worst its own install costs one extra reopen).
+    let mut replaced = bluetooth.replaced();
     let adapter = match bluetooth.adapter().await {
         Ok(a) => a,
         Err(e) => {
@@ -108,6 +111,7 @@ async fn watch_once(bluetooth: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
             return;
         }
     };
+    let opened_on = replaced.borrow().lost_managers;
     let mut events = match adapter.events().await {
         Ok(s) => s,
         Err(e) => {
@@ -116,7 +120,24 @@ async fn watch_once(bluetooth: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
         }
     };
     let mut last_advert: HashMap<PeripheralId, Instant> = HashMap::new();
-    while let Some(ev) = events.next().await {
+    loop {
+        let ev = tokio::select! {
+            ev = events.next() => match ev {
+                Some(ev) => ev,
+                None => break,
+            },
+            _ = replaced.changed() => {
+                log::debug!("wakeup watcher: adapter replaced; reopening");
+                if replaced.borrow().lost_managers != opened_on {
+                    // The stream belongs to a dead D-Bus connection: BlueZ's
+                    // stream unwraps a D-Bus call when dropped, which fails
+                    // there and would abort the app. It never delivers
+                    // again, so keep it (one per system bus restart).
+                    std::mem::forget(events);
+                }
+                return;
+            }
+        };
         let Some((id, kind)) = sighting(&ev) else { continue };
         if kind == Sighting::Advertising {
             let now = Instant::now();
