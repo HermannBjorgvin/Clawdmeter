@@ -30,13 +30,17 @@
 //! Reconnect timing is [`Reconnect`] (backoff capped at
 //! [`reconnect::BACKOFF_CAP`]), cut short by [`spawn_watcher`]'s wakeups when
 //! the OS sees the device come back (BlueZ auto-reconnecting the bonded
-//! device, or an advertisement during a scan).
+//! device, or an advertisement during a scan). Both get their adapter from
+//! one [`Bluetooth`] handle, so reconnecting never creates another
+//! btleplug manager.
 
 #![warn(missing_docs)]
 
+mod bluetooth;
 pub mod reconnect;
 mod watch;
 
+pub use bluetooth::Bluetooth;
 pub use reconnect::Reconnect;
 pub use watch::{should_wake, spawn_watcher, Sighting, Wake, Wakeups};
 
@@ -48,10 +52,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use btleplug::api::{
-    BDAddr, Central, CentralState, Characteristic, Manager as _, Peripheral as _, RetrievePeripheralsOptions,
-    ScanFilter, WriteType,
+    BDAddr, Central, Characteristic, Peripheral as _, RetrievePeripheralsOptions, ScanFilter, WriteType,
 };
-use btleplug::platform::{Adapter, Manager, Peripheral};
+use btleplug::platform::{Adapter, Peripheral};
 use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -196,17 +199,6 @@ impl Default for LinkOptions {
             scan_time: Duration::from_secs(8),
         }
     }
-}
-
-/// The first powered adapter.
-pub async fn adapter() -> Result<Adapter, LinkError> {
-    let manager = Manager::new().await.map_err(|e| LinkError::NoAdapter(e.to_string()))?;
-    let adapters = manager.adapters().await.map_err(|e| LinkError::NoAdapter(e.to_string()))?;
-    let adapter = adapters.into_iter().next().ok_or_else(|| LinkError::NoAdapter("none present".into()))?;
-    if let Ok(CentralState::PoweredOff) = adapter.adapter_state().await {
-        return Err(LinkError::NoAdapter("adapter is off".into()));
-    }
-    Ok(adapter)
 }
 
 /// A candidate device the OS knows about.

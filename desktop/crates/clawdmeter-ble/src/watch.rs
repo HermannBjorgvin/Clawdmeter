@@ -24,7 +24,7 @@ use btleplug::platform::PeripheralId;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-use crate::{accept, adapter, describe};
+use crate::{accept, describe, Bluetooth};
 
 /// How the device showed up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,16 +80,16 @@ const ADVERT_DEBOUNCE: Duration = Duration::from_secs(2);
 /// Wait before reopening the event stream after the adapter went away.
 const REOPEN_AFTER: Duration = Duration::from_secs(5);
 
-/// Watch the first adapter for sightings of a Clawdmeter. Runs until the
+/// Watch `bluetooth`'s adapter for sightings of a Clawdmeter. Runs until the
 /// receiver is dropped; reopens the stream when the adapter or the Bluetooth
 /// service goes away. Must be called inside a tokio runtime.
-pub fn spawn_watcher() -> Wakeups {
+pub fn spawn_watcher(bluetooth: Bluetooth) -> Wakeups {
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 () = tx.closed() => return,
-                () = watch_once(&tx) => {}
+                () = watch_once(&bluetooth, &tx) => {}
             }
             tokio::select! {
                 () = tx.closed() => return,
@@ -100,8 +100,8 @@ pub fn spawn_watcher() -> Wakeups {
     rx
 }
 
-async fn watch_once(tx: &mpsc::UnboundedSender<Wake>) {
-    let adapter = match adapter().await {
+async fn watch_once(bluetooth: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
+    let adapter = match bluetooth.adapter().await {
         Ok(a) => a,
         Err(e) => {
             log::debug!("wakeup watcher: {e}");
