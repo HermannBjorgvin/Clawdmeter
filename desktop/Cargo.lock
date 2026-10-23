@@ -1021,6 +1021,7 @@ dependencies = [
 name = "clawdmeter-ble"
 version = "0.1.0"
 dependencies = [
+ "bluez-async",
  "btleplug",
  "clawdmeter-core",
  "dbus",

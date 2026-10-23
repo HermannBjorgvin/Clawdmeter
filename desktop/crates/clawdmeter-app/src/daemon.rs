@@ -167,6 +167,8 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let mut link: Option<DeviceLink> = None;
     let mut device_events: Option<DeviceEvents> = None;
     let mut connecting: Option<JoinHandle<ConnectResult>> = None;
+    // A zombie link's disconnect, still running.
+    let mut closing: Option<JoinHandle<()>> = None;
     let mut polling: Option<JoinHandle<PollResults>> = None;
     let mut link_state = LinkState::Starting;
     let mut reconnect = Reconnect::default();
@@ -333,32 +335,29 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             if link.is_some() || !should_wake(&w, cache.load().as_deref()) {
                 continue;
             }
-            if connecting.is_none() && !reconnect.due(now) {
+            if reconnect.wake(now, connecting.is_some()) {
                 let how = match w.sighting {
                     Sighting::Connected => "connected at the OS level",
                     Sighting::Advertising => "advertising",
                 };
                 log::info!("device {} {how}; reconnecting now", w.key);
             }
-            reconnect.wake(now, connecting.is_some());
         }
-        if link.is_none() && connecting.is_none() && reconnect.due(now) {
+        let closed = closing.as_ref().is_none_or(JoinHandle::is_finished);
+        if link.is_none() && connecting.is_none() && closed && reconnect.due(now) {
+            closing = None;
             if link_state == LinkState::Starting {
                 link_state = LinkState::Connecting;
             }
             let (bluetooth, cache, opts) = (bluetooth.clone(), cache.clone(), link_opts.clone());
-            connecting = Some(tokio::spawn(async move {
-                let adapter = bluetooth.adapter().await?;
-                DeviceLink::open(&adapter, &cache, &opts).await
-            }));
+            connecting = Some(tokio::spawn(async move { DeviceLink::open(&bluetooth, &cache, &opts).await }));
         }
         if let Some(l) = &link {
             if now - last_link_check >= LINK_CHECK_EVERY {
                 last_link_check = now;
                 if !l.is_connected().await {
                     log::info!("device disconnected, reconnecting...");
-                    close_if_zombie(l).await;
-                    link = None;
+                    closing = drop_link(&mut link).or(closing.take());
                     device_events = None;
                     link_state = LinkState::Searching;
                     reconnect.retry_in(now, 2);
@@ -388,8 +387,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     Err(e) => {
                         log::warn!("write failed: {e}");
                         if !l.is_connected().await {
-                            close_if_zombie(l).await;
-                            link = None;
+                            closing = drop_link(&mut link).or(closing.take());
                             device_events = None;
                             link_state = LinkState::Searching;
                             reconnect.retry_in(now, 2);
@@ -408,12 +406,13 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     }
 }
 
-/// Disconnect a zombie link before dropping it: the stack still reports it
+/// Drop a link that stopped working. A zombie is disconnected first, in the
+/// background so the tick loop keeps going: the stack still reports it
 /// connected, so the next attempt would reuse it instead of reconnecting.
-async fn close_if_zombie(l: &DeviceLink) {
-    if l.is_zombie() {
-        l.close().await;
-    }
+/// That attempt waits for the returned disconnect.
+fn drop_link(link: &mut Option<DeviceLink>) -> Option<JoinHandle<()>> {
+    let l = link.take().filter(DeviceLink::is_zombie)?;
+    Some(tokio::spawn(async move { l.close().await }))
 }
 
 /// One poll of every account, printed as the payload the device would get

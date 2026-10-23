@@ -101,17 +101,19 @@ pub fn spawn_watcher(bluetooth: Bluetooth) -> Wakeups {
 }
 
 async fn watch_once(bluetooth: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
-    // Subscribed first, so a replacement made while the lookup runs isn't
-    // missed (at worst its own install costs one extra reopen).
     let mut replaced = bluetooth.replaced();
-    let adapter = match bluetooth.adapter().await {
-        Ok(a) => a,
-        Err(e) => {
-            log::debug!("wakeup watcher: {e}");
-            return;
+    // Watch only an adapter that is still current once subscribed; a lookup
+    // that raced a replacement is repeated.
+    let (adapter, opened_on) = loop {
+        match bluetooth.adapter_at().await {
+            Ok((a, at)) if *replaced.borrow_and_update() == at => break (a, at),
+            Ok(_) => continue,
+            Err(e) => {
+                log::debug!("wakeup watcher: {e}");
+                return;
+            }
         }
     };
-    let opened_on = replaced.borrow().lost_managers;
     let mut events = match adapter.events().await {
         Ok(s) => s,
         Err(e) => {
@@ -124,18 +126,14 @@ async fn watch_once(bluetooth: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
         let ev = tokio::select! {
             ev = events.next() => match ev {
                 Some(ev) => ev,
-                None => break,
+                None => {
+                    log::debug!("wakeup watcher: event stream ended");
+                    break;
+                }
             },
             _ = replaced.changed() => {
                 log::debug!("wakeup watcher: adapter replaced; reopening");
-                if replaced.borrow().lost_managers != opened_on {
-                    // The stream belongs to a dead D-Bus connection: BlueZ's
-                    // stream unwraps a D-Bus call when dropped, which fails
-                    // there and would abort the app. It never delivers
-                    // again, so keep it (one per system bus restart).
-                    std::mem::forget(events);
-                }
-                return;
+                break;
             }
         };
         let Some((id, kind)) = sighting(&ev) else { continue };
@@ -151,12 +149,23 @@ async fn watch_once(bluetooth: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
         if !accept(c.name.as_deref(), c.has_service) {
             continue;
         }
+        if kind == Sighting::Connected && bluetooth.take_own_connect(&c.key) {
+            log::debug!("wakeup watcher: {} connected by the daemon", c.key);
+            continue;
+        }
         log::debug!("wakeup: {} {:?}", c.key, kind);
         if tx.send(Wake { key: c.key, sighting: kind }).is_err() {
-            return;
+            break;
         }
     }
-    log::debug!("wakeup watcher: event stream ended");
+    if replaced.borrow().lost_managers != opened_on.lost_managers {
+        // The stream's manager was dropped, maybe with its D-Bus connection
+        // dead. Dropping a BlueZ stream unwraps a D-Bus call, which fails on
+        // a dead connection and would abort the app, so retire it instead:
+        // drained if the connection still lives (the backstop replaced it),
+        // idle for good if not. One per replaced manager.
+        tokio::spawn(async move { while events.next().await.is_some() {} });
+    }
 }
 
 #[cfg(test)]
