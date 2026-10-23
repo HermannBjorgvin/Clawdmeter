@@ -40,6 +40,7 @@ Nested `CLAUDE.md` files load when you read or edit a file in their folder.
 | `waveshare_amoled_132` | Waveshare ESP32-S3-Touch-AMOLED-1.32 | CO5300 466×466 round, CST820 touch, BOOT rotates the UI |
 | `esp32_2432s024c`, `esp32_2432s024c_landscape` | Sunton ESP32-2432S024C | classic ESP32, no PSRAM, ST7789 SPI 240×320 / 320×240, CST820 touch |
 | `esp32_2432s028r`, `esp32_2432s028r_landscape` | Sunton ESP32-2432S028R (CYD) | classic ESP32, no PSRAM, ILI9341 SPI 240×320 / 320×240, resistive XPT2046 touch |
+| `upesy_wroom_st7789` | uPesy ESP32 WROOM DevKit + 1.9" ST7789 module | classic ESP32, no PSRAM, ST7789 SPI 170×320, no touch |
 | `m5sticks3` | M5Stack M5StickS3 | ST7789P3 SPI 135×240, no touch, M5PM1 PMIC, ES8311 chime |
 | `m5stack_fire` | M5Stack FIRE | ESP32 (classic, no S3), ILI9342C SPI 320×240, no touch, 3 buttons, IP5306 |
 | `lilygo_t_display_s3` | LILYGO T-Display S3 (non-touch) | ST7789 i80 parallel 170×320, BOOT + a PWR-role key |

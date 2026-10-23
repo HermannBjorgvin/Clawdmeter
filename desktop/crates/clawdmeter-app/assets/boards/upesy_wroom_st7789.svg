@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="56" height="122" viewBox="-3 -3 56.00 122.20">
+<title>uPesy ESP32 WROOM + ST7789 1.9" 170x320, portrait</title>
+<ellipse cx="25.00" cy="112.70" rx="23.75" ry="3.5" fill="#000" opacity="0.14"/>
+<g transform="translate(0 2.00) matrix(2.0 0.2 0 2.1 0 0)"><rect x="0" y="0" width="25" height="52" rx="1.6" fill="#102a57"/></g><g transform="translate(0 1.30) matrix(2.0 0.2 0 2.1 0 0)"><rect x="0" y="0" width="25" height="52" rx="1.6" fill="#14336a"/></g><g transform="translate(0 0.65) matrix(2.0 0.2 0 2.1 0 0)"><rect x="0" y="0" width="25" height="52" rx="1.6" fill="#173b7a"/></g>
+<g transform="matrix(2.0 0.2 0 2.1 0 0)">
+<rect x="-0.4" y="-0.4" width="25.8" height="52.8" rx="2" fill="#173b7a"/>
+<rect x="0" y="0" width="25" height="52" rx="1.6" fill="#1f4fa0"/>
+<rect x="1.4000000000000001" y="1.2" width="22.200000000000003" height="44.6" rx="1.2" fill="#16161a"/>
+<rect x="2.2" y="2" width="20.6" height="43" rx="0.6" fill="#000"/>
+<g transform="translate(12.50 17.48) scale(1.0) translate(-25.0 -18.8)"><path d="M21.72 15.5h6.57v0.82h-6.57zM21.72 16.32h0.82v0.82h-0.82zM23.36 16.32h3.28v0.82h-3.28zM27.46 16.32h0.82v0.82h-0.82zM20.08 17.14h9.85v0.82h-9.85zM20.08 17.96h9.85v0.82h-9.85zM21.72 18.78h6.57v0.82h-6.57zM21.72 19.6h6.57v0.82h-6.57zM21.72 20.42h0.82v0.82h-0.82zM23.36 20.42h0.82v0.82h-0.82zM25.82 20.42h0.82v0.82h-0.82zM27.46 20.42h0.82v0.82h-0.82zM21.72 21.24h0.82v0.82h-0.82zM23.36 21.24h0.82v0.82h-0.82zM25.82 21.24h0.82v0.82h-0.82zM27.46 21.24h0.82v0.82h-0.82z" fill="#d97757"/><path d="M22.54 16.32h0.82v0.82h-0.82zM26.64 16.32h0.82v0.82h-0.82z" fill="#141413"/></g>
+<rect x="5.00" y="30.00" width="15.00" height="0.9" rx="0.45" fill="#2a2a28"/><rect x="5.00" y="30.00" width="5.10" height="0.9" rx="0.45" fill="#788c5d"/><rect x="5.00" y="33.00" width="15.00" height="0.9" rx="0.45" fill="#2a2a28"/><rect x="5.00" y="33.00" width="9.30" height="0.9" rx="0.45" fill="#d97757"/>
+<circle cx="3.20" cy="49.40" r="0.75" fill="#d9b44a"/><circle cx="3.20" cy="49.40" r="0.35" fill="#0c1a33"/><circle cx="5.74" cy="49.40" r="0.75" fill="#d9b44a"/><circle cx="5.74" cy="49.40" r="0.35" fill="#0c1a33"/><circle cx="8.28" cy="49.40" r="0.75" fill="#d9b44a"/><circle cx="8.28" cy="49.40" r="0.35" fill="#0c1a33"/><circle cx="10.82" cy="49.40" r="0.75" fill="#d9b44a"/><circle cx="10.82" cy="49.40" r="0.35" fill="#0c1a33"/><circle cx="13.36" cy="49.40" r="0.75" fill="#d9b44a"/><circle cx="13.36" cy="49.40" r="0.35" fill="#0c1a33"/><circle cx="15.90" cy="49.40" r="0.75" fill="#d9b44a"/><circle cx="15.90" cy="49.40" r="0.35" fill="#0c1a33"/><circle cx="18.44" cy="49.40" r="0.75" fill="#d9b44a"/><circle cx="18.44" cy="49.40" r="0.35" fill="#0c1a33"/><circle cx="20.98" cy="49.40" r="0.75" fill="#d9b44a"/><circle cx="20.98" cy="49.40" r="0.35" fill="#0c1a33"/>
+</g>
+</svg>
