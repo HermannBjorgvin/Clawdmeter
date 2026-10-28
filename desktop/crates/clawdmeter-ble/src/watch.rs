@@ -80,17 +80,17 @@ const ADVERT_DEBOUNCE: Duration = Duration::from_secs(2);
 /// Wait before reopening the event stream after the adapter went away.
 const REOPEN_AFTER: Duration = Duration::from_secs(5);
 
-/// Watch `bt`'s first adapter for sightings of a Clawdmeter. Runs until the
-/// receiver is dropped; reopens the stream when it ends, or when `bt`
-/// replaces its manager after the D-Bus connection died (a dead connection
-/// can leave its stream hanging). Must be called inside a tokio runtime.
-pub fn spawn_watcher(bt: Bluetooth) -> Wakeups {
+/// Watch `bluetooth`'s adapter for sightings of a Clawdmeter. Runs until
+/// the receiver is dropped; reopens the stream when it ends, or when
+/// `bluetooth` replaces its adapter or its manager (a dead connection can
+/// leave its stream hanging). Must be called inside a tokio runtime.
+pub fn spawn_watcher(bluetooth: Bluetooth) -> Wakeups {
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 () = tx.closed() => return,
-                () = watch_once(&bt, &tx) => {}
+                () = watch_once(&bluetooth, &tx) => {}
             }
             tokio::select! {
                 () = tx.closed() => return,
@@ -101,16 +101,18 @@ pub fn spawn_watcher(bt: Bluetooth) -> Wakeups {
     rx
 }
 
-async fn watch_once(bt: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
-    // Subscribe before the adapter lookup, so a connection lost between
-    // the two is counted here.
-    let mut losses = bt.connection_losses();
-    let opened_at = *losses.borrow_and_update();
-    let adapter = match bt.adapter().await {
-        Ok(a) => a,
-        Err(e) => {
-            log::debug!("wakeup watcher: {e}");
-            return;
+async fn watch_once(bluetooth: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
+    let mut replaced = bluetooth.replaced();
+    // Watch only an adapter that is still current once subscribed; a lookup
+    // that raced a replacement is repeated.
+    let (adapter, opened_on) = loop {
+        match bluetooth.adapter_at().await {
+            Ok((a, at)) if *replaced.borrow_and_update() == at => break (a, at),
+            Ok(_) => continue,
+            Err(e) => {
+                log::debug!("wakeup watcher: {e}");
+                return;
+            }
         }
     };
     let mut events = match adapter.events().await {
@@ -130,11 +132,8 @@ async fn watch_once(bt: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
                     break;
                 }
             },
-            _ = losses.changed() => {
-                // A dead connection can leave its event stream hanging
-                // rather than ending it: the match channels stay open
-                // while the session is alive. Reopen on the replacement.
-                log::debug!("wakeup watcher: connection replaced; reopening");
+            _ = replaced.changed() => {
+                log::debug!("wakeup watcher: adapter or connection replaced; reopening");
                 break;
             }
         };
@@ -156,25 +155,7 @@ async fn watch_once(bt: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
             break;
         }
     }
-    // bluez-async's event-stream drop unwraps a `RemoveMatch` call on the
-    // stream's connection; on a dead one that panics, and release builds
-    // abort (panic = "abort"). A counted loss says dead at once; else one
-    // lookup proves the connection alive — or replaces a dead manager on
-    // the way, counting the loss. Anything but a clear "alive" means
-    // leak: a forgotten stream is heap only, no socket. The count is read
-    // after the lookup: one that succeeds on a manager someone else just
-    // put in place of this stream's dead one has bumped it by then.
-    if bt.adapter().await.is_err() || must_leak(opened_at, *losses.borrow()) {
-        std::mem::forget(events);
-    }
-}
-
-/// Must a stream opened when `opened_at` connection losses were counted be
-/// leaked rather than dropped? Once `Bluetooth` counts its connection lost
-/// the stream is dead weight, and dropping it runs `RemoveMatch` on that
-/// dead connection (see `watch_once`).
-fn must_leak(opened_at: u64, now: u64) -> bool {
-    now != opened_at
+    bluetooth.retire(events, opened_on.lost_connections).await;
 }
 
 #[cfg(test)]
@@ -197,13 +178,5 @@ mod tests {
         assert!(should_wake(&w, None));
         assert!(should_wake(&w, Some("aa:bb:cc:dd:ee:ff")));
         assert!(!should_wake(&w, Some("11:22:33:44:55:66")));
-    }
-
-    #[test]
-    fn only_streams_of_a_lost_connection_are_leaked() {
-        assert!(!must_leak(2, 2));
-        assert!(must_leak(2, 3));
-        // A connection lost twice while the stream was open.
-        assert!(must_leak(2, 4));
     }
 }

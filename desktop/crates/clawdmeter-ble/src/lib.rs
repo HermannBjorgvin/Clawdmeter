@@ -27,8 +27,9 @@
 //!   itself connected (a half-open "zombie" link) make
 //!   [`DeviceLink::is_connected`] report false, so the caller reconnects.
 //!
-//! Adapters come from one [`Bluetooth`] handle per runtime, never a fresh
-//! btleplug manager per attempt (on Linux each leaks a D-Bus connection).
+//! The manager and adapter come from one [`Bluetooth`] handle per runtime,
+//! never fresh ones per attempt (on Linux each manager leaks a D-Bus
+//! connection, on macOS each adapter listing a CoreBluetooth thread).
 //!
 //! Reconnect timing is [`Reconnect`] (backoff capped at
 //! [`reconnect::BACKOFF_CAP`]), cut short by [`spawn_watcher`]'s wakeups when
@@ -37,9 +38,11 @@
 
 #![warn(missing_docs)]
 
+mod bluetooth;
 pub mod reconnect;
 mod watch;
 
+pub use bluetooth::Bluetooth;
 pub use reconnect::Reconnect;
 pub use watch::{should_wake, spawn_watcher, Sighting, Wake, Wakeups};
 
@@ -48,16 +51,14 @@ use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use btleplug::api::{
-    BDAddr, Central, CentralState, Characteristic, Manager as _, Peripheral as _, RetrievePeripheralsOptions,
-    ScanFilter, WriteType,
+    BDAddr, Central, Characteristic, Peripheral as _, RetrievePeripheralsOptions, ScanFilter, WriteType,
 };
-use btleplug::platform::{Adapter, Manager, Peripheral};
+use btleplug::platform::{Adapter, Peripheral};
 use futures::{Stream, StreamExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 pub use clawdmeter_core::DEVICE_NAME;
@@ -106,6 +107,14 @@ impl std::fmt::Display for LinkError {
 }
 
 impl std::error::Error for LinkError {}
+
+impl LinkError {
+    /// The [`DeviceLink::open`] that failed with this got as far as
+    /// connecting to a device (or found one connected).
+    pub fn reached_device(&self) -> bool {
+        !matches!(self, LinkError::NoAdapter(_) | LinkError::NotFound)
+    }
+}
 
 impl From<btleplug::Error> for LinkError {
     fn from(e: btleplug::Error) -> Self {
@@ -200,112 +209,6 @@ impl Default for LinkOptions {
             scan_time: Duration::from_secs(8),
         }
     }
-}
-
-/// The Bluetooth stack: one btleplug [`Manager`], made on first use and
-/// shared by every clone. Its I/O task runs on the runtime of the
-/// [`adapter`](Self::adapter) call that made it, so keep a handle to one
-/// runtime and pass clones around.
-///
-/// On Linux a `Manager` is a D-Bus system-bus connection whose I/O task
-/// btleplug spawns detached, so dropping the manager never closes it. A
-/// manager per connect attempt leaked one connection per attempt until the
-/// per-user limit (256) starved the whole session. The manager is replaced
-/// only once a throwaway connection proves a new one would fare better and
-/// a retry on its own connection still fails — meaning this one's
-/// connection is dead and its socket already closed.
-/// [`connection_losses`](Self::connection_losses) counts the replacements:
-/// a stream opened on a lost connection must not be dropped, so the wakeup
-/// watcher leaks it (see `spawn_watcher`).
-#[derive(Clone)]
-pub struct Bluetooth {
-    manager: Arc<tokio::sync::Mutex<Option<Arc<Manager>>>>,
-    lost_connections: Arc<tokio::sync::watch::Sender<u64>>,
-}
-
-impl Default for Bluetooth {
-    fn default() -> Self {
-        Bluetooth { manager: Arc::default(), lost_connections: Arc::new(tokio::sync::watch::channel(0).0) }
-    }
-}
-
-impl Bluetooth {
-    /// The first powered adapter.
-    pub async fn adapter(&self) -> Result<Adapter, LinkError> {
-        let manager = self.manager().await?;
-        let adapters = match manager.adapters().await {
-            Ok(a) => a,
-            Err(e) => {
-                if !connection_lost().await {
-                    return Err(LinkError::NoAdapter(e.to_string()));
-                }
-                // The probe can find bluetoothd answering again just after
-                // this call hit it restarting, so ask this connection once
-                // more: a dead one fails again at once, a live one answers.
-                match manager.adapters().await {
-                    Ok(a) => a,
-                    Err(_) => {
-                        // Whoever drops the dead manager counts the loss, so
-                        // streams opened on its connection know they must
-                        // not be dropped.
-                        if self.manager.lock().await.take_if(|m| Arc::ptr_eq(m, &manager)).is_some() {
-                            self.lost_connections.send_modify(|n| *n += 1);
-                        }
-                        return Err(LinkError::NoAdapter(e.to_string()));
-                    }
-                }
-            }
-        };
-        let adapter = adapters.into_iter().next().ok_or_else(|| LinkError::NoAdapter("none present".into()))?;
-        if let Ok(CentralState::PoweredOff) = adapter.adapter_state().await {
-            return Err(LinkError::NoAdapter("adapter is off".into()));
-        }
-        Ok(adapter)
-    }
-
-    /// How often the manager was replaced after its D-Bus connection died.
-    /// The wakeup watcher reopens its stream on every bump and reads the
-    /// count to tell whether a finished stream is safe to drop.
-    pub(crate) fn connection_losses(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.lost_connections.subscribe()
-    }
-
-    async fn manager(&self) -> Result<Arc<Manager>, LinkError> {
-        let mut slot = self.manager.lock().await;
-        if let Some(m) = &*slot {
-            return Ok(m.clone());
-        }
-        let m = Arc::new(Manager::new().await.map_err(|e| LinkError::NoAdapter(e.to_string()))?);
-        *slot = Some(m.clone());
-        Ok(m)
-    }
-}
-
-/// Is the manager's D-Bus connection gone — or would a fresh one hit the
-/// same error? btleplug boxes bluez-async's error out of reach (its
-/// `source()` chain skips the `dbus::Error` inside), so instead of reading
-/// the error this asks the bus itself over a throwaway connection; dbus-rs
-/// closes those on drop, so the probe leaks nothing. Only a bus or
-/// bluetoothd that demonstrably answers proves the manager's connection
-/// the dead one; anything else errs on the side of keeping it, since a
-/// missed loss only delays recovery while a spurious one leaks a live
-/// connection.
-#[cfg(target_os = "linux")]
-async fn connection_lost() -> bool {
-    let reach = tokio::task::spawn_blocking(bluez::reach).await.unwrap_or(bluez::Reach::BluetoothUnreachable);
-    lost_on(reach)
-}
-
-/// No system-bus connection to lose elsewhere.
-#[cfg(not(target_os = "linux"))]
-async fn connection_lost() -> bool {
-    false
-}
-
-/// Which [`bluez::Reach`] results mean the manager's connection is dead.
-#[cfg(target_os = "linux")]
-fn lost_on(reach: bluez::Reach) -> bool {
-    matches!(reach, bluez::Reach::Reached | bluez::Reach::BusUnreachable)
 }
 
 /// A candidate device the OS knows about.
@@ -514,6 +417,8 @@ pub struct DeviceLink {
     key: String,
     name: Option<String>,
     health: WriteHealth,
+    /// Dropping it stops the notification forwarder.
+    _forwarder: Option<oneshot::Sender<()>>,
 }
 
 impl std::fmt::Debug for DeviceLink {
@@ -523,13 +428,23 @@ impl std::fmt::Debug for DeviceLink {
 }
 
 impl DeviceLink {
-    /// Find, connect, discover and subscribe. On a failed connect the address
-    /// cache is dropped (if it pointed at that device).
+    /// Find, connect, discover and subscribe on `bluetooth`'s adapter. On a
+    /// failed connect the address cache is dropped (if it pointed at that
+    /// device).
     pub async fn open(
-        adapter: &Adapter,
+        bluetooth: &Bluetooth,
         cache: &AddressCache,
         opts: &LinkOptions,
     ) -> Result<(DeviceLink, DeviceEvents), LinkError> {
+        let (adapter, at) = bluetooth.adapter_at().await?;
+        let adapter = &adapter;
+        // The adapter is kept for the app's lifetime, and WinRT and
+        // CoreBluetooth keep every peripheral it handed out: WinRT with its
+        // device session, connected flag and discovered services,
+        // CoreBluetooth with every board a scan ever saw. Start each attempt
+        // from fresh ones, so a link left half-open, a GATT table changed by
+        // a reflash or a board long gone isn't reused. (BlueZ keeps none.)
+        let _ = adapter.clear_peripherals().await;
         // CLAWDMETER_BLE_ADDRESS pins the device to try first (the bash
         // daemon's DEVICE_MAC, the Windows daemon's override); else the cache.
         let cached = pinned_address().or_else(|| cache.load());
@@ -542,7 +457,7 @@ impl DeviceLink {
         }
         let mut last_err = LinkError::NotFound;
         for cand in connect_order(&cands, cached.as_deref()) {
-            match Self::connect(cand.clone(), opts).await {
+            match Self::connect(cand.clone(), opts, bluetooth, at.lost_connections).await {
                 Ok(ok) => {
                     if cached.as_deref() != Some(cand.key.as_str()) {
                         let _ = cache.save(&cand.key);
@@ -563,8 +478,14 @@ impl DeviceLink {
         Err(last_err)
     }
 
-    /// Connect to a specific candidate.
-    pub async fn connect(cand: Candidate, opts: &LinkOptions) -> Result<(DeviceLink, DeviceEvents), LinkError> {
+    /// Connect to a specific candidate, found on `bluetooth`'s adapter when
+    /// `lost_at` connections had been lost.
+    async fn connect(
+        cand: Candidate,
+        opts: &LinkOptions,
+        bluetooth: &Bluetooth,
+        lost_at: u64,
+    ) -> Result<(DeviceLink, DeviceEvents), LinkError> {
         let p = cand.peripheral;
         if !p.is_connected().await.unwrap_or(false) {
             let r = match tokio::time::timeout(opts.connect_timeout, p.connect()).await {
@@ -572,10 +493,15 @@ impl DeviceLink {
                 Err(_) => Err(LinkError::Timeout("connect")),
             };
             if let Err(e) = r {
-                // Cancel BlueZ's pending Connect, or the next attempt fails
-                // with "Operation already in progress".
-                let _ = p.disconnect().await;
-                return Err(e);
+                if p.is_connected().await.unwrap_or(false) {
+                    // BlueZ's own reconnect got there first.
+                    log::debug!("connect failed ({e}), but the device is connected; carrying on");
+                } else {
+                    // Cancel BlueZ's pending Connect, or the next attempt
+                    // fails with "Operation already in progress".
+                    let _ = p.disconnect().await;
+                    return Err(e);
+                }
             }
         }
         tokio::time::timeout(opts.discover_timeout, p.discover_services())
@@ -593,11 +519,12 @@ impl DeviceLink {
             .filter(|c| (c.uuid == REQ_UUID || c.uuid == TX_UUID) && c.service_uuid == SERVICE_UUID)
             .cloned()
             .collect();
+        let mut forwarder = None;
         if !notifying.is_empty() {
             // Listen before subscribing: the device fires its REQ notify
             // inside the subscribe (it asks only when it has no data yet).
             match p.notifications().await {
-                Ok(stream) => spawn_event_forwarder(stream, tx),
+                Ok(stream) => forwarder = Some(spawn_event_forwarder(stream, tx, bluetooth.clone(), lost_at)),
                 Err(e) => log::warn!("no notification stream: {e}"),
             }
         }
@@ -618,7 +545,15 @@ impl DeviceLink {
                 log::debug!("could not mark the device trusted: {e}");
             }
         }
-        Ok((DeviceLink { key: cand.key, name: cand.name, peripheral: p, rx, health: WriteHealth::default() }, events))
+        let link = DeviceLink {
+            key: cand.key,
+            name: cand.name,
+            peripheral: p,
+            rx,
+            health: WriteHealth::default(),
+            _forwarder: forwarder,
+        };
+        Ok((link, events))
     }
 
     /// Write one payload (already encoded to at most [`MAX_WRITE`] bytes).
@@ -642,12 +577,21 @@ impl DeviceLink {
     /// Still connected? False once writes keep failing (a zombie link), so
     /// the caller drops it and reconnects.
     pub async fn is_connected(&self) -> bool {
-        !self.health.is_zombie() && self.peripheral.is_connected().await.unwrap_or(false)
+        !self.is_zombie() && self.peripheral.is_connected().await.unwrap_or(false)
     }
 
-    /// Drop the GATT connection (the OS may keep the HID link).
+    /// Writes keep failing on a link the stack still reports connected.
+    /// BlueZ keeps reporting it so, so [`DeviceLink::close`] it before
+    /// dropping the link, or the next attempt finds it "connected" and skips
+    /// the connect.
+    pub fn is_zombie(&self) -> bool {
+        self.health.is_zombie()
+    }
+
+    /// Drop the GATT connection (the OS may keep the HID link). Bounded;
+    /// errors are ignored.
     pub async fn close(&self) {
-        let _ = self.peripheral.disconnect().await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.peripheral.disconnect()).await;
     }
 
     /// Cache key (address).
@@ -775,19 +719,33 @@ fn macos_unpair_stale_bond() {
     }
 }
 
+/// Forward a link's notifications as [`DeviceEvent`]s until the link is
+/// dropped (the returned sender with it). Every link's stream holds a match
+/// rule on the one kept D-Bus connection, which caps them (512 by default),
+/// so a dropped link's stream is retired, not left running.
 fn spawn_event_forwarder(
     mut stream: Pin<Box<dyn Stream<Item = btleplug::api::ValueNotification> + Send>>,
     tx: mpsc::UnboundedSender<DeviceEvent>,
-) {
+    bluetooth: Bluetooth,
+    lost_at: u64,
+) -> oneshot::Sender<()> {
+    let (stop, mut stopped) = oneshot::channel::<()>();
     tokio::spawn(async move {
-        while let Some(n) = stream.next().await {
+        loop {
+            let n = tokio::select! {
+                n = stream.next() => n,
+                _ = &mut stopped => None,
+            };
+            let Some(n) = n else { break };
             if let Some(ev) = device_event(n.uuid, &n.value) {
                 if tx.send(ev).is_err() {
                     break;
                 }
             }
         }
+        bluetooth.retire(stream, lost_at).await;
     });
+    stop
 }
 
 /// Forget a device in BlueZ (unpair). Not called by the daemon loop: doing it
@@ -887,15 +845,6 @@ mod bluez {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn reach_results() {
-        use bluez::Reach::*;
-        assert!(lost_on(Reached));
-        assert!(lost_on(BusUnreachable));
-        assert!(!lost_on(BluetoothUnreachable));
-    }
 
     #[test]
     fn device_events() {
