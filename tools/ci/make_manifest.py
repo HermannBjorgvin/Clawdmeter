@@ -49,6 +49,7 @@ DISPLAY_NAMES = {
     "esp32_2432s024c_landscape": "ESP32-2432S024C CYD 2.4\" (landscape)",
     "esp32_2432s028r": "ESP32-2432S028R CYD 2.8\" (portrait)",
     "esp32_2432s028r_landscape": "ESP32-2432S028R CYD 2.8\" (landscape)",
+    "upesy_wroom_st7789": "uPesy ESP32 WROOM + ST7789 1.9\"",
     "m5sticks3": "M5Stack M5StickS3",
     "m5stack_fire": "M5Stack FIRE",
     "lilygo_t_display_s3": "LILYGO T-Display S3",
