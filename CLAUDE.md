@@ -160,7 +160,7 @@ Workflows in `.github/workflows/`:
 - `firmware.yml`: builds every hardware env plus merged images, runs native
   tests, captures a headless sim screenshot, runs `tools/ci` unittests.
 - `desktop.yml`: fmt, clippy and workspace tests on Linux; core tests on
-  macOS and Windows.
+  macOS and Windows, plus workspace clippy on macOS.
 - `release.yml`: runs on `v*` tags; see the `cutting-a-release` skill.
 
 ## Skills

@@ -317,7 +317,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                         LinkError::NoAdapter(s) => LinkState::NoAdapter(s.clone()),
                         _ => LinkState::Searching,
                     };
-                    let wait = reconnect.failed(now);
+                    let wait = reconnect.failed(now, e.reached_device());
                     if !matches!(e, LinkError::NotFound) || wait == 1 {
                         log::info!("{e}; retrying in {wait}s");
                     }
@@ -331,31 +331,27 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             if link.is_some() || !should_wake(&w, cache.load().as_deref()) {
                 continue;
             }
-            if connecting.is_none() && !reconnect.due(now) {
+            if reconnect.wake(now, connecting.is_some(), w.sighting) {
                 let how = match w.sighting {
                     Sighting::Connected => "connected at the OS level",
                     Sighting::Advertising => "advertising",
                 };
                 log::info!("device {} {how}; reconnecting now", w.key);
             }
-            reconnect.wake(now, connecting.is_some());
         }
         if link.is_none() && connecting.is_none() && reconnect.due(now) {
             if link_state == LinkState::Starting {
                 link_state = LinkState::Connecting;
             }
             let (bt, cache, opts) = (bt.clone(), cache.clone(), link_opts.clone());
-            connecting = Some(tokio::spawn(async move {
-                let adapter = bt.adapter().await?;
-                DeviceLink::open(&adapter, &cache, &opts).await
-            }));
+            connecting = Some(tokio::spawn(async move { DeviceLink::open(&bt, &cache, &opts).await }));
         }
         if let Some(l) = &link {
             if now - last_link_check >= LINK_CHECK_EVERY {
                 last_link_check = now;
                 if !l.is_connected().await {
                     log::info!("device disconnected, reconnecting...");
-                    link = None;
+                    drop_link(&mut link).await;
                     device_events = None;
                     link_state = LinkState::Searching;
                     reconnect.retry_in(now, 2);
@@ -385,7 +381,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     Err(e) => {
                         log::warn!("write failed: {e}");
                         if !l.is_connected().await {
-                            link = None;
+                            drop_link(&mut link).await;
                             device_events = None;
                             link_state = LinkState::Searching;
                             reconnect.retry_in(now, 2);
@@ -401,6 +397,15 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             last_write_at,
             claude: claude.clone(),
         });
+    }
+}
+
+/// Drop a link that stopped working. BlueZ still reports a zombie
+/// connected, so it is disconnected first (bounded at 5 s), or the next
+/// attempt would reuse it.
+async fn drop_link(link: &mut Option<DeviceLink>) {
+    if let Some(l) = link.take().filter(DeviceLink::is_zombie) {
+        l.close().await;
     }
 }
 
