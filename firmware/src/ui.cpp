@@ -37,6 +37,33 @@ static_assert(LAYOUT_BATT_W == ICON_BATTERY_W && LAYOUT_BATT_W_SMALL == ICON_BAT
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
 
+// Colours set once when a widget is built are registered here, so a new
+// palette from the app (ui_apply_theme) repaints them in place. Colours that
+// follow the data (bar fills, the pace text) are recomputed instead.
+enum ThemedPart : uint8_t { PART_BG, PART_TEXT, PART_IMAGE };
+struct Themed { lv_obj_t* obj; ThemeColor tok; ThemedPart part; lv_style_selector_t sel; };
+static Themed themed[40];
+static int    n_themed = 0;
+
+static void paint(const Themed& t) {
+    switch (t.part) {
+    case PART_TEXT:  lv_obj_set_style_text_color(t.obj, theme_color(t.tok), t.sel); break;
+    case PART_BG:    lv_obj_set_style_bg_color(t.obj, theme_color(t.tok), t.sel); break;
+    case PART_IMAGE: lv_obj_set_style_image_recolor(t.obj, theme_color(t.tok), t.sel); break;
+    }
+}
+static void themed_color(lv_obj_t* obj, ThemeColor tok, ThemedPart part, lv_style_selector_t sel) {
+    if (n_themed < (int)(sizeof(themed) / sizeof(themed[0]))) themed[n_themed++] = { obj, tok, part, sel };
+    paint({ obj, tok, part, sel });
+}
+static void themed_bg(lv_obj_t* obj, ThemeColor tok, lv_style_selector_t sel = 0) { themed_color(obj, tok, PART_BG, sel); }
+static void themed_text(lv_obj_t* obj, ThemeColor tok) { themed_color(obj, tok, PART_TEXT, 0); }
+// A white-tinted icon (firmware CLAUDE.md gotcha 12) drawn in a token.
+static void themed_icon(lv_obj_t* obj, ThemeColor tok) {
+    lv_obj_set_style_image_recolor_opa(obj, LV_OPA_COVER, 0);
+    themed_color(obj, tok, PART_IMAGE, 0);
+}
+
 // ---- Usage screen widgets (single non-splash view) ----
 static lv_obj_t* usage_container;
 static lv_obj_t* lbl_title;
@@ -191,7 +218,7 @@ static lv_obj_t* make_pace_tick(lv_obj_t* bar) {
     lv_obj_t* tick = lv_obj_create(bar);
     lv_obj_remove_style_all(tick);
     lv_obj_set_size(tick, L.bar_h >= 20 ? 3 : 2, L.bar_h);
-    lv_obj_set_style_bg_color(tick, COL_TEXT, 0);
+    themed_bg(tick, TH_TEXT);
     lv_obj_set_style_bg_opa(tick, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(tick, 1, 0);
     lv_obj_clear_flag(tick, LV_OBJ_FLAG_CLICKABLE);
@@ -235,7 +262,7 @@ static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
     lv_obj_set_pos(panel, x, y);
     lv_obj_set_size(panel, w, h);
-    lv_obj_set_style_bg_color(panel, COL_PANEL, 0);
+    themed_bg(panel, TH_PANEL);
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(panel, 8, 0);
     lv_obj_set_style_border_width(panel, 0, 0);
@@ -254,7 +281,7 @@ static lv_obj_t* make_bar(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_set_size(bar, w, h);
     lv_bar_set_range(bar, 0, 100);
     lv_bar_set_value(bar, 0, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(bar, COL_BAR_BG, LV_PART_MAIN);
+    themed_bg(bar, TH_BAR_BG, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(bar, 6, LV_PART_MAIN);
     lv_obj_set_style_bg_color(bar, COL_GREEN, LV_PART_INDICATOR);
@@ -276,8 +303,8 @@ static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
     lv_obj_set_style_text_font(lbl, L.pill_font, 0);
-    lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
-    lv_obj_set_style_bg_color(lbl, COL_BAR_BG, 0);
+    themed_text(lbl, TH_TEXT);
+    themed_bg(lbl, TH_BAR_BG);
     lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(lbl, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_pad_left(lbl, L.pill_pad_x, 0);
@@ -315,7 +342,7 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, const LayoutRect& r, const c
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "--%");
     lv_obj_set_style_text_font(*out_pct, L.pct_font, 0);
-    lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
+    themed_text(*out_pct, TH_TEXT);
     lv_obj_set_pos(*out_pct, 0, 0);
 
     *out_pill = make_pill(panel, pill_text);
@@ -326,7 +353,7 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, const LayoutRect& r, const c
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
     lv_obj_set_style_text_font(*out_reset, L.reset_font, 0);
-    lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
+    themed_text(*out_reset, TH_DIM);
     lv_obj_set_pos(*out_reset, 0, L.reset_y);
 
     return panel;
@@ -351,11 +378,11 @@ static void apply_pair_text(void) {
 }
 
 // A centred line; on panels where the steps wrap, it wraps at pair_w.
-static lv_obj_t* make_pair_line(int i, lv_color_t color) {
+static lv_obj_t* make_pair_line(int i, ThemeColor color) {
     lv_obj_t* l = lv_label_create(pair_group);
     lv_label_set_text(l, "");
     lv_obj_set_style_text_font(l, L.pair_font[i], 0);
-    lv_obj_set_style_text_color(l, color, 0);
+    themed_text(l, color);
     if (L.pair_wrap) {
         lv_obj_set_width(l, L.pair_w);
         lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
@@ -374,10 +401,10 @@ static void build_pair_group(lv_obj_t* parent) {
     lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    pair_lines[0] = make_pair_line(0, COL_TEXT);
-    pair_lines[1] = make_pair_line(1, COL_DIM);
-    pair_lines[2] = make_pair_line(2, COL_DIM);
-    pair_lines[3] = make_pair_line(3, COL_DIM);
+    pair_lines[0] = make_pair_line(0, TH_TEXT);
+    pair_lines[1] = make_pair_line(1, TH_DIM);
+    pair_lines[2] = make_pair_line(2, TH_DIM);
+    pair_lines[3] = make_pair_line(3, TH_DIM);   // recoloured by apply_pair_text
     apply_pair_text();
 
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);  // ui_update_ble_status decides
@@ -417,7 +444,7 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
-    lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
+    themed_text(lbl_title, TH_TEXT);
     apply_title_font();
 
     // Usage panels (shown when connected) live in a transparent full-size group
@@ -439,13 +466,13 @@ static void init_usage_screen(lv_obj_t* scr) {
     lbl_session_pct_sym = lv_label_create(panel_session);
     lv_label_set_text(lbl_session_pct_sym, "%");
     lv_obj_set_style_text_font(lbl_session_pct_sym, L.reset_font, 0);
-    lv_obj_set_style_text_color(lbl_session_pct_sym, COL_TEXT, 0);
+    themed_text(lbl_session_pct_sym, TH_TEXT);
     lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
 
     lbl_spending_desc = lv_label_create(panel_session);
     lv_label_set_text(lbl_spending_desc, "of spending limit");
     lv_obj_set_style_text_font(lbl_spending_desc, L.reset_font, 0);
-    lv_obj_set_style_text_color(lbl_spending_desc, COL_DIM, 0);
+    themed_text(lbl_spending_desc, TH_DIM);
     lv_obj_set_pos(lbl_spending_desc, 0, L.reset_y);
     lv_obj_add_flag(lbl_spending_desc, LV_OBJ_FLAG_HIDDEN);
 
@@ -470,7 +497,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
     lv_obj_set_style_text_font(lbl_anim, L.status_font, 0);
-    lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
+    themed_text(lbl_anim, TH_ACCENT);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.status_y);
 }
 
@@ -485,7 +512,7 @@ void ui_init(void) {
     L = layout_compute({ caps.width, caps.height, caps.round_panel });
 
     lv_obj_t* scr = lv_screen_active();
-    lv_obj_set_style_bg_color(scr, COL_BG, 0);
+    themed_bg(scr, TH_BG);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     // The screen is a fixed room, not a scroll view. Left scrollable (the
     // LVGL default), it grows a theme scrollbar (a faint 4 px grey bar ~6 px
@@ -495,7 +522,8 @@ void ui_init(void) {
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
 
     // Static corner mascot (see clawd_still.h): fallback when the animated
-    // one can't get its buffer.
+    // one can't get its buffer. Baked art, so it keeps the official orange
+    // whatever TH_CLAWD is.
     if (L.small_icons) init_icon_dsc_rgb565a8(&logo_dsc, CLAWD_STILL_SMALL_W, CLAWD_STILL_SMALL_H, clawd_still_small_data);
     else               init_icon_dsc_rgb565a8(&logo_dsc, CLAWD_STILL_W, CLAWD_STILL_H, clawd_still_data);
     init_battery_icons();
@@ -510,6 +538,8 @@ void ui_init(void) {
     if (!board_caps().has_battery) {
         lv_obj_del(battery_img);
         battery_img = nullptr;
+    } else {
+        themed_icon(battery_img, TH_TEXT);   // white by default; readable on a light theme
     }
 
     // Corner mascot in the old logo slot. The still Clawd is shorter than the
@@ -565,10 +595,37 @@ static void apply_bar_colors(const UsageData* data) {
     place_pace_tick(tick_weekly, pace_elapsed_pct(data->weekly_reset_mins, PACE_WEEK_MINS));
 }
 
+// Enterprise Period box: the bar's fill and the recoloured pace + reset text.
+static void apply_period_colors(const UsageData* data) {
+    const float s = data->session_pct, tp = (float)data->time_pct;
+    const ThemeColor bar_pace = s <= tp ? TH_GREEN : s <= tp + 15.0f ? TH_AMBER : TH_RED;
+    lv_obj_set_style_bg_color(bar_weekly, theme_color(bar_pace), LV_PART_INDICATOR);
+    const char* pace_text = "Under pace";
+    ThemeColor  pace = TH_GREEN;
+    if (s > tp + 15.0f)      { pace_text = "Over pace"; pace = TH_RED; }
+    else if (s > tp - 15.0f) { pace_text = "On pace";   pace = TH_AMBER; }
+    char buf[64];
+    if (L.period_short)
+        snprintf(buf, sizeof(buf), "#%06lx Resets %s#", (unsigned long)theme_hex(pace), data->reset_date);
+    else
+        snprintf(buf, sizeof(buf), "#%06lx %s# - #%06lx Resets %s#", (unsigned long)theme_hex(pace),
+                 pace_text, (unsigned long)theme_hex(TH_TEXT), data->reset_date);
+    lv_label_set_text(lbl_weekly_reset, buf);
+}
+
 void ui_set_pace_marker(bool on) {
     if (on == pace_marker) return;
     pace_marker = on;
     if (have_last_data) apply_bar_colors(&last_data);
+}
+
+void ui_apply_theme(void) {
+    for (int i = 0; i < n_themed; i++) paint(themed[i]);
+    apply_pair_text();   // its last line follows the hold state
+    if (have_last_data) {
+        apply_bar_colors(&last_data);
+        if (last_data.enterprise) apply_period_colors(&last_data);
+    }
 }
 
 void ui_update(const UsageData* data) {
@@ -616,16 +673,6 @@ void ui_update(const UsageData* data) {
 
     char buf[48];
 
-    // Pace vars used in both enterprise blocks below
-    const char* pace_text = "Under pace";
-    lv_color_t  pace_color = COL_GREEN;
-    const char* pace_hex   = "788c5d";   // matches THEME_GREEN
-    if (data->session_pct > (float)data->time_pct + 15.0f) {
-        pace_text = "Over pace";  pace_color = COL_RED;   pace_hex = "c0392b";
-    } else if (data->session_pct > (float)data->time_pct - 15.0f) {
-        pace_text = "On pace";    pace_color = COL_AMBER; pace_hex = "d97757";
-    }
-
     if (data->enterprise) {
         lv_label_set_text_fmt(lbl_session_pct, "%d", s_pct);
         lv_obj_align_to(lbl_session_pct_sym, lbl_session_pct,
@@ -643,17 +690,8 @@ void ui_update(const UsageData* data) {
         lv_label_set_text(lbl_weekly_label, L.pills[3]);
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", data->time_pct);
         lv_bar_set_value(bar_weekly, data->time_pct, LV_ANIM_ON);
-        lv_color_t bar_pace = (data->session_pct <= (float)data->time_pct) ? COL_GREEN :
-                              (data->session_pct <= (float)data->time_pct + 15.0f) ? COL_AMBER :
-                              COL_RED;
-        lv_obj_set_style_bg_color(bar_weekly, bar_pace, LV_PART_INDICATOR);
-        if (L.period_short)
-            snprintf(buf, sizeof(buf), "#%s Resets %s#", pace_hex, data->reset_date);
-        else
-            snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Resets %s#",
-                     pace_hex, pace_text, data->reset_date);
         lv_obj_set_style_text_font(lbl_weekly_reset, L.period_font, 0);
-        lv_label_set_text(lbl_weekly_reset, buf);
+        apply_period_colors(data);
     } else {
         int w_pct = (int)(data->weekly_pct + 0.5f);
         lv_label_set_text(lbl_weekly_label, L.pills[1]);

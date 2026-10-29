@@ -2,6 +2,11 @@
 #include "clawd_director.h"
 #include "clawd_policy.h"
 #include "ui.h"
+#include "face.h"
+#include "clawd_anim.h"
+#include "mascot.h"
+#include "performer.h"
+#include "hal/board_caps.h"
 #include <Preferences.h>
 #include <Arduino.h>
 
@@ -17,6 +22,22 @@ void clawd_prefs_init(void) {
     pace_marker_set(pace);
     Serial.printf("Device prefs init: liveliness %d, attention animation %d s, pace marker %s\n",
                   clawd_liveliness(), clawd_attn_anim(), pace ? "on" : "off");
+}
+
+// The palette is kept as its `th` hex string.
+void theme_prefs_load(void) {
+    if (board_caps().mono_panel) return;   // 1-bit: the default palette only
+    Preferences prefs;
+    prefs.begin("clawdmeter", true);
+    char hex[THEME_HEX_LEN + 1] = {};
+    const size_t n = prefs.isKey("theme") ? prefs.getBytes("theme", hex, THEME_HEX_LEN) : 0;
+    prefs.end();
+    uint32_t p[TH_COUNT];
+    if (n == THEME_HEX_LEN && theme_parse_hex(hex, p)) {
+        theme_palette_set(p);
+        clawd_anim_recolor();
+        Serial.printf("Theme: %s (saved)\n", hex);
+    }
 }
 
 static void save(const char* key, uint8_t v) {
@@ -57,3 +78,20 @@ void pace_marker_set(bool on) {
 }
 
 bool pace_marker_get(void) { return pace_marker; }
+
+void theme_set(const uint32_t p[TH_COUNT]) {
+    if (board_caps().mono_panel) return;   // 1-bit: the default palette only
+    if (!theme_palette_set(p)) return;
+    char hex[THEME_HEX_LEN + 1];
+    theme_format_hex(p, hex);
+    Preferences prefs;
+    prefs.begin("clawdmeter", false);
+    prefs.putBytes("theme", hex, THEME_HEX_LEN);
+    prefs.end();
+    ui_apply_theme();
+    face_apply_theme();
+    clawd_anim_recolor();
+    mascot_repaint();
+    performer_repaint();
+    Serial.printf("Theme: %s\n", hex);
+}

@@ -10,6 +10,7 @@ void ui_init(void);
 void ui_update(const UsageData* data);
 // Pace marker on the Pro/Max usage bars (`pm`, pace.h); redraws the last data.
 void ui_set_pace_marker(bool on);
+void ui_apply_theme(void);          // repaint everything in the live palette (theme_palette.h)
 void ui_tick_anim(void);
 void ui_update_ble_status(ble_state_t state, const char* name, const char* mac);
 void ui_update_battery(int percent, bool charging, bool usb_power);  // percent < 0 = no battery

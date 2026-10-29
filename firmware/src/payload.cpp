@@ -76,6 +76,7 @@ bool payload_parse(const char* json, UsageData* out, const char** err) {
 
     JsonVariant pm = doc["pm"];
     d.pace_marker = pm.isNull() ? -1 : (int8_t)((pm | 0) ? 1 : 0);
+    d.has_theme = theme_parse_hex(doc["th"] | "", d.theme);
 
     d.ok = doc["ok"] | false;
     d.valid = true;

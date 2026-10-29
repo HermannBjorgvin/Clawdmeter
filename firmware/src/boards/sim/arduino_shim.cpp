@@ -85,3 +85,37 @@ size_t Preferences::putUChar(const char* key, uint8_t value) {
         }
     return 0;
 }
+
+#define PREF_BLOB_SLOTS 4
+static struct { char key[16]; uint8_t val[96]; size_t len; bool used; } blobs[PREF_BLOB_SLOTS];
+
+bool Preferences::isKey(const char* key) {
+    for (auto& s : store)
+        if (s.used && strcmp(s.key, key) == 0) return true;
+    for (auto& b : blobs)
+        if (b.used && strcmp(b.key, key) == 0) return true;
+    return false;
+}
+size_t Preferences::getBytes(const char* key, void* buf, size_t max_len) {
+    for (auto& b : blobs)
+        if (b.used && strcmp(b.key, key) == 0) {
+            if (b.len > max_len) return 0;
+            memcpy(buf, b.val, b.len);
+            return b.len;
+        }
+    return 0;
+}
+size_t Preferences::putBytes(const char* key, const void* value, size_t len) {
+    if (len > sizeof(blobs[0].val)) return 0;
+    for (auto& b : blobs)
+        if (b.used && strcmp(b.key, key) == 0) { memcpy(b.val, value, len); b.len = len; return len; }
+    for (auto& b : blobs)
+        if (!b.used) {
+            b.used = true;
+            strncpy(b.key, key, sizeof(b.key) - 1);
+            memcpy(b.val, value, len);
+            b.len = len;
+            return len;
+        }
+    return 0;
+}

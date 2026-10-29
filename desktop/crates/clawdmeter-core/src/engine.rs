@@ -145,6 +145,8 @@ pub struct Engine {
     sent_aa: Option<u16>,
     /// The pace marker the device last got (`pm`).
     sent_pm: Option<u8>,
+    /// Last `th` sent.
+    sent_th: Option<String>,
     last_event_ts: Option<i64>,
     /// Latest prompt or tool activity that names no configured account.
     unattributed_activity: Option<i64>,
@@ -183,6 +185,7 @@ impl Engine {
             sent_lv: None,
             sent_aa: None,
             sent_pm: None,
+            sent_th: None,
             last_event_ts: None,
             unattributed_activity: None,
             claude_found: true,
@@ -280,6 +283,7 @@ impl Engine {
         self.sent_lv = None;
         self.sent_aa = None;
         self.sent_pm = None;
+        self.sent_th = None;
         if self.active.is_some() || self.logged_out {
             self.fresh_poll = true;
         }
@@ -465,8 +469,11 @@ impl Engine {
         // A changed device setting goes out right away, like an event.
         let aa = self.settings.attention_anim.seconds();
         let pm = u8::from(self.settings.pace_marker);
-        let prefs_changed =
-            self.sent_lv != Some(self.settings.liveliness) || self.sent_aa != Some(aa) || self.sent_pm != Some(pm);
+        let th = self.settings.colors().to_hex();
+        let prefs_changed = self.sent_lv != Some(self.settings.liveliness)
+            || self.sent_aa != Some(aa)
+            || self.sent_pm != Some(pm)
+            || self.sent_th.as_deref() != Some(th.as_str());
 
         let (mut payload, kind) = if self.logged_out {
             if !(self.fresh_poll || self.attention.pending()) {
@@ -504,6 +511,7 @@ impl Engine {
             p.lv = Some(self.settings.liveliness);
             p.aa = Some(aa);
             p.pm = Some(pm);
+            p.th = Some(th);
             (p, kind)
         };
 
@@ -555,6 +563,9 @@ impl Engine {
         }
         if let Some(pm) = w.payload.pm {
             self.sent_pm = Some(pm);
+        }
+        if let Some(th) = &w.payload.th {
+            self.sent_th = Some(th.clone());
         }
     }
 
@@ -649,7 +660,7 @@ mod tests {
         assert_eq!(w.kind, WriteKind::Poll);
         assert_eq!(
             w.payload.to_json(),
-            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0}"#
+            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413"}"#
         );
         assert!(write(&mut e, T0 + 1).is_none());
     }
@@ -666,7 +677,7 @@ mod tests {
         assert_eq!(hb.kind, WriteKind::Heartbeat);
         assert_eq!(
             hb.payload.to_json(),
-            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120,"pm":0}"#
+            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120,"pm":0,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413"}"#
         );
         // Three misses: stale, heartbeats stop so the device's freshness lapses.
         for i in 1..=3 {
@@ -1164,6 +1175,26 @@ mod tests {
         assert!(write(&mut e, T0 + 3).is_none());
         e.on_connected();
         assert_eq!(write(&mut e, T0 + 4).unwrap().payload.pm, Some(1), "resent on a reconnect");
+    }
+
+    #[test]
+    fn colors_go_out_with_the_data_and_when_they_change() {
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        let w = write(&mut e, T0).unwrap();
+        assert_eq!(
+            w.payload.th.as_deref(),
+            Some(crate::config::Palette::default().to_hex().as_str()),
+            "every data payload carries it"
+        );
+        assert!(write(&mut e, T0 + 1).is_none(), "nothing new");
+        e.update_settings(settings("theme = custom\ncolor_accent = 647d99\n"));
+        let w = write(&mut e, T0 + 2).expect("a new colour is sent right away");
+        assert_eq!((w.kind, w.payload.rp), (WriteKind::Event, Some(1)));
+        assert_eq!(&w.payload.th.unwrap()[24..30], "647d99");
+        assert!(write(&mut e, T0 + 3).is_none());
+        e.on_connected();
+        assert_eq!(&write(&mut e, T0 + 4).unwrap().payload.th.unwrap()[24..30], "647d99", "resent on a reconnect");
     }
 
     #[test]

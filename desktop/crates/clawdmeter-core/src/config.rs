@@ -12,6 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::paths::Paths;
+use crate::themes::{self, ThemePreset};
 
 /// Default seconds between `/usage` polls while a session is working
 /// (`cadence::Cadence::default().working`).
@@ -230,6 +231,182 @@ impl AttentionAnim {
     }
 }
 
+/// One of the device's UI colours, in the order the payload's `th` carries
+/// them (`firmware/src/theme_palette.h`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorToken {
+    /// Screen background.
+    Bg,
+    /// Card fill.
+    Panel,
+    /// Primary text.
+    Text,
+    /// Secondary text.
+    Dim,
+    /// Status line and pairing notes.
+    Accent,
+    /// Bars under 50 % (or on pace).
+    Green,
+    /// Bars at 50-80 % (or ahead of pace).
+    Amber,
+    /// Bars at 80 %+ (or at the limit).
+    Red,
+    /// Unfilled bar track and the pills.
+    BarBg,
+    /// Clawd: the sprite's body and the screensaver face.
+    Clawd,
+    /// The screensaver face's eyes.
+    Eye,
+}
+
+impl ColorToken {
+    /// Every token, in `th` order (also the Device page's order).
+    pub const ALL: [ColorToken; 11] = [
+        ColorToken::Bg,
+        ColorToken::Panel,
+        ColorToken::Text,
+        ColorToken::Dim,
+        ColorToken::Accent,
+        ColorToken::Green,
+        ColorToken::Amber,
+        ColorToken::Red,
+        ColorToken::BarBg,
+        ColorToken::Clawd,
+        ColorToken::Eye,
+    ];
+
+    /// The config key, `color_<name>`.
+    pub fn key(self) -> &'static str {
+        match self {
+            ColorToken::Bg => "color_bg",
+            ColorToken::Panel => "color_panel",
+            ColorToken::Text => "color_text",
+            ColorToken::Dim => "color_dim",
+            ColorToken::Accent => "color_accent",
+            ColorToken::Green => "color_green",
+            ColorToken::Amber => "color_amber",
+            ColorToken::Red => "color_red",
+            ColorToken::BarBg => "color_bar_bg",
+            ColorToken::Clawd => "color_clawd",
+            ColorToken::Eye => "color_eye",
+        }
+    }
+
+    /// The Device page's name for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            ColorToken::Bg => "Background",
+            ColorToken::Panel => "Cards",
+            ColorToken::Text => "Text",
+            ColorToken::Dim => "Secondary text",
+            ColorToken::Accent => "Accent",
+            ColorToken::Green => "Low usage",
+            ColorToken::Amber => "Medium usage",
+            ColorToken::Red => "High usage",
+            ColorToken::BarBg => "Bar track",
+            ColorToken::Clawd => "Clawd",
+            ColorToken::Eye => "Face eyes",
+        }
+    }
+
+    /// The firmware's default, 0xRRGGBB.
+    pub fn default_rgb(self) -> u32 {
+        match self {
+            ColorToken::Bg => 0x000000,
+            ColorToken::Panel => 0x1f1f1e,
+            ColorToken::Text => 0xfaf9f5,
+            ColorToken::Dim => 0xb0aea5,
+            ColorToken::Accent | ColorToken::Amber | ColorToken::Clawd => 0xd97757,
+            ColorToken::Green => 0x788c5d,
+            ColorToken::Red => 0xc0392b,
+            ColorToken::BarBg => 0x2a2a28,
+            ColorToken::Eye => 0x141413,
+        }
+    }
+
+    fn index(self) -> usize {
+        ColorToken::ALL.iter().position(|&t| t == self).expect("listed")
+    }
+}
+
+/// The device's colours (`color_*` keys, sent as `th`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette([u32; 11]);
+
+impl Default for Palette {
+    fn default() -> Self {
+        Palette(ColorToken::ALL.map(ColorToken::default_rgb))
+    }
+}
+
+impl Palette {
+    /// From eleven 0xRRGGBB colours in [`ColorToken::ALL`] order.
+    pub const fn new(colors: [u32; 11]) -> Self {
+        Palette(colors)
+    }
+
+    /// 0xRRGGBB for `t`.
+    pub fn get(&self, t: ColorToken) -> u32 {
+        self.0[t.index()]
+    }
+
+    /// Set `t` to 0xRRGGBB (masked to 24 bits).
+    pub fn set(&mut self, t: ColorToken, rgb: u32) {
+        self.0[t.index()] = rgb & 0xff_ffff;
+    }
+
+    /// The payload's `th`: every colour as 6 lower-case hex digits, run together.
+    pub fn to_hex(&self) -> String {
+        self.0.iter().map(|c| format!("{c:06x}")).collect()
+    }
+}
+
+/// A `color_*` value: six hex digits, `rrggbb`, no `#` (that starts a
+/// comment in the config file).
+pub fn parse_rgb(v: &str) -> Option<u32> {
+    let h = v.trim();
+    if h.len() == 6 && h.bytes().all(|b| b.is_ascii_hexdigit()) {
+        u32::from_str_radix(h, 16).ok()
+    } else {
+        None
+    }
+}
+
+/// The device's colours: a preset (`theme = <id>`, default `clawd`) or
+/// `theme = custom`, which uses the `color_*` keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceTheme {
+    /// One of [`crate::themes::PRESETS`].
+    Preset(&'static ThemePreset),
+    /// [`Settings::custom_colors`].
+    Custom,
+}
+
+impl Default for DeviceTheme {
+    fn default() -> Self {
+        DeviceTheme::Preset(themes::default_preset())
+    }
+}
+
+impl DeviceTheme {
+    /// `theme`: a preset id or `custom`; anything else is the default.
+    pub fn parse(v: &str) -> Self {
+        if v.trim().eq_ignore_ascii_case("custom") {
+            DeviceTheme::Custom
+        } else {
+            themes::find(v).map(DeviceTheme::Preset).unwrap_or_default()
+        }
+    }
+
+    /// The `theme` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeviceTheme::Preset(p) => p.id,
+            DeviceTheme::Custom => "custom",
+        }
+    }
+}
+
 /// Typed view of the config, with the old daemons' defaults and clamps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -266,6 +443,11 @@ pub struct Settings {
     pub attention_anim: AttentionAnim,
     /// Pace marker on the device's usage bars (`pm`, default off).
     pub pace_marker: bool,
+    /// Which colours the device uses (`theme`); [`Settings::colors`] is
+    /// the palette it gets as `th`.
+    pub theme: DeviceTheme,
+    /// The custom theme's colours (`color_*`), kept while a preset is chosen.
+    pub custom_colors: Palette,
 }
 
 /// `alert_on`: the alert kinds that show, as a comma list of `permission`,
@@ -364,6 +546,15 @@ fn on_off(v: Option<&str>, default: bool) -> bool {
 }
 
 impl Settings {
+    /// The palette the device gets (`th`): the chosen preset's, or the
+    /// custom colours.
+    pub fn colors(&self) -> Palette {
+        match self.theme {
+            DeviceTheme::Preset(p) => p.colors,
+            DeviceTheme::Custom => self.custom_colors,
+        }
+    }
+
     /// Build from a parsed file. `env_poll` is the `POLL_INTERVAL` env var,
     /// which seeds the default the file overrides (bash daemon behaviour).
     pub fn from_config(cfg: &ConfigFile, paths: &Paths, env_poll: Option<&str>) -> Self {
@@ -394,6 +585,16 @@ impl Settings {
             liveliness: cfg.get("liveliness").map(parse_liveliness).unwrap_or(DEFAULT_LIVELINESS),
             attention_anim: cfg.get("attention_anim").map(AttentionAnim::parse).unwrap_or_default(),
             pace_marker: on_off(cfg.get("pace_marker"), false),
+            theme: cfg.get("theme").map(DeviceTheme::parse).unwrap_or_default(),
+            custom_colors: {
+                let mut p = Palette::default();
+                for t in ColorToken::ALL {
+                    if let Some(rgb) = cfg.get(t.key()).and_then(parse_rgb) {
+                        p.set(t, rgb);
+                    }
+                }
+                p
+            },
         }
     }
 
@@ -484,6 +685,25 @@ impl Settings {
         }
         if current.attention_anim != self.attention_anim {
             cfg.set("attention_anim", self.attention_anim.as_str());
+        }
+        if current.theme != self.theme {
+            if self.theme == DeviceTheme::default() {
+                cfg.remove("theme");
+            } else {
+                cfg.set("theme", self.theme.as_str());
+            }
+        }
+        // A custom colour back at its default leaves the file.
+        for t in ColorToken::ALL {
+            let rgb = self.custom_colors.get(t);
+            if rgb == current.custom_colors.get(t) {
+                continue;
+            }
+            if rgb == t.default_rgb() {
+                cfg.remove(t.key());
+            } else {
+                cfg.set(t.key(), &format!("{rgb:06x}"));
+            }
         }
     }
 }
@@ -653,6 +873,51 @@ mod tests {
         s.apply_to(&mut cfg, &paths());
         assert_eq!(cfg.get("attention_anim"), Some("off"));
         assert_eq!(Settings::from_config(&cfg, &paths(), None).attention_anim, AttentionAnim::Off);
+    }
+
+    #[test]
+    fn colors_round_trip() {
+        let d = settings("");
+        assert_eq!((d.theme, d.colors()), (DeviceTheme::default(), Palette::default()));
+        assert_eq!(d.theme.as_str(), "clawd");
+        assert_eq!(&d.colors().to_hex()[24..30], "d97757", "accent defaults to terra-cotta");
+        assert_eq!(d.colors().to_hex().len(), 66);
+        let s = settings("theme = custom\ncolor_accent = 647D99\ncolor_clawd = 112233  # mine\ncolor_red = nope\n");
+        assert_eq!(s.theme, DeviceTheme::Custom);
+        assert_eq!(s.colors().get(ColorToken::Accent), 0x647d99);
+        assert_eq!(s.colors().get(ColorToken::Clawd), 0x112233);
+        assert_eq!(s.colors().get(ColorToken::Red), ColorToken::Red.default_rgb(), "bad values keep the default");
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = settings("");
+        s.theme = DeviceTheme::Custom;
+        s.custom_colors.set(ColorToken::Accent, 0x647d99);
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!((cfg.get("theme"), cfg.get("color_accent")), (Some("custom"), Some("647d99")));
+        assert!(cfg.get("color_bg").is_none(), "defaults stay out of the file");
+        s.custom_colors.set(ColorToken::Accent, ColorToken::Accent.default_rgb());
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("color_accent").is_none(), "back to the default leaves the file");
+    }
+
+    #[test]
+    fn a_preset_keeps_the_custom_colours_for_later() {
+        let s = settings("theme = Nord\ncolor_accent = 647d99\n");
+        let nord = crate::themes::find("nord").unwrap();
+        assert_eq!(s.theme, DeviceTheme::Preset(nord));
+        assert_eq!(s.colors(), nord.colors, "a preset's own colours, not the custom ones");
+        assert_eq!(s.custom_colors.get(ColorToken::Accent), 0x647d99, "kept for Custom");
+        assert_eq!(settings("theme = nope\n").theme, DeviceTheme::default(), "unknown: the default");
+
+        let mut cfg = ConfigFile::parse("theme = nord\ncolor_accent = 647d99\n");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.theme = DeviceTheme::default();
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("theme").is_none(), "back to the default leaves the file");
+        assert_eq!(cfg.get("color_accent"), Some("647d99"));
+        s.theme = DeviceTheme::Custom;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("theme"), Some("custom"));
     }
 
     #[test]
