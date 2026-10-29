@@ -260,6 +260,10 @@ static lv_obj_t* make_bar(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_set_style_bg_color(bar, COL_GREEN, LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_INDICATOR);
     lv_obj_set_style_radius(bar, 6, LV_PART_INDICATOR);
+    if (board_caps().mono_panel) {   // the dark track prints as paper: outline it
+        lv_obj_set_style_border_color(bar, COL_TEXT, LV_PART_MAIN);
+        lv_obj_set_style_border_width(bar, 2, LV_PART_MAIN);
+    }
     return bar;
 }
 
@@ -276,8 +280,11 @@ static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
     lv_obj_set_style_text_font(lbl, L.pill_font, 0);
-    lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
-    lv_obj_set_style_bg_color(lbl, COL_BAR_BG, 0);
+    // mono_panel: ink pill, paper text. The grey sits just above the ink
+    // threshold so the text's thin strokes still print as paper.
+    const bool mono = board_caps().mono_panel;
+    lv_obj_set_style_text_color(lbl, mono ? COL_BG : COL_TEXT, 0);
+    lv_obj_set_style_bg_color(lbl, mono ? lv_color_hex(0x585858) : COL_BAR_BG, 0);
     lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(lbl, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_pad_left(lbl, L.pill_pad_x, 0);
@@ -690,7 +697,9 @@ static void update_view_state(void) {
         lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
         // `opa` (not `opa_layered`) scales every draw of the group and its
         // children: no layer buffer, so it costs nothing on the C6.
-        lv_obj_set_style_opa(usage_group, v == 1 ? STALE_OPA : LV_OPA_COVER, 0);
+        // mono_panel: faded text prints broken in 1 bit, so it never fades
+        const bool dim = v == 1 && !board_caps().mono_panel;
+        lv_obj_set_style_opa(usage_group, dim ? STALE_OPA : LV_OPA_COVER, 0);
     }
 }
 
@@ -700,7 +709,7 @@ void ui_tick_anim(void) {
     update_view_state();
     if (pair_hint == PAIR_HINT_CLEARED && lv_tick_get() - pair_hint_since >= PAIR_CLEARED_SHOW_MS)
         ui_set_pair_hint(PAIR_HINT_NORMAL);
-    const bool still = minimal_mode();   // minimal: nothing moves but the numbers
+    const bool still = minimal_mode() && !board_caps().minimal_verbs;   // minimal: nothing moves but the numbers
 
     uint32_t now = lv_tick_get();
 
@@ -744,13 +753,14 @@ void ui_tick_anim(void) {
     // and the spinner holds still, so the line only redraws when the word
     // does (clawd_policy.h, liveliness).
     const ClawdTuning& tune = clawd_tuning();
+    const bool spin = tune.spinner && !minimal_mode();   // minimal_verbs: spinner held still
     if (now - anim_msg_start >= tune.verb_ms) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
         anim_verb_idx = fitting_verb((anim_verb_idx + 1) % ANIM_MSG_COUNT);
         anim_msg_start = now;
     }
 
-    if (tune.spinner) {
+    if (spin) {
         if (now - anim_last_ms < spinner_ms[anim_spinner_idx]) return;
         anim_last_ms = now;
         anim_phase = (anim_phase + 1) % SPINNER_PHASES;
@@ -773,7 +783,7 @@ void ui_tick_anim(void) {
         text = anim_messages[anim_verb_idx];
     }
 
-    if (!tune.spinner) {
+    if (!spin) {
         if (text == frozen_shown) return;
         frozen_shown = text;
     }
