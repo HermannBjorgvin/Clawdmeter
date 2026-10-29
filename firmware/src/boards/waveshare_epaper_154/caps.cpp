@@ -13,6 +13,7 @@ static const BoardCaps caps = {
     .minimal_ui = true,        // e-paper: meters + a still corner Clawd, no animation
     .has_pwr_button = true,    // PWR side-button, GPIO18
     .has_touch = false,
+    .mono_panel = true,        // 1-bit: luminance >= 64 is ink, so only the default palette reads
 };
 
 const BoardCaps& board_caps(void) { return caps; }

@@ -40,20 +40,29 @@ static_assert(LAYOUT_BATT_W == ICON_BATTERY_W && LAYOUT_BATT_W_SMALL == ICON_BAT
 // Colours set once when a widget is built are registered here, so a new
 // palette from the app (ui_apply_theme) repaints them in place. Colours that
 // follow the data (bar fills, the pace text) are recomputed instead.
-struct Themed { lv_obj_t* obj; ThemeColor tok; bool text; lv_style_selector_t sel; };
+enum ThemedPart : uint8_t { PART_BG, PART_TEXT, PART_IMAGE };
+struct Themed { lv_obj_t* obj; ThemeColor tok; ThemedPart part; lv_style_selector_t sel; };
 static Themed themed[40];
 static int    n_themed = 0;
 
 static void paint(const Themed& t) {
-    if (t.text) lv_obj_set_style_text_color(t.obj, theme_color(t.tok), t.sel);
-    else        lv_obj_set_style_bg_color(t.obj, theme_color(t.tok), t.sel);
+    switch (t.part) {
+    case PART_TEXT:  lv_obj_set_style_text_color(t.obj, theme_color(t.tok), t.sel); break;
+    case PART_BG:    lv_obj_set_style_bg_color(t.obj, theme_color(t.tok), t.sel); break;
+    case PART_IMAGE: lv_obj_set_style_image_recolor(t.obj, theme_color(t.tok), t.sel); break;
+    }
 }
-static void themed_color(lv_obj_t* obj, ThemeColor tok, bool text, lv_style_selector_t sel) {
-    if (n_themed < (int)(sizeof(themed) / sizeof(themed[0]))) themed[n_themed++] = { obj, tok, text, sel };
-    paint({ obj, tok, text, sel });
+static void themed_color(lv_obj_t* obj, ThemeColor tok, ThemedPart part, lv_style_selector_t sel) {
+    if (n_themed < (int)(sizeof(themed) / sizeof(themed[0]))) themed[n_themed++] = { obj, tok, part, sel };
+    paint({ obj, tok, part, sel });
 }
-static void themed_bg(lv_obj_t* obj, ThemeColor tok, lv_style_selector_t sel = 0) { themed_color(obj, tok, false, sel); }
-static void themed_text(lv_obj_t* obj, ThemeColor tok) { themed_color(obj, tok, true, 0); }
+static void themed_bg(lv_obj_t* obj, ThemeColor tok, lv_style_selector_t sel = 0) { themed_color(obj, tok, PART_BG, sel); }
+static void themed_text(lv_obj_t* obj, ThemeColor tok) { themed_color(obj, tok, PART_TEXT, 0); }
+// A white-tinted icon (firmware CLAUDE.md gotcha 12) drawn in a token.
+static void themed_icon(lv_obj_t* obj, ThemeColor tok) {
+    lv_obj_set_style_image_recolor_opa(obj, LV_OPA_COVER, 0);
+    themed_color(obj, tok, PART_IMAGE, 0);
+}
 
 // ---- Usage screen widgets (single non-splash view) ----
 static lv_obj_t* usage_container;
@@ -513,7 +522,8 @@ void ui_init(void) {
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
 
     // Static corner mascot (see clawd_still.h): fallback when the animated
-    // one can't get its buffer.
+    // one can't get its buffer. Baked art, so it keeps the official orange
+    // whatever TH_CLAWD is.
     if (L.small_icons) init_icon_dsc_rgb565a8(&logo_dsc, CLAWD_STILL_SMALL_W, CLAWD_STILL_SMALL_H, clawd_still_small_data);
     else               init_icon_dsc_rgb565a8(&logo_dsc, CLAWD_STILL_W, CLAWD_STILL_H, clawd_still_data);
     init_battery_icons();
@@ -528,6 +538,8 @@ void ui_init(void) {
     if (!board_caps().has_battery) {
         lv_obj_del(battery_img);
         battery_img = nullptr;
+    } else {
+        themed_icon(battery_img, TH_TEXT);   // white by default; readable on a light theme
     }
 
     // Corner mascot in the old logo slot. The still Clawd is shorter than the

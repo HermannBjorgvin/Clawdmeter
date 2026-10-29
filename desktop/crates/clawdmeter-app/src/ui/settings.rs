@@ -726,13 +726,16 @@ impl SettingsView {
         for preset in PRESETS.iter() {
             let me = cx.entity().downgrade();
             let on = theme == DeviceTheme::Preset(preset);
-            cards = cards.child(theme_card(t, preset.id, preset.name, &preset.colors, on).on_click(move |_, _, cx| {
-                let _ = me.update(cx, |v, cx| {
-                    v.color_pick = None;
-                    v.save(|s, _| s.theme = DeviceTheme::Preset(preset));
-                    cx.notify();
-                });
-            }));
+            cards = cards.child(theme_card(t, preset.id, preset.name, &preset.colors, on).on_click(
+                move |_, window, cx| {
+                    window.blur(); // the hex field shows the new colour
+                    let _ = me.update(cx, |v, cx| {
+                        v.color_pick = None;
+                        v.save(|s, _| s.theme = DeviceTheme::Preset(preset));
+                        cx.notify();
+                    });
+                },
+            ));
         }
         // Custom starts from the theme on screen until it has colours of its own.
         let custom = self.settings.custom_colors;
@@ -741,7 +744,8 @@ impl SettingsView {
         let me = cx.entity().downgrade();
         let preview = if fresh && !on { self.settings.colors() } else { custom };
         cards = cards.child(theme_card(t, "custom", if on { "Custom" } else { "Custom +" }, &preview, on).on_click(
-            move |_, _, cx| {
+            move |_, window, cx| {
+                window.blur(); // the hex field shows the new colour
                 let _ = me.update(cx, |v, cx| {
                     v.save(|s, _| {
                         if s.custom_colors == Palette::default() {
@@ -790,7 +794,8 @@ impl SettingsView {
                     .when(on, |d| d.bg(t.selected))
                     .cursor_pointer()
                     .hover(|s| s.bg(t.hover))
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
+                        window.blur(); // the hex field shows the new colour
                         let _ = me.update(cx, |v, cx| {
                             v.color_pick = if on { None } else { Some(tok) };
                             v.hex_draft.clear();
@@ -825,7 +830,8 @@ impl SettingsView {
             "Reset all colors",
             ButtonKind::Small,
             colors != Palette::default(),
-            move |_, _, cx| {
+            move |_, window, cx| {
+                window.blur(); // the hex field shows the new colour
                 let _ = me.update(cx, |v, cx| {
                     v.save(|s, _| s.custom_colors = Palette::default());
                     cx.notify();
@@ -859,7 +865,8 @@ impl SettingsView {
                             }
                         })
                         .cursor_pointer()
-                        .on_click(move |_, _, cx| {
+                        .on_click(move |_, window, cx| {
+                            window.blur(); // the hex field shows the new colour
                             let _ = me.update(cx, |v, cx| {
                                 v.save(|s, _| s.custom_colors.set(tok, color));
                                 cx.notify();
@@ -886,7 +893,8 @@ impl SettingsView {
                         "Default",
                         ButtonKind::Small,
                         current != tok.default_rgb(),
-                        move |_, _, cx| {
+                        move |_, window, cx| {
+                            window.blur(); // the hex field shows the new colour
                             let _ = me.update(cx, |v, cx| {
                                 v.save(|s, _| s.custom_colors.set(tok, tok.default_rgb()));
                                 cx.notify();
@@ -935,6 +943,7 @@ impl SettingsView {
     fn hex_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tok) = self.color_pick else { return };
         let k = &ev.keystroke;
+        let shortcut = k.modifiers.control || k.modifiers.platform || k.modifiers.alt;
         if k.modifiers.secondary() && k.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
                 if let Some(hex) = pasted_hex(&text) {
@@ -950,6 +959,7 @@ impl SettingsView {
                     self.hex_draft.clear();
                     window.blur();
                 }
+                _ if shortcut => {} // Ctrl+A and the like are not hex digits
                 key => {
                     let typed = k.key_char.as_deref().unwrap_or(key);
                     let mut chars = typed.chars();
@@ -1824,6 +1834,7 @@ mod tests {
         click(cx, "color-default");
         assert!(!std::fs::read_to_string(&paths.config_file).unwrap().contains("color_accent"));
         click(cx, "color-hex");
+        cx.simulate_keystrokes("ctrl-a ctrl-c"); // shortcuts type nothing
         cx.simulate_input("#647D9");
         assert!(!std::fs::read_to_string(&paths.config_file).unwrap().contains("color_accent"), "five digits: not yet");
         cx.simulate_keystrokes("9");

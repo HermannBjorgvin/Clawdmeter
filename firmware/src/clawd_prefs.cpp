@@ -6,6 +6,7 @@
 #include "clawd_anim.h"
 #include "mascot.h"
 #include "performer.h"
+#include "hal/board_caps.h"
 #include <Preferences.h>
 #include <Arduino.h>
 
@@ -25,6 +26,7 @@ void clawd_prefs_init(void) {
 
 // The palette is kept as its `th` hex string.
 void theme_prefs_load(void) {
+    if (board_caps().mono_panel) return;   // 1-bit: the default palette only
     Preferences prefs;
     prefs.begin("clawdmeter", true);
     char hex[THEME_HEX_LEN + 1] = {};
@@ -78,6 +80,7 @@ void pace_marker_set(bool on) {
 bool pace_marker_get(void) { return pace_marker; }
 
 void theme_set(const uint32_t p[TH_COUNT]) {
+    if (board_caps().mono_panel) return;   // 1-bit: the default palette only
     if (!theme_palette_set(p)) return;
     char hex[THEME_HEX_LEN + 1];
     theme_format_hex(p, hex);
