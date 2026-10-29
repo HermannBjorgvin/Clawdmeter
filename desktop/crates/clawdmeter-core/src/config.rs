@@ -230,6 +230,142 @@ impl AttentionAnim {
     }
 }
 
+/// One of the device's UI colours, in the order the payload's `th` carries
+/// them (`firmware/src/theme_palette.h`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorToken {
+    /// Screen background.
+    Bg,
+    /// Card fill.
+    Panel,
+    /// Primary text.
+    Text,
+    /// Secondary text.
+    Dim,
+    /// Status line and pairing notes.
+    Accent,
+    /// Bars under 50 % (or on pace).
+    Green,
+    /// Bars at 50-80 % (or ahead of pace).
+    Amber,
+    /// Bars at 80 %+ (or at the limit).
+    Red,
+    /// Unfilled bar track and the pills.
+    BarBg,
+    /// The screensaver face's body.
+    Face,
+    /// The screensaver face's eyes.
+    Eye,
+}
+
+impl ColorToken {
+    /// Every token, in `th` order (also the Device page's order).
+    pub const ALL: [ColorToken; 11] = [
+        ColorToken::Bg,
+        ColorToken::Panel,
+        ColorToken::Text,
+        ColorToken::Dim,
+        ColorToken::Accent,
+        ColorToken::Green,
+        ColorToken::Amber,
+        ColorToken::Red,
+        ColorToken::BarBg,
+        ColorToken::Face,
+        ColorToken::Eye,
+    ];
+
+    /// The config key, `color_<name>`.
+    pub fn key(self) -> &'static str {
+        match self {
+            ColorToken::Bg => "color_bg",
+            ColorToken::Panel => "color_panel",
+            ColorToken::Text => "color_text",
+            ColorToken::Dim => "color_dim",
+            ColorToken::Accent => "color_accent",
+            ColorToken::Green => "color_green",
+            ColorToken::Amber => "color_amber",
+            ColorToken::Red => "color_red",
+            ColorToken::BarBg => "color_bar_bg",
+            ColorToken::Face => "color_face",
+            ColorToken::Eye => "color_eye",
+        }
+    }
+
+    /// The Device page's name for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            ColorToken::Bg => "Background",
+            ColorToken::Panel => "Cards",
+            ColorToken::Text => "Text",
+            ColorToken::Dim => "Secondary text",
+            ColorToken::Accent => "Accent",
+            ColorToken::Green => "Low usage",
+            ColorToken::Amber => "Medium usage",
+            ColorToken::Red => "High usage",
+            ColorToken::BarBg => "Bar track",
+            ColorToken::Face => "Face",
+            ColorToken::Eye => "Face eyes",
+        }
+    }
+
+    /// The firmware's default, 0xRRGGBB.
+    pub fn default_rgb(self) -> u32 {
+        match self {
+            ColorToken::Bg => 0x000000,
+            ColorToken::Panel => 0x1f1f1e,
+            ColorToken::Text => 0xfaf9f5,
+            ColorToken::Dim => 0xb0aea5,
+            ColorToken::Accent | ColorToken::Amber | ColorToken::Face => 0xd97757,
+            ColorToken::Green => 0x788c5d,
+            ColorToken::Red => 0xc0392b,
+            ColorToken::BarBg => 0x2a2a28,
+            ColorToken::Eye => 0x141413,
+        }
+    }
+
+    fn index(self) -> usize {
+        ColorToken::ALL.iter().position(|&t| t == self).expect("listed")
+    }
+}
+
+/// The device's colours (`color_*` keys, sent as `th`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette([u32; 11]);
+
+impl Default for Palette {
+    fn default() -> Self {
+        Palette(ColorToken::ALL.map(ColorToken::default_rgb))
+    }
+}
+
+impl Palette {
+    /// 0xRRGGBB for `t`.
+    pub fn get(&self, t: ColorToken) -> u32 {
+        self.0[t.index()]
+    }
+
+    /// Set `t` to 0xRRGGBB (masked to 24 bits).
+    pub fn set(&mut self, t: ColorToken, rgb: u32) {
+        self.0[t.index()] = rgb & 0xff_ffff;
+    }
+
+    /// The payload's `th`: every colour as 6 lower-case hex digits, run together.
+    pub fn to_hex(&self) -> String {
+        self.0.iter().map(|c| format!("{c:06x}")).collect()
+    }
+}
+
+/// A `color_*` value: six hex digits, `rrggbb`, no `#` (that starts a
+/// comment in the config file).
+pub fn parse_rgb(v: &str) -> Option<u32> {
+    let h = v.trim();
+    if h.len() == 6 && h.bytes().all(|b| b.is_ascii_hexdigit()) {
+        u32::from_str_radix(h, 16).ok()
+    } else {
+        None
+    }
+}
+
 /// Typed view of the config, with the old daemons' defaults and clamps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -266,6 +402,8 @@ pub struct Settings {
     pub attention_anim: AttentionAnim,
     /// Pace marker on the device's usage bars (`pm`, default off).
     pub pace_marker: bool,
+    /// The device's colours (`color_*`, sent as `th`).
+    pub colors: Palette,
 }
 
 /// `alert_on`: the alert kinds that show, as a comma list of `permission`,
@@ -394,6 +532,15 @@ impl Settings {
             liveliness: cfg.get("liveliness").map(parse_liveliness).unwrap_or(DEFAULT_LIVELINESS),
             attention_anim: cfg.get("attention_anim").map(AttentionAnim::parse).unwrap_or_default(),
             pace_marker: on_off(cfg.get("pace_marker"), false),
+            colors: {
+                let mut p = Palette::default();
+                for t in ColorToken::ALL {
+                    if let Some(rgb) = cfg.get(t.key()).and_then(parse_rgb) {
+                        p.set(t, rgb);
+                    }
+                }
+                p
+            },
         }
     }
 
@@ -484,6 +631,18 @@ impl Settings {
         }
         if current.attention_anim != self.attention_anim {
             cfg.set("attention_anim", self.attention_anim.as_str());
+        }
+        // A colour back at its default leaves the file.
+        for t in ColorToken::ALL {
+            let rgb = self.colors.get(t);
+            if rgb == current.colors.get(t) {
+                continue;
+            }
+            if rgb == t.default_rgb() {
+                cfg.remove(t.key());
+            } else {
+                cfg.set(t.key(), &format!("{rgb:06x}"));
+            }
         }
     }
 }
@@ -653,6 +812,28 @@ mod tests {
         s.apply_to(&mut cfg, &paths());
         assert_eq!(cfg.get("attention_anim"), Some("off"));
         assert_eq!(Settings::from_config(&cfg, &paths(), None).attention_anim, AttentionAnim::Off);
+    }
+
+    #[test]
+    fn colors_round_trip() {
+        let d = settings("");
+        assert_eq!(d.colors, Palette::default());
+        assert_eq!(&d.colors.to_hex()[24..30], "d97757", "accent defaults to terra-cotta");
+        assert_eq!(d.colors.to_hex().len(), 66);
+        let s = settings("color_accent = 647D99\ncolor_face = 112233  # mine\ncolor_red = nope\n");
+        assert_eq!(s.colors.get(ColorToken::Accent), 0x647d99);
+        assert_eq!(s.colors.get(ColorToken::Face), 0x112233);
+        assert_eq!(s.colors.get(ColorToken::Red), ColorToken::Red.default_rgb(), "bad values keep the default");
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = settings("");
+        s.colors.set(ColorToken::Accent, 0x647d99);
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("color_accent"), Some("647d99"));
+        assert!(cfg.get("color_bg").is_none(), "defaults stay out of the file");
+        s.colors.set(ColorToken::Accent, ColorToken::Accent.default_rgb());
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("color_accent").is_none(), "back to the default leaves the file");
     }
 
     #[test]

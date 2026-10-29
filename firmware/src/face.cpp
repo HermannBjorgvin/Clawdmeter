@@ -21,8 +21,8 @@
 #define BLINK_GAP  140
 #define GLANCE_MS  280
 
-#define COL_FACE   THEME_ACCENT               // Clawd orange
-#define COL_EYE    lv_color_hex(0x141413)
+#define COL_FACE   theme_color(TH_FACE)       // Clawd orange by default
+#define COL_EYE    theme_color(TH_EYE)
 
 static Field     field;      // the body + arms: redraws only what changes
 static lv_obj_t* root = NULL; // == field.obj: full screen, never moves; the eyes are its children
@@ -362,6 +362,16 @@ void face_blink(bool twice) {
     blink_phase = 1;
     blink_until = millis() + BLINK_MS;
     set_squint(true);
+}
+
+void face_apply_theme(void) {
+    if (!root) return;
+    field.color = COL_FACE;
+    for (int e = 0; e < 2; e++) {
+        lv_obj_set_style_bg_color(eye_open[e], COL_EYE, 0);
+        for (lv_obj_t* o : squint[e]) if (o) lv_obj_set_style_bg_color(o, COL_EYE, 0);
+    }
+    lv_obj_invalidate(root);   // the body is drawn from field.color
 }
 
 void face_set_resting(bool on) {

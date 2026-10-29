@@ -1,14 +1,19 @@
 #pragma once
 #include <lvgl.h>
+#include "theme_palette.h"
 
-// Design tokens — single source of truth for UI colors. Anthropic-inspired
-// dark palette, AMOLED-friendly (true black bg).
-#define THEME_BG       lv_color_hex(0x000000)   // screen background
-#define THEME_PANEL    lv_color_hex(0x1f1f1e)   // card/zone fill
-#define THEME_TEXT     lv_color_hex(0xfaf9f5)   // primary text
-#define THEME_DIM      lv_color_hex(0xb0aea5)   // secondary text
-#define THEME_ACCENT   lv_color_hex(0xd97757)   // brand terra-cotta
-#define THEME_GREEN    lv_color_hex(0x788c5d)
-#define THEME_AMBER    lv_color_hex(0xd97757)
-#define THEME_RED      lv_color_hex(0xc0392b)
-#define THEME_BAR_BG   lv_color_hex(0x2a2a28)   // unfilled bar track
+// Design tokens — single source of truth for UI colors. The defaults are in
+// theme_palette.cpp; the app can change any of them at run time (payload
+// `th`, kept in NVS by clawd_prefs.cpp), so read them when drawing and
+// register long-lived styles in ui.cpp so a new palette repaints them.
+static inline lv_color_t theme_color(ThemeColor c) { return lv_color_hex(theme_hex(c)); }
+
+#define THEME_BG       theme_color(TH_BG)       // screen background
+#define THEME_PANEL    theme_color(TH_PANEL)    // card/zone fill
+#define THEME_TEXT     theme_color(TH_TEXT)     // primary text
+#define THEME_DIM      theme_color(TH_DIM)      // secondary text
+#define THEME_ACCENT   theme_color(TH_ACCENT)   // brand terra-cotta by default
+#define THEME_GREEN    theme_color(TH_GREEN)
+#define THEME_AMBER    theme_color(TH_AMBER)
+#define THEME_RED      theme_color(TH_RED)
+#define THEME_BAR_BG   theme_color(TH_BAR_BG)   // unfilled bar track
