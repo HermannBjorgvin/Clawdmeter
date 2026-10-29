@@ -12,13 +12,14 @@ use std::time::Duration;
 
 use clawdmeter_core::autostart::{self, LaunchMode};
 use clawdmeter_core::config::{
-    parse_rgb, AlertOn, AttentionAnim, ClockMode, ColorToken, ConfigFile, Palette, LIVELINESS_MAX,
+    parse_rgb, AlertOn, AttentionAnim, ClockMode, ColorToken, ConfigFile, DeviceTheme, Palette, LIVELINESS_MAX,
 };
+use clawdmeter_core::themes::PRESETS;
 use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::device::{self, FirmwareInfo};
 use gpui::{
-    div, img, prelude::*, px, rgb, Context, EventEmitter, FocusHandle, KeyDownEvent, PathPromptOptions, SharedString,
-    Window,
+    div, img, prelude::*, px, relative, rgb, Context, EventEmitter, FocusHandle, KeyDownEvent, PathPromptOptions,
+    SharedString, Window,
 };
 
 use super::theme::{Theme, FONT_DISPLAY, FONT_MONO, R_ITEM, R_M, R_S};
@@ -716,10 +717,59 @@ impl SettingsView {
         pane
     }
 
-    /// The board's colours: a chip per colour; the chosen one opens a grid
-    /// of swatches to pick from.
+    /// The board's colours: a card per theme, each a small preview in its
+    /// own colours, then Custom +, which opens a chip per colour; the chosen
+    /// chip opens a grid of swatches to pick from.
     fn colors_field(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.settings.colors;
+        let theme = self.settings.theme;
+        let mut cards = div().w_full().flex().flex_wrap().items_start().gap(px(8.));
+        for preset in PRESETS.iter() {
+            let me = cx.entity().downgrade();
+            let on = theme == DeviceTheme::Preset(preset);
+            cards = cards.child(theme_card(t, preset.id, preset.name, &preset.colors, on).on_click(move |_, _, cx| {
+                let _ = me.update(cx, |v, cx| {
+                    v.color_pick = None;
+                    v.save(|s, _| s.theme = DeviceTheme::Preset(preset));
+                    cx.notify();
+                });
+            }));
+        }
+        // Custom starts from the theme on screen until it has colours of its own.
+        let custom = self.settings.custom_colors;
+        let fresh = custom == Palette::default();
+        let on = theme == DeviceTheme::Custom;
+        let me = cx.entity().downgrade();
+        let preview = if fresh && !on { self.settings.colors() } else { custom };
+        cards = cards.child(theme_card(t, "custom", if on { "Custom" } else { "Custom +" }, &preview, on).on_click(
+            move |_, _, cx| {
+                let _ = me.update(cx, |v, cx| {
+                    v.save(|s, _| {
+                        if s.custom_colors == Palette::default() {
+                            s.custom_colors = s.colors();
+                        }
+                        s.theme = DeviceTheme::Custom;
+                    });
+                    cx.notify();
+                });
+            },
+        ));
+        let mut body = div().w_full().flex().flex_col().gap(px(10.)).child(cards);
+        if on {
+            body = body.child(self.custom_colors(t, cx));
+        }
+        field_stacked(
+            t,
+            "Colors",
+            "The board's colors, Clawd's included. Pick a theme, or Custom + to choose each color yourself (the \
+             first time, it starts from the theme you're on). The board repaints with the app's next update, \
+             within seconds while usage is current.",
+            body,
+        )
+    }
+
+    /// Custom: a chip per colour; the chosen one opens a grid of swatches.
+    fn custom_colors(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.settings.custom_colors;
         let pick = self.color_pick;
         let mut chips = div().w_full().flex().flex_wrap().gap(px(6.));
         for tok in ColorToken::ALL {
@@ -759,36 +809,34 @@ impl SettingsView {
             );
         }
         let me = cx.entity().downgrade();
-        let custom = colors != Palette::default();
-        let mut body = div().w_full().flex().flex_col().gap(px(10.)).child(chips);
+        let mut body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(caption(t, "Pick a color, then click a swatch or type a hex code such as 647d99."))
+            .child(chips);
         if let Some(tok) = pick {
             body = body.child(self.color_grid(t, tok, cx));
         }
-        body = body.child(div().flex().child(button(
+        body.child(div().flex().child(button(
             t,
             "colors-reset-all",
             "Reset all colors",
             ButtonKind::Small,
-            custom,
+            colors != Palette::default(),
             move |_, _, cx| {
                 let _ = me.update(cx, |v, cx| {
-                    v.save(|s, _| s.colors = Palette::default());
+                    v.save(|s, _| s.custom_colors = Palette::default());
                     cx.notify();
                 });
             },
-        )));
-        field_stacked(
-            t,
-            "Colors",
-            "The board's colors. Pick one, then click a swatch or type a hex code such as 647d99. The board \
-             repaints with the app's next update, within seconds while usage is current.",
-            body,
-        )
+        )))
     }
 
     /// Swatches for `tok`, its current colour outlined.
     fn color_grid(&self, t: &Theme, tok: ColorToken, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = self.settings.colors.get(tok);
+        let current = self.settings.custom_colors.get(tok);
         let mut grid = div().flex().flex_col().gap(px(4.));
         for (r, row) in SWATCH_ROWS.with(|rows| rows.clone()).into_iter().enumerate() {
             let mut line = div().flex().flex_wrap().gap(px(4.));
@@ -813,7 +861,7 @@ impl SettingsView {
                         .cursor_pointer()
                         .on_click(move |_, _, cx| {
                             let _ = me.update(cx, |v, cx| {
-                                v.save(|s, _| s.colors.set(tok, color));
+                                v.save(|s, _| s.custom_colors.set(tok, color));
                                 cx.notify();
                             });
                         }),
@@ -840,7 +888,7 @@ impl SettingsView {
                         current != tok.default_rgb(),
                         move |_, _, cx| {
                             let _ = me.update(cx, |v, cx| {
-                                v.save(|s, _| s.colors.set(tok, tok.default_rgb()));
+                                v.save(|s, _| s.custom_colors.set(tok, tok.default_rgb()));
                                 cx.notify();
                             });
                         },
@@ -918,8 +966,8 @@ impl SettingsView {
         }
         self.hex_draft.make_ascii_lowercase();
         if let Some(rgb) = parse_rgb(&self.hex_draft) {
-            if rgb != self.settings.colors.get(tok) {
-                self.save(|s, _| s.colors.set(tok, rgb));
+            if rgb != self.settings.custom_colors.get(tok) {
+                self.save(|s, _| s.custom_colors.set(tok, rgb));
             }
         }
         cx.stop_propagation();
@@ -1582,6 +1630,64 @@ pub(crate) fn write_settings(
     cfg.save(path)
 }
 
+/// A theme to pick: a small board in its colours (background, a card with
+/// a bar, Clawd) over its name.
+fn theme_card(t: &Theme, id: &'static str, name: &'static str, c: &Palette, on: bool) -> gpui::Stateful<gpui::Div> {
+    let col = |tok| rgb(c.get(tok));
+    let board = div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .p(px(6.))
+        .rounded(px(5.))
+        .bg(col(ColorToken::Bg))
+        .border_1()
+        .border_color(t.line)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(div().w(px(26.)).h(px(5.)).rounded(px(2.)).bg(col(ColorToken::Text)))
+                .child(div().size(px(10.)).rounded(px(2.)).bg(col(ColorToken::Clawd))),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .p(px(5.))
+                .rounded(px(3.))
+                .bg(col(ColorToken::Panel))
+                .child(div().w(px(18.)).h(px(4.)).rounded(px(1.)).bg(col(ColorToken::Dim)))
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(5.))
+                        .rounded(px(2.))
+                        .bg(col(ColorToken::BarBg))
+                        .child(div().w(relative(0.6)).h_full().rounded(px(2.)).bg(col(ColorToken::Green))),
+                ),
+        );
+    let sel = format!("theme-{id}");
+    div()
+        .id(SharedString::from(sel.clone()))
+        .debug_selector(move || sel)
+        .w(px(140.))
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .p(px(5.))
+        .rounded(px(R_M))
+        .border_2()
+        .border_color(if on { t.text } else { gpui::transparent_black().into() })
+        .cursor_pointer()
+        .hover(|s| s.bg(t.hover))
+        .child(board)
+        .child(div().px(px(2.)).text_size(px(12.5)).text_color(t.text).child(name))
+}
+
 /// A colour sample with a hairline edge (black and the panel's grey still show).
 fn swatch(t: &Theme, color: u32, size: f32) -> impl IntoElement {
     div().flex_shrink_0().size(px(size)).rounded(px(4.)).bg(rgb(color)).border_1().border_color(t.line)
@@ -1695,6 +1801,21 @@ mod tests {
         assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("attention_anim = 30s"));
         click(cx, "pace-marker");
         assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("pace_marker = on"));
+        // A preset is one click; Custom opens the per-colour editor, starting
+        // from the theme on screen.
+        let config = || std::fs::read_to_string(&paths.config_file).unwrap();
+        click(cx, "theme-dracula");
+        assert!(config().contains("theme = dracula"));
+        click(cx, "theme-custom");
+        let text = config();
+        assert!(text.contains("theme = custom") && text.contains("color_bg = 21222c"), "{text}");
+        click(cx, "theme-clawd");
+        assert!(!config().contains("theme ="), "the default leaves the file");
+        assert!(config().contains("color_bg = 21222c"), "Custom keeps its colours for later");
+        click(cx, "theme-custom");
+        assert!(config().contains("theme = custom"));
+        click(cx, "colors-reset-all");
+        assert!(!config().contains("color_"));
         assert_eq!(view.update(cx, |v, _| v.color_pick), None, "the grid opens on a pick");
         click(cx, "color_accent");
         assert_eq!(view.update(cx, |v, _| v.color_pick), Some(ColorToken::Accent));
