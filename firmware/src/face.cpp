@@ -21,7 +21,7 @@
 #define BLINK_GAP  140
 #define GLANCE_MS  280
 
-#define COL_FACE   theme_color(TH_FACE)       // Clawd orange by default
+#define COL_FACE   theme_color(TH_CLAWD)      // Clawd orange by default
 #define COL_EYE    theme_color(TH_EYE)
 
 static Field     field;      // the body + arms: redraws only what changes

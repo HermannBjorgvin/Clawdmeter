@@ -3,6 +3,9 @@
 #include "clawd_policy.h"
 #include "ui.h"
 #include "face.h"
+#include "clawd_anim.h"
+#include "mascot.h"
+#include "performer.h"
 #include <Preferences.h>
 #include <Arduino.h>
 
@@ -30,6 +33,7 @@ void theme_prefs_load(void) {
     uint32_t p[TH_COUNT];
     if (n == THEME_HEX_LEN && theme_parse_hex(hex, p)) {
         theme_palette_set(p);
+        clawd_anim_recolor();
         Serial.printf("Theme: %s (saved)\n", hex);
     }
 }
@@ -83,5 +87,8 @@ void theme_set(const uint32_t p[TH_COUNT]) {
     prefs.end();
     ui_apply_theme();
     face_apply_theme();
+    clawd_anim_recolor();
+    mascot_repaint();
+    performer_repaint();
     Serial.printf("Theme: %s\n", hex);
 }

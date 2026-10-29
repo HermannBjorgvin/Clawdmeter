@@ -12,7 +12,7 @@
     0xd97757,   /* amber */                                                  \
     0xc0392b,   /* red */                                                    \
     0x2a2a28,   /* bar bg */                                                 \
-    0xd97757,   /* face: Clawd orange */                                     \
+    0xd97757,   /* clawd: his orange */                                      \
     0x141413    /* eye */
 
 const uint32_t THEME_DEFAULTS[TH_COUNT] = { DEFAULTS };
@@ -55,4 +55,20 @@ bool theme_palette_set(const uint32_t p[TH_COUNT]) {
     if (memcmp(palette, p, sizeof(palette)) == 0) return false;
     memcpy(palette, p, sizeof(palette));
     return true;
+}
+
+uint16_t theme_rgb565(uint32_t rgb) {
+    return (uint16_t)(((rgb >> 8) & 0xf800) | ((rgb >> 5) & 0x07e0) | ((rgb >> 3) & 0x001f));
+}
+
+// The shade is the body with each RGB565 channel scaled by the art's own
+// ratio (red 23/27, green 26/29, blue 9/10), rounded.
+static uint16_t scale(uint16_t v, uint16_t num, uint16_t den) { return (uint16_t)((v * num + den / 2) / den); }
+
+uint16_t theme_clawd_art(uint16_t art565, uint32_t clawd) {
+    const uint16_t body = theme_rgb565(clawd);
+    if (art565 == CLAWD_ART_BODY) return body;
+    if (art565 != CLAWD_ART_SHADE) return art565;
+    const uint16_t r = body >> 11, g = (body >> 5) & 0x3f, b = body & 0x1f;
+    return (uint16_t)((scale(r, 23, 27) << 11) | (scale(g, 26, 29) << 5) | scale(b, 9, 10));
 }
