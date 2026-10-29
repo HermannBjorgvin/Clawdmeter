@@ -35,6 +35,8 @@ struct BoardCaps {
                              // button when button_count is 0) dismisses an
                              // active alert before it does anything else
                              // (director_button).
+    bool    mono_panel;      // a 1-bit panel (e-paper): it keeps the default
+                             // palette and ignores `th` (clawd_prefs.cpp).
 };
 
 const BoardCaps& board_caps(void);
