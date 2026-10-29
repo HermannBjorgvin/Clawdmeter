@@ -8,9 +8,10 @@
 // EN, so there is no PWR-role button and the hold-to-pair gesture is the
 // 5 s touch hold on the pairing hint (has_pwr_button = false).
 //
-// VBUS isn't wired to a GPIO either. With no battery read the board can only
-// be running from USB, so that case reports VBUS present and idle sleep stays
-// off on a battery-less desk unit (IDLE_SLEEP_WHEN_CHARGING is false).
+// VBUS isn't wired to a GPIO either. VBUS is reported only when the divider
+// reads below 3.0 V (no battery), but with no cell fitted the charger holds
+// BAT near 4.2 V, so in practice it reads as a full battery and VBUS stays
+// false: the display idle-sleeps on USB too (seen on hardware).
 
 #define BATTERY_POLL_MS  2000
 
