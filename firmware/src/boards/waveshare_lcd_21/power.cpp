@@ -8,10 +8,11 @@
 // EN, so there is no PWR-role button and the hold-to-pair gesture is the
 // 5 s touch hold on the pairing hint (has_pwr_button = false).
 //
-// VBUS isn't wired to a GPIO either. VBUS is reported only when the divider
-// reads below 3.0 V (no battery), but with no cell fitted the charger holds
-// BAT near 4.2 V, so in practice it reads as a full battery and VBUS stays
-// false: the display idle-sleeps on USB too (seen on hardware).
+// VBUS isn't wired to a GPIO either, and the ADC can't stand in for it: with
+// no cell fitted the charger holds BAT near 4.2 V, which reads as a full
+// battery. Like the LCD-4, report VBUS present so USB-powered desk use never
+// idle-sleeps (IDLE_SLEEP_WHEN_CHARGING is false). On battery the display
+// therefore never idle-sleeps either.
 
 #define BATTERY_POLL_MS  2000
 
@@ -50,7 +51,7 @@ void power_hal_tick(void) {
 
 int  power_hal_battery_pct(void) { return cached_pct; }
 bool power_hal_is_charging(void) { return false; }
-bool power_hal_is_vbus_in(void)  { return cached_pct < 0; }
+bool power_hal_is_vbus_in(void)  { return true; }
 bool power_hal_pwr_pressed(void) { return false; }
 bool power_hal_pwr_long_pressed(void) { return false; }
 bool power_hal_pwr_released(void) { return false; }

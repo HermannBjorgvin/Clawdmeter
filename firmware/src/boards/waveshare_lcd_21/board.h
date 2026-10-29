@@ -37,7 +37,6 @@
 #define LCD_B2               48
 #define LCD_B3               47
 #define LCD_B4               21
-#define LCD_PCLK_HZ          18000000   // Waveshare demo value
 
 // ---- Software SPI for ST7701S init commands (CS is expander EXIO3) ----
 #define LCD_SPI_SCK           2
