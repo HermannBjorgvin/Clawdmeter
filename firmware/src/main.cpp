@@ -133,7 +133,7 @@ static void clear_pairing(const char* why) {
 }
 
 // ---- Serial command buffer ----
-#define CMD_BUF_SIZE 64
+#define CMD_BUF_SIZE 80   // fits `theme` + the 66-digit palette
 static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_pos = 0;
 
@@ -224,6 +224,15 @@ static void check_serial_cmd() {
                 if (cmd_buf[11] == ' ') pace_marker_set(atoi(cmd_buf + 12) != 0);
                 Serial.printf("{\"pace_marker\":%s}\n", pace_marker_get() ? "true" : "false");
             }
+            else if (strcmp(cmd_buf, "theme") == 0 || strncmp(cmd_buf, "theme ", 6) == 0) {
+                // QA: `theme [hex]`, the `th` string (theme_palette.h; until the app sends its own).
+                uint32_t p[TH_COUNT];
+                if (cmd_buf[5] == ' ' && theme_parse_hex(cmd_buf + 6, p)) theme_set(p);
+                char hex[THEME_HEX_LEN + 1];
+                for (int i = 0; i < TH_COUNT; i++) p[i] = theme_hex((ThemeColor)i);
+                theme_format_hex(p, hex);
+                Serial.printf("{\"theme\":\"%s\"}\n", hex);
+            }
             else if (strncmp(cmd_buf, "clawd ", 6) == 0) {
                 const bool ok = director_debug(cmd_buf + 6);
                 Serial.printf("{\"clawd\":\"%s\",\"ok\":%s}\n", cmd_buf + 6, ok ? "true" : "false");
@@ -283,6 +292,7 @@ void setup() {
     ble_init();
     input_hal_init();
 
+    theme_prefs_load();  // the saved palette, so the meters are built in it
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging(), power_hal_is_vbus_in());
@@ -488,6 +498,7 @@ void loop() {
                 sound_hal_chime();
             }
             if (usage.pace_marker >= 0) pace_marker_set(usage.pace_marker != 0);
+            if (usage.has_theme) theme_set(usage.theme);
             ui_update(&usage);
             // A prompt (or you're back after a gap): you're at the computer,
             // so a dimmed or dark panel wakes before Clawd notices you. A

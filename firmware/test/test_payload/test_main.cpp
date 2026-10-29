@@ -3,6 +3,7 @@
 //   pio test -d firmware -e native -f test_payload
 #include <unity.h>
 #include <string.h>
+#include <stdio.h>
 #include "payload.h"
 
 void setUp(void) {}
@@ -121,6 +122,35 @@ static void test_pace_marker(void) {
     TEST_ASSERT_EQUAL_INT(1, d.pace_marker);
 }
 
+static void test_theme(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.has_theme);                // absent: keep the saved palette
+    char hex[THEME_HEX_LEN + 1];
+    uint32_t want[TH_COUNT];
+    memcpy(want, THEME_DEFAULTS, sizeof(want));
+    want[TH_ACCENT] = 0x647d99;
+    theme_format_hex(want, hex);
+    char json[128];
+    snprintf(json, sizeof(json), "{\"th\":\"%s\"}", hex);
+    TEST_ASSERT_TRUE(payload_parse(json, &d, nullptr));
+    TEST_ASSERT_TRUE(d.has_theme);
+    TEST_ASSERT_EQUAL_HEX32_ARRAY(want, d.theme, TH_COUNT);
+    // Upper case parses too; the round trip formats lower case.
+    for (char* c = hex; *c; c++) if (*c >= 'a' && *c <= 'f') *c -= 32;
+    uint32_t got[TH_COUNT];
+    TEST_ASSERT_TRUE(theme_parse_hex(hex, got));
+    TEST_ASSERT_EQUAL_HEX32_ARRAY(want, got, TH_COUNT);
+    // Too short, too long or not hex: ignored, never a half-applied palette.
+    TEST_ASSERT_TRUE(payload_parse("{\"th\":\"647d99\"}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.has_theme);
+    hex[5] = 'g';
+    TEST_ASSERT_FALSE(theme_parse_hex(hex, got));
+    TEST_ASSERT_EQUAL_HEX32_ARRAY(want, got, TH_COUNT);   // untouched
+    TEST_ASSERT_TRUE(payload_parse("{\"th\":5}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.has_theme);
+}
+
 static void test_long_strings_truncate(void) {
     UsageData d;
     TEST_ASSERT_TRUE(payload_parse("{\"st\":\"abcdefghijklmnopqrstuvwxyz\"}", &d, nullptr));
@@ -137,6 +167,7 @@ int main(void) {
     RUN_TEST(test_liveliness);
     RUN_TEST(test_attention_animation);
     RUN_TEST(test_pace_marker);
+    RUN_TEST(test_theme);
     RUN_TEST(test_long_strings_truncate);
     return UNITY_END();
 }

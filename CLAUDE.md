@@ -67,6 +67,11 @@ python3 tools/simgrid/simgrid.py serve               # every panel at once (docs
 python3 -m unittest discover -s tools/ci/tests        # release/manifest scripts
 ```
 
+One test: `pio test -d firmware -e native -f test_layout` (a `firmware/test/`
+folder name), `(cd desktop && cargo test -p clawdmeter-core <name>)`. The
+`native` env compiles only the Arduino-free sources listed in its
+`build_src_filter`; add a new pure source file there before testing it.
+
 A bare `pio test` runs every default env, hardware included. If `pio` isn't on
 PATH, use `~/.platformio/penv/bin/pio` (or `brew install platformio`). On
 Linux, `nix develop` gives Rust, PlatformIO and SDL2. Flashing and serial
@@ -88,8 +93,9 @@ The app writes one complete JSON object per write to RX
   them, but a new `es` in the same write still fires.
 - Device settings, on every data payload: `lv` (liveliness 1–5), `aa`
   (attention animation seconds: 120, 30, 10, 0 = off; only his animation,
-  not the alert) and `pm` (pace marker on the usage bars, `pace.h`). The
-  device keeps them in NVS (`clawd_prefs.cpp`) so they apply from boot.
+  not the alert), `pm` (pace marker on the usage bars, `pace.h`) and `th`
+  (the palette, 11 hex colours run together, `theme_palette.h`). The device
+  keeps them in NVS (`clawd_prefs.cpp`) so they apply from boot.
 - Device → app: `0x01` on REQ (`…-0004`) when it has no data yet;
   `{"dismiss":true}` on TX (`…-0003`) when a tap or the 2-minute timeout ends
   an alert. The app clears its own alert and doesn't echo a clear back. Alerts

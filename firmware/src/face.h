@@ -29,6 +29,7 @@ bool face_busy(void);          // moving, blinking or glancing
 
 void face_blink(bool twice);   // the noticing beat
 void face_set_resting(bool on);// irregular blinks + glances while up
+void face_apply_theme(void);   // pick up a new palette (TH_FACE, TH_EYE)
 // Look toward screen x (a tap): the eyes glance proportionally (up to 1.5x
 // the resting glance, far eye 1.5x on top), hold for hold_ms, then come back
 // to you. face_busy() until they're back.
