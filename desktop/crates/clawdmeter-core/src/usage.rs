@@ -72,12 +72,12 @@ pub struct Spend {
 
 /// Whether the account has a 5-hour (session) limit at all.
 ///
-/// Verified Ultra (Max 20x) accounts have none: the usage endpoint answers
-/// `"five_hour": null` for them, where an account with the limit and no
-/// window running gets `{"utilization": 0, "resets_at": null}`. Only the
-/// endpoint can say so; `/usage` omits the session line both when no window
-/// is running and when there is no limit, and the probe runs only while a
-/// window is.
+/// Verified Ultra (formerly Max 20x) accounts have none: the usage endpoint
+/// answers `"five_hour": null` for them, where an account with the limit and
+/// no window running gets `{"utilization": 0, "resets_at": null}`. Only the
+/// endpoint can say so: `/usage` omits the session line both when no window
+/// is running and when there is no limit, and a probe answer without the
+/// session window makes the poll ask the endpoint ([`crate::probe::poll`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SessionLimit {
     /// This source can't tell: [`AccountState::record`] keeps what the last
@@ -915,7 +915,12 @@ impl AccountState {
     pub fn record(&mut self, now: i64, result: Result<UsageReading, UsageError>) {
         match result {
             Ok(mut r) => {
-                if r.session_limit == SessionLimit::Unknown {
+                // A session window is the limit. Without one, a source that
+                // can't tell keeps the last answer; only a reading with a week
+                // can be weekly-only (a spend-capped one keeps its own meter).
+                if r.session.is_some() {
+                    r.session_limit = SessionLimit::Applies;
+                } else if r.session_limit == SessionLimit::Unknown && r.week.is_some() {
                     r.session_limit = self.last.as_ref().map_or(SessionLimit::Unknown, |l| l.session_limit);
                 }
                 self.last = Some(r);
@@ -1244,6 +1249,15 @@ mod tests {
         st.record(3000, both);
         assert_eq!(st.last.as_ref().unwrap().session_limit, SessionLimit::Applies);
         assert_eq!(st.last.as_ref().unwrap().session_pct(), 5);
+        // A spend-capped reading after it (another login in that folder)
+        // keeps its own meter.
+        st.last.as_mut().unwrap().session_limit = SessionLimit::Absent;
+        let spend =
+            UsageReading { spend: Some(Spend { pct: 21, resets_at: None, period: None }), ..Default::default() };
+        st.record(4000, Ok(spend));
+        let last = st.last.as_ref().unwrap();
+        assert!(!last.no_session_limit() && last.is_spend_only());
+        assert_eq!(last.session_pct(), 21);
         // With no reading before, unknown stays unknown: the usual session meter.
         let mut fresh = AccountState::default();
         fresh.record(1000, parse_usage_text(week, now));

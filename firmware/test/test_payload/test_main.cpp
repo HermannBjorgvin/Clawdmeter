@@ -66,11 +66,14 @@ static void test_legacy_fields(void) {
 
 static void test_account_kinds(void) {
     UsageData d;
-    TEST_ASSERT_TRUE(payload_parse("{\"s\":48,\"sr\":7900,\"acct\":\"week\",\"ok\":true}", &d, nullptr));
+    // No 5-hour limit: s/sr come as "not started"; the week becomes the main meter.
+    TEST_ASSERT_TRUE(payload_parse(
+        "{\"s\":0,\"sr\":-1,\"w\":48,\"wr\":7900,\"acct\":\"week\",\"ok\":true}", &d, nullptr));
     TEST_ASSERT_TRUE(d.weekly_only);
     TEST_ASSERT_FALSE(d.enterprise);
     TEST_ASSERT_EQUAL_FLOAT(48, d.session_pct);
     TEST_ASSERT_EQUAL_INT(7900, d.session_reset_mins);
+    TEST_ASSERT_EQUAL_FLOAT(48, d.weekly_pct);
     TEST_ASSERT_TRUE(payload_parse("{\"acct\":\"pro\"}", &d, nullptr));
     TEST_ASSERT_FALSE(d.weekly_only);
     TEST_ASSERT_TRUE(payload_parse("{\"acct\":\"ent\"}", &d, nullptr));

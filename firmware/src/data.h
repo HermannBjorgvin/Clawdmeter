@@ -16,7 +16,8 @@ struct UsageData {
     bool alert_clear;        // the session moved on: end the alert
     bool enterprise;         // true = Enterprise spending-limit account
     bool weekly_only;        // true = no 5-hour limit (acct "week", verified Ultra):
-                             //   session_pct / session_reset_mins carry the week
+                             //   session_pct / session_reset_mins carry the week,
+                             //   copied from w / wr by payload_parse
     int time_pct;            // 0-100: fraction of billing period elapsed (Enterprise)
     int period_days;         // total billing period length in days (Enterprise)
     char reset_date[12];     // formatted reset date e.g. "Jul 1" (Enterprise)
@@ -40,3 +41,9 @@ struct UsageData {
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
 };
+
+// What session_pct measures: 0 the 5-hour session, 1 the week (weekly_only),
+// 2 the spend (enterprise). A change of kind is not a reset or a rise.
+static inline int usage_meter_kind(const UsageData* d) {
+    return d->enterprise ? 2 : d->weekly_only ? 1 : 0;
+}

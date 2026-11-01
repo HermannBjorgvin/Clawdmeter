@@ -132,13 +132,14 @@ the line, amber when it's ahead, and red at the limit. Off (the default),
 the bars go amber at 50% and red at 80%. A bar with no reset time yet keeps
 those colours, and spend-capped accounts are unchanged.
 
-Accounts with no 5-hour limit (Ultra, formerly Max 20x, once Anthropic has
-verified the account) show only the **Weekly** meter, on the device, the
-Overview page and the tray. Clawdmeter goes by what the usage server reports,
-not by the plan's name: an Ultra account that isn't verified yet still has a
-temporary 5-hour limit and keeps the Session meter until the limit goes. For
-these accounts the reset chime and Clawd's fresh-window jump mark the weekly
-reset.
+Accounts with no 5-hour limit, such as Ultra (formerly Max 20x) once
+Anthropic has verified the account, show only the **Weekly** meter on the
+device, the Overview page and the tray. Clawdmeter goes by what the usage
+server reports, not by the plan's name: an Ultra account that isn't verified
+yet still has a temporary 5-hour limit and keeps the Session meter until the
+limit goes. For these accounts the reset chime and Clawd's fresh-window jump
+mark the weekly reset. Firmware older than this change keeps showing the
+session as not started; update it from the Flash page.
 
 The device boots to the meters. Clawd performs his shows right on them,
 in front of the panels. Tap a show or the screensaver to send him back to

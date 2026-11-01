@@ -41,6 +41,11 @@ enum UsageRateGroup {
 // Forget all samples and activity (boot state). Tests call it between cases.
 void  usage_rate_clear(void);
 
+// Forget the samples but keep the activity level: the main meter now measures
+// something else (signals.cpp, on an account-kind change), so the next sample
+// starts a new ring and is never a reset.
+void  usage_rate_restart(void);
+
 // Feed one session % sample. `replay` samples are ignored entirely (return
 // false). Returns true when this real sample is a session reset; never true on
 // the first sample after boot/clear.

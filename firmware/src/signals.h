@@ -16,7 +16,8 @@
 // false, and every getter returns its "unknown" value.
 
 struct SignalsUpdate {
-    bool     session_reset;   // a real sample dropped > 5 points (chime trigger)
+    bool     session_reset;   // a real sample dropped > 5 points (chime trigger);
+                              // never when the meter's kind changed (usage_meter_kind)
     bool     replay;          // usage numbers repeat the last poll (rp=1)
     bool     event_fired;     // a hook event the device hasn't reacted to yet
     char     event;           // 'p' prompt, 's' stop, 'b' back after a gap,

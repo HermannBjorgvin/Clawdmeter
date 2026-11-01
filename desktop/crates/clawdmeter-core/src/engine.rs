@@ -335,9 +335,10 @@ impl Engine {
             // The backoff is `/usage`'s (its endpoint's rate limit).
             blocked_until: st.and_then(|a| a.backoff.until()).filter(|_| source == Source::Usage),
             usage_only: source == Source::Usage,
+            // With no 5-hour limit the week's reset is the one to catch.
             wake_at: st
                 .and_then(|a| a.last.as_ref())
-                .and_then(|r| r.session.as_ref())
+                .and_then(|r| if r.no_session_limit() { r.week.as_ref() } else { r.session.as_ref() })
                 .and_then(|w| w.resets_at)
                 .map(|t| t.timestamp()),
         }
@@ -625,6 +626,8 @@ mod tests {
         UsageReading {
             session: Some(Window { pct: s, resets_at: Some(utc(T0 + 3600)) }),
             week: Some(Window { pct: 10, resets_at: Some(utc(T0 + 86_400)) }),
+            // As every source labels a reading with a session window.
+            session_limit: crate::usage::SessionLimit::Applies,
             ..Default::default()
         }
     }
@@ -652,6 +655,30 @@ mod tests {
             r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0}"#
         );
         assert!(write(&mut e, T0 + 1).is_none());
+    }
+
+    // No 5-hour limit: "week" on the wire with the session left "not
+    // started" for older firmware, and the weekly reset wakes the account.
+    #[test]
+    fn no_session_limit_payload_and_weekly_wake() {
+        let mut e = Engine::new(settings(""));
+        let dir = PathBuf::from("/h/.claude");
+        let ultra = UsageReading {
+            week: Some(Window { pct: 48, resets_at: Some(utc(T0 + 86_400)) }),
+            session_limit: crate::usage::SessionLimit::Absent,
+            ..Default::default()
+        };
+        e.on_poll_results(T0, vec![(dir.clone(), Ok(ultra))]);
+        assert_eq!(e.clock(&dir, T0 + 60).wake_at, Some(T0 + 86_400));
+        assert_eq!(e.source(&dir, T0 + 60), Source::Usage);
+        let w = write(&mut e, T0).unwrap();
+        assert_eq!(
+            w.payload.to_json(),
+            r#"{"s":0,"sr":-1,"w":48,"wr":1440,"st":"allowed","acct":"week","ok":true,"lv":3,"aa":120,"pm":0}"#
+        );
+        // An account with the limit still wakes at its session reset.
+        e.on_poll_results(T0 + 200, vec![(dir.clone(), Ok(reading(5)))]);
+        assert_eq!(e.clock(&dir, T0 + 260).wake_at, Some(T0 + 3600));
     }
 
     // Heartbeat replays (bash parity + rp marker), and none once stale.

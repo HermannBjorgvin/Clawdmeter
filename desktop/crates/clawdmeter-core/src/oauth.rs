@@ -197,17 +197,18 @@ pub fn parse_usage_json(body: &str, now: DateTime<Utc>) -> Result<UsageReading, 
         });
     let overage = v.get("extra_usage").and_then(|x| x.get("is_enabled")).and_then(Value::as_bool).unwrap_or(false)
         && v.get("extra_usage").and_then(|x| x.get("used_credits")).and_then(Value::as_f64).is_some_and(|c| c > 0.0);
+    let five_hour_null = v.get("five_hour").is_some_and(Value::is_null);
     let five_hour = v.get("five_hour").is_some_and(|w| !w.is_null());
     let has_any = five_hour || week.is_some() || spend.is_some();
     if !has_any {
         return Err(UsageError::NoUsageLines("usage endpoint: no windows".into()));
     }
     // A five-hour object, even {0 %, no reset}, is a limit with no window
-    // running; null next to a weekly window is no limit at all (verified
-    // Ultra accounts).
+    // running; an explicit null next to a weekly window is no limit at all
+    // (verified Ultra accounts). A missing key says nothing.
     let session_limit = if five_hour {
         SessionLimit::Applies
-    } else if week.is_some() {
+    } else if five_hour_null && week.is_some() {
         SessionLimit::Absent
     } else {
         SessionLimit::Unknown
@@ -349,7 +350,7 @@ mod tests {
         assert_eq!(r.session_pct(), 48, "the week is the main meter");
         let p = crate::Payload::from_reading(&r, now);
         let wr = minutes(now, "2026-11-07T01:59:59.879601Z");
-        assert_eq!((p.s, p.sr, p.w, p.wr), (Some(48), Some(wr), Some(48), Some(wr)));
+        assert_eq!((p.s, p.sr, p.w, p.wr), (Some(0), Some(-1), Some(48), Some(wr)), "older firmware: not started");
         assert_eq!((p.acct.as_deref(), p.st.as_deref()), (Some("week"), Some("allowed")));
         // Never the probe: there's no window to follow.
         let st = crate::usage::AccountState {
@@ -372,7 +373,7 @@ mod tests {
         let week = r#""seven_day":{"utilization":20,"resets_at":"2026-10-19T00:00:00Z"}"#;
         let limit = |body: &str| parse_usage_json(body, now).unwrap().session_limit;
         assert_eq!(limit(&format!(r#"{{"five_hour":null,{week}}}"#)), SessionLimit::Absent);
-        assert_eq!(limit(&format!("{{{week}}}")), SessionLimit::Absent, "left out like null");
+        assert_eq!(limit(&format!("{{{week}}}")), SessionLimit::Unknown, "only an explicit null");
         assert_eq!(
             limit(&format!(r#"{{"five_hour":{{"utilization":0,"resets_at":null}},{week}}}"#)),
             SessionLimit::Applies

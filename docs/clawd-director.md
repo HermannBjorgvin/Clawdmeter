@@ -135,8 +135,11 @@ Small reactions on the meters, from `home` or `corner`:
   then reacts. The reaction waits up to 15 s (`react_pending_ms`) for him. A
   reaction arriving while a commanded act plays queues behind it.
 - **Fresh window**: `session_reset` from signals (real samples only, so never
-  on a replay). For a `week` account (no 5-hour limit) `s` is the week, so
-  this is the weekly reset. He jumps happy twice, in the same loop iteration as the chime.
+  on a replay). For a `week` account (no 5-hour limit) the main meter is
+  the week, so this is the weekly reset. A change in what the meter
+  measures (session, week or spend: `usage_meter_kind`) restarts the slow
+  clock and is never a reset or a rise. He jumps happy twice, in the same
+  loop iteration as the chime.
   If he's out on a trip he hurries back for it; if he's in another room it
   waits up to 5 min for him to sit down. It outranks the wave.
 

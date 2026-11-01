@@ -64,6 +64,7 @@ static uint32_t    last_engagement = 0;
 static bool        window_not_started = false;
 static bool        have_pct = false;
 static float       last_pct = 0;
+static int         last_kind = -1;    // usage_meter_kind of last_pct
 static bool        joy_pending = false;
 static uint32_t    joy_at = 0;
 static bool        minimal = false;
@@ -305,8 +306,11 @@ void director_on_payload(const UsageData* d, const SignalsUpdate* sig) {
     // Spend-capped and no-5-hour-limit accounts have no window to start.
     window_not_started = !d->enterprise && !d->weekly_only && d->session_reset_mins < 0;
 
-    // The slow clock moving counts as you being around.
+    // The slow clock moving counts as you being around. A change of what the
+    // meter measures (session, week, spend) is not a rise.
     if (!sig->replay) {
+        if (usage_meter_kind(d) != last_kind) have_pct = false;
+        last_kind = usage_meter_kind(d);
         if (have_pct && d->session_pct > last_pct + 0.01f) {
             engage();
             if (beat == B_SCREENSAVER) to_meters(true);

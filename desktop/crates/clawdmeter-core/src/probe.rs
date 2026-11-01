@@ -170,8 +170,9 @@ pub fn parse_stream(stdout: &str) -> Result<UsageReading, UsageError> {
     };
     let session = window("five_hour");
     let reading = UsageReading {
-        // The probe runs only while a window is: a missing five_hour says
-        // nothing about the limit.
+        // Without five_hour the answer can't say why (the window ended as it
+        // was sent, or the account has no 5-hour limit any more): [`poll`]
+        // asks the usage endpoint, which can tell.
         session_limit: if session.is_some() { SessionLimit::Applies } else { SessionLimit::Unknown },
         session,
         week: window("seven_day"),
@@ -267,6 +268,14 @@ pub fn poll(
         (Plan::Known(r), _) => probe(Ok(r.clone()), false),
         (Plan::Usage, _) | (Plan::Probe { .. }, None) => poll_idle(claude, config_dir, home, now).into(),
         (Plan::Probe { usage_fallback }, Some(c)) => match run_probe(c, config_dir, home, cwd, usage::CLI_TIMEOUT) {
+            // No five_hour: the window just ended, or the account has no
+            // 5-hour limit any more. Only the endpoint can tell, so ask it
+            // when it may be asked; while it's backing off the answer is
+            // kept as it is (not started), which stops the probe.
+            Ok(r) if r.session.is_none() && *usage_fallback => {
+                log::info!("{}: probe answer has no 5-hour window; asking the usage endpoint", config_dir.display());
+                Polled { result: poll_idle(claude, config_dir, home, now), idle: true, probe_missed: true }
+            }
             Ok(r) => probe(Ok(r), false),
             Err(e) if e.is_auth() || !usage_fallback => probe(Err(e), true),
             Err(e) => {
@@ -300,6 +309,43 @@ mod tests {
         let now = Utc::now();
         assert_eq!(poll_idle(None, &cfg, &dir, now), Err(UsageError::TokenExpired));
         assert!(poll_idle(Some(&fake), &cfg, &dir, now).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A probe answer without five_hour: the endpoint (here `claude -p
+    // /usage`, no token) answers in the same poll; while it's backing off,
+    // the probe's own answer is kept, so the probe isn't sent again and again.
+    #[cfg(unix)]
+    #[test]
+    fn probe_without_five_hour_asks_the_endpoint_when_allowed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("cm-probe-week-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfg = dir.join(".claude");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let usage = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/not-started.json");
+        let stream = dir.join("stream.jsonl");
+        std::fs::write(
+            &stream,
+            "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"unifiedWindows\":{\"seven_day\":{\"utilization\":0.48,\"resetsAt\":1791990000}}}}\n",
+        )
+        .unwrap();
+        let fake = dir.join("claude");
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in *\"/usage\"*) cat '{}' ;; *) cat '{}' ;; esac\n",
+            usage.display(),
+            stream.display()
+        );
+        std::fs::write(&fake, script).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let now = Utc::now();
+        let p = poll(Some(&fake), &cfg, &dir, &dir, &Plan::Probe { usage_fallback: true }, now);
+        assert!(p.idle && p.probe_missed, "{p:?}");
+        assert_eq!(p.result.unwrap().week.map(|w| w.pct), Some(38), "the /usage fixture, not the probe");
+        let p = poll(Some(&fake), &cfg, &dir, &dir, &Plan::Probe { usage_fallback: false }, now);
+        assert!(!p.idle && !p.probe_missed, "{p:?}");
+        let r = p.result.unwrap();
+        assert_eq!((r.session, r.week.map(|w| w.pct)), (None, Some(48)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -364,6 +410,12 @@ mod tests {
         assert_eq!(r.session, Some(Window { pct: 105, resets_at: ts(20) }));
         assert_eq!(r.week, None);
         assert!(r.overage);
+        assert_eq!(r.session_limit, SessionLimit::Applies);
+        // The week alone can't say whether the limit is gone ([`poll`] asks
+        // the endpoint).
+        let week_only =
+            parse_stream(&ev(r#"{"unifiedWindows":{"seven_day":{"utilization":0.48,"resetsAt":30}}}"#)).unwrap();
+        assert_eq!((week_only.session, week_only.session_limit), (None, SessionLimit::Unknown));
         // No event, an event without windows, empty windows: a miss.
         assert!(matches!(parse_stream("{\"type\":\"result\"}\n"), Err(UsageError::BadOutput(_))));
         assert!(matches!(parse_stream(&ev(r#"{"status":"allowed"}"#)), Err(UsageError::BadOutput(_))));
@@ -395,6 +447,13 @@ mod tests {
         // The same activity on an account with the limit, no window running: the probe.
         st.last.as_mut().unwrap().session_limit = SessionLimit::Applies;
         assert_eq!(choose_source(&st, None, T0), Source::Probe);
+        // Verified while that window ran: the probe's answer has the week
+        // alone, so the endpoint answers in the same poll ([`poll`]).
+        let endpoint = UsageReading { session_limit: SessionLimit::Absent, ..reading(None, Some((48, None))) };
+        st.record_polled(T0 + 60, Polled { result: Ok(endpoint), idle: true, probe_missed: true });
+        assert!(st.last.as_ref().unwrap().no_session_limit());
+        st.note_activity(T0 + 90);
+        assert_eq!(choose_source(&st, None, T0 + 120), Source::Usage);
     }
 
     #[test]
