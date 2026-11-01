@@ -90,6 +90,19 @@ pub enum SessionLimit {
     Absent,
 }
 
+/// What [`UsageReading::session_pct`] measures, as the firmware's
+/// `usage_meter_kind`. Numbers of different kinds aren't comparable: a
+/// change of kind is never a rise or a reset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeterKind {
+    /// The 5-hour session (not started reads 0).
+    Session,
+    /// The week, for an account with no 5-hour limit.
+    Week,
+    /// The spend cap, for a spend-capped account.
+    Spend,
+}
+
 /// Everything `/usage` told us for one account.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UsageReading {
@@ -118,6 +131,17 @@ impl UsageReading {
             (None, Some(sp)) if self.week.is_none() => sp.pct,
             (None, _) if self.no_session_limit() => self.week.as_ref().map_or(0, |w| w.pct),
             _ => 0,
+        }
+    }
+
+    /// What [`UsageReading::session_pct`] measures.
+    pub fn meter_kind(&self) -> MeterKind {
+        if self.is_spend_only() {
+            MeterKind::Spend
+        } else if self.no_session_limit() {
+            MeterKind::Week
+        } else {
+            MeterKind::Session
         }
     }
 
@@ -348,9 +372,6 @@ pub fn parse_usage_text(text: &str, now: DateTime<Utc>) -> Result<UsageReading, 
         let label = label.trim();
         if label.eq_ignore_ascii_case("session") {
             r.session = Some(window);
-            // No session line says nothing: it is left out when no window
-            // is running, too.
-            r.session_limit = SessionLimit::Applies;
             matched = true;
         } else if let Some(inner) = label
             .strip_prefix("week")
@@ -893,8 +914,10 @@ pub struct AccountState {
 
 impl AccountState {
     /// Record one [`crate::probe::Polled`]: an idle-source result as
-    /// [`AccountState::record`]; a probe's own miss counts as a miss but
-    /// doesn't back off the idle source, whose rate limit it never touched.
+    /// [`AccountState::record`]. The probe never touches the idle source's
+    /// rate limit: its miss counts as a miss without backing the idle source
+    /// off, and its answer doesn't end that backoff. An idle-source miss next
+    /// to a probe's reading backs off all the same.
     pub fn record_polled(&mut self, now: i64, polled: crate::probe::Polled) {
         if polled.probe_missed {
             self.probe_misses = self.probe_misses.saturating_add(1);
@@ -906,8 +929,41 @@ impl AccountState {
                 self.misses = self.misses.saturating_add(1);
                 self.last_error = Some(e);
             }
+            // Nor does a probe's answer clear the idle source's backoff: the
+            // endpoint stays parked until it answers itself or the block runs
+            // out, so a probe answer without five_hour can't send the
+            // fallback into a 429 block (which the server would lengthen).
+            Ok(r) if !polled.idle => {
+                let backoff = self.backoff;
+                self.record(now, Ok(r));
+                self.backoff = backoff;
+            }
             r => self.record(now, r),
         }
+        // The probe's reading stands, but the idle source asked after it
+        // missed: a transient miss still backs the account off (a 429 is
+        // kept and saved), without making the fresh reading a miss. Others
+        // (a login problem) are left to the idle source's own next poll.
+        if let Some(e) = polled.idle_miss.filter(UsageError::is_transient) {
+            self.back_off(now, &e);
+            self.last_error = Some(e);
+        }
+    }
+
+    /// Start or extend the backoff for an idle-source miss.
+    fn back_off(&mut self, now: i64, e: &UsageError) {
+        match e {
+            // The endpoint said exactly how long: no more, no less.
+            UsageError::Throttled { retry_after_secs: Some(s) } => self.backoff.park_exact(now, *s),
+            // A refused token is retried on the ladder too, not every poll.
+            _ if e.is_transient() || *e == UsageError::TokenRejected => {
+                self.backoff.on_miss(now, e.retry_after());
+            }
+            _ => return,
+        }
+        // Only a 429's pause is Anthropic's: saved for a restart and shown
+        // as a pause until it runs out, even after a probe has answered.
+        self.backoff.set_throttled(e.is_throttle());
     }
 
     /// Record a poll outcome. A transient miss starts or extends the
@@ -915,7 +971,8 @@ impl AccountState {
     pub fn record(&mut self, now: i64, result: Result<UsageReading, UsageError>) {
         match result {
             Ok(mut r) => {
-                // A session window is the limit. Without one, a source that
+                // A session window is the limit, whatever the source (the
+                // parsers leave this to here). Without one, a source that
                 // can't tell keeps the last answer; only a reading with a week
                 // can be weekly-only (a spend-capped one keeps its own meter).
                 if r.session.is_some() {
@@ -937,16 +994,7 @@ impl AccountState {
             }
             Err(e) => {
                 self.misses = self.misses.saturating_add(1);
-                match e {
-                    // The endpoint said exactly how long: no more, no less.
-                    UsageError::Throttled { retry_after_secs: Some(s) } => self.backoff.park_exact(now, s),
-                    // A refused token is retried on the ladder too, not
-                    // every poll.
-                    _ if e.is_transient() || e == UsageError::TokenRejected => {
-                        self.backoff.on_miss(now, e.retry_after());
-                    }
-                    _ => {}
-                }
+                self.back_off(now, &e);
                 self.last_error = Some(e);
             }
         }

@@ -68,6 +68,10 @@ struct Layout {
 
 Layout layout_compute(const LayoutShape& shape);
 
+// The first card's y when it's shown alone (an account with no 5-hour limit,
+// acct "week"): centred on the space the two cards take.
+int16_t layout_lone_card_y(const Layout& L);
+
 // Corner icon sizes the layout plans with (ui.cpp checks them against the art).
 #define LAYOUT_LOGO_SLOT        80   // logo.h LOGO_HEIGHT
 #define LAYOUT_LOGO_SLOT_SMALL  40

@@ -14,6 +14,11 @@
 //         < 10 %/h  Normal    (2 points)
 //         < 20 %/h  Active    (3-4 points)
 //         >= 20     Heavy     (5+ points: at pace or faster)
+//     A `week` account (no 5-hour limit) feeds its weekly % with the same
+//     thresholds, so its rate stays Idle in practice: even pace is 0.6 %/h,
+//     and scaling a quarter hour of whole points would turn every 1-point
+//     tick into Heavy. Its mood comes from hook activity; the ring still
+//     catches the weekly reset.
 //   * The divisor is never shorter than the window, so a 1-point tick right
 //     after boot reads 4 %/h, not 60. The baseline is the newest sample at
 //     least one window older than `now`, so the rate decays to Idle on its own

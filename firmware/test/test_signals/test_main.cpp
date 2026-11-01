@@ -119,19 +119,29 @@ static void test_meter_kind_change_is_not_a_reset(void) {
     UsageData week = parse("{\"s\":0,\"sr\":-1,\"w\":48,\"wr\":7900,\"acct\":\"week\",\"ok\":true}");
     UsageData pro0 = parse("{\"s\":0,\"sr\":-1,\"w\":48,\"wr\":7900,\"acct\":\"pro\",\"ok\":true}");
     UsageData pro70 = parse("{\"s\":70,\"sr\":90,\"w\":48,\"wr\":7900,\"acct\":\"pro\",\"ok\":true}");
-    TEST_ASSERT_FALSE(signals_ingest_at(&week, 1 * MIN).session_reset);
-    TEST_ASSERT_FALSE(signals_ingest_at(&pro0, 20 * MIN).session_reset);    // 48 -> 0
+    SignalsUpdate u = signals_ingest_at(&week, 1 * MIN);
+    TEST_ASSERT_FALSE(u.session_reset);
+    TEST_ASSERT_FALSE(u.meter_kind_changed);                                // first sight
+    u = signals_ingest_at(&pro0, 20 * MIN);                                 // 48 -> 0
+    TEST_ASSERT_FALSE(u.session_reset);
+    TEST_ASSERT_TRUE(u.meter_kind_changed);
     TEST_ASSERT_FALSE(signals_ingest_at(&week, 40 * MIN).session_reset);    // back
     TEST_ASSERT_FALSE(signals_ingest_at(&pro70, 60 * MIN).session_reset);
     TEST_ASSERT_FALSE(signals_ingest_at(&week, 80 * MIN).session_reset);    // verified: 70 -> 48
     // A real weekly reset of the same kind still fires.
     UsageData fresh = parse("{\"s\":0,\"sr\":-1,\"w\":0,\"wr\":10080,\"acct\":\"week\",\"ok\":true}");
-    TEST_ASSERT_TRUE(signals_ingest_at(&fresh, 100 * MIN).session_reset);
+    u = signals_ingest_at(&fresh, 100 * MIN);
+    TEST_ASSERT_TRUE(u.session_reset);
+    TEST_ASSERT_FALSE(u.meter_kind_changed);
     // A replay of another kind doesn't count as a sample of that kind.
     UsageData rp = parse("{\"s\":70,\"sr\":90,\"acct\":\"pro\",\"rp\":1,\"ok\":true}");
-    TEST_ASSERT_FALSE(signals_ingest_at(&rp, 101 * MIN).session_reset);
+    u = signals_ingest_at(&rp, 101 * MIN);
+    TEST_ASSERT_FALSE(u.session_reset);
+    TEST_ASSERT_FALSE(u.meter_kind_changed);
     UsageData later = parse("{\"s\":0,\"sr\":-1,\"w\":1,\"wr\":10000,\"acct\":\"week\",\"ok\":true}");
-    TEST_ASSERT_FALSE(signals_ingest_at(&later, 120 * MIN).session_reset);
+    u = signals_ingest_at(&later, 120 * MIN);
+    TEST_ASSERT_FALSE(u.session_reset);
+    TEST_ASSERT_FALSE(u.meter_kind_changed);
 }
 
 static void test_sessions_change(void) {

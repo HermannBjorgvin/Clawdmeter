@@ -349,8 +349,8 @@ mod tests {
         assert!(r.no_session_limit() && !r.window_started() && !r.is_spend_only());
         assert_eq!(r.session_pct(), 48, "the week is the main meter");
         let p = crate::Payload::from_reading(&r, now);
-        let wr = minutes(now, "2026-11-07T01:59:59.879601Z");
-        assert_eq!((p.s, p.sr, p.w, p.wr), (Some(0), Some(-1), Some(48), Some(wr)), "older firmware: not started");
+        // 5 d 12 h 29 min 59.88 s to the reset.
+        assert_eq!((p.s, p.sr, p.w, p.wr), (Some(0), Some(-1), Some(48), Some(7950)), "older firmware: not started");
         assert_eq!((p.acct.as_deref(), p.st.as_deref()), (Some("week"), Some("allowed")));
         // Never the probe: there's no window to follow.
         let st = crate::usage::AccountState {
@@ -361,10 +361,6 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(crate::probe::choose_source(&st, None, now.timestamp() + 60), crate::probe::Source::Usage);
-    }
-
-    fn minutes(now: DateTime<Utc>, t: &str) -> i64 {
-        ((at(t) - now).num_seconds() + 30) / 60
     }
 
     #[test]

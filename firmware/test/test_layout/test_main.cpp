@@ -132,6 +132,14 @@ static void check_panel(const Panel& p) {
     }
     check_apart("cards", card(0), card(1));
 
+    // The first card alone (acct "week"): centred on the space both take, so
+    // it keeps clear of everything the two cards keep clear of.
+    const Box lone = { L.card[0].x, layout_lone_card_y(L), L.card[0].w, L.card[0].h };
+    check_on_glass("lone card", lone, 8);
+    const int above = lone.y - L.card[0].y;
+    const int below = L.card[1].y + L.card[1].h - (lone.y + lone.h);
+    if (above < 0 || below < 0 || abs(above - below) > 1) fail("lone card not centred on the cards", lone);
+
     // Inside a card.
     const int inner_w = L.card[0].w - 2 * L.pad_x, inner_h = L.card[0].h - 2 * L.pad_y;
     const int pill_w = 2 * L.pill_pad_x + 4;   // padding + PILL_GAP
@@ -196,6 +204,7 @@ static void test_large_480x480(void) {
     TEST_ASSERT_EQUAL_INT16(20, L.card[0].x);   TEST_ASSERT_EQUAL_INT16(440, L.card[0].w);
     TEST_ASSERT_EQUAL_INT16(100, L.card[0].y);  TEST_ASSERT_EQUAL_INT16(150, L.card[0].h);
     TEST_ASSERT_EQUAL_INT16(266, L.card[1].y);
+    TEST_ASSERT_EQUAL_INT16(183, layout_lone_card_y(L));   // (100 + 416 - 150) / 2
     TEST_ASSERT_EQUAL_INT16(56, L.bar_y);       TEST_ASSERT_EQUAL_INT16(24, L.bar_h);
     TEST_ASSERT_EQUAL_INT16(94, L.reset_y);
     TEST_ASSERT_EQUAL_PTR(&font_styrene_48, L.pct_font);

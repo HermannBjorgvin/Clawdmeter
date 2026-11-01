@@ -42,7 +42,10 @@ SignalsUpdate signals_ingest_at(const UsageData* d, uint32_t now_ms) {
     // rather than read the jump as a reset.
     if (real_sample) {
         const int kind = usage_meter_kind(d);
-        if (meter_kind >= 0 && kind != meter_kind) usage_rate_restart();
+        if (meter_kind >= 0 && kind != meter_kind) {
+            usage_rate_restart();
+            u.meter_kind_changed = true;
+        }
         meter_kind = kind;
     }
     u.session_reset = usage_rate_sample_at(now_ms, d->session_pct, !real_sample);

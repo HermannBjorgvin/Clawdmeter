@@ -297,7 +297,7 @@ impl Engine {
     pub fn blocks(&self, now: i64) -> BTreeMap<PathBuf, SavedBlock> {
         self.accounts
             .iter()
-            .filter(|(_, a)| a.last_error.as_ref().is_some_and(UsageError::is_throttle))
+            .filter(|(_, a)| a.backoff.throttled())
             .filter_map(|(d, a)| {
                 let until = a.backoff.until().filter(|u| *u > now)?;
                 Some((d.clone(), SavedBlock { strikes: a.backoff.strikes(), until }))
@@ -391,16 +391,27 @@ impl Engine {
         let results: Vec<(PathBuf, probe::Polled)> = results.into_iter().map(|(d, r)| (d, r.into())).collect();
         let polled = !results.is_empty();
         let ok_dirs: Vec<PathBuf> = results.iter().filter(|(_, r)| r.result.is_ok()).map(|(d, _)| d.clone()).collect();
+        // Accounts whose main meter now measures something else (session,
+        // week or spend: verified for no 5-hour limit, or a first reading
+        // that couldn't tell). The jump is neither a rise nor a reset.
+        let mut rekinded: Vec<PathBuf> = Vec::new();
         for (dir, r) in results {
             let st = self.accounts.entry(dir.clone()).or_default();
             // Results without a `begin_poll` (`--once`) count as attempted now.
             if !self.in_flight.contains(&dir) {
                 st.last_attempt_at = Some(now);
             }
+            let kind = st.last.as_ref().map(UsageReading::meter_kind);
             st.record_polled(now, r);
+            if kind.is_some_and(|k| st.last.as_ref().is_some_and(|l| l.meter_kind() != k)) {
+                rekinded.push(dir.clone());
+            }
             if let (Some(left), Some(e)) = (st.backoff.remaining(now), &st.last_error) {
                 log::info!("{}: {e}; not polling it for {left}s", dir.display());
             }
+        }
+        for d in &rekinded {
+            self.selector.forget(d);
         }
         // Every configured account's latest answer is a login problem.
         let all_auth = !self.settings.config_dirs.is_empty()
@@ -428,6 +439,9 @@ impl Engine {
         // write, so they would only ride along on a replay.
         let active_fresh = self.active.as_ref().is_some_and(|a| ok_dirs.contains(a));
         if active_fresh {
+            if self.active.as_ref().is_some_and(|a| rekinded.contains(a)) {
+                self.rate = RateTracker::default();
+            }
             if let Some(r) = self.active_reading() {
                 let pct = r.session_pct();
                 self.rate.sample(now, pct, false);
@@ -597,7 +611,7 @@ impl Engine {
                 .as_ref()
                 .or(self.settings.config_dirs.first())
                 .and_then(|d| self.accounts.get(d))
-                .filter(|a| a.last_error.as_ref().is_some_and(UsageError::is_throttle))
+                .filter(|a| a.backoff.throttled())
                 .and_then(|a| a.backoff.until())
                 .filter(|u| *u > now),
             polling: self.active.as_ref().is_some_and(|a| self.in_flight.contains(a)),
@@ -626,7 +640,8 @@ mod tests {
         UsageReading {
             session: Some(Window { pct: s, resets_at: Some(utc(T0 + 3600)) }),
             week: Some(Window { pct: 10, resets_at: Some(utc(T0 + 86_400)) }),
-            // As every source labels a reading with a session window.
+            // As `AccountState::record` labels a reading with a session
+            // window, so recorded readings compare equal.
             session_limit: crate::usage::SessionLimit::Applies,
             ..Default::default()
         }
@@ -721,6 +736,32 @@ mod tests {
         // B tokenless/logged out doesn't matter while A works.
         e.on_poll_results(T0 + 180, vec![(a.clone(), Ok(reading(20))), (b, Err(UsageError::NotLoggedIn("x".into())))]);
         assert!(!e.status(T0 + 180).logged_out);
+    }
+
+    // An account whose main meter changes kind (verified for no 5-hour
+    // limit, or a first reading that couldn't tell): its jump from the
+    // session's 0 % to the week's 48 % is not a rise, so the shown account
+    // stays, and the rate math starts over rather than read it as heavy use.
+    #[test]
+    fn a_change_of_meter_kind_is_not_a_rise() {
+        use crate::usage::SessionLimit;
+        let week = |pct| UsageReading { week: Some(Window { pct, resets_at: None }), ..Default::default() };
+        let ultra = |pct| UsageReading { session_limit: SessionLimit::Absent, ..week(pct) };
+        let mut e = Engine::new(settings("config_dirs = ~/.claude, ~/.claude-work\n"));
+        let a = PathBuf::from("/h/.claude");
+        let b = PathBuf::from("/h/.claude-work");
+        e.on_poll_results(T0, vec![(a.clone(), Ok(reading(10))), (b.clone(), Ok(week(48)))]);
+        e.on_poll_results(T0 + 60, vec![(a.clone(), Ok(reading(12))), (b.clone(), Ok(week(48)))]);
+        assert_eq!(e.status(T0 + 60).active_account, Some(a.clone()));
+        e.on_poll_results(T0 + 120, vec![(a.clone(), Ok(reading(12))), (b.clone(), Ok(ultra(48)))]);
+        assert_eq!(e.status(T0 + 120).active_account, Some(a.clone()), "B's 0 → 48 isn't activity");
+        e.on_poll_results(T0 + 180, vec![(a.clone(), Ok(reading(12))), (b.clone(), Ok(ultra(49)))]);
+        assert_eq!(e.status(T0 + 180).active_account, Some(b), "B's week moving is");
+        // One account: the change doesn't read as 48 points in ten minutes.
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(a.clone(), Ok(week(48)))]);
+        e.on_poll_results(T0 + 600, vec![(a, Ok(ultra(48)))]);
+        assert_eq!(e.status(T0 + 600).mood, Some(Mood::Idle));
     }
 
     // A miss on the shown account is never a poll, even when another
@@ -1101,6 +1142,22 @@ mod tests {
         // The user's own prompt starts a window: the probe, at once.
         e.on_hook_event(&mine(T0 + 4500), T0 + 4500);
         assert_eq!(plans(&mut e, T0 + 4500), vec![ProbePlan::Probe { usage_fallback: true }]);
+    }
+
+    // A probe answering (or missing) during a 429 block leaves it in place:
+    // still saved for a restart and shown as a pause until it runs out.
+    #[test]
+    fn a_probe_result_keeps_the_saved_block() {
+        let mut e = Engine::new(settings(""));
+        let a = PathBuf::from("/h/.claude");
+        e.on_poll_results(T0, vec![(a.clone(), Err(UsageError::Throttled { retry_after_secs: Some(3600) }))]);
+        let probe = |result| probe::Polled { result, idle: false, probe_missed: false, idle_miss: None };
+        e.on_poll_results(T0 + 120, vec![(a.clone(), probe(Ok(reading(5))))]);
+        assert_eq!(e.blocks(T0 + 130).get(&a).map(|b| b.until), Some(T0 + 3600));
+        assert_eq!(e.status(T0 + 130).paused_until, Some(T0 + 3600));
+        e.on_poll_results(T0 + 300, vec![(a.clone(), probe(Err(UsageError::Timeout)))]);
+        assert_eq!(e.blocks(T0 + 310).get(&a).map(|b| b.until), Some(T0 + 3600));
+        assert!(e.blocks(T0 + 3600).is_empty(), "until it runs out");
     }
 
     // Only a 429 is saved as a block (and called a pause by Anthropic); a

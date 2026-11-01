@@ -13,8 +13,9 @@
 //! Polling inside that window gets nothing back, and polling right after it
 //! can trip the limit again, so a miss that may have reached the endpoint
 //! parks the account for [`RATE_LIMIT_FLOOR_SECS`], then longer on repeated
-//! misses ([`BACKOFF_STEPS`]), until a poll succeeds. Nothing bypasses it:
-//! device refresh requests and the tray's "Refresh now" wait too.
+//! misses ([`BACKOFF_STEPS`]), until the idle source answers (a probe's
+//! answer doesn't end it). Nothing bypasses it: device refresh requests and
+//! the tray's "Refresh now" wait too.
 
 /// Claude Code's own 429 memory per bearer (about 600 s), so the shortest
 /// pause after a miss.
@@ -32,6 +33,9 @@ pub const RETRY_AFTER_MARGIN_SECS: i64 = 10;
 pub struct Backoff {
     strikes: u32,
     until: Option<i64>,
+    /// The pause is a 429's: Anthropic paused usage requests. Saved across
+    /// restarts and shown as a pause, whatever answers in the meantime.
+    throttled: bool,
 }
 
 impl Backoff {
@@ -53,9 +57,19 @@ impl Backoff {
         self.until = Some(now.saturating_add(secs.max(0)));
     }
 
-    /// Restore a saved block.
+    /// Restore a saved block (only a 429's is saved).
     pub fn restore(strikes: u32, until: i64) -> Self {
-        Backoff { strikes, until: Some(until) }
+        Backoff { strikes, until: Some(until), throttled: true }
+    }
+
+    /// Whether the latest pause is a 429's.
+    pub fn set_throttled(&mut self, throttled: bool) {
+        self.throttled = throttled;
+    }
+
+    /// The pause is a 429's (see [`Backoff::set_throttled`]).
+    pub fn throttled(&self) -> bool {
+        self.throttled
     }
 
     /// A good poll: back to normal.
