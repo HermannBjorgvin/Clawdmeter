@@ -80,7 +80,9 @@ The app writes one complete JSON object per write to RX
 
 - Usage: `s sr w wr st acct tp pd rd t tf c ok`. `sr`/`wr` = -1 means not
   started or unknown. `acct:"ent"` is a spend-capped account: `s` is spend %,
-  `tp/pd/rd` the billing period. `{"ok":false}` means no data.
+  `tp/pd/rd` the billing period. `acct:"week"` has no 5-hour limit (verified
+  Ultra, the endpoint's `five_hour: null`): `s`/`sr` are the week, shown
+  alone. `{"ok":false}` means no data.
 - Attention: `b` (alert chime), `m` (ASCII message), `x` (clear).
 - Fast clock: `a` (activity 0–3), `e` + `es` (event `p`/`s`/`b` and its
   sequence), `n` (active sessions). `rp:1` marks the usage numbers as a replay

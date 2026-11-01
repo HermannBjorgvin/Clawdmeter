@@ -25,7 +25,8 @@
 //! ended with no activity since needs no call at all: the session is not
 //! started ([`not_started`]). Anything less certain goes to `/usage`, which
 //! answers locally and starts nothing, on a slower cadence
-//! ([`crate::cadence::Cadence::no_window`]).
+//! ([`crate::cadence::Cadence::no_window`]). An account with no 5-hour limit
+//! (verified Ultra) has no window to follow and never gets the probe.
 
 use std::path::Path;
 use std::process::Command;
@@ -34,7 +35,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::usage::{self, AccountState, UsageError, UsageReading, Window};
+use crate::usage::{self, AccountState, SessionLimit, UsageError, UsageReading, Window};
 
 /// The session window's length.
 pub const WINDOW_SECS: i64 = 5 * 3600;
@@ -77,8 +78,9 @@ pub fn anchor(st: &AccountState) -> Option<i64> {
 /// prompt or tool activity that couldn't be tied to an account.
 pub fn choose_source(st: &AccountState, unattributed: Option<i64>, now: i64) -> Source {
     let Some(last) = &st.last else { return Source::Usage };
-    // Spend-capped accounts: the headers carry no spend cap.
-    if last.is_spend_only() {
+    // Spend-capped accounts: the headers carry no spend cap. No 5-hour
+    // limit: no window to follow, and the endpoint has the weekly numbers.
+    if last.is_spend_only() || last.no_session_limit() {
         return Source::Usage;
     }
     let anchor = anchor(st).unwrap_or(now);
@@ -117,6 +119,7 @@ pub fn not_started(last: &UsageReading, now: i64) -> UsageReading {
         models: last.models.iter().map(|(m, w)| (m.clone(), reset(w))).collect(),
         spend: last.spend.clone(),
         overage: false,
+        session_limit: last.session_limit,
     }
 }
 
@@ -165,8 +168,12 @@ pub fn parse_stream(stdout: &str) -> Result<UsageReading, UsageError> {
         let resets_at = w.get("resetsAt").and_then(Value::as_i64).and_then(|t| DateTime::<Utc>::from_timestamp(t, 0));
         Some(Window { pct: (used * 100.0).round().max(0.0) as u32, resets_at })
     };
+    let session = window("five_hour");
     let reading = UsageReading {
-        session: window("five_hour"),
+        // The probe runs only while a window is: a missing five_hour says
+        // nothing about the limit.
+        session_limit: if session.is_some() { SessionLimit::Applies } else { SessionLimit::Unknown },
+        session,
         week: window("seven_day"),
         models: Vec::new(),
         spend: None,
@@ -341,6 +348,7 @@ mod tests {
         assert_eq!(r.week, Some(Window { pct: 20, resets_at: ts(1_792_360_800) }));
         assert!(!r.overage);
         assert!(r.window_started());
+        assert_eq!(r.session_limit, SessionLimit::Applies);
     }
 
     #[test]
@@ -376,6 +384,20 @@ mod tests {
     }
 
     #[test]
+    fn no_session_limit_never_probes() {
+        let ultra =
+            UsageReading { session_limit: SessionLimit::Absent, ..reading(None, Some((48, Some(T0 + 86_400)))) };
+        let mut st = state(ultra, T0 - 60);
+        // A prompt would open the probe for an account with the limit.
+        st.note_activity(T0 - 30);
+        assert_eq!(st.first_activity, Some(T0 - 30));
+        assert_eq!(choose_source(&st, None, T0), Source::Usage);
+        // The same activity on an account with the limit, no window running: the probe.
+        st.last.as_mut().unwrap().session_limit = SessionLimit::Applies;
+        assert_eq!(choose_source(&st, None, T0), Source::Probe);
+    }
+
+    #[test]
     fn probes_only_while_the_window_runs() {
         let st = state(reading(Some((30, Some(T0 + 3600))), Some((10, Some(T0 + 86_400)))), T0 - 60);
         assert_eq!(choose_source(&st, None, T0), Source::Probe);
@@ -397,6 +419,10 @@ mod tests {
         // Past the weekly reset too: back at 0 % with no reset.
         let Source::NotStarted(r) = choose_source(&st, None, T0 + 86_400) else { panic!() };
         assert_eq!(r.week, Some(Window { pct: 0, resets_at: None }));
+        let mut limited = st.clone();
+        limited.last.as_mut().unwrap().session_limit = SessionLimit::Applies;
+        let Source::NotStarted(r) = choose_source(&limited, None, T0) else { panic!() };
+        assert_eq!(r.session_limit, SessionLimit::Applies, "kept");
         // Already not started at the last reading: /usage keeps watch.
         let idle = state(reading(None, Some((10, Some(T0 + 86_400)))), T0 - 600);
         assert_eq!(choose_source(&idle, None, T0), Source::Usage);

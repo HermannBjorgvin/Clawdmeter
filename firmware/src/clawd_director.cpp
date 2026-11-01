@@ -302,7 +302,8 @@ static void indev_cb(lv_event_t* e) {
 
 void director_on_payload(const UsageData* d, const SignalsUpdate* sig) {
     if (!d->valid || !d->ok) return;
-    window_not_started = !d->enterprise && d->session_reset_mins < 0;
+    // Spend-capped and no-5-hour-limit accounts have no window to start.
+    window_not_started = !d->enterprise && !d->weekly_only && d->session_reset_mins < 0;
 
     // The slow clock moving counts as you being around.
     if (!sig->replay) {

@@ -70,10 +70,31 @@ pub struct Spend {
     pub period: Option<SpendPeriod>,
 }
 
+/// Whether the account has a 5-hour (session) limit at all.
+///
+/// Verified Ultra (Max 20x) accounts have none: the usage endpoint answers
+/// `"five_hour": null` for them, where an account with the limit and no
+/// window running gets `{"utilization": 0, "resets_at": null}`. Only the
+/// endpoint can say so; `/usage` omits the session line both when no window
+/// is running and when there is no limit, and the probe runs only while a
+/// window is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionLimit {
+    /// This source can't tell: [`AccountState::record`] keeps what the last
+    /// reading said.
+    #[default]
+    Unknown,
+    /// The account has a 5-hour limit, running or not.
+    Applies,
+    /// The account has no 5-hour limit, only weekly ones.
+    Absent,
+}
+
 /// Everything `/usage` told us for one account.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UsageReading {
-    /// `Current session` (5-hour window). `None` = window not started.
+    /// `Current session` (5-hour window). `None` = window not started, or no
+    /// 5-hour limit at all ([`UsageReading::no_session_limit`]).
     pub session: Option<Window>,
     /// `Current week (all models)`.
     pub week: Option<Window>,
@@ -83,17 +104,27 @@ pub struct UsageReading {
     pub spend: Option<Spend>,
     /// The CLI says extra usage ("overages") is paying for requests.
     pub overage: bool,
+    /// Whether the account has a 5-hour limit at all.
+    pub session_limit: SessionLimit,
 }
 
 impl UsageReading {
     /// The device's main meter (`s`): session % used (0 when the window
-    /// hasn't started), or the spend % for a spend-capped account.
+    /// hasn't started), the spend % for a spend-capped account, or the week
+    /// % for an account with no 5-hour limit.
     pub fn session_pct(&self) -> u32 {
         match (&self.session, &self.spend) {
             (Some(w), _) => w.pct,
             (None, Some(sp)) if self.week.is_none() => sp.pct,
+            (None, _) if self.no_session_limit() => self.week.as_ref().map_or(0, |w| w.pct),
             _ => 0,
         }
+    }
+
+    /// The account has no 5-hour limit (verified Ultra): only the weekly
+    /// windows apply, and the session meter is hidden.
+    pub fn no_session_limit(&self) -> bool {
+        self.session_limit == SessionLimit::Absent
     }
 
     /// True when a 5-hour window is running (a session line with a reset).
@@ -317,6 +348,9 @@ pub fn parse_usage_text(text: &str, now: DateTime<Utc>) -> Result<UsageReading, 
         let label = label.trim();
         if label.eq_ignore_ascii_case("session") {
             r.session = Some(window);
+            // No session line says nothing: it is left out when no window
+            // is running, too.
+            r.session_limit = SessionLimit::Applies;
             matched = true;
         } else if let Some(inner) = label
             .strip_prefix("week")
@@ -880,7 +914,10 @@ impl AccountState {
     /// account's backoff; a good reading clears it.
     pub fn record(&mut self, now: i64, result: Result<UsageReading, UsageError>) {
         match result {
-            Ok(r) => {
+            Ok(mut r) => {
+                if r.session_limit == SessionLimit::Unknown {
+                    r.session_limit = self.last.as_ref().map_or(SessionLimit::Unknown, |l| l.session_limit);
+                }
                 self.last = Some(r);
                 self.last_ok_at = Some(now);
                 self.read_started_at = Some(self.last_attempt_at.unwrap_or(now).min(now));
@@ -1182,6 +1219,36 @@ mod tests {
         std::fs::write(dbg.join("latest"), "2026-10-13T15:40:00Z [DEBUG] fine\n").unwrap();
         assert_eq!(rate_limit_from_debug_log(&root, now), None, "latest wins over mtimes");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_source_that_cant_tell_keeps_the_session_limit() {
+        let now = at("2026-10-13T12:00:00Z");
+        let week = "Current week (all models): 38% used · resets Oct 14, 2:59pm (UTC)";
+        let ultra = UsageReading {
+            week: Some(Window { pct: 30, resets_at: None }),
+            session_limit: SessionLimit::Absent,
+            ..Default::default()
+        };
+        let mut st = AccountState::default();
+        st.record(1000, Ok(ultra));
+        // `/usage` with no session line (the token had expired): still none.
+        let text = parse_usage_text(week, now).unwrap();
+        assert_eq!(text.session_limit, SessionLimit::Unknown);
+        st.record(2000, Ok(text));
+        let last = st.last.as_ref().unwrap();
+        assert!(last.no_session_limit());
+        assert_eq!(last.session_pct(), 38, "the new week %");
+        // A session line says the limit is back.
+        let both = parse_usage_text(&format!("Current session: 5% used · resets Oct 13, 3pm (UTC)\n{week}"), now);
+        st.record(3000, both);
+        assert_eq!(st.last.as_ref().unwrap().session_limit, SessionLimit::Applies);
+        assert_eq!(st.last.as_ref().unwrap().session_pct(), 5);
+        // With no reading before, unknown stays unknown: the usual session meter.
+        let mut fresh = AccountState::default();
+        fresh.record(1000, parse_usage_text(week, now));
+        assert!(!fresh.last.as_ref().unwrap().no_session_limit());
+        assert_eq!(fresh.last.as_ref().unwrap().session_pct(), 0);
     }
 
     #[test]

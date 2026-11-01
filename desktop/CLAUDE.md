@@ -109,7 +109,16 @@ Per account (`probe.rs`, `oauth.rs`):
   `transcript_path`). A window that ends with no activity since becomes
   "not started" with no call. Anything uncertain (first run, unattributed
   activity, near a reset) uses the idle source, which sends no message.
-  Spend-capped accounts always use the idle source.
+  Spend-capped accounts always use the idle source, and so do accounts with
+  no 5-hour limit.
+- **No 5-hour limit** (verified Ultra, formerly Max 20x): the endpoint
+  answers `"five_hour": null`, where an account with the limit and no window
+  running gets `{"utilization": 0, "resets_at": null}`. Only the endpoint can
+  tell (`usage::SessionLimit`); `/usage` and the probe leave it `Unknown` and
+  `AccountState::record` keeps the last answer. The payload is
+  `acct:"week"` with the week in `s`/`sr`; the Overview, tray and device
+  drop the session meter. The plan name (`planDisplayName`, `rate_limit_tier`)
+  isn't used: an unverified Ultra account still has a temporary 5-hour limit.
 - `claude` is found via `claude_path` → `PATH` / install dirs → the newest
   Claude-desktop-bundled build (`<userData>/claude-code/<version>/<hash>/claude`;
   verified on Linux, the macOS/Windows paths come from the desktop app's code

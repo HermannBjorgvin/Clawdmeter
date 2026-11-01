@@ -288,14 +288,11 @@ impl Render for OverviewView {
             return page.child(chime).child(setup);
         };
 
-        page = page.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(12.))
-                .child(meter(&t, "Session", s.session_pct, reset_text(s.session_resets_at, now, "Not started")))
-                .child(meter(&t, "Weekly", s.week_pct, reset_text(s.week_resets_at, now, "---"))),
-        );
+        // No 5-hour limit (verified Ultra): the week is the only meter.
+        let session = (!s.no_session_limit)
+            .then(|| meter(&t, "Session", s.session_pct, reset_text(s.session_resets_at, now, "Not started")));
+        let weekly = meter(&t, "Weekly", s.week_pct, reset_text(s.week_resets_at, now, "---"));
+        page = page.child(div().flex().flex_col().gap(px(12.)).children(session).child(weekly));
         if let Some(v) = s.update_available() {
             let v = v.trim_start_matches('v').to_owned();
             page = page.child(

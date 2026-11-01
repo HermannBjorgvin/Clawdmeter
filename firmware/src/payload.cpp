@@ -32,6 +32,7 @@ bool payload_parse(const char* json, UsageData* out, const char** err) {
     d.alert_clear = doc["x"].as<bool>();
     const char* acct = doc["acct"] | "pro";
     d.enterprise = (strcmp(acct, "ent") == 0);
+    d.weekly_only = (strcmp(acct, "week") == 0);
     d.time_pct = doc["tp"] | 0;
     d.period_days = doc["pd"] | 30;
     copy_str(d.reset_date, sizeof(d.reset_date), doc["rd"] | "");

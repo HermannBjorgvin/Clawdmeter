@@ -32,10 +32,10 @@ seconds) and sends `x` if the device still shows it.
 
 | Field | Meaning |
 | --- | --- |
-| `s`, `w` | Session and weekly % used. |
+| `s`, `w` | Session and weekly % used (`s` is the spend % for `ent` and the weekly % for `week`). |
 | `sr`, `wr` | Minutes until each resets; `-1` = window not started / unknown. |
 | `st` | `allowed`, `limited` or `overage` (stored, not shown). |
-| `acct` | `pro`, or `ent` for a spend-capped account: `s` is then the spend %, and `tp` (% of the billing period elapsed), `pd` (period length in days) and `rd` (reset date, e.g. `"Nov 1"`) fill the second card. |
+| `acct` | `pro`, `week` or `ent`. `week` is an account with no 5-hour limit (Ultra, formerly Max 20x, once verified; the usage endpoint answers `"five_hour": null`): `s`/`sr` carry the week, shown alone in the first card, and its rate, reset chime and pace follow the week; `w`/`wr` repeat it for older firmware, which draws the Pro cards. `ent` is a spend-capped account: `s` is then the spend %, and `tp` (% of the billing period elapsed), `pd` (period length in days) and `rd` (reset date, e.g. `"Nov 1"`) fill the second card. |
 | `t`, `tf` | Local wall-clock epoch and 12/24-hour format, when the clock is on. |
 | `c` | `1` = the reset chime may sound. |
 | `ok` | `false` alone = no usable account data; do not treat this as a zero reading. |

@@ -15,6 +15,8 @@ struct UsageData {
     char alert_msg[128];     // attention message for the status line; empty = no alert
     bool alert_clear;        // the session moved on: end the alert
     bool enterprise;         // true = Enterprise spending-limit account
+    bool weekly_only;        // true = no 5-hour limit (acct "week", verified Ultra):
+                             //   session_pct / session_reset_mins carry the week
     int time_pct;            // 0-100: fraction of billing period elapsed (Enterprise)
     int period_days;         // total billing period length in days (Enterprise)
     char reset_date[12];     // formatted reset date e.g. "Jul 1" (Enterprise)
