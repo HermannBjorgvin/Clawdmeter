@@ -13,9 +13,10 @@
 //! Polling inside that window gets nothing back, and polling right after it
 //! can trip the limit again, so a miss that may have reached the endpoint
 //! parks the account for [`RATE_LIMIT_FLOOR_SECS`], then longer on repeated
-//! misses ([`BACKOFF_STEPS`]), until the idle source answers (a probe's
-//! answer doesn't end it). Nothing bypasses it: device refresh requests and
-//! the tray's "Refresh now" wait too.
+//! misses ([`BACKOFF_STEPS`]), until the idle source answers. A probe's
+//! answer doesn't end a pause that's still running; once it has run out, it
+//! clears the strikes. Nothing bypasses it: device refresh requests and the
+//! tray's "Refresh now" wait too.
 
 /// Claude Code's own 429 memory per bearer (about 600 s), so the shortest
 /// pause after a miss.

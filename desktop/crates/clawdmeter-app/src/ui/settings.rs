@@ -719,7 +719,8 @@ impl SettingsView {
             .child(para(
                 t,
                 "The default Claude Code folder is ~/.claude. Add a config folder for each other account you want \
-                 to monitor. The device follows the account whose session usage increased most recently.",
+                 to monitor. The device follows the account whose usage increased most recently (weekly usage, on \
+                 accounts with no 5-hour limit).",
             ))
             .when_some(self.snap.as_ref(), |d, snap| {
                 d.child(caption(

@@ -916,35 +916,38 @@ impl AccountState {
     /// Record one [`crate::probe::Polled`]: an idle-source result as
     /// [`AccountState::record`]. The probe never touches the idle source's
     /// rate limit: its miss counts as a miss without backing the idle source
-    /// off, and its answer doesn't end that backoff. An idle-source miss next
-    /// to a probe's reading backs off all the same.
+    /// off, and its answer doesn't end a pause that's still running. An
+    /// endpoint miss next to a probe's reading backs off all the same.
     pub fn record_polled(&mut self, now: i64, polled: crate::probe::Polled) {
-        if polled.probe_missed {
-            self.probe_misses = self.probe_misses.saturating_add(1);
-        } else if !polled.idle && polled.result.is_ok() {
-            self.probe_misses = 0;
+        match polled.probe {
+            crate::probe::ProbeRun::Missed => self.probe_misses = self.probe_misses.saturating_add(1),
+            crate::probe::ProbeRun::Answered => self.probe_misses = 0,
+            crate::probe::ProbeRun::NotRun => {}
         }
         match polled.result {
             Err(e) if !polled.idle => {
                 self.misses = self.misses.saturating_add(1);
                 self.last_error = Some(e);
             }
-            // Nor does a probe's answer clear the idle source's backoff: the
-            // endpoint stays parked until it answers itself or the block runs
-            // out, so a probe answer without five_hour can't send the
+            // The endpoint stays parked until it answers itself or the pause
+            // runs out, so a probe answer without five_hour can't send the
             // fallback into a 429 block (which the server would lengthen).
+            // Once the pause has run out a probe answer ends it, so hours on
+            // the probe don't lengthen the next one, unless the endpoint
+            // missed again in this poll: misses in a row still climb.
             Ok(r) if !polled.idle => {
-                let backoff = self.backoff;
-                self.record(now, Ok(r));
-                self.backoff = backoff;
+                self.store(now, r);
+                if !self.backoff.active(now) && polled.idle_miss.is_none() {
+                    self.backoff.on_success();
+                }
             }
             r => self.record(now, r),
         }
-        // The probe's reading stands, but the idle source asked after it
-        // missed: a transient miss still backs the account off (a 429 is
-        // kept and saved), without making the fresh reading a miss. Others
-        // (a login problem) are left to the idle source's own next poll.
-        if let Some(e) = polled.idle_miss.filter(UsageError::is_transient) {
+        // The probe's reading stands, but the endpoint, asked after it,
+        // missed: the miss backs the account off as the idle source's would
+        // (a 429 is kept and saved, a refused token waits on the ladder),
+        // without making the fresh reading a miss.
+        if let Some(e) = polled.idle_miss {
             self.back_off(now, &e);
             self.last_error = Some(e);
         }
@@ -970,26 +973,8 @@ impl AccountState {
     /// account's backoff; a good reading clears it.
     pub fn record(&mut self, now: i64, result: Result<UsageReading, UsageError>) {
         match result {
-            Ok(mut r) => {
-                // A session window is the limit, whatever the source (the
-                // parsers leave this to here). Without one, a source that
-                // can't tell keeps the last answer; only a reading with a week
-                // can be weekly-only (a spend-capped one keeps its own meter).
-                if r.session.is_some() {
-                    r.session_limit = SessionLimit::Applies;
-                } else if r.session_limit == SessionLimit::Unknown && r.week.is_some() {
-                    r.session_limit = self.last.as_ref().map_or(SessionLimit::Unknown, |l| l.session_limit);
-                }
-                self.last = Some(r);
-                self.last_ok_at = Some(now);
-                self.read_started_at = Some(self.last_attempt_at.unwrap_or(now).min(now));
-                let anchor = crate::probe::anchor(self);
-                self.first_activity = self.first_activity.filter(|t| anchor.is_some_and(|a| *t > a));
-                if self.first_activity.is_none() {
-                    self.probe_misses = 0;
-                }
-                self.misses = 0;
-                self.last_error = None;
+            Ok(r) => {
+                self.store(now, r);
                 self.backoff.on_success();
             }
             Err(e) => {
@@ -998,6 +983,38 @@ impl AccountState {
                 self.last_error = Some(e);
             }
         }
+    }
+
+    /// Keep a good reading: everything [`AccountState::record`] does with
+    /// one except ending the backoff.
+    fn store(&mut self, now: i64, mut r: UsageReading) {
+        // A session window is the limit, whatever the source (the parsers
+        // leave this to here). Without one, a source that can't tell keeps
+        // the last answer; only a reading with a week can be weekly-only (a
+        // spend-capped one keeps its own meter).
+        let running =
+            |l: &UsageReading| l.session.as_ref().and_then(|w| w.resets_at).is_some_and(|t| t.timestamp() > now);
+        if r.session.is_some() {
+            r.session_limit = SessionLimit::Applies;
+        } else if r.session_limit == SessionLimit::Unknown && r.week.is_some() {
+            r.session_limit = self.last.as_ref().map_or(SessionLimit::Unknown, |l| l.session_limit);
+        } else if r.session_limit == SessionLimit::Absent && self.last.as_ref().is_some_and(running) {
+            // "No 5-hour limit" in the middle of a running window waits for
+            // the next answer: this reading has no window, so a second one
+            // says it, and one odd answer doesn't drop the session meter or
+            // stop the probe. Verifying an account costs one poll.
+            r.session_limit = SessionLimit::Applies;
+        }
+        self.last = Some(r);
+        self.last_ok_at = Some(now);
+        self.read_started_at = Some(self.last_attempt_at.unwrap_or(now).min(now));
+        let anchor = crate::probe::anchor(self);
+        self.first_activity = self.first_activity.filter(|t| anchor.is_some_and(|a| *t > a));
+        if self.first_activity.is_none() {
+            self.probe_misses = 0;
+        }
+        self.misses = 0;
+        self.last_error = None;
     }
 
     /// Three misses in a row (or never read at all after three tries), or a
@@ -1311,6 +1328,36 @@ mod tests {
         fresh.record(1000, parse_usage_text(week, now));
         assert!(!fresh.last.as_ref().unwrap().no_session_limit());
         assert_eq!(fresh.last.as_ref().unwrap().session_pct(), 0);
+    }
+
+    // One "no 5-hour limit" answer while the last reading's window still
+    // runs waits for the next answer; with no window running it counts at
+    // once.
+    #[test]
+    fn no_limit_in_a_running_window_waits_for_the_next_answer() {
+        let pro = UsageReading {
+            session: Some(Window { pct: 30, resets_at: DateTime::from_timestamp(5000, 0) }),
+            week: Some(Window { pct: 40, resets_at: None }),
+            ..Default::default()
+        };
+        let ultra = || UsageReading {
+            week: Some(Window { pct: 48, resets_at: None }),
+            session_limit: SessionLimit::Absent,
+            ..Default::default()
+        };
+        let mut st = AccountState::default();
+        st.record(1000, Ok(pro.clone()));
+        st.record(2000, Ok(ultra()));
+        let last = st.last.as_ref().unwrap();
+        assert!(!last.no_session_limit() && last.session.is_none(), "{last:?}");
+        assert_eq!(last.session_pct(), 0, "not started meanwhile");
+        st.record(2600, Ok(ultra()));
+        assert!(st.last.as_ref().unwrap().no_session_limit(), "the next answer says it");
+        // The window over: at once.
+        let mut st = AccountState::default();
+        st.record(1000, Ok(pro));
+        st.record(6000, Ok(ultra()));
+        assert!(st.last.as_ref().unwrap().no_session_limit());
     }
 
     #[test]

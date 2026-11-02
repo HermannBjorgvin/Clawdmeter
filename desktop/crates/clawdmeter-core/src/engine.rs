@@ -586,16 +586,17 @@ impl Engine {
                 .accounts
                 .iter()
                 .filter_map(|(k, a)| {
-                    a.last_error.as_ref().map(|e| AccountError {
-                        dir: k.clone(),
-                        message: match a.backoff.until().filter(|u| *u > now) {
-                            Some(until) if e.is_throttle() => {
-                                crate::usage::paused_message(until, crate::platform::utc_offset_secs())
-                            }
-                            _ => e.user_message(a.backoff.remaining(now)),
-                        },
-                        retrying: e.is_transient(),
-                    })
+                    // A 429's pause comes from the backoff, as the Overview's
+                    // does: a probe's answer clears the error, not the pause.
+                    let paused = a.backoff.until().filter(|u| a.backoff.throttled() && *u > now);
+                    let (message, retrying) = match (paused, &a.last_error) {
+                        (Some(until), _) => {
+                            (crate::usage::paused_message(until, crate::platform::utc_offset_secs()), true)
+                        }
+                        (None, Some(e)) => (e.user_message(a.backoff.remaining(now)), e.is_transient()),
+                        (None, None) => return None,
+                    };
+                    Some(AccountError { dir: k.clone(), message, retrying })
                 })
                 .collect(),
             attention: self.attention.active(),
@@ -1145,19 +1146,32 @@ mod tests {
     }
 
     // A probe answering (or missing) during a 429 block leaves it in place:
-    // still saved for a restart and shown as a pause until it runs out.
+    // still saved for a restart and shown as a pause, on the Overview and
+    // the Accounts page alike, until it runs out.
     #[test]
     fn a_probe_result_keeps_the_saved_block() {
         let mut e = Engine::new(settings(""));
         let a = PathBuf::from("/h/.claude");
         e.on_poll_results(T0, vec![(a.clone(), Err(UsageError::Throttled { retry_after_secs: Some(3600) }))]);
-        let probe = |result| probe::Polled { result, idle: false, probe_missed: false, idle_miss: None };
+        let probe = |result: Result<UsageReading, UsageError>| {
+            let run = if result.is_ok() { probe::ProbeRun::Answered } else { probe::ProbeRun::Missed };
+            probe::Polled { result, idle: false, probe: run, idle_miss: None }
+        };
+        let paused = |e: &Engine, now| {
+            let errors = e.status(now).errors;
+            let [err] = errors.as_slice() else { panic!("{errors:?}") };
+            assert!(err.message.starts_with("Usage paused by Anthropic until ") && err.retrying, "{err:?}");
+        };
         e.on_poll_results(T0 + 120, vec![(a.clone(), probe(Ok(reading(5))))]);
         assert_eq!(e.blocks(T0 + 130).get(&a).map(|b| b.until), Some(T0 + 3600));
         assert_eq!(e.status(T0 + 130).paused_until, Some(T0 + 3600));
+        assert_eq!(e.accounts[&a].last_error, None, "the probe's reading is fresh");
+        paused(&e, T0 + 130);
         e.on_poll_results(T0 + 300, vec![(a.clone(), probe(Err(UsageError::Timeout)))]);
         assert_eq!(e.blocks(T0 + 310).get(&a).map(|b| b.until), Some(T0 + 3600));
+        paused(&e, T0 + 310);
         assert!(e.blocks(T0 + 3600).is_empty(), "until it runs out");
+        assert!(e.status(T0 + 3600).errors[0].message.starts_with("Claude Code took too long"));
     }
 
     // Only a 429 is saved as a block (and called a pause by Anthropic); a

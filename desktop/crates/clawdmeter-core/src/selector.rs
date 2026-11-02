@@ -1,9 +1,10 @@
 //! Which account to show when several are configured.
 //!
-//! The account whose session % rose most recently wins. A
+//! The account whose main meter % rose most recently wins (the session, or
+//! the week or spend on accounts measured that way: `session_pct()`). A
 //! rise stamps a monotonic poll counter, so the choice is sticky and a window
-//! reset (a drop) is not activity. Before any rise, the highest current
-//! session % wins.
+//! reset (a drop) is not activity. Before any rise, the highest current %
+//! wins, whatever each one measures: the account nearest its own limit.
 
 use std::collections::HashMap;
 use std::hash::Hash;

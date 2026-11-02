@@ -242,19 +242,44 @@ pub struct Polled {
     /// The result is the idle source's (the endpoint or `/usage`), whose
     /// misses back the account off.
     pub idle: bool,
-    /// The probe ran and missed (the idle source may have answered after).
-    pub probe_missed: bool,
-    /// The idle source missed after the probe had answered (an answer
+    /// What the probe did (the idle source may have answered after it).
+    pub probe: ProbeRun,
+    /// The usage endpoint missed after the probe had answered (an answer
     /// without five_hour, see [`poll`]): `result` is the probe's reading,
-    /// and a transient miss here still backs the account off.
+    /// and the miss still backs the account off.
     pub idle_miss: Option<UsageError>,
+}
+
+/// What the probe did in one poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProbeRun {
+    /// It didn't run.
+    #[default]
+    NotRun,
+    /// It answered, even if the endpoint's reading replaced its own.
+    Answered,
+    /// It missed.
+    Missed,
 }
 
 impl From<Result<UsageReading, UsageError>> for Polled {
     /// An idle-source result.
     fn from(result: Result<UsageReading, UsageError>) -> Self {
-        Polled { result, idle: true, probe_missed: false, idle_miss: None }
+        Polled { result, idle: true, probe: ProbeRun::NotRun, idle_miss: None }
     }
+}
+
+/// A probe answer without five_hour, and the usage endpoint's answer after
+/// it (`None`: no token to ask it with). The endpoint's reading replaces the
+/// probe's; when it can't give one, the probe's stands and the miss rides
+/// along.
+fn after_week_only_probe(probe: UsageReading, endpoint: Option<Result<UsageReading, UsageError>>) -> Polled {
+    let (result, idle, idle_miss) = match endpoint {
+        Some(Ok(r)) => (Ok(r), true, None),
+        Some(Err(e)) => (Ok(probe), false, Some(e)),
+        None => (Ok(probe), false, None),
+    };
+    Polled { result, idle, probe: ProbeRun::Answered, idle_miss }
 }
 
 /// Read one account by `plan`. `cwd` is where the probe runs; without a
@@ -267,31 +292,38 @@ pub fn poll(
     plan: &Plan,
     now: DateTime<Utc>,
 ) -> Polled {
-    let probe = |result, probe_missed| Polled { result, idle: false, probe_missed, idle_miss: None };
+    let probe = |result, probe| Polled { result, idle: false, probe, idle_miss: None };
     match (plan, claude) {
-        (Plan::Known(r), _) => probe(Ok(r.clone()), false),
+        (Plan::Known(r), _) => probe(Ok(r.clone()), ProbeRun::NotRun),
         (Plan::Usage, _) | (Plan::Probe { .. }, None) => poll_idle(claude, config_dir, home, now).into(),
         (Plan::Probe { usage_fallback }, Some(c)) => match run_probe(c, config_dir, home, cwd, usage::CLI_TIMEOUT) {
             // No five_hour: the window just ended, or the account has no
-            // 5-hour limit any more. Only the endpoint can tell, so ask it
-            // when it may be asked. While it's backing off, or if it misses,
-            // the answer is kept as it is (not started), which stops the
-            // probe; the miss still backs the account off.
+            // 5-hour limit any more. Only the usage endpoint can tell, so ask
+            // it when it may be asked; `/usage` drops the session line either
+            // way, so it isn't asked. While the endpoint is backing off, has
+            // no token to be asked with, or misses, the answer is kept as it
+            // is (not started), which stops the probe until the next prompt;
+            // the miss still backs the account off.
             Ok(r) if r.session.is_none() && *usage_fallback => {
                 log::info!("{}: probe answer has no 5-hour window; asking the usage endpoint", config_dir.display());
-                match poll_idle(claude, config_dir, home, now) {
-                    Ok(idle) => Ok(idle).into(),
-                    Err(e) => {
+                let endpoint = crate::oauth::poll_endpoint(config_dir, home, now);
+                match &endpoint {
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
                         log::info!("{}: usage endpoint missed ({e}); keeping the probe's answer", config_dir.display());
-                        Polled { result: Ok(r), idle: false, probe_missed: false, idle_miss: Some(e) }
                     }
+                    None => log::info!(
+                        "{}: no token for the usage endpoint; keeping the probe's answer",
+                        config_dir.display()
+                    ),
                 }
+                after_week_only_probe(r, endpoint)
             }
-            Ok(r) => probe(Ok(r), false),
-            Err(e) if e.is_auth() || !usage_fallback => probe(Err(e), true),
+            Ok(r) => probe(Ok(r), ProbeRun::Answered),
+            Err(e) if e.is_auth() || !usage_fallback => probe(Err(e), ProbeRun::Missed),
             Err(e) => {
                 log::info!("{}: probe missed ({e}); asking the usage endpoint", config_dir.display());
-                Polled { probe_missed: true, ..poll_idle(claude, config_dir, home, now).into() }
+                Polled { probe: ProbeRun::Missed, ..poll_idle(claude, config_dir, home, now).into() }
             }
         },
     }
@@ -302,14 +334,15 @@ mod tests {
     use super::*;
 
     // An expired token goes to `claude -p /usage` (a stand-in script here),
-    // which renews it; without a CLI the expiry is reported.
+    // which renews it; without a CLI the expiry is reported. The folder isn't
+    // `<home>/.claude`, whose Keychain entry is the real default one on macOS.
     #[cfg(unix)]
     #[test]
     fn expired_token_asks_the_cli() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("cm-idle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let cfg = dir.join(".claude");
+        let cfg = dir.join("cfg");
         std::fs::create_dir_all(&cfg).unwrap();
         std::fs::write(cfg.join(".credentials.json"), r#"{"claudeAiOauth":{"accessToken":"t","expiresAt":1000}}"#)
             .unwrap();
@@ -323,47 +356,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // A probe answer without five_hour: the endpoint (here `claude -p
-    // /usage`, no token) answers in the same poll; while it's backing off, or
-    // when it misses, the probe's own answer is kept (not started), and the
-    // probe waits for the next prompt.
+    // A probe answer without five_hour asks the usage endpoint alone:
+    // `claude -p /usage` can't tell either, and would run on every prompt.
+    // With no token to ask it with, an expired one, or while it's backing
+    // off, the probe's own answer is kept (not started). The folder isn't
+    // `<home>/.claude` (the real default Keychain entry on macOS), so no
+    // token is found and nothing reaches the network.
     #[cfg(unix)]
     #[test]
-    fn probe_without_five_hour_asks_the_endpoint_when_allowed() {
+    fn probe_without_five_hour_asks_only_the_endpoint() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("cm-probe-week-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let cfg = dir.join(".claude");
+        let cfg = dir.join("cfg");
         std::fs::create_dir_all(&cfg).unwrap();
-        let usage = dir.join("usage.json");
-        std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/not-started.json"), &usage).unwrap();
+        let usage = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/not-started.json");
         let stream = dir.join("stream.jsonl");
         std::fs::write(
             &stream,
             "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"unifiedWindows\":{\"seven_day\":{\"utilization\":0.48,\"resetsAt\":1791990000}}}}\n",
         )
         .unwrap();
+        let ran_usage = dir.join("ran-usage");
         let fake = dir.join("claude");
         let script = format!(
-            "#!/bin/sh\ncase \"$*\" in *\"/usage\"*) cat '{}' ;; *) cat '{}' ;; esac\n",
+            "#!/bin/sh\ncase \"$*\" in *\"/usage\"*) touch '{}'; cat '{}' ;; *) cat '{}' ;; esac\n",
+            ran_usage.display(),
             usage.display(),
             stream.display()
         );
         std::fs::write(&fake, script).unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let now = Utc::now();
+        let week_only = |p: &Polled| {
+            let r = p.result.as_ref().unwrap();
+            (r.session.clone(), r.week.as_ref().map(|w| w.pct)) == (None, Some(48))
+        };
+        // No token.
         let p = poll(Some(&fake), &cfg, &dir, &dir, &Plan::Probe { usage_fallback: true }, now);
-        assert!(p.idle && !p.probe_missed && p.idle_miss.is_none(), "{p:?}");
-        assert_eq!(p.result.unwrap().week.map(|w| w.pct), Some(38), "the /usage fixture, not the probe");
+        assert!(!p.idle && p.probe == ProbeRun::Answered && p.idle_miss.is_none() && week_only(&p), "{p:?}");
+        // Backing off: the endpoint isn't asked.
         let p = poll(Some(&fake), &cfg, &dir, &dir, &Plan::Probe { usage_fallback: false }, now);
-        assert!(!p.idle && !p.probe_missed, "{p:?}");
-        let r = p.result.unwrap();
-        assert_eq!((r.session, r.week.map(|w| w.pct)), (None, Some(48)));
-        // The endpoint misses: the probe's answer stands, and the miss backs
-        // the account off without making the fresh reading a miss.
-        std::fs::write(&usage, "not json").unwrap();
+        assert!(!p.idle && p.probe == ProbeRun::Answered && p.idle_miss.is_none() && week_only(&p), "{p:?}");
+        // An expired token: the probe's answer stands, the expiry rides along.
+        std::fs::write(cfg.join(".credentials.json"), r#"{"claudeAiOauth":{"accessToken":"t","expiresAt":1000}}"#)
+            .unwrap();
         let p = poll(Some(&fake), &cfg, &dir, &dir, &Plan::Probe { usage_fallback: true }, now);
-        assert!(!p.idle && !p.probe_missed && p.idle_miss.as_ref().is_some_and(UsageError::is_transient), "{p:?}");
+        assert!(!p.idle && p.idle_miss == Some(UsageError::TokenExpired) && week_only(&p), "{p:?}");
+        assert!(!ran_usage.exists(), "claude -p /usage never ran");
         let pro =
             UsageReading { session_limit: SessionLimit::Applies, ..reading(Some((30, Some(T0))), Some((40, None))) };
         let mut st = state(pro, T0 - 600);
@@ -371,30 +411,74 @@ mod tests {
         let last = st.last.as_ref().unwrap();
         assert_eq!((last.session.clone(), last.week.as_ref().map(|w| w.pct)), (None, Some(48)), "not started");
         assert!(!last.no_session_limit(), "an account with the limit keeps it");
-        assert_eq!(st.misses, 0);
-        assert!(st.last_error.is_some() && st.backoff.active(T0 + 120), "{st:?}");
+        assert_eq!((st.misses, st.last_error.clone()), (0, Some(UsageError::TokenExpired)));
+        assert!(!st.backoff.active(T0 + 60), "an expired token never reached the endpoint");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // What the endpoint said after a probe answer without five_hour.
+    #[test]
+    fn the_endpoint_decides_after_a_week_only_probe() {
+        let probe = reading(None, Some((48, Some(T0 + 86_400))));
+        let pro =
+            || UsageReading { session_limit: SessionLimit::Applies, ..reading(Some((30, Some(T0))), Some((40, None))) };
+        // It answered: its reading, as the idle source's.
+        let ultra = UsageReading { session_limit: SessionLimit::Absent, ..reading(None, Some((48, None))) };
+        let p = after_week_only_probe(probe.clone(), Some(Ok(ultra)));
+        assert!(p.idle && p.probe == ProbeRun::Answered && p.idle_miss.is_none(), "{p:?}");
+        let mut st = state(pro(), T0 - 600);
+        st.record_polled(T0 + 60, p);
+        assert!(st.last.as_ref().unwrap().no_session_limit());
+        // The probe answered, so its earlier misses are over, even when an
+        // activity during the poll keeps the window inferred.
+        let mut st = state(pro(), T0 - 600);
+        st.last_attempt_at = Some(T0);
+        st.first_activity = Some(T0 + 30);
+        st.probe_misses = PROBE_MISS_LIMIT - 1;
+        let endpoint = UsageReading { session_limit: SessionLimit::Applies, ..reading(None, Some((48, None))) };
+        st.record_polled(T0 + 60, after_week_only_probe(probe.clone(), Some(Ok(endpoint))));
+        assert_eq!((st.first_activity, st.probe_misses), (Some(T0 + 30), 0));
+        // A transient miss, and a refused token, back the account off on the
+        // ladder and are reported; the probe's reading stands.
+        for e in [UsageError::Offline("down".into()), UsageError::TokenRejected] {
+            let mut st = state(pro(), T0 - 600);
+            st.record_polled(T0 + 60, after_week_only_probe(probe.clone(), Some(Err(e.clone()))));
+            assert_eq!(st.backoff.until(), Some(T0 + 660), "{e}");
+            assert_eq!((st.misses, st.last_error.clone()), (0, Some(e)));
+            assert_eq!(st.last.as_ref().unwrap().session, None);
+        }
     }
 
     // The endpoint is 429-parked after a probe answer without five_hour; the
     // user keeps prompting, so the probe answers again. That answer doesn't
     // end the block, or the next one would fall back to the endpoint inside
-    // it. The endpoint's own answer does.
+    // it. Once a pause has run out, a probe answer clears its strikes, so
+    // hours on the probe don't lengthen the next one; endpoint misses in a
+    // row still climb the ladder.
     #[test]
-    fn a_probe_answer_keeps_the_idle_backoff() {
+    fn a_probe_answer_keeps_a_running_backoff() {
         let week = || reading(None, Some((48, Some(T0 + 86_400))));
+        let answered = |idle_miss| Polled { result: Ok(week()), idle: false, probe: ProbeRun::Answered, idle_miss };
         let mut st = state(reading(Some((30, Some(T0))), Some((48, Some(T0 + 86_400)))), T0 - 600);
-        let throttled = UsageError::Throttled { retry_after_secs: Some(589) };
-        st.record_polled(
-            T0 + 60,
-            Polled { result: Ok(week()), idle: false, probe_missed: false, idle_miss: Some(throttled) },
-        );
+        st.record_polled(T0 + 60, answered(Some(UsageError::Throttled { retry_after_secs: Some(589) })));
         assert_eq!(st.backoff.until(), Some(T0 + 649));
-        st.record_polled(T0 + 180, Polled { result: Ok(week()), idle: false, probe_missed: false, idle_miss: None });
+        st.record_polled(T0 + 180, answered(None));
         assert_eq!(st.backoff.until(), Some(T0 + 649), "still parked: no fallback to the endpoint");
+        assert!(st.backoff.throttled());
         assert_eq!((st.misses, st.last_error.clone()), (0, None), "the probe's reading is fresh");
-        st.record_polled(T0 + 700, Ok(week()).into());
-        assert_eq!(st.backoff.until(), None, "the endpoint answered");
+        st.record_polled(T0 + 700, answered(None));
+        assert_eq!((st.backoff.until(), st.backoff.strikes()), (None, 0), "run out: its strikes go too");
+        // A timeout (strike 1); the endpoint missing again once that has run
+        // out is strike 2.
+        st.record_polled(T0 + 800, Polled { probe: ProbeRun::Missed, ..Err(UsageError::Timeout).into() });
+        assert_eq!(st.backoff.until(), Some(T0 + 1400));
+        st.record_polled(T0 + 1000, answered(None));
+        assert_eq!(st.backoff.until(), Some(T0 + 1400), "kept while it runs");
+        st.record_polled(T0 + 1500, answered(Some(UsageError::Offline("down".into()))));
+        assert_eq!((st.backoff.until(), st.backoff.strikes()), (Some(T0 + 2700), 2), "misses in a row climb");
+        // The endpoint's own answer ends it at once.
+        st.record_polled(T0 + 2000, Ok(week()).into());
+        assert_eq!((st.backoff.until(), st.backoff.strikes()), (None, 0));
     }
 
     #[test]
@@ -402,7 +486,8 @@ mod tests {
         let mut st = state(reading(None, Some((20, Some(T0 + 86_400)))), T0);
         st.first_activity = Some(T0 + 60);
         assert_eq!(choose_source(&st, None, T0 + 120), Source::Probe);
-        let miss = || Polled { result: Err(UsageError::Timeout), idle: false, probe_missed: true, idle_miss: None };
+        let miss =
+            || Polled { result: Err(UsageError::Timeout), idle: false, probe: ProbeRun::Missed, idle_miss: None };
         for _ in 0..PROBE_MISS_LIMIT {
             st.record_polled(T0 + 120, miss());
         }
