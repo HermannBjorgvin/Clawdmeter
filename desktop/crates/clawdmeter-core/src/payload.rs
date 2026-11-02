@@ -14,10 +14,11 @@ use crate::usage::{SpendPeriod, UsageReading};
 /// One device payload. `None` fields are omitted.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Payload {
-    /// Session % used.
+    /// Session % used (spend % for "ent"; 0 for "week").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub s: Option<u32>,
-    /// Minutes until the session resets; -1 = window not started.
+    /// Minutes until the session resets; -1 = window not started (always
+    /// for "week").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sr: Option<i64>,
     /// Weekly % used.
@@ -30,7 +31,8 @@ pub struct Payload {
     /// or "overage" (extra usage is paying). Stored, not shown, by the firmware.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub st: Option<String>,
-    /// Account kind: "pro" (5h/7d windows) or "ent" (spending limit).
+    /// Account kind: "pro" (5h/7d windows), "week" (weekly windows only, no
+    /// 5-hour limit, e.g. verified Ultra) or "ent" (spending limit).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acct: Option<String>,
     /// Enterprise: % of the billing period elapsed.
@@ -244,13 +246,17 @@ impl Payload {
             Some(win) => (win.pct, win.resets_at.map_or(-1, |t| minutes_until(t, now))),
             None => (0, -1),
         };
+        // No 5-hour limit: `s`/`sr` stay "not started", so firmware that
+        // doesn't know "week" draws exactly what it always did; newer
+        // firmware shows `w`/`wr` alone and follows the week.
+        let acct = if r.no_session_limit() { "week" } else { "pro" };
         Payload {
             s: Some(s),
             sr: Some(sr),
             w: Some(w),
             wr: Some(wr),
             st: Some(st.to_owned()),
-            acct: Some("pro".to_owned()),
+            acct: Some(acct.to_owned()),
             ok: true,
             ..Default::default()
         }

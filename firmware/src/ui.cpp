@@ -557,6 +557,14 @@ static void apply_bar_colors(const UsageData* data) {
         place_pace_tick(tick_weekly, -1.0f);
         return;
     }
+    if (data->weekly_only) {
+        // No 5-hour limit: the first card is the week, the second is hidden.
+        lv_obj_set_style_bg_color(bar_session,
+            bar_color(data->session_pct, data->session_reset_mins, PACE_WEEK_MINS), LV_PART_INDICATOR);
+        place_pace_tick(tick_session, pace_elapsed_pct(data->session_reset_mins, PACE_WEEK_MINS));
+        place_pace_tick(tick_weekly, -1.0f);
+        return;
+    }
     lv_obj_set_style_bg_color(bar_session,
         bar_color(data->session_pct, data->session_reset_mins, PACE_SESSION_MINS), LV_PART_INDICATOR);
     place_pace_tick(tick_session, pace_elapsed_pct(data->session_reset_mins, PACE_SESSION_MINS));
@@ -595,6 +603,11 @@ void ui_update(const UsageData* data) {
 
     int s_pct = (int)(data->session_pct + 0.5f);
 
+    // No 5-hour limit: the one card left sits in the middle of the space the
+    // two cards take. LVGL skips the set when y hasn't changed.
+    if (panel_session)
+        lv_obj_set_y(panel_session, data->weekly_only ? layout_lone_card_y(L) : L.card[0].y);
+
     if (data->enterprise) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
         lv_obj_set_style_text_font(lbl_session_pct, L.ent_pct_font, 0);
@@ -605,13 +618,18 @@ void ui_update(const UsageData* data) {
         lv_obj_add_flag(lbl_spending_status,   LV_OBJ_FLAG_HIDDEN);
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     } else {
+        // No 5-hour limit (verified Ultra): the week moves up into the first
+        // card and the second card goes away.
         lv_obj_set_style_text_font(lbl_session_pct, L.pct_font, 0);
-        lv_label_set_text(lbl_session_label, L.pills[0]);
+        lv_label_set_text(lbl_session_label, L.pills[data->weekly_only ? 1 : 0]);
         lv_obj_clear_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
-        if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+        if (panel_weekly) {
+            if (data->weekly_only) lv_obj_add_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+            else                   lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
     char buf[48];
@@ -632,7 +650,7 @@ void ui_update(const UsageData* data) {
                         LV_ALIGN_OUT_RIGHT_TOP, 4, 12);
     } else {
         lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
-        format_reset_time(data->session_reset_mins, buf, sizeof(buf), "Not started");
+        format_reset_time(data->session_reset_mins, buf, sizeof(buf), data->weekly_only ? "---" : "Not started");
         lv_label_set_text(lbl_session_reset, buf);
     }
 

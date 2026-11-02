@@ -64,6 +64,25 @@ static void test_legacy_fields(void) {
     TEST_ASSERT_TRUE(d.ok);
 }
 
+static void test_account_kinds(void) {
+    UsageData d;
+    // No 5-hour limit: s/sr come as "not started"; the week becomes the main meter.
+    TEST_ASSERT_TRUE(payload_parse(
+        "{\"s\":0,\"sr\":-1,\"w\":48,\"wr\":7900,\"acct\":\"week\",\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_TRUE(d.weekly_only);
+    TEST_ASSERT_FALSE(d.enterprise);
+    TEST_ASSERT_EQUAL_FLOAT(48, d.session_pct);
+    TEST_ASSERT_EQUAL_INT(7900, d.session_reset_mins);
+    TEST_ASSERT_EQUAL_FLOAT(48, d.weekly_pct);
+    TEST_ASSERT_TRUE(payload_parse("{\"acct\":\"pro\"}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.weekly_only);
+    TEST_ASSERT_TRUE(payload_parse("{\"acct\":\"ent\"}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.weekly_only);
+    TEST_ASSERT_TRUE(d.enterprise);
+    TEST_ASSERT_TRUE(payload_parse("{}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.weekly_only);
+}
+
 static void test_fast_clock_fields(void) {
     UsageData d;
     TEST_ASSERT_TRUE(payload_parse("{\"a\":2,\"e\":\"b\",\"es\":4000000000,\"n\":3,\"rp\":1}", &d, nullptr));
@@ -132,6 +151,7 @@ int main(void) {
     RUN_TEST(test_rejects_malformed_json);
     RUN_TEST(test_empty_object_gives_legacy_defaults);
     RUN_TEST(test_legacy_fields);
+    RUN_TEST(test_account_kinds);
     RUN_TEST(test_fast_clock_fields);
     RUN_TEST(test_fast_clock_clamps);
     RUN_TEST(test_liveliness);

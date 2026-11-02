@@ -12,6 +12,7 @@ mod event_loop;
 #[cfg(target_os = "linux")]
 mod sni;
 
+use std::cell::Cell;
 use std::process::{Child, Command as Proc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -65,6 +66,8 @@ struct Items {
     status: MenuItem,
     account: MenuItem,
     session: MenuItem,
+    /// `session` is in the menu (it leaves it with no 5-hour limit).
+    session_listed: Cell<bool>,
     weekly: MenuItem,
     refresh: MenuItem,
     mute: CheckMenuItem,
@@ -81,6 +84,7 @@ impl Items {
             status: MenuItem::new("Clawdmeter · Starting", false, None),
             account: MenuItem::new("No usage data yet", false, None),
             session: MenuItem::new("Session  –", false, None),
+            session_listed: Cell::new(true),
             weekly: MenuItem::new("Weekly  –", false, None),
             refresh: MenuItem::new("Refresh usage", true, None),
             mute: CheckMenuItem::new("Mute chimes", true, false, None),
@@ -122,6 +126,16 @@ impl Items {
             (None, _) if snap.logged_out => "Open Claude Code to sign in".into(),
             (None, _) => "No usage data yet".into(),
         });
+        // No 5-hour limit (verified Ultra): no Session line at all. It goes
+        // back above Weekly, after the status, account and separator.
+        let listed = !snap.no_session_limit;
+        if listed != self.session_listed.get() {
+            let done = if listed { self.menu.insert(&self.session, 3) } else { self.menu.remove(&self.session) };
+            match done {
+                Ok(()) => self.session_listed.set(listed),
+                Err(e) => log::warn!("tray menu: {e}"),
+            }
+        }
         self.session.set_text(match snap.session_pct {
             Some(p) if snap.window_started => format!("Session  {p}%"),
             Some(_) => "Session  not started".into(),
@@ -154,8 +168,10 @@ fn icon_for(state: TrayState) -> Option<Icon> {
 
 fn tooltip(snap: &StatusSnapshot) -> String {
     let mut t = format!("Clawdmeter · {}", snap.tray_state().label());
-    if let (Some(s), Some(w)) = (snap.session_pct, snap.week_pct) {
-        t.push_str(&format!(" · Session {s}% · Weekly {w}%"));
+    match (snap.session_pct, snap.week_pct) {
+        (Some(s), Some(w)) => t.push_str(&format!(" · Session {s}% · Weekly {w}%")),
+        (None, Some(w)) if snap.no_session_limit => t.push_str(&format!(" · Weekly {w}%")),
+        _ => {}
     }
     t
 }
@@ -499,4 +515,18 @@ fn run_locked(paths: Paths, _lock: Option<std::fs::File>) -> i32 {
         }),
     );
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tooltip_leaves_out_a_session_with_no_limit() {
+        let snap = StatusSnapshot { session_pct: Some(5), week_pct: Some(40), ..Default::default() };
+        assert!(tooltip(&snap).ends_with(" · Session 5% · Weekly 40%"));
+        let ultra = StatusSnapshot { session_pct: None, no_session_limit: true, ..snap.clone() };
+        assert!(tooltip(&ultra).ends_with(" · Weekly 40%"));
+        assert!(!tooltip(&ultra).contains("Session"));
+    }
 }

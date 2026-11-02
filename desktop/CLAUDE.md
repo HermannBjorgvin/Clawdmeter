@@ -109,7 +109,31 @@ Per account (`probe.rs`, `oauth.rs`):
   `transcript_path`). A window that ends with no activity since becomes
   "not started" with no call. Anything uncertain (first run, unattributed
   activity, near a reset) uses the idle source, which sends no message.
-  Spend-capped accounts always use the idle source.
+  Spend-capped accounts always use the idle source, and so do accounts with
+  no 5-hour limit.
+- **No 5-hour limit** (e.g. verified Ultra, formerly Max 20x): the endpoint
+  answers `"five_hour": null`, where an account with the limit and no window
+  running gets `{"utilization": 0, "resets_at": null}` (`usage::SessionLimit`).
+  Only the endpoint can tell: a probe answer without `five_hour` makes the
+  same poll ask the endpoint, never `/usage` (while it's backing off, has no
+  readable or unexpired token, or misses, the answer is kept as not started,
+  so the probe waits for the next prompt; any miss, a refused token included,
+  still backs the account off), and `/usage` drops the session line when no window runs,
+  so it leaves `Unknown` and `AccountState::record` keeps the last answer. A
+  missing `five_hour` key is `Unknown` too; `record` makes a reading with a
+  session window `Applies` (the parsers leave it). An `Absent` answer while
+  the last reading's window still runs is taken as `Applies` once: the next
+  answer confirms it, so verifying an account costs one poll. The payload is
+  `acct:"week"` with `s`/`sr` left "not started" for older firmware; the
+  Overview, tray and device drop the session meter, `session_pct()` is the
+  week (the selector follows it; before any rise it compares it with other
+  accounts' session %, as it does spend %), and the weekly reset wakes the
+  account.
+  When `meter_kind()` changes (session, week, spend) the selector forgets
+  that account's last value, and the rate tracker starts over if it's the
+  shown one, so the jump is never a rise.
+  The plan name (`planDisplayName`, `rate_limit_tier`) isn't used: an
+  unverified Ultra account still has a temporary 5-hour limit.
 - `claude` is found via `claude_path` → `PATH` / install dirs → the newest
   Claude-desktop-bundled build (`<userData>/claude-code/<version>/<hash>/claude`;
   verified on Linux, the macOS/Windows paths come from the desktop app's code
@@ -130,14 +154,17 @@ Per account (`probe.rs`, `oauth.rs`):
 - Backoff (`backoff.rs`, idle source only): a 429 parks the account for
   exactly its `retry-after`; other transient misses (no 429 header, offline,
   `/usage` printing no `Current …` lines, timeouts) park it 10 → 20 → 30 min,
-  reset on success. Nothing bypasses it (Refresh now, device REQ and prompts
-  included); the probe is a separate path and stays allowed.
+  reset when the idle source answers. Nothing bypasses it (Refresh now, device
+  REQ and prompts included); the probe is a separate path and stays allowed.
+  Its answers don't end a pause that's still running; once it has run out
+  they clear its strikes, unless the endpoint missed again in that poll.
 - Calls during a block make the server lengthen it (589 → 1353 → 2721 →
   3600 s seen), so blocks are saved to `<state>/usage-blocks.json` and
   restored at start-up (`--once` honours them too). Only 429-type misses
-  persist; probe misses don't. The Overview and Accounts pages say "Usage
-  paused by Anthropic until HH:MM"; a parked shown account keeps its last
-  values.
+  persist (`Backoff::throttled`), until they run out or the idle source
+  answers; probe misses and answers don't touch them. The Overview and
+  Accounts pages say "Usage paused by Anthropic until HH:MM"; a parked shown
+  account keeps its last values.
 - Heartbeat replays (`rp:1`) every `heartbeat_interval` (60 s) keep the
   firmware's 90 s `DATA_FRESH_MS` open and stop after 3 consecutive misses,
   so the device shows stale. **A failed poll is never a zero.**

@@ -37,7 +37,7 @@ frames.
 | `--status off` | The daemon not running |
 | `--accounts retrying` | A second, rate-limited account |
 | `--refresh wait\|checking` | Overview refresh button waiting out the gap / mid-check |
-| `--session idle` | Session not started |
+| `--session idle\|week` | Session not started / no 5-hour limit (weekly meter only) |
 | `--hooks-preview`, `--shop`, `--advanced` | Hooks file preview, board shop links, advanced settings |
 | `--height PX` | A taller window (default 640) so a long page fits one capture |
 

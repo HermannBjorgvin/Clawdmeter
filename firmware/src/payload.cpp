@@ -32,6 +32,13 @@ bool payload_parse(const char* json, UsageData* out, const char** err) {
     d.alert_clear = doc["x"].as<bool>();
     const char* acct = doc["acct"] | "pro";
     d.enterprise = (strcmp(acct, "ent") == 0);
+    d.weekly_only = (strcmp(acct, "week") == 0);
+    if (d.weekly_only) {
+        // No 5-hour limit: the app leaves s/sr "not started" for firmware
+        // that predates "week"; here the week is the main meter.
+        d.session_pct = d.weekly_pct;
+        d.session_reset_mins = d.weekly_reset_mins;
+    }
     d.time_pct = doc["tp"] | 0;
     d.period_days = doc["pd"] | 30;
     copy_str(d.reset_date, sizeof(d.reset_date), doc["rd"] | "");

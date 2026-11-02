@@ -132,6 +132,15 @@ the line, amber when it's ahead, and red at the limit. Off (the default),
 the bars go amber at 50% and red at 80%. A bar with no reset time yet keeps
 those colours, and spend-capped accounts are unchanged.
 
+Accounts with no 5-hour limit, such as Ultra (formerly Max 20x) once
+Anthropic has verified the account, show only the **Weekly** meter on the
+device, the Overview page and the tray. Clawdmeter goes by what the usage
+server reports, not by the plan's name: an Ultra account that isn't verified
+yet still has a temporary 5-hour limit and keeps the Session meter until the
+limit goes. For these accounts the reset chime and Clawd's fresh-window jump
+mark the weekly reset. Firmware older than this change keeps showing the
+session as not started; update it from the Flash page.
+
 The device boots to the meters. Clawd performs his shows right on them,
 in front of the panels. Tap a show or the screensaver to send him back to
 his seat.
@@ -182,7 +191,7 @@ seconds and preserves comments and unknown keys when saving.
 
 | Key | Default | Effect |
 | --- | --- | --- |
-| `config_dirs` | `~/.claude` | Comma-separated Claude Code config folders. The app selects the account whose session usage increased most recently. `CLAUDE_CONFIG_DIR` supplies the default when this key is absent. |
+| `config_dirs` | `~/.claude` | Comma-separated Claude Code config folders. The app selects the account whose usage increased most recently (session usage, or weekly usage on an account with no 5-hour limit); before any rise, the one with the highest percentage. `CLAUDE_CONFIG_DIR` supplies the default when this key is absent. |
 | `reset_chime` | `off` | Chime on the device when the session usage resets (boards with a speaker). The older `chime` key still works. |
 | `alert_chime` | `off` | Chime on the device when Claude needs you (boards with a speaker). The older `beep` key still works. |
 | `desktop_chime` | `off` | Play the same chime on this computer when Claude needs you. Follows `alert_on`. |

@@ -471,3 +471,7 @@ Layout layout_compute(const LayoutShape& shape) {
     fit_period(L);
     return L;
 }
+
+int16_t layout_lone_card_y(const Layout& L) {
+    return L.card[0].y + (stack_bottom(L) - L.card[0].y - L.card[0].h) / 2;
+}

@@ -98,7 +98,8 @@ pub enum PollReason {
     Interval,
     /// Retrying a failed poll (after its backoff, if it has one).
     Retry,
-    /// The account's known 5-hour window just ended.
+    /// The account's known 5-hour window just ended (its week, with no
+    /// 5-hour limit).
     WindowEnd,
 }
 
@@ -116,7 +117,8 @@ pub struct AccountClock {
     /// No window is known to be running: `/usage` on [`Cadence::no_window`],
     /// not sped up by prompts or Stops.
     pub usage_only: bool,
-    /// The known window's reset: poll once when it passes.
+    /// The known window's reset (the week's, for an account with no 5-hour
+    /// limit): poll once when it passes.
     pub wake_at: Option<i64>,
 }
 

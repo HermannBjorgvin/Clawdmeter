@@ -438,6 +438,10 @@ pub fn once(paths: &Paths) -> i32 {
                 ok = true;
                 println!("{}: spend limit {}% used", d.display(), r.session_pct());
             }
+            Ok(r) if r.no_session_limit() => {
+                ok = true;
+                println!("{}: no 5-hour limit, week {}%", d.display(), r.session_pct());
+            }
             Ok(r) => {
                 ok = true;
                 println!(
