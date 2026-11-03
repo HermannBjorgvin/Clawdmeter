@@ -35,6 +35,9 @@ struct BoardCaps {
                              // button when button_count is 0) dismisses an
                              // active alert before it does anything else
                              // (director_button).
+    bool    mono_panel;      // 1-bit panel printing luminance >= 64 as ink:
+                             // outlined bars, inverted pills, no stale fade
+    bool    minimal_verbs;   // minimal mode keeps the rotating status verbs
 };
 
 const BoardCaps& board_caps(void);
