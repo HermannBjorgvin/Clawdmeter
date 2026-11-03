@@ -92,7 +92,20 @@ mod tests {
 
     #[test]
     fn the_default_is_the_firmware_palette() {
-        assert_eq!(default_preset().colors, Palette::default());
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../firmware/src");
+        if !src_dir.is_dir() {
+            eprintln!("firmware source not found at {}; skipping", src_dir.display());
+            return;
+        }
+        let src = std::fs::read_to_string(src_dir.join("theme_palette.cpp")).expect("the firmware's palette");
+        let block = src.split("#define DEFAULTS").nth(1).and_then(|s| s.split("const uint32_t").next()).unwrap();
+        let hex: String =
+            block.split_whitespace().filter_map(|w| w.strip_prefix("0x")).map(|w| w.trim_end_matches(',')).collect();
+        assert_eq!(default_preset().colors.to_hex(), hex);
+    }
+
+    #[test]
+    fn find_is_case_insensitive_and_custom_is_no_preset() {
         assert_eq!(find("Dracula").map(|p| p.name), Some("Dracula"));
         assert!(find("custom").is_none());
     }

@@ -54,6 +54,7 @@ static void paint(const Themed& t) {
 }
 static void themed_color(lv_obj_t* obj, ThemeColor tok, ThemedPart part, lv_style_selector_t sel) {
     if (n_themed < (int)(sizeof(themed) / sizeof(themed[0]))) themed[n_themed++] = { obj, tok, part, sel };
+    else Serial.println("ui: themed[] is full; this widget won't follow theme changes");
     paint({ obj, tok, part, sel });
 }
 static void themed_bg(lv_obj_t* obj, ThemeColor tok, lv_style_selector_t sel = 0) { themed_color(obj, tok, PART_BG, sel); }

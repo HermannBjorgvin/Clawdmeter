@@ -311,21 +311,12 @@ impl ColorToken {
 
     /// The firmware's default, 0xRRGGBB.
     pub fn default_rgb(self) -> u32 {
-        match self {
-            ColorToken::Bg => 0x000000,
-            ColorToken::Panel => 0x1f1f1e,
-            ColorToken::Text => 0xfaf9f5,
-            ColorToken::Dim => 0xb0aea5,
-            ColorToken::Accent | ColorToken::Amber | ColorToken::Clawd => 0xd97757,
-            ColorToken::Green => 0x788c5d,
-            ColorToken::Red => 0xc0392b,
-            ColorToken::BarBg => 0x2a2a28,
-            ColorToken::Eye => 0x141413,
-        }
+        Palette::default().get(self)
     }
 
+    /// Its place in `th`: the variants are declared in [`Self::ALL`]'s order.
     fn index(self) -> usize {
-        ColorToken::ALL.iter().position(|&t| t == self).expect("listed")
+        self as usize
     }
 }
 
@@ -335,7 +326,7 @@ pub struct Palette([u32; 11]);
 
 impl Default for Palette {
     fn default() -> Self {
-        Palette(ColorToken::ALL.map(ColorToken::default_rgb))
+        themes::default_preset().colors
     }
 }
 
@@ -358,6 +349,12 @@ impl Palette {
     /// The payload's `th`: every colour as 6 lower-case hex digits, run together.
     pub fn to_hex(&self) -> String {
         self.0.iter().map(|c| format!("{c:06x}")).collect()
+    }
+}
+
+impl serde::Serialize for Palette {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_hex())
     }
 }
 
@@ -446,8 +443,9 @@ pub struct Settings {
     /// Which colours the device uses (`theme`); [`Settings::colors`] is
     /// the palette it gets as `th`.
     pub theme: DeviceTheme,
-    /// The custom theme's colours (`color_*`), kept while a preset is chosen.
-    pub custom_colors: Palette,
+    /// The custom theme's colours (`color_*`), kept while a preset is chosen;
+    /// `None` until it has any.
+    pub custom_colors: Option<Palette>,
 }
 
 /// `alert_on`: the alert kinds that show, as a comma list of `permission`,
@@ -551,8 +549,17 @@ impl Settings {
     pub fn colors(&self) -> Palette {
         match self.theme {
             DeviceTheme::Preset(p) => p.colors,
-            DeviceTheme::Custom => self.custom_colors,
+            DeviceTheme::Custom => self.custom_colors.unwrap_or_default(),
         }
+    }
+
+    /// Switch to the custom theme. The first time, it starts from the colours
+    /// on screen; after that it keeps its own, even if they equal a preset's.
+    pub fn choose_custom(&mut self) {
+        if self.custom_colors.is_none() {
+            self.custom_colors = Some(self.colors());
+        }
+        self.theme = DeviceTheme::Custom;
     }
 
     /// Build from a parsed file. `env_poll` is the `POLL_INTERVAL` env var,
@@ -587,10 +594,10 @@ impl Settings {
             pace_marker: on_off(cfg.get("pace_marker"), false),
             theme: cfg.get("theme").map(DeviceTheme::parse).unwrap_or_default(),
             custom_colors: {
-                let mut p = Palette::default();
+                let mut p: Option<Palette> = None;
                 for t in ColorToken::ALL {
                     if let Some(rgb) = cfg.get(t.key()).and_then(parse_rgb) {
-                        p.set(t, rgb);
+                        p.get_or_insert_default().set(t, rgb);
                     }
                 }
                 p
@@ -693,16 +700,14 @@ impl Settings {
                 cfg.set("theme", self.theme.as_str());
             }
         }
-        // A custom colour back at its default leaves the file.
-        for t in ColorToken::ALL {
-            let rgb = self.custom_colors.get(t);
-            if rgb == current.custom_colors.get(t) {
-                continue;
-            }
-            if rgb == t.default_rgb() {
-                cfg.remove(t.key());
-            } else {
-                cfg.set(t.key(), &format!("{rgb:06x}"));
+        // All eleven, default or not: their presence is how a later run knows
+        // Custom has colours of its own (`choose_custom`).
+        if current.custom_colors != self.custom_colors {
+            for t in ColorToken::ALL {
+                match self.custom_colors {
+                    Some(p) => cfg.set(t.key(), &format!("{:06x}", p.get(t))),
+                    None => cfg.remove(t.key()),
+                }
             }
         }
     }
@@ -891,13 +896,57 @@ mod tests {
         let mut cfg = ConfigFile::parse("");
         let mut s = settings("");
         s.theme = DeviceTheme::Custom;
-        s.custom_colors.set(ColorToken::Accent, 0x647d99);
+        s.custom_colors.get_or_insert_default().set(ColorToken::Accent, 0x647d99);
         s.apply_to(&mut cfg, &paths());
         assert_eq!((cfg.get("theme"), cfg.get("color_accent")), (Some("custom"), Some("647d99")));
-        assert!(cfg.get("color_bg").is_none(), "defaults stay out of the file");
-        s.custom_colors.set(ColorToken::Accent, ColorToken::Accent.default_rgb());
+        assert_eq!(cfg.get("color_bg"), Some("000000"), "all eleven are written");
+        s.custom_colors.get_or_insert_default().set(ColorToken::Accent, ColorToken::Accent.default_rgb());
         s.apply_to(&mut cfg, &paths());
-        assert!(cfg.get("color_accent").is_none(), "back to the default leaves the file");
+        assert_eq!(cfg.get("color_accent"), Some("d97757"), "a default stays, as Custom's own");
+        assert_eq!(Settings::from_config(&cfg, &paths(), None).custom_colors, Some(Palette::default()));
+    }
+
+    #[test]
+    fn tokens_are_declared_in_th_order() {
+        for (i, t) in ColorToken::ALL.into_iter().enumerate() {
+            assert_eq!(t.index(), i, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn custom_starts_from_the_theme_on_screen_only_the_first_time() {
+        let dracula = crate::themes::find("dracula").unwrap();
+        let mut cfg = ConfigFile::parse("theme = dracula\n");
+        let reload = |cfg: &ConfigFile| Settings::from_config(cfg, &paths(), None);
+
+        let mut s = reload(&cfg);
+        assert_eq!(s.custom_colors, None, "never customised");
+        s.choose_custom();
+        assert_eq!((s.theme, s.custom_colors), (DeviceTheme::Custom, Some(dracula.colors)));
+        s.apply_to(&mut cfg, &paths());
+
+        // Reset all colors, on to a preset, and back: the reset is what's kept.
+        let mut s = reload(&cfg);
+        s.custom_colors = Some(Palette::default());
+        s.apply_to(&mut cfg, &paths());
+        let mut s = reload(&cfg);
+        s.theme = DeviceTheme::Preset(dracula);
+        s.apply_to(&mut cfg, &paths());
+        let mut s = reload(&cfg);
+        s.choose_custom();
+        assert_eq!(s.custom_colors, Some(Palette::default()));
+
+        // The same from the default theme, whose colours are the defaults.
+        let mut cfg = ConfigFile::parse("");
+        let mut s = reload(&cfg);
+        s.choose_custom();
+        s.apply_to(&mut cfg, &paths());
+        let mut s = reload(&cfg);
+        s.theme = DeviceTheme::Preset(dracula);
+        s.apply_to(&mut cfg, &paths());
+        let mut s = reload(&cfg);
+        s.choose_custom();
+        assert_eq!(s.custom_colors, Some(Palette::default()), "not Dracula's");
     }
 
     #[test]
@@ -906,7 +955,7 @@ mod tests {
         let nord = crate::themes::find("nord").unwrap();
         assert_eq!(s.theme, DeviceTheme::Preset(nord));
         assert_eq!(s.colors(), nord.colors, "a preset's own colours, not the custom ones");
-        assert_eq!(s.custom_colors.get(ColorToken::Accent), 0x647d99, "kept for Custom");
+        assert_eq!(s.custom_colors.unwrap().get(ColorToken::Accent), 0x647d99, "kept for Custom");
         assert_eq!(settings("theme = nope\n").theme, DeviceTheme::default(), "unknown: the default");
 
         let mut cfg = ConfigFile::parse("theme = nord\ncolor_accent = 647d99\n");

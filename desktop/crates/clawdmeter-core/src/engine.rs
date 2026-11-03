@@ -11,7 +11,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use crate::attention::{Alert, AttentionState};
 use crate::backoff::SavedBlock;
 use crate::cadence::{heartbeat_due, AccountClock, Cadence, PollReason, Scheduler};
-use crate::config::Settings;
+use crate::config::{Palette, Settings};
 use crate::events::{Activity, HookEvent, Signal};
 use crate::payload::{clock_fields, Payload};
 use crate::probe::{self, Plan as ProbePlan, Source};
@@ -146,7 +146,7 @@ pub struct Engine {
     /// The pace marker the device last got (`pm`).
     sent_pm: Option<u8>,
     /// Last `th` sent.
-    sent_th: Option<String>,
+    sent_th: Option<Palette>,
     last_event_ts: Option<i64>,
     /// Latest prompt or tool activity that names no configured account.
     unattributed_activity: Option<i64>,
@@ -484,11 +484,11 @@ impl Engine {
         // A changed device setting goes out right away, like an event.
         let aa = self.settings.attention_anim.seconds();
         let pm = u8::from(self.settings.pace_marker);
-        let th = self.settings.colors().to_hex();
+        let th = self.settings.colors();
         let prefs_changed = self.sent_lv != Some(self.settings.liveliness)
             || self.sent_aa != Some(aa)
             || self.sent_pm != Some(pm)
-            || self.sent_th.as_deref() != Some(th.as_str());
+            || self.sent_th != Some(th);
 
         let (mut payload, kind) = if self.logged_out {
             if !(self.fresh_poll || self.attention.pending()) {
@@ -579,8 +579,8 @@ impl Engine {
         if let Some(pm) = w.payload.pm {
             self.sent_pm = Some(pm);
         }
-        if let Some(th) = &w.payload.th {
-            self.sent_th = Some(th.clone());
+        if let Some(th) = w.payload.th {
+            self.sent_th = Some(th);
         }
     }
 
@@ -701,7 +701,7 @@ mod tests {
         let w = write(&mut e, T0).unwrap();
         assert_eq!(
             w.payload.to_json(),
-            r#"{"s":0,"sr":-1,"w":48,"wr":1440,"st":"allowed","acct":"week","ok":true,"lv":3,"aa":120,"pm":0}"#
+            r#"{"s":0,"sr":-1,"w":48,"wr":1440,"st":"allowed","acct":"week","ok":true,"lv":3,"aa":120,"pm":0,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413"}"#
         );
         // An account with the limit still wakes at its session reset.
         e.on_poll_results(T0 + 200, vec![(dir.clone(), Ok(reading(5)))]);
@@ -1277,22 +1277,20 @@ mod tests {
 
     #[test]
     fn colors_go_out_with_the_data_and_when_they_change() {
+        use crate::config::ColorToken;
         let mut e = Engine::new(settings(""));
         e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
         let w = write(&mut e, T0).unwrap();
-        assert_eq!(
-            w.payload.th.as_deref(),
-            Some(crate::config::Palette::default().to_hex().as_str()),
-            "every data payload carries it"
-        );
+        assert_eq!(w.payload.th, Some(Palette::default()), "every data payload carries it");
         assert!(write(&mut e, T0 + 1).is_none(), "nothing new");
         e.update_settings(settings("theme = custom\ncolor_accent = 647d99\n"));
         let w = write(&mut e, T0 + 2).expect("a new colour is sent right away");
         assert_eq!((w.kind, w.payload.rp), (WriteKind::Event, Some(1)));
-        assert_eq!(&w.payload.th.unwrap()[24..30], "647d99");
+        assert_eq!(w.payload.th.unwrap().get(ColorToken::Accent), 0x647d99);
         assert!(write(&mut e, T0 + 3).is_none());
         e.on_connected();
-        assert_eq!(&write(&mut e, T0 + 4).unwrap().payload.th.unwrap()[24..30], "647d99", "resent on a reconnect");
+        let resent = write(&mut e, T0 + 4).unwrap().payload.th.unwrap();
+        assert_eq!(resent.get(ColorToken::Accent), 0x647d99, "resent on a reconnect");
     }
 
     #[test]

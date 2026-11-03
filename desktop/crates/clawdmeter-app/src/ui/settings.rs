@@ -8,6 +8,7 @@
 //! re-reads the file every few seconds.
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use clawdmeter_core::autostart::{self, LaunchMode};
@@ -739,21 +740,14 @@ impl SettingsView {
             ));
         }
         // Custom starts from the theme on screen until it has colours of its own.
-        let custom = self.settings.custom_colors;
-        let fresh = custom == Palette::default();
         let on = theme == DeviceTheme::Custom;
         let me = cx.entity().downgrade();
-        let preview = if fresh && !on { self.settings.colors() } else { custom };
+        let preview = self.settings.custom_colors.unwrap_or_else(|| self.settings.colors());
         cards = cards.child(theme_card(t, "custom", if on { "Custom" } else { "Custom +" }, &preview, on).on_click(
             move |_, window, cx| {
                 window.blur(); // the hex field shows the new colour
                 let _ = me.update(cx, |v, cx| {
-                    v.save(|s, _| {
-                        if s.custom_colors == Palette::default() {
-                            s.custom_colors = s.colors();
-                        }
-                        s.theme = DeviceTheme::Custom;
-                    });
+                    v.save(|s, _| s.choose_custom());
                     cx.notify();
                 });
             },
@@ -774,7 +768,7 @@ impl SettingsView {
 
     /// Custom: a chip per colour; the chosen one opens a grid of swatches.
     fn custom_colors(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.settings.custom_colors;
+        let colors = self.settings.custom_colors.unwrap_or_default();
         let pick = self.color_pick;
         let mut chips = div().w_full().flex().flex_wrap().gap(px(6.));
         for tok in ColorToken::ALL {
@@ -834,7 +828,7 @@ impl SettingsView {
             move |_, window, cx| {
                 window.blur(); // the hex field shows the new colour
                 let _ = me.update(cx, |v, cx| {
-                    v.save(|s, _| s.custom_colors = Palette::default());
+                    v.save(|s, _| s.custom_colors = Some(Palette::default()));
                     cx.notify();
                 });
             },
@@ -843,11 +837,11 @@ impl SettingsView {
 
     /// Swatches for `tok`, its current colour outlined.
     fn color_grid(&self, t: &Theme, tok: ColorToken, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = self.settings.custom_colors.get(tok);
+        let current = self.settings.custom_colors.unwrap_or_default().get(tok);
         let mut grid = div().flex().flex_col().gap(px(4.));
-        for (r, row) in SWATCH_ROWS.with(|rows| rows.clone()).into_iter().enumerate() {
+        for (r, row) in SWATCH_ROWS.iter().enumerate() {
             let mut line = div().flex().flex_wrap().gap(px(4.));
-            for (c, color) in row.into_iter().enumerate() {
+            for (c, &color) in row.iter().enumerate() {
                 let me = cx.entity().downgrade();
                 let id = format!("swatch-{r}-{c}");
                 let sel = id.clone();
@@ -869,7 +863,7 @@ impl SettingsView {
                         .on_click(move |_, window, cx| {
                             window.blur(); // the hex field shows the new colour
                             let _ = me.update(cx, |v, cx| {
-                                v.save(|s, _| s.custom_colors.set(tok, color));
+                                v.save(|s, _| s.custom_colors.get_or_insert_default().set(tok, color));
                                 cx.notify();
                             });
                         }),
@@ -897,7 +891,7 @@ impl SettingsView {
                         move |_, window, cx| {
                             window.blur(); // the hex field shows the new colour
                             let _ = me.update(cx, |v, cx| {
-                                v.save(|s, _| s.custom_colors.set(tok, tok.default_rgb()));
+                                v.save(|s, _| s.custom_colors.get_or_insert_default().set(tok, tok.default_rgb()));
                                 cx.notify();
                             });
                         },
@@ -977,8 +971,8 @@ impl SettingsView {
         }
         self.hex_draft.make_ascii_lowercase();
         if let Some(rgb) = parse_rgb(&self.hex_draft) {
-            if rgb != self.settings.custom_colors.get(tok) {
-                self.save(|s, _| s.custom_colors.set(tok, rgb));
+            if rgb != self.settings.custom_colors.unwrap_or_default().get(tok) {
+                self.save(|s, _| s.custom_colors.get_or_insert_default().set(tok, rgb));
             }
         }
         cx.stop_propagation();
@@ -1705,23 +1699,21 @@ fn swatch(t: &Theme, color: u32, size: f32) -> impl IntoElement {
     div().flex_shrink_0().size(px(size)).rounded(px(4.)).bg(rgb(color)).border_1().border_color(t.line)
 }
 
-thread_local! {
-    /// The colour picker's swatches: the default palette, a grey ramp, then
-    /// twelve hues (every 30°) from light to nearly black, with a greyish row.
-    static SWATCH_ROWS: Vec<Vec<u32>> = {
-        let mut defaults: Vec<u32> = Vec::new();
-        for c in ColorToken::ALL.map(ColorToken::default_rgb) {
-            if !defaults.contains(&c) {
-                defaults.push(c);
-            }
+/// The colour picker's swatches: the default palette, a grey ramp, then
+/// twelve hues (every 30°) from light to nearly black, with a greyish row.
+static SWATCH_ROWS: LazyLock<Vec<Vec<u32>>> = LazyLock::new(|| {
+    let mut defaults: Vec<u32> = Vec::new();
+    for c in ColorToken::ALL.map(ColorToken::default_rgb) {
+        if !defaults.contains(&c) {
+            defaults.push(c);
         }
-        let mut rows = vec![defaults, (0..12).map(|i| (i * 255 / 11) * 0x010101).collect()];
-        for (s, l) in [(0.85, 0.80), (0.75, 0.64), (0.62, 0.50), (0.60, 0.36), (0.22, 0.50), (0.25, 0.22), (0.15, 0.10)] {
-            rows.push((0..12).map(|i| hsl_rgb(i as f32 * 30.0, s, l)).collect());
-        }
-        rows
-    };
-}
+    }
+    let mut rows = vec![defaults, (0..12).map(|i| (i * 255 / 11) * 0x010101).collect()];
+    for (s, l) in [(0.85, 0.80), (0.75, 0.64), (0.62, 0.50), (0.60, 0.36), (0.22, 0.50), (0.25, 0.22), (0.15, 0.10)] {
+        rows.push((0..12).map(|i| hsl_rgb(i as f32 * 30.0, s, l)).collect());
+    }
+    rows
+});
 
 /// A pasted colour: six hex digits, optionally after `#` or `0x`; anything
 /// else is ignored rather than half-read.
@@ -1827,18 +1819,18 @@ mod tests {
         click(cx, "theme-custom");
         assert!(config().contains("theme = custom"));
         click(cx, "colors-reset-all");
-        assert!(!config().contains("color_"));
+        assert!(config().contains("color_bg = 000000"), "reset: the defaults, now Custom's own");
         assert_eq!(view.update(cx, |v, _| v.color_pick), None, "the grid opens on a pick");
         click(cx, "color_accent");
         assert_eq!(view.update(cx, |v, _| v.color_pick), Some(ColorToken::Accent));
         click(cx, "swatch-1-0"); // black, from the grey ramp
         assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("color_accent = 000000"));
         click(cx, "color-default");
-        assert!(!std::fs::read_to_string(&paths.config_file).unwrap().contains("color_accent"));
+        assert!(config().contains("color_accent = d97757"));
         click(cx, "color-hex");
         cx.simulate_keystrokes("ctrl-a ctrl-c"); // shortcuts type nothing
         cx.simulate_input("#647D9");
-        assert!(!std::fs::read_to_string(&paths.config_file).unwrap().contains("color_accent"), "five digits: not yet");
+        assert!(config().contains("color_accent = d97757"), "five digits: not yet");
         cx.simulate_keystrokes("9");
         assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("color_accent = 647d99"));
         cx.simulate_keystrokes("backspace 8");
@@ -1848,8 +1840,14 @@ mod tests {
         click(cx, "color_accent"); // closes the grid again
         assert_eq!(view.update(cx, |v, _| v.color_pick), None);
         click(cx, "colors-reset-all");
-        let text = std::fs::read_to_string(&paths.config_file).unwrap();
-        assert!(!text.contains("color_"), "{text}");
+        let text = config();
+        assert!(text.contains("color_accent = d97757"), "{text}");
+        // Only the first Custom starts from the theme on screen, even when
+        // Custom's colours are the defaults.
+        click(cx, "theme-dracula");
+        click(cx, "theme-custom");
+        let text = config();
+        assert!(text.contains("color_bg = 000000") && !text.contains("21222c"), "{text}");
 
         view.update(cx, |v, cx| v.show(Page::Settings, false, cx));
         click(cx, "poll-2"); // While working: 5 min

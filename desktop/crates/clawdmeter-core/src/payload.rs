@@ -8,7 +8,7 @@
 use chrono::{DateTime, Datelike, Months, TimeZone, Utc};
 use serde::Serialize;
 
-use crate::config::ClockMode;
+use crate::config::{ClockMode, Palette};
 use crate::usage::{SpendPeriod, UsageReading};
 
 /// One device payload. `None` fields are omitted.
@@ -98,7 +98,7 @@ pub struct Payload {
     /// ([`crate::config::Palette::to_hex`]). The device keeps the last value
     /// it got.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub th: Option<String>,
+    pub th: Option<Palette>,
 }
 
 /// Every key [`Payload`] can emit, in serialization order.
@@ -519,7 +519,7 @@ mod tests {
             lv: Some(3),
             aa: Some(120),
             pm: Some(1),
-            th: Some(crate::config::Palette::default().to_hex()),
+            th: Some(Palette::default()),
         };
         let v: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&pl.to_json()).unwrap();
         // serde_json's Map is sorted without preserve_order; check membership.

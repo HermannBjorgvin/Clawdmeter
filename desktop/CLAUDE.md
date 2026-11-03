@@ -73,7 +73,9 @@ is faked behind `FlashHardware`.
   `attention_anim` (`off`/`10s`/`30s`/`2m`, default `2m`, sent as `aa`
   seconds), `pace_marker` (default off, sent as `pm`), `theme` (a preset id from
   `themes::PRESETS`, default `clawd`, or `custom`) and `color_<token>`
-  (`rrggbb`, no `#`; the custom theme's colours); the chosen palette's
+  (`rrggbb`, no `#`; the custom theme's colours, all eleven written once it
+  has been chosen, which is how it knows not to start from the current theme
+  again); the chosen palette's
   eleven colours are sent as `th` (`Settings::colors`), `claude_path`,
   `release_repo`, `update_check`, `onboarding_done`, `alert_on` (alert kinds
   the daemon lets through: the hook records `k` from `hook_event_name` /
