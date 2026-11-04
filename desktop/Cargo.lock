@@ -1036,6 +1036,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "chrono-tz",
+ "dbus",
  "dirs 6.0.0",
  "log",
  "serde",
@@ -1043,6 +1044,7 @@ dependencies = [
  "sha2 0.10.9",
  "unicode-normalization",
  "ureq",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

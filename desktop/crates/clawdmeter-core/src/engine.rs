@@ -14,6 +14,7 @@ use crate::cadence::{heartbeat_due, AccountClock, Cadence, PollReason, Scheduler
 use crate::config::{Palette, Settings};
 use crate::events::{Activity, HookEvent, Signal};
 use crate::payload::{clock_fields, Payload};
+use crate::platform::Appearance;
 use crate::probe::{self, Plan as ProbePlan, Source};
 use crate::rate::{Mood, RateTracker};
 use crate::selector::PlanSelector;
@@ -147,6 +148,8 @@ pub struct Engine {
     sent_pm: Option<u8>,
     /// Last `th` sent.
     sent_th: Option<Palette>,
+    /// The OS's light/dark mode, which picks the System theme's palette.
+    appearance: Appearance,
     /// The clock's hour format the device last got (`tf`; 0 = no clock).
     sent_tf: Option<u8>,
     last_event_ts: Option<i64>,
@@ -188,6 +191,7 @@ impl Engine {
             sent_aa: None,
             sent_pm: None,
             sent_th: None,
+            appearance: Appearance::default(),
             sent_tf: None,
             last_event_ts: None,
             unattributed_activity: None,
@@ -199,6 +203,17 @@ impl Engine {
     /// Current settings.
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// The OS's light/dark mode. With the System theme, a change goes out
+    /// as a new `th` on the next write check.
+    pub fn set_appearance(&mut self, appearance: Appearance) {
+        self.appearance = appearance;
+    }
+
+    /// The palette the device gets as `th`, the System theme resolved.
+    pub fn colors(&self) -> Palette {
+        self.settings.colors(self.appearance)
     }
 
     /// Apply re-read settings (the config is re-read every few seconds).
@@ -488,7 +503,7 @@ impl Engine {
         // A changed device setting goes out right away, like an event.
         let aa = self.settings.attention_anim.seconds();
         let pm = u8::from(self.settings.pace_marker);
-        let th = self.settings.colors();
+        let th = self.colors();
         let clock = clock_fields(self.settings.clock, utc(now), host.utc_offset_secs, host.prefers_12h);
         let tf = clock.as_ref().map_or(0, |cf| cf.hour_format);
         let prefs_changed = self.sent_lv != Some(self.settings.liveliness)
@@ -1302,6 +1317,29 @@ mod tests {
         e.on_connected();
         let resent = write(&mut e, T0 + 4).unwrap().payload.th.unwrap();
         assert_eq!(resent.get(ColorToken::Accent), 0x647d99, "resent on a reconnect");
+    }
+
+    #[test]
+    fn the_system_theme_follows_the_os_at_once() {
+        use crate::themes;
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.th, Some(themes::default_preset().colors), "dark until told");
+        e.set_appearance(Appearance::Dark);
+        assert!(write(&mut e, T0 + 1).is_none(), "no change, nothing new");
+        e.set_appearance(Appearance::Light);
+        let w = write(&mut e, T0 + 2).expect("the OS went light: sent right away");
+        assert_eq!((w.kind, w.payload.rp, w.payload.th), (WriteKind::Event, Some(1), Some(themes::light().colors)));
+        assert!(write(&mut e, T0 + 3).is_none());
+        e.set_appearance(Appearance::Dark);
+        assert_eq!(write(&mut e, T0 + 4).expect("and back").payload.th, Some(themes::default_preset().colors));
+
+        // A chosen preset doesn't follow the OS.
+        e.update_settings(settings("theme = dracula\n"));
+        let dracula = themes::find("dracula").unwrap().colors;
+        assert_eq!(write(&mut e, T0 + 5).unwrap().payload.th, Some(dracula));
+        e.set_appearance(Appearance::Light);
+        assert!(write(&mut e, T0 + 6).is_none(), "Dracula stays");
     }
 
     #[test]

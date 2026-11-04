@@ -15,7 +15,8 @@ use clawdmeter_core::autostart::{self, LaunchMode};
 use clawdmeter_core::config::{
     parse_rgb, AlertOn, AttentionAnim, ClockMode, ColorToken, ConfigFile, DeviceTheme, Palette, LIVELINESS_MAX,
 };
-use clawdmeter_core::themes::PRESETS;
+use clawdmeter_core::platform::{Appearance, AppearanceWatch};
+use clawdmeter_core::themes::{self, PRESETS};
 use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::device::{self, FirmwareInfo};
 use gpui::{
@@ -117,6 +118,10 @@ pub struct SettingsView {
     hex_focus: FocusHandle,
     hex_draft: String,
     hex_focused: bool,
+    /// The OS's light/dark mode, for the System theme's preview and the
+    /// first Custom (Dark in tests, which have no watch).
+    appearance: Appearance,
+    appearance_watch: Option<AppearanceWatch>,
     ticks: u32,
 }
 
@@ -125,7 +130,11 @@ impl EventEmitter<Navigate> for SettingsView {}
 impl SettingsView {
     /// Build and load the config. USB is probed while the Device page is up.
     pub fn new(paths: Paths, page: Page, cx: &mut Context<Self>) -> Self {
-        Self::with_usb(paths, page, true, cx)
+        let mut v = Self::with_usb(paths, page, true, cx);
+        let watch = AppearanceWatch::spawn();
+        v.appearance = watch.get();
+        v.appearance_watch = Some(watch);
+        v
     }
 
     /// [`SettingsView::new`]; `usb: false` never touches serial ports (tests).
@@ -164,6 +173,8 @@ impl SettingsView {
             hex_focus: cx.focus_handle(),
             hex_draft: String::new(),
             hex_focused: false,
+            appearance: Appearance::default(),
+            appearance_watch: None,
             ticks: 0,
         };
         v.reload();
@@ -259,6 +270,9 @@ impl SettingsView {
     fn tick(&mut self, cx: &mut Context<Self>) {
         self.ticks += 1;
         self.snap = live_status(&self.paths);
+        if let Some(w) = &self.appearance_watch {
+            self.appearance = w.get();
+        }
         // Pick up hand edits and other windows' changes every few seconds,
         // but never under an open diff preview.
         if self.ticks.is_multiple_of(6) && self.preview.is_none() {
@@ -719,39 +733,48 @@ impl SettingsView {
         pane
     }
 
-    /// The board's colours: a card per theme, each a small preview in its
-    /// own colours, then Custom +, which opens a chip per colour; the chosen
-    /// chip opens a grid of swatches to pick from.
+    /// The board's colours: System theme first (half Dark, half Light),
+    /// then a card per preset, each a small preview in its own colours, then
+    /// Custom +, which opens a chip per colour; the chosen chip opens a grid
+    /// of swatches to pick from.
     fn colors_field(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.settings.theme;
         let mut cards = div().w_full().flex().flex_wrap().items_start().gap(px(8.));
-        for preset in PRESETS.iter() {
+        let choices = std::iter::once(("system", "System theme", DeviceTheme::System, system_board(t)))
+            .chain(PRESETS.iter().map(|p| (p.id, p.name, DeviceTheme::Preset(p), theme_board(t, &p.colors))));
+        for (id, name, choice, board) in choices {
             let me = cx.entity().downgrade();
-            let on = theme == DeviceTheme::Preset(preset);
-            cards = cards.child(theme_card(t, preset.id, preset.name, &preset.colors, on).on_click(
-                move |_, window, cx| {
-                    window.blur(); // the hex field shows the new colour
-                    let _ = me.update(cx, |v, cx| {
-                        v.color_pick = None;
-                        v.save(|s, _| s.theme = DeviceTheme::Preset(preset));
-                        cx.notify();
+            cards = cards.child(theme_card(t, id, name, board, theme == choice).on_click(move |_, window, cx| {
+                window.blur(); // the hex field shows the new colour
+                let _ = me.update(cx, |v, cx| {
+                    v.color_pick = None;
+                    v.save(|s, cfg| {
+                        s.theme = choice;
+                        // An old `theme = clawd` already reads as System; clear it too.
+                        if choice == DeviceTheme::System {
+                            cfg.remove("theme");
+                        }
                     });
-                },
-            ));
+                    cx.notify();
+                });
+            }));
         }
         // Custom starts from the theme on screen until it has colours of its own.
         let on = theme == DeviceTheme::Custom;
         let me = cx.entity().downgrade();
-        let preview = self.settings.custom_colors.unwrap_or_else(|| self.settings.colors());
-        cards = cards.child(theme_card(t, "custom", if on { "Custom" } else { "Custom +" }, &preview, on).on_click(
-            move |_, window, cx| {
-                window.blur(); // the hex field shows the new colour
-                let _ = me.update(cx, |v, cx| {
-                    v.save(|s, _| s.choose_custom());
-                    cx.notify();
-                });
-            },
-        ));
+        let appearance = self.appearance;
+        let preview = self.settings.custom_colors.unwrap_or_else(|| self.settings.colors(appearance));
+        cards = cards.child(
+            theme_card(t, "custom", if on { "Custom" } else { "Custom +" }, theme_board(t, &preview), on).on_click(
+                move |_, window, cx| {
+                    window.blur(); // the hex field shows the new colour
+                    let _ = me.update(cx, |v, cx| {
+                        v.save(|s, _| s.choose_custom(appearance));
+                        cx.notify();
+                    });
+                },
+            ),
+        );
         let mut body = div().w_full().flex().flex_col().gap(px(10.)).child(cards);
         if on {
             body = body.child(self.custom_colors(t, cx));
@@ -759,9 +782,10 @@ impl SettingsView {
         field_stacked(
             t,
             "Colors",
-            "The board's colors, Clawd's included. Pick a theme, or Custom + to choose each color yourself (the \
-             first time, it starts from the theme you're on). The board repaints with the app's next update, \
-             within seconds while usage is current.",
+            "The board's colors, Clawd's included. System theme switches between Dark and Light with this \
+             computer's light or dark mode. Pick a theme, or Custom + to choose each color yourself (the first \
+             time, it starts from the theme you're on). The board repaints with the app's next update, within \
+             seconds while usage is current.",
             body,
         )
     }
@@ -1640,11 +1664,24 @@ pub(crate) fn write_settings(
     Ok(())
 }
 
-/// A theme to pick: a small board in its colours (background, a card with
-/// a bar, Clawd) over its name.
-fn theme_card(t: &Theme, id: &'static str, name: &'static str, c: &Palette, on: bool) -> gpui::Stateful<gpui::Div> {
+/// The System theme's preview: Dark's board on the left, Light's on the right.
+fn system_board(t: &Theme) -> gpui::Div {
+    div().relative().w_full().child(theme_board(t, &themes::default_preset().colors)).child(
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .w(relative(0.5))
+            .overflow_hidden()
+            .child(div().absolute().top_0().right_0().w(relative(2.)).child(theme_board(t, &themes::light().colors))),
+    )
+}
+
+/// A small board in a palette's colours: background, a card with a bar, Clawd.
+fn theme_board(t: &Theme, c: &Palette) -> gpui::Div {
     let col = |tok| rgb(c.get(tok));
-    let board = div()
+    div()
         .w_full()
         .flex()
         .flex_col()
@@ -1679,7 +1716,17 @@ fn theme_card(t: &Theme, id: &'static str, name: &'static str, c: &Palette, on: 
                         .bg(col(ColorToken::BarBg))
                         .child(div().w(relative(0.6)).h_full().rounded(px(2.)).bg(col(ColorToken::Green))),
                 ),
-        );
+        )
+}
+
+/// A theme to pick: its board over its name.
+fn theme_card(
+    t: &Theme,
+    id: &'static str,
+    name: &'static str,
+    board: impl IntoElement,
+    on: bool,
+) -> gpui::Stateful<gpui::Div> {
     let sel = format!("theme-{id}");
     div()
         .id(SharedString::from(sel.clone()))
@@ -1810,15 +1857,26 @@ mod tests {
         click(cx, "pace-marker");
         assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("pace_marker = on"));
         // A preset is one click; Custom opens the per-colour editor, starting
-        // from the theme on screen.
+        // from the theme on screen. System theme comes first.
         let config = || std::fs::read_to_string(&paths.config_file).unwrap();
+        let xs: Vec<_> = ["theme-system", "theme-dark", "theme-light"]
+            .map(|id| cx.debug_bounds(id).expect(id).origin.x)
+            .into_iter()
+            .collect();
+        assert!(xs[0] < xs[1] && xs[1] < xs[2], "{xs:?}");
+        click(cx, "theme-dark");
+        assert!(config().contains("theme = dark"));
         click(cx, "theme-dracula");
         assert!(config().contains("theme = dracula"));
         click(cx, "theme-custom");
         let text = config();
         assert!(text.contains("theme = custom") && text.contains("color_bg = 21222c"), "{text}");
-        click(cx, "theme-clawd");
+        click(cx, "theme-system");
         assert!(!config().contains("theme ="), "the default leaves the file");
+        std::fs::write(&paths.config_file, config() + "theme = clawd\n").unwrap();
+        view.update(cx, |v, _| v.reload());
+        click(cx, "theme-system");
+        assert!(!config().contains("theme ="), "the old default goes too");
         assert!(config().contains("color_bg = 21222c"), "Custom keeps its colours for later");
         click(cx, "theme-custom");
         assert!(config().contains("theme = custom"));

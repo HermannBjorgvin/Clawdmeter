@@ -72,12 +72,20 @@ is faked behind `FlashHardware`.
   this computer via rodio, ALSA on Linux), `clock`, `liveliness` (1–5,
   default 3: the Device page's Animation silliness slider, sent as `lv`),
   `attention_anim` (`off`/`10s`/`30s`/`2m`, default `2m`, sent as `aa`
-  seconds), `pace_marker` (default off, sent as `pm`), `theme` (a preset id from
-  `themes::PRESETS`, default `clawd`, or `custom`) and `color_<token>`
+  seconds), `pace_marker` (default off, sent as `pm`), `theme` (`system`, the
+  default, a preset id from `themes::PRESETS`, or `custom`; the old default
+  `clawd` and unknown values read as `system`) and `color_<token>`
   (`rrggbb`, no `#`; the custom theme's colours, all eleven written once it
   has been chosen, which is how it knows not to start from the current theme
   again); the chosen palette's
-  eleven colours are sent as `th` (`Settings::colors`), `claude_path`,
+  eleven colours are sent as `th` (`Settings::colors`; System resolves to
+  Dark or Light by the OS appearance, `platform::AppearanceWatch`: the
+  xdg-desktop-portal `color-scheme` over D-Bus, macOS `AppleInterfaceStyle`,
+  Windows `AppsUseLightTheme`; portal "no preference" is GNOME's light
+  default, unreadable = Dark. A background thread reads it every 0.5 s (2 s
+  on macOS) so neither the daemon's runtime nor the UI thread blocks; the
+  daemon hands changes to `Engine::set_appearance`, which sends them like any
+  device setting), `claude_path`,
   `release_repo`, `update_check`, `onboarding_done`, `alert_on` (alert kinds
   the daemon lets through: the hook records `k` from `hook_event_name` /
   `notification_type` and `engine.on_attention` drops the rest; default all

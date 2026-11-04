@@ -16,6 +16,7 @@ use clawdmeter_core::attention::AttentionInbox;
 use clawdmeter_core::backoff;
 use clawdmeter_core::engine::PollPlan;
 use clawdmeter_core::events::EventTail;
+use clawdmeter_core::platform::AppearanceWatch;
 use clawdmeter_core::probe;
 use clawdmeter_core::usage;
 use clawdmeter_core::{unix_now, Engine, EngineStatus, HostClock, Paths, Settings, WriteKind};
@@ -166,6 +167,10 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     engine.restore_blocks(&backoff::load_blocks(&paths.usage_blocks_file()), unix_now());
     let mut saved_blocks = engine.blocks(unix_now());
     let host = HostClock { utc_offset_secs: 0, prefers_12h: clawdmeter_core::platform::prefers_12h() };
+    // The System theme's Dark or Light follows the OS.
+    // Dark until its first read (no write goes out before a link and a poll).
+    let appearance = AppearanceWatch::spawn();
+    let mut shown_appearance = None;
     let inbox = AttentionInbox::new(&paths.state_dir);
     let (mut tail, seed) = EventTail::open(paths.events_log());
     engine.seed_events(&seed);
@@ -254,6 +259,12 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         }
 
         // ---- fast clock ----
+        let a = appearance.get();
+        if shown_appearance != Some(a) {
+            log::info!("system appearance: {a:?}");
+            shown_appearance = Some(a);
+            engine.set_appearance(a);
+        }
         for ev in tail.poll() {
             log::debug!("hook {:?} {}", ev.kind, ev.session);
             engine.on_hook_event(&ev, now);
@@ -432,6 +443,7 @@ pub fn once(paths: &Paths) -> i32 {
     let claude = usage::find_claude(settings.claude_path.as_deref(), &paths.home);
     let now = unix_now();
     let mut engine = Engine::new(settings.clone());
+    engine.set_appearance(clawdmeter_core::platform::system_appearance().unwrap_or_default());
     engine.restore_blocks(&backoff::load_blocks(&paths.usage_blocks_file()), now);
     // A blocked account isn't asked: a call during a block lengthens it.
     let blocked = engine.blocks(now);

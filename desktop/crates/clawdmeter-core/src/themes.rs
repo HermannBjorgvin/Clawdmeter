@@ -1,8 +1,10 @@
-//! The device's colour themes: the default Clawd palette and well-known
-//! editor schemes mapped onto its eleven colours (the `theme` key; `custom`
-//! uses the `color_*` keys instead).
+//! The device's colour themes: Dark (the firmware's own palette), Light, and
+//! well-known editor schemes mapped onto its eleven colours (the `theme` key;
+//! `system` follows the OS between Dark and Light, `custom` uses the
+//! `color_*` keys instead).
 
 use crate::config::Palette;
+use crate::platform::Appearance;
 
 /// A named palette on the Device page.
 #[derive(Debug, PartialEq, Eq)]
@@ -15,14 +17,23 @@ pub struct ThemePreset {
     pub colors: Palette,
 }
 
-/// Every preset, the default first. Each lists background, cards, text,
-/// secondary text, accent, low/medium/high usage, bar track, Clawd and the
-/// face's eyes (the `th` order).
-pub static PRESETS: [ThemePreset; 10] = [
+/// Every preset: Dark (the firmware's palette) and Light first. Each lists
+/// background, cards, text, secondary text, accent, low/medium/high usage,
+/// bar track, Clawd and the face's eyes (the `th` order).
+pub static PRESETS: [ThemePreset; 11] = [
     preset(
-        "clawd",
-        "Clawd",
+        "dark",
+        "Dark",
         [0x000000, 0x1f1f1e, 0xfaf9f5, 0xb0aea5, 0xd97757, 0x788c5d, 0xd97757, 0xc0392b, 0x2a2a28, 0xd97757, 0x141413],
+    ),
+    // Ivory paper, near-black text. Accent, green and amber are deeper than
+    // Dark's so text in them (status line, "On pace") reads on the cards
+    // (about 4:1); amber leans gold so it parts from red by hue, which
+    // lightness can't do at that contrast. Clawd keeps his own orange.
+    preset(
+        "light",
+        "Light",
+        [0xfaf9f5, 0xedebe3, 0x141413, 0x5e5d59, 0xa8561f, 0x5a7a3f, 0xa36a10, 0xc0392b, 0xdad7cc, 0xd97757, 0x141413],
     ),
     preset(
         "catppuccin_mocha",
@@ -75,9 +86,22 @@ const fn preset(id: &'static str, name: &'static str, colors: [u32; 11]) -> Them
     ThemePreset { id, name, colors: Palette::new(colors) }
 }
 
-/// The default theme (the firmware's own palette).
+/// Dark: the firmware's own palette, what the device shows from boot.
 pub fn default_preset() -> &'static ThemePreset {
     &PRESETS[0]
+}
+
+/// Light.
+pub fn light() -> &'static ThemePreset {
+    &PRESETS[1]
+}
+
+/// The preset the System theme uses in `appearance`.
+pub fn for_appearance(appearance: Appearance) -> &'static ThemePreset {
+    match appearance {
+        Appearance::Dark => default_preset(),
+        Appearance::Light => light(),
+    }
 }
 
 /// The preset named by a `theme` value (case-insensitive), if any.
@@ -108,6 +132,14 @@ mod tests {
     fn find_is_case_insensitive_and_custom_is_no_preset() {
         assert_eq!(find("Dracula").map(|p| p.name), Some("Dracula"));
         assert!(find("custom").is_none());
+        assert!(find("system").is_none());
+        assert!(find("clawd").is_none(), "the old id means System (config::DeviceTheme)");
+    }
+
+    #[test]
+    fn system_picks_dark_or_light() {
+        assert_eq!(for_appearance(Appearance::Dark).id, "dark");
+        assert_eq!(for_appearance(Appearance::Light).id, "light");
     }
 
     #[test]
