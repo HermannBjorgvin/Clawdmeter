@@ -16,7 +16,7 @@ use clawdmeter_core::config::{
     parse_rgb, AlertOn, AttentionAnim, ClockMode, ColorToken, ConfigFile, DeviceTheme, Palette, LIVELINESS_MAX,
 };
 use clawdmeter_core::platform::{Appearance, AppearanceWatch};
-use clawdmeter_core::themes::{self, PRESETS};
+use clawdmeter_core::themes::{FollowTheme, FOLLOWING, PRESETS};
 use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::device::{self, FirmwareInfo};
 use gpui::{
@@ -748,15 +748,23 @@ impl SettingsView {
         pane
     }
 
-    /// The board's colours: System theme first (half Dark, half Light),
-    /// then a card per preset, each a small preview in its own colours, then
-    /// Custom +, which opens a chip per colour; the chosen chip opens a grid
-    /// of swatches to pick from.
+    /// The board's colours: a card per preset, each a small preview in its
+    /// own colours, with each OS-following theme (System, Solarized) just
+    /// before its dark preset, half dark and half light; then Custom +, which
+    /// opens a chip per colour; the chosen chip opens a grid of swatches to
+    /// pick from.
     fn colors_field(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.settings.theme;
         let mut cards = div().w_full().flex().flex_wrap().items_start().gap(px(8.));
-        let choices = std::iter::once(("system", "System theme", DeviceTheme::System, system_board(t)))
-            .chain(PRESETS.iter().map(|p| (p.id, p.name, DeviceTheme::Preset(p), theme_board(t, &p.colors))));
+        let choices = PRESETS.iter().flat_map(|p| {
+            let follow = FOLLOWING.iter().copied().filter(move |f| std::ptr::eq(f.dark, p));
+            follow.map(|f| (f.id, f.name, DeviceTheme::Follow(f), follow_board(t, f))).chain(std::iter::once((
+                p.id,
+                p.name,
+                DeviceTheme::Preset(p),
+                theme_board(t, &p.colors),
+            )))
+        });
         for (id, name, choice, board) in choices {
             let me = cx.entity().downgrade();
             cards = cards.child(theme_card(t, id, name, board, theme == choice).on_click(move |_, window, cx| {
@@ -766,7 +774,7 @@ impl SettingsView {
                     v.save(|s, cfg| {
                         s.theme = choice;
                         // An old `theme = clawd` already reads as System; clear it too.
-                        if choice == DeviceTheme::System {
+                        if choice == DeviceTheme::default() {
                             cfg.remove("theme");
                         }
                     });
@@ -798,7 +806,7 @@ impl SettingsView {
             t,
             "Colors",
             "The board's colors, Clawd's included. System theme switches between Dark and Light with this \
-             computer's light or dark mode. Pick a theme, or Custom + to choose each color yourself (the first \
+             computer's light or dark mode, Solarized between Solarized Dark and Light. Pick a theme, or Custom + to choose each color yourself (the first \
              time, it starts from the theme you're on). The board repaints with the app's next update, within \
              seconds while usage is current.",
             body,
@@ -1679,9 +1687,10 @@ pub(crate) fn write_settings(
     Ok(())
 }
 
-/// The System theme's preview: Dark's board on the left, Light's on the right.
-fn system_board(t: &Theme) -> gpui::Div {
-    div().relative().w_full().child(theme_board(t, &themes::default_preset().colors)).child(
+/// An OS-following theme's preview: its dark board on the left, its light
+/// one on the right.
+fn follow_board(t: &Theme, f: &FollowTheme) -> gpui::Div {
+    div().relative().w_full().child(theme_board(t, &f.dark.colors)).child(
         div()
             .absolute()
             .top_0()
@@ -1689,7 +1698,7 @@ fn system_board(t: &Theme) -> gpui::Div {
             .right_0()
             .w(relative(0.5))
             .overflow_hidden()
-            .child(div().absolute().top_0().right_0().w(relative(2.)).child(theme_board(t, &themes::light().colors))),
+            .child(div().absolute().top_0().right_0().w(relative(2.)).child(theme_board(t, &f.light.colors))),
     )
 }
 
@@ -1855,6 +1864,8 @@ mod tests {
         let paths = home("cfg");
         let p = paths.clone();
         let (view, cx) = cx.add_window_view(move |_, cx| SettingsView::with_usb(p, Page::Device, false, cx));
+        // Tall enough for the whole Device page, Custom's editor and every theme card included.
+        cx.simulate_resize(gpui::size(px(2400.), px(1600.)));
         click(cx, "reset-chime");
         let text = std::fs::read_to_string(&paths.config_file).unwrap();
         assert!(text.starts_with("# mine\n"), "comments kept: {text}");
@@ -1872,13 +1883,22 @@ mod tests {
         click(cx, "pace-marker");
         assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("pace_marker = on"));
         // A preset is one click; Custom opens the per-colour editor, starting
-        // from the theme on screen. System theme comes first.
+        // from the theme on screen. System theme comes first; Solarized sits
+        // just before Solarized Dark and Light.
         let config = || std::fs::read_to_string(&paths.config_file).unwrap();
         let xs: Vec<_> = ["theme-system", "theme-dark", "theme-light"]
             .map(|id| cx.debug_bounds(id).expect(id).origin.x)
             .into_iter()
             .collect();
         assert!(xs[0] < xs[1] && xs[1] < xs[2], "{xs:?}");
+        let at = |id: &'static str| {
+            let o = cx.debug_bounds(id).expect(id).origin;
+            (o.y, o.x)
+        };
+        let order = ["theme-one_dark", "theme-solarized", "theme-solarized_dark", "theme-solarized_light"].map(at);
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
+        click(cx, "theme-solarized");
+        assert!(config().contains("theme = solarized\n"), "{}", config());
         click(cx, "theme-dark");
         assert!(config().contains("theme = dark"));
         click(cx, "theme-dracula");

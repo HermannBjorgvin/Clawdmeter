@@ -1340,6 +1340,15 @@ mod tests {
         assert_eq!(write(&mut e, T0 + 5).unwrap().payload.th, Some(dracula));
         e.set_appearance(Appearance::Light);
         assert!(write(&mut e, T0 + 6).is_none(), "Dracula stays");
+
+        // Solarized follows it too, between its own Dark and Light.
+        e.update_settings(settings("theme = solarized\n"));
+        let w = write(&mut e, T0 + 7).expect("the theme changed");
+        assert_eq!(w.payload.th, Some(themes::find("solarized_light").unwrap().colors));
+        e.set_appearance(Appearance::Dark);
+        let w = write(&mut e, T0 + 8).expect("the OS went dark: sent right away");
+        assert_eq!((w.kind, w.payload.th), (WriteKind::Event, Some(themes::find("solarized_dark").unwrap().colors)));
+        assert!(write(&mut e, T0 + 9).is_none());
     }
 
     #[test]

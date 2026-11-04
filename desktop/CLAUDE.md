@@ -73,14 +73,15 @@ is faked behind `FlashHardware`.
   default 3: the Device page's Animation silliness slider, sent as `lv`),
   `attention_anim` (`off`/`10s`/`30s`/`2m`, default `2m`, sent as `aa`
   seconds), `pace_marker` (default off, sent as `pm`), `theme` (`system`, the
-  default, a preset id from `themes::PRESETS`, or `custom`; the old default
+  default, or `solarized`: the OS-following themes in `themes::FOLLOWING`; a
+  preset id from `themes::PRESETS`; or `custom`; the old default
   `clawd` and unknown values read as `system`) and `color_<token>`
   (`rrggbb`, no `#`; the custom theme's colours, all eleven written once it
   has been chosen, which is how it knows not to start from the current theme
   again); the chosen palette's
   eleven colours are sent as `th` (`Settings::colors`; System resolves to
-  Dark or Light by the OS appearance, `platform::AppearanceWatch`: the
-  xdg-desktop-portal `color-scheme` over D-Bus, macOS `AppleInterfaceStyle`,
+  Dark or Light, Solarized to Solarized Dark or Light, by the OS appearance,
+  `platform::AppearanceWatch`: the xdg-desktop-portal `color-scheme` over D-Bus, macOS `AppleInterfaceStyle`,
   Windows `AppsUseLightTheme`; portal "no preference" is GNOME's light
   default, unreadable = Dark. A background thread keeps it (Linux: one read,
   then the portal's `SettingChanged` signal; macOS polls every 10 s, Windows
