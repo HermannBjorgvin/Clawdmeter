@@ -136,12 +136,14 @@ those colours, and spend-capped accounts are unchanged.
 this computer's light or dark mode: the board shows **Dark** (its own
 palette) or **Light** and switches within a couple of seconds when the mode
 changes, while usage is current (with stale numbers it waits for the next
-reading).
+reading). **Solarized** does the same between **Solarized Dark** and
+**Solarized Light**.
 Pick Dark, Light or another theme to keep one palette, or **Custom +** to
 choose each colour. The e-paper board stays black on white whatever is
 chosen. A setup that makes things dark only through `GTK_THEME` (common on
 tiling window managers) and leaves the desktop's colour scheme at its
-default gets the Light board with System theme: pick Dark there.
+default gets the Light board with System theme or Solarized: pick Dark or
+Solarized Dark there.
 
 Accounts with no 5-hour limit, such as Ultra (formerly Max 20x) once
 Anthropic has verified the account, show only the **Weekly** meter on the
@@ -210,7 +212,7 @@ seconds and preserves comments and unknown keys when saving.
 | `liveliness` | `3` | How lively Clawd is, `1` (No-nonsense) to `5` (All-nonsense). Set with **Animation silliness** on the Device page. |
 | `attention_anim` | `2m` | How long Clawd points and waves for an alert: `off`, `10s`, `30s` or `2m`. The alert itself is unchanged. Set with **Attention animation** on the Device page. |
 | `pace_marker` | `off` | `on` marks the elapsed share of each usage window on the device's bars and colours them by pace. Set with **Pace marker** on the Device page. |
-| `theme` | `system` | The device's colours, Clawd's included: `system` (Dark or Light, following this computer's light or dark mode, and switching when it does; `clawd`, the old default, means the same), `dark` (the board's own palette), `light`, `catppuccin_mocha`, `dracula`, `gruvbox`, `monokai`, `nord`, `one_dark`, `solarized_dark`, `solarized_light`, `tokyo_night`, or `custom` for the `color_*` keys below. Set with **Colors** on the Device page. |
+| `theme` | `system` | The device's colours, Clawd's included: `system` (Dark or Light, following this computer's light or dark mode, and switching when it does; `clawd`, the old default, means the same), `dark` (the board's own palette), `light`, `catppuccin_mocha`, `dracula`, `gruvbox`, `monokai`, `nord`, `one_dark`, `solarized` (Solarized Dark or Light, following the mode like `system`), `solarized_dark`, `solarized_light`, `tokyo_night`, or `custom` for the `color_*` keys below. Set with **Colors** on the Device page. |
 | `color_<name>` | the default palette | The custom theme's colours as `rrggbb` (no `#`, which starts a comment): `color_bg`, `color_panel`, `color_text`, `color_dim`, `color_accent`, `color_green`, `color_amber`, `color_red`, `color_bar_bg`, `color_clawd`, `color_eye`. Used only with `theme = custom` and kept while a preset is chosen. Set with **Custom +** under **Colors** on the Device page (a swatch or a typed hex code). The first time, Custom starts from the theme you're on and writes all eleven keys; from then on it keeps its own colours. |
 | `poll_interval` | automatic | Override working and no-hooks polling intervals, in seconds. The scheduler enforces at least 120 seconds per account. Quiet and other-account schedules still apply. |
 | `heartbeat_interval` | `60` | Resend cached readings between usage checks. This does not fetch usage. Keep the default unless diagnosing the connection. |

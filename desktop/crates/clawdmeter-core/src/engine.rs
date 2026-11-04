@@ -148,7 +148,7 @@ pub struct Engine {
     sent_pm: Option<u8>,
     /// Last `th` sent.
     sent_th: Option<Palette>,
-    /// The OS's light/dark mode, which picks the System theme's palette.
+    /// The OS's light/dark mode, which picks System's or Solarized's palette.
     appearance: Appearance,
     /// The clock's hour format the device last got (`tf`; 0 = no clock).
     sent_tf: Option<u8>,
@@ -205,13 +205,13 @@ impl Engine {
         &self.settings
     }
 
-    /// The OS's light/dark mode. With the System theme, a change goes out
-    /// as a new `th` on the next write check.
+    /// The OS's light/dark mode. With a theme that follows it (System,
+    /// Solarized), a change goes out as a new `th` on the next write check.
     pub fn set_appearance(&mut self, appearance: Appearance) {
         self.appearance = appearance;
     }
 
-    /// The palette the device gets as `th`, the System theme resolved.
+    /// The palette the device gets as `th`, a following theme resolved.
     pub fn colors(&self) -> Palette {
         self.settings.colors(self.appearance)
     }
@@ -1340,6 +1340,15 @@ mod tests {
         assert_eq!(write(&mut e, T0 + 5).unwrap().payload.th, Some(dracula));
         e.set_appearance(Appearance::Light);
         assert!(write(&mut e, T0 + 6).is_none(), "Dracula stays");
+
+        // Solarized follows it too, between its own Dark and Light.
+        e.update_settings(settings("theme = solarized\n"));
+        let w = write(&mut e, T0 + 7).expect("the theme changed");
+        assert_eq!(w.payload.th, Some(themes::find("solarized_light").unwrap().colors));
+        e.set_appearance(Appearance::Dark);
+        let w = write(&mut e, T0 + 8).expect("the OS went dark: sent right away");
+        assert_eq!((w.kind, w.payload.th), (WriteKind::Event, Some(themes::find("solarized_dark").unwrap().colors)));
+        assert!(write(&mut e, T0 + 9).is_none());
     }
 
     #[test]

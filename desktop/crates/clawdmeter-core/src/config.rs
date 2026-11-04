@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::paths::Paths;
 use crate::platform::Appearance;
-use crate::themes::{self, ThemePreset};
+use crate::themes::{self, FollowTheme, ThemePreset};
 
 /// Default seconds between `/usage` polls while a session is working
 /// (`cadence::Cadence::default().working`).
@@ -370,26 +370,37 @@ pub fn parse_rgb(v: &str) -> Option<u32> {
     }
 }
 
-/// The device's colours: `theme = system` (the default), a preset
-/// (`theme = <id>`) or `theme = custom`, which uses the `color_*` keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// The device's colours: `theme = system` (the default) or another theme
+/// that follows the OS, a preset (`theme = <id>`) or `theme = custom`, which
+/// uses the `color_*` keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceTheme {
-    /// Dark or Light, following the OS's appearance.
-    #[default]
-    System,
+    /// One of [`crate::themes::FOLLOWING`]: two presets, picked by the OS's
+    /// appearance.
+    Follow(&'static FollowTheme),
     /// One of [`crate::themes::PRESETS`].
     Preset(&'static ThemePreset),
     /// [`Settings::custom_colors`].
     Custom,
 }
 
+/// System.
+impl Default for DeviceTheme {
+    fn default() -> Self {
+        DeviceTheme::Follow(&themes::SYSTEM)
+    }
+}
+
 impl DeviceTheme {
-    /// `theme`: `system`, a preset id or `custom`. `clawd`, the default
-    /// before there was a System theme, and anything unknown are System.
+    /// `theme`: `system`, `solarized`, a preset id or `custom`. `clawd`, the
+    /// default before there was a System theme, and anything unknown are
+    /// System.
     pub fn parse(v: &str) -> Self {
         let v = v.trim();
         if v.eq_ignore_ascii_case("custom") {
             DeviceTheme::Custom
+        } else if let Some(f) = themes::find_following(v) {
+            DeviceTheme::Follow(f)
         } else {
             themes::find(v).map(DeviceTheme::Preset).unwrap_or_default()
         }
@@ -398,7 +409,7 @@ impl DeviceTheme {
     /// The `theme` value.
     pub fn as_str(self) -> &'static str {
         match self {
-            DeviceTheme::System => "system",
+            DeviceTheme::Follow(f) => f.id,
             DeviceTheme::Preset(p) => p.id,
             DeviceTheme::Custom => "custom",
         }
@@ -545,19 +556,19 @@ fn on_off(v: Option<&str>, default: bool) -> bool {
 }
 
 impl Settings {
-    /// The palette the device gets (`th`): Dark or Light for the System
-    /// theme (by the OS's `appearance`), the chosen preset's, or the custom
-    /// colours.
+    /// The palette the device gets (`th`): for System (Dark or Light) and
+    /// Solarized (its Dark or Light), the one the OS's `appearance` picks;
+    /// the chosen preset's; or the custom colours.
     pub fn colors(&self, appearance: Appearance) -> Palette {
         match self.theme {
-            DeviceTheme::System => themes::for_appearance(appearance).colors,
+            DeviceTheme::Follow(f) => f.preset(appearance).colors,
             DeviceTheme::Preset(p) => p.colors,
             DeviceTheme::Custom => self.custom_colors.unwrap_or_default(),
         }
     }
 
     /// Switch to the custom theme. The first time, it starts from the colours
-    /// on screen (the System theme's as `appearance` has it); after that it
+    /// on screen (a following theme's as `appearance` has it); after that it
     /// keeps its own, even if they equal a preset's.
     pub fn choose_custom(&mut self, appearance: Appearance) {
         if self.custom_colors.is_none() {
@@ -889,7 +900,7 @@ mod tests {
     #[test]
     fn colors_round_trip() {
         let d = settings("");
-        assert_eq!((d.theme, d.colors(DARK)), (DeviceTheme::System, Palette::default()));
+        assert_eq!((d.theme, d.colors(DARK)), (DeviceTheme::default(), Palette::default()));
         assert_eq!(d.theme.as_str(), "system");
         assert_eq!(&d.colors(DARK).to_hex()[24..30], "d97757", "accent defaults to terra-cotta");
         assert_eq!(d.colors(DARK).to_hex().len(), 66);
@@ -961,6 +972,14 @@ mod tests {
         let mut s = reload(&ConfigFile::parse(""));
         s.choose_custom(LIGHT);
         assert_eq!(s.custom_colors, Some(crate::themes::light().colors));
+
+        // From Solarized: whichever of its Dark and Light is on screen.
+        let mut s = reload(&ConfigFile::parse("theme = solarized\n"));
+        s.choose_custom(LIGHT);
+        assert_eq!(s.custom_colors, Some(crate::themes::find("solarized_light").unwrap().colors));
+        let mut s = reload(&ConfigFile::parse("theme = solarized\n"));
+        s.choose_custom(DARK);
+        assert_eq!(s.custom_colors, Some(crate::themes::find("solarized_dark").unwrap().colors));
     }
 
     #[test]
@@ -989,7 +1008,7 @@ mod tests {
         let light = crate::themes::light();
         for text in ["", "theme = system\n", "theme = clawd\n", "theme = Clawd\n", "theme = nope\n"] {
             let s = settings(text);
-            assert_eq!(s.theme, DeviceTheme::System, "{text:?}");
+            assert_eq!(s.theme, DeviceTheme::default(), "{text:?}");
             assert_eq!((s.colors(DARK), s.colors(LIGHT)), (dark.colors, light.colors), "{text:?}");
         }
         let s = settings("theme = dark\n");
@@ -1006,7 +1025,34 @@ mod tests {
         s.theme = DeviceTheme::Preset(dark);
         s.apply_to(&mut cfg, &paths());
         assert_eq!(cfg.get("theme"), Some("dark"));
-        s.theme = DeviceTheme::System;
+        s.theme = DeviceTheme::default();
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("theme").is_none());
+    }
+
+    #[test]
+    fn solarized_follows_the_os_and_the_fixed_ones_stay() {
+        let sol_dark = crate::themes::find("solarized_dark").unwrap();
+        let sol_light = crate::themes::find("solarized_light").unwrap();
+        for text in ["theme = solarized\n", "theme = Solarized  # both\n"] {
+            let s = settings(text);
+            assert_eq!(s.theme, DeviceTheme::Follow(&crate::themes::SOLARIZED), "{text:?}");
+            assert_eq!((s.colors(DARK), s.colors(LIGHT)), (sol_dark.colors, sol_light.colors), "{text:?}");
+        }
+        let s = settings("theme = solarized_dark\n");
+        assert_eq!((s.theme, s.colors(LIGHT)), (DeviceTheme::Preset(sol_dark), sol_dark.colors));
+        let s = settings("theme = solarized_light\n");
+        assert_eq!((s.theme, s.colors(DARK)), (DeviceTheme::Preset(sol_light), sol_light.colors));
+
+        // Written as `solarized`, read back the same; System still leaves the key out.
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.theme = DeviceTheme::parse("solarized");
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("theme"), Some("solarized"));
+        assert_eq!(Settings::from_config(&cfg, &paths(), None).theme, s.theme);
+        assert_eq!(s.theme.as_str(), "solarized");
+        s.theme = DeviceTheme::default();
         s.apply_to(&mut cfg, &paths());
         assert!(cfg.get("theme").is_none());
     }

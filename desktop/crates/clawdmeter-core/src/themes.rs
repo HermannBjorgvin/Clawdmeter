@@ -1,7 +1,7 @@
 //! The device's colour themes: Dark (the firmware's own palette), Light, and
 //! well-known editor schemes mapped onto its eleven colours (the `theme` key;
-//! `system` follows the OS between Dark and Light, `custom` uses the
-//! `color_*` keys instead).
+//! `system` follows the OS between Dark and Light, `solarized` between
+//! Solarized Dark and Light, `custom` uses the `color_*` keys instead).
 
 use crate::config::Palette;
 use crate::platform::Appearance;
@@ -96,18 +96,51 @@ pub fn light() -> &'static ThemePreset {
     &PRESETS[1]
 }
 
-/// The preset the System theme uses in `appearance`.
-pub fn for_appearance(appearance: Appearance) -> &'static ThemePreset {
-    match appearance {
-        Appearance::Dark => default_preset(),
-        Appearance::Light => light(),
+/// A theme that follows the OS's appearance between two presets.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FollowTheme {
+    /// The config value, `theme = <id>`.
+    pub id: &'static str,
+    /// The Device page's name for it.
+    pub name: &'static str,
+    /// The preset in dark mode.
+    pub dark: &'static ThemePreset,
+    /// The preset in light mode.
+    pub light: &'static ThemePreset,
+}
+
+impl FollowTheme {
+    /// The preset for `appearance`.
+    pub fn preset(&self, appearance: Appearance) -> &'static ThemePreset {
+        match appearance {
+            Appearance::Dark => self.dark,
+            Appearance::Light => self.light,
+        }
     }
 }
+
+/// System: Dark or Light. The default theme.
+pub static SYSTEM: FollowTheme =
+    FollowTheme { id: "system", name: "System theme", dark: &PRESETS[0], light: &PRESETS[1] };
+
+/// Solarized: Solarized Dark or Solarized Light.
+pub static SOLARIZED: FollowTheme =
+    FollowTheme { id: "solarized", name: "Solarized", dark: &PRESETS[8], light: &PRESETS[9] };
+
+/// Every theme that follows the OS. The Device page shows each one's card
+/// just before its dark preset's.
+pub static FOLLOWING: [&FollowTheme; 2] = [&SYSTEM, &SOLARIZED];
 
 /// The preset named by a `theme` value (case-insensitive), if any.
 pub fn find(id: &str) -> Option<&'static ThemePreset> {
     let id = id.trim();
     PRESETS.iter().find(|p| p.id.eq_ignore_ascii_case(id))
+}
+
+/// The OS-following theme named by a `theme` value (case-insensitive), if any.
+pub fn find_following(id: &str) -> Option<&'static FollowTheme> {
+    let id = id.trim();
+    FOLLOWING.iter().copied().find(|f| f.id.eq_ignore_ascii_case(id))
 }
 
 #[cfg(test)]
@@ -133,13 +166,33 @@ mod tests {
         assert_eq!(find("Dracula").map(|p| p.name), Some("Dracula"));
         assert!(find("custom").is_none());
         assert!(find("system").is_none());
+        assert!(find("solarized").is_none());
         assert!(find("clawd").is_none(), "the old id means System (config::DeviceTheme)");
+        assert_eq!(find_following(" Solarized ").map(|f| f.name), Some("Solarized"));
+        assert!(find_following("solarized_dark").is_none());
+        assert!(find_following("clawd").is_none());
     }
 
     #[test]
-    fn system_picks_dark_or_light() {
-        assert_eq!(for_appearance(Appearance::Dark).id, "dark");
-        assert_eq!(for_appearance(Appearance::Light).id, "light");
+    fn following_themes_pick_by_appearance() {
+        let ids = |f: &FollowTheme| (f.preset(Appearance::Dark).id, f.preset(Appearance::Light).id);
+        assert_eq!(ids(&SYSTEM), ("dark", "light"));
+        assert_eq!(ids(&SOLARIZED), ("solarized_dark", "solarized_light"));
+    }
+
+    #[test]
+    fn following_ids_and_names_are_unique() {
+        for (i, a) in FOLLOWING.iter().enumerate() {
+            for b in &FOLLOWING[i + 1..] {
+                assert_ne!((a.id, a.name), (b.id, b.name));
+            }
+            assert!(PRESETS.iter().all(|p| p.id != a.id && p.name != a.name), "{}", a.id);
+            // The Device page shows its card before its dark preset's.
+            assert!(PRESETS.iter().any(|p| std::ptr::eq(p, a.dark)), "{}: dark isn't in PRESETS", a.id);
+            assert!(PRESETS.iter().any(|p| std::ptr::eq(p, a.light)), "{}: light isn't in PRESETS", a.id);
+            assert!(!a.id.eq_ignore_ascii_case("custom") && !a.id.eq_ignore_ascii_case("clawd"));
+            assert!(a.id.bytes().all(|c| c.is_ascii_lowercase() || c == b'_'), "{}", a.id);
+        }
     }
 
     #[test]
