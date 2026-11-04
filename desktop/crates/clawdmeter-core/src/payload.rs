@@ -2,13 +2,13 @@
 //!
 //! Keys match `payload_parse()` in `firmware/src/payload.cpp`, in the order
 //! the old daemons wrote them, plus the additive fast-clock fields `a`, `e`,
-//! `es`, `n`, `rp` and Clawd's settings `lv` and `aa` (old firmware ignores
-//! unknown keys).
+//! `es`, `n`, `rp` and the device settings `lv`, `aa`, `pm` and `th`
+//! (old firmware ignores unknown keys).
 
 use chrono::{DateTime, Datelike, Months, TimeZone, Utc};
 use serde::Serialize;
 
-use crate::config::ClockMode;
+use crate::config::{ClockMode, Palette};
 use crate::usage::{SpendPeriod, UsageReading};
 
 /// One device payload. `None` fields are omitted.
@@ -94,12 +94,17 @@ pub struct Payload {
     /// value it got.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm: Option<u8>,
+    /// The device's colours: 11 six-digit hex colours run together
+    /// ([`crate::config::Palette::to_hex`]). The device keeps the last value
+    /// it got.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub th: Option<Palette>,
 }
 
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
     "s", "sr", "w", "wr", "st", "acct", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x", "a", "e", "es", "n",
-    "rp", "lv", "aa", "pm",
+    "rp", "lv", "aa", "pm", "th",
 ];
 /// The fast-clock keys added in v0.4 (old firmware ignores them).
 pub const ADDITIVE_KEYS: &[&str] = &["a", "e", "es", "n", "rp"];
@@ -514,6 +519,7 @@ mod tests {
             lv: Some(3),
             aa: Some(120),
             pm: Some(1),
+            th: Some(Palette::default()),
         };
         let v: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&pl.to_json()).unwrap();
         // serde_json's Map is sorted without preserve_order; check membership.

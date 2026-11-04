@@ -44,3 +44,4 @@ void performer_perform_group(int group, uint32_t loop_ms, bool calm);
 void performer_release(void);   // stop now, snap to the idle pose where he is
 bool performer_busy(void);      // walking or performing
 bool performer_visible(void);   // any of him is on screen right now
+void performer_repaint(void);   // redraw what's on screen (a new TH_CLAWD)
