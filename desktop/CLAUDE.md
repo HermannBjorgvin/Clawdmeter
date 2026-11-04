@@ -48,10 +48,11 @@ is faked behind `FlashHardware`.
   chip + flash size, writes with espflash.
 - `clawdmeter-app`: the `clawdmeter` binary. Tray (`tray/`, ksni on Linux),
   window (`ui/`), `daemon.rs` (drives the engine on its own thread: 0.5 s
-  tick, config re-read every 5 s), `hooks/` (`clawdmeter hook
-  alert|clear|event` and the settings.json installer), `ipc.rs`
-  (single-instance lock, status file, command queues, window lock),
-  `onboarding.rs`, `boards.rs` (names, buy links, illustrations), `chime.rs`.
+  tick, config re-read every 5 s and on `Command::ReloadSettings`),
+  `hooks/` (`clawdmeter hook alert|clear|event` and the settings.json
+  installer), `ipc.rs` (single-instance lock, status file, command queues,
+  window lock), `onboarding.rs`, `boards.rs` (names, buy links,
+  illustrations), `chime.rs`.
 
 ## Running
 
@@ -183,6 +184,12 @@ Per account (`probe.rs`, `oauth.rs`):
   Hooks, Settings) or the setup wizard (`ui/setup.rs`) filling the window.
   Pages are `crate::Page`; `Page::parse` also accepts the old
   `background`/`flasher`/`status`/`alerts` names.
+- The window saves settings through `ui::settings::write_settings`, which
+  also queues `settings-changed` on `<state>/app-commands`; the tray (it
+  takes the queue every 200 ms) forwards it as `Command::ReloadSettings`, so
+  a device setting goes out within about a second. `Engine::next_write` sends
+  a changed `lv`/`aa`/`pm`/`th` or clock format (`tf`, off included) at once.
+  The 5 s re-read stays for hand edits and `--daemon` without a tray.
 - Only one window process runs (`<state>/window.lock`). The tray, or a second
   `--window` launch, appends `show <page>` to `<state>/window-commands`; the
   window switches page and raises itself. Child views ask for another page by

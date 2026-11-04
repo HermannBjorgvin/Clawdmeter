@@ -61,8 +61,8 @@ Config lives at `~/.config/clawdmeter/config` on Linux and
 macOS, `%LOCALAPPDATA%\Clawdmeter\config` on Windows; `key = value`, `#`
 comments, last key wins, case-insensitive keys (`clawdmeter-core/src/config.rs`).
 The app uses only the current state folder and ignores the legacy directory.
-The app re-reads config every 5 s and the settings window edits it in place,
-keeping comments and unknown keys.
+The app re-reads config every 5 s, and at once when the settings window
+saves it; the window edits it in place, keeping comments and unknown keys.
 
 | Key | Old daemons | Rust | Notes |
 |---|---|---|---|

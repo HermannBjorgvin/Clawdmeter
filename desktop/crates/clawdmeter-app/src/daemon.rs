@@ -41,6 +41,9 @@ pub enum Command {
     /// Mute the alert chimes (device and this computer) for this run,
     /// whatever the config says.
     SetChimesMuted(bool),
+    /// Re-read the config now (the window saved it), not at the next
+    /// periodic re-read.
+    ReloadSettings,
     /// Stop the daemon thread.
     Shutdown,
 }
@@ -111,6 +114,22 @@ pub fn spawn(paths: Paths) -> DaemonHandle {
         })
         .expect("spawn daemon thread");
     DaemonHandle { commands: cmd_tx, status: st_rx, thread: Some(thread) }
+}
+
+/// Re-read the config into the engine, keeping a tray mute and finding
+/// `claude` again when its path changed (or it wasn't found). An unreadable
+/// file keeps the settings in use.
+fn reload_settings(paths: &Paths, engine: &mut Engine, claude: &mut Option<PathBuf>, chimes_muted: bool) {
+    let Ok(mut s) = Settings::load(paths) else { return };
+    if chimes_muted {
+        s.alert_chime = false;
+        s.desktop_chime = false;
+    }
+    if s.claude_path != engine.settings().claude_path || claude.is_none() {
+        *claude = usage::find_claude(s.claude_path.as_deref(), &paths.home);
+    }
+    engine.update_settings(s);
+    engine.set_claude_found(claude.is_some());
 }
 
 type PollResults = Vec<(PathBuf, probe::Polled)>;
@@ -202,14 +221,19 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                 }
                 Ok(Command::SetChimesMuted(m)) => {
                     chimes_muted = m;
-                    let mut s = engine.settings().clone();
                     if m {
+                        let mut s = engine.settings().clone();
                         s.alert_chime = false;
                         s.desktop_chime = false;
-                    } else if let Ok(fresh) = Settings::load(&paths) {
-                        s = fresh;
+                        engine.update_settings(s);
+                    } else {
+                        reload_settings(&paths, &mut engine, &mut claude, false);
                     }
-                    engine.update_settings(s);
+                }
+                Ok(Command::ReloadSettings) => {
+                    // This tick's write check sees the new settings.
+                    last_settings = now;
+                    reload_settings(&paths, &mut engine, &mut claude, chimes_muted);
                 }
                 Ok(Command::Shutdown) | Err(mpsc::error::TryRecvError::Disconnected) => {
                     if let Some(l) = link.take() {
@@ -222,20 +246,11 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             }
         }
 
-        // ---- config (re-read every SETTINGS_EVERY) ----
+        // ---- config (re-read every SETTINGS_EVERY, and on ReloadSettings:
+        // this catches hand edits and a `--daemon` with no tray) ----
         if now - last_settings >= SETTINGS_EVERY {
             last_settings = now;
-            if let Ok(mut s) = Settings::load(&paths) {
-                if chimes_muted {
-                    s.alert_chime = false;
-                    s.desktop_chime = false;
-                }
-                if s.claude_path != engine.settings().claude_path || claude.is_none() {
-                    claude = usage::find_claude(s.claude_path.as_deref(), &paths.home);
-                }
-                engine.update_settings(s);
-                engine.set_claude_found(claude.is_some());
-            }
+            reload_settings(&paths, &mut engine, &mut claude, chimes_muted);
         }
 
         // ---- fast clock ----

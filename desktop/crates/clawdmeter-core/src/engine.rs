@@ -147,6 +147,8 @@ pub struct Engine {
     sent_pm: Option<u8>,
     /// Last `th` sent.
     sent_th: Option<Palette>,
+    /// The clock's hour format the device last got (`tf`; 0 = no clock).
+    sent_tf: Option<u8>,
     last_event_ts: Option<i64>,
     /// Latest prompt or tool activity that names no configured account.
     unattributed_activity: Option<i64>,
@@ -186,6 +188,7 @@ impl Engine {
             sent_aa: None,
             sent_pm: None,
             sent_th: None,
+            sent_tf: None,
             last_event_ts: None,
             unattributed_activity: None,
             claude_found: true,
@@ -284,6 +287,7 @@ impl Engine {
         self.sent_aa = None;
         self.sent_pm = None;
         self.sent_th = None;
+        self.sent_tf = None;
         if self.active.is_some() || self.logged_out {
             self.fresh_poll = true;
         }
@@ -485,10 +489,13 @@ impl Engine {
         let aa = self.settings.attention_anim.seconds();
         let pm = u8::from(self.settings.pace_marker);
         let th = self.settings.colors();
+        let clock = clock_fields(self.settings.clock, utc(now), host.utc_offset_secs, host.prefers_12h);
+        let tf = clock.as_ref().map_or(0, |cf| cf.hour_format);
         let prefs_changed = self.sent_lv != Some(self.settings.liveliness)
             || self.sent_aa != Some(aa)
             || self.sent_pm != Some(pm)
-            || self.sent_th != Some(th);
+            || self.sent_th != Some(th)
+            || self.sent_tf != Some(tf);
 
         let (mut payload, kind) = if self.logged_out {
             if !(self.fresh_poll || self.attention.pending()) {
@@ -516,7 +523,7 @@ impl Engine {
             if self.settings.reset_chime {
                 p.c = Some(1);
             }
-            if let Some(cf) = clock_fields(self.settings.clock, utc(now), host.utc_offset_secs, host.prefers_12h) {
+            if let Some(cf) = clock {
                 p.t = Some(cf.local_epoch);
                 p.tf = Some(cf.hour_format);
             }
@@ -581,6 +588,10 @@ impl Engine {
         }
         if let Some(th) = w.payload.th {
             self.sent_th = Some(th);
+        }
+        // Every data payload carries the clock; no `tf` means it's off.
+        if w.kind != WriteKind::NoData {
+            self.sent_tf = Some(w.payload.tf.unwrap_or(0));
         }
     }
 
@@ -1299,5 +1310,28 @@ mod tests {
         e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
         let w = e.next_write(T0, HostClock { utc_offset_secs: -3600, prefers_12h: false }).unwrap();
         assert_eq!((w.payload.t, w.payload.tf), (Some(T0 - 3600), Some(12)));
+    }
+
+    #[test]
+    fn clock_goes_out_when_it_changes() {
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.tf, None, "off by default");
+        assert!(write(&mut e, T0 + 1).is_none(), "nothing new");
+        e.update_settings(settings("clock = 24\n"));
+        let w = write(&mut e, T0 + 2).expect("a new clock mode is sent right away");
+        assert_eq!((w.kind, w.payload.tf, w.payload.rp), (WriteKind::Event, Some(24), Some(1)));
+        assert!(w.payload.t.is_some());
+        assert!(write(&mut e, T0 + 3).is_none(), "the ticking time alone doesn't resend");
+        e.update_settings(settings("clock = 12\n"));
+        assert_eq!(write(&mut e, T0 + 4).expect("12h ↔ 24h too").payload.tf, Some(12));
+        e.update_settings(settings("clock = off\n"));
+        let w = write(&mut e, T0 + 5).expect("turning it off too");
+        assert_eq!((w.payload.t, w.payload.tf), (None, None));
+        assert!(write(&mut e, T0 + 6).is_none());
+        e.update_settings(settings("clock = 12\n"));
+        assert!(write(&mut e, T0 + 7).is_some());
+        e.on_connected();
+        assert_eq!(write(&mut e, T0 + 8).unwrap().payload.tf, Some(12), "resent on a reconnect");
     }
 }

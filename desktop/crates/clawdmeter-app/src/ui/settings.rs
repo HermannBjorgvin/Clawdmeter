@@ -1619,8 +1619,8 @@ impl Render for SettingsView {
     }
 }
 
-/// Re-read the config file, apply `change`, and write only the keys whose
-/// value differs.
+/// Re-read the config file, apply `change`, write only the keys whose
+/// value differs, and tell the tray's daemon to re-read it.
 pub(crate) fn write_settings(
     paths: &Paths,
     change: impl FnOnce(&mut Settings, &mut ConfigFile),
@@ -1633,7 +1633,11 @@ pub(crate) fn write_settings(
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    cfg.save(path)
+    cfg.save(path)?;
+    // The daemon re-reads the file every few seconds anyway; this makes a
+    // device setting reach the device at once.
+    command(paths, AppCommand::SettingsChanged);
+    Ok(())
 }
 
 /// A theme to pick: a small board in its colours (background, a card with

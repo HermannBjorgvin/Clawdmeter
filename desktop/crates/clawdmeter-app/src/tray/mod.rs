@@ -234,6 +234,7 @@ impl TrayApp {
                 }
             }
             AppCommand::CheckUpdate => self.check_now.store(true, Ordering::SeqCst),
+            AppCommand::SettingsChanged => self.send(Command::ReloadSettings),
             AppCommand::Quit => return false,
         }
         true
