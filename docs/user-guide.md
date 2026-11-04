@@ -139,7 +139,9 @@ changes, while usage is current (with stale numbers it waits for the next
 reading).
 Pick Dark, Light or another theme to keep one palette, or **Custom +** to
 choose each colour. The e-paper board stays black on white whatever is
-chosen.
+chosen. A setup that makes things dark only through `GTK_THEME` (common on
+tiling window managers) and leaves the desktop's colour scheme at its
+default gets the Light board with System theme: pick Dark there.
 
 Accounts with no 5-hour limit, such as Ultra (formerly Max 20x) once
 Anthropic has verified the account, show only the **Weekly** meter on the

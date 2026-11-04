@@ -90,20 +90,32 @@ impl Appearance {
 /// the `AppsUseLightTheme` registry value. This blocks for the read; to
 /// follow changes, use [`AppearanceWatch`].
 pub fn system_appearance() -> Option<Appearance> {
-    Reader::default().read()
+    #[cfg(target_os = "linux")]
+    {
+        let conn = dbus::blocking::Connection::new_session().ok()?;
+        portal::read(&conn).ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        poll_read()
+    }
 }
 
-/// How often [`AppearanceWatch`] asks the OS: a D-Bus or registry read is
-/// cheap, macOS spawns `defaults`.
+/// How often the watch asks on macOS (each read spawns `defaults`) and
+/// Windows (a registry read). Linux is told of changes instead.
+#[cfg(any(not(target_os = "linux"), test))]
 const APPEARANCE_EVERY: Duration =
-    if cfg!(target_os = "macos") { Duration::from_secs(2) } else { Duration::from_millis(500) };
-/// After a failed read (no portal yet, say), how long before asking again.
-const APPEARANCE_RETRY: Duration = Duration::from_secs(5);
+    if cfg!(target_os = "macos") { Duration::from_secs(10) } else { Duration::from_secs(2) };
+/// After a failed read, how long before asking again.
+#[cfg(any(not(target_os = "linux"), test))]
+const APPEARANCE_RETRY: Duration = Duration::from_secs(60);
 
 /// The OS's appearance, kept current by a background thread so reading it
 /// never blocks (the daemon's runtime and the window's UI thread both ask).
-/// It keeps the last answer through a failed read; dark before any. The
-/// thread ends after the watch is dropped.
+/// Linux reads the desktop portal once and then follows its
+/// `SettingChanged` signal; macOS and Windows poll. It keeps the last answer
+/// through a failed read; dark before any. The thread ends after the watch
+/// is dropped.
 pub struct AppearanceWatch {
     state: Arc<AtomicU8>,
 }
@@ -114,8 +126,10 @@ impl AppearanceWatch {
         let state = Arc::new(AtomicU8::new(Appearance::default().to_u8()));
         let shared = Arc::downgrade(&state);
         let started = std::thread::Builder::new().name("appearance".into()).spawn(move || {
-            let mut reader = Reader::default();
-            watch_loop(&shared, || reader.read(), std::thread::sleep);
+            #[cfg(target_os = "linux")]
+            portal::watch(&shared);
+            #[cfg(not(target_os = "linux"))]
+            watch_loop(&shared, poll_read, std::thread::sleep);
         });
         if let Err(e) = started {
             log::warn!("appearance: no watch thread ({e}); the System theme stays dark");
@@ -129,102 +143,203 @@ impl AppearanceWatch {
     }
 }
 
-/// Read, store and wait until the watch is gone: [`APPEARANCE_EVERY`]
-/// after an answer, [`APPEARANCE_RETRY`] after a miss (the last answer
-/// stays).
+/// Store `a` if the watch is still there.
+fn store(state: &Weak<AtomicU8>, a: Appearance) {
+    if let Some(s) = state.upgrade() {
+        s.store(a.to_u8(), Ordering::Relaxed);
+    }
+}
+
+/// Poll until the watch is gone: [`APPEARANCE_EVERY`] after an answer,
+/// [`APPEARANCE_RETRY`] after a miss (the last answer stays).
+#[cfg(any(not(target_os = "linux"), test))]
 fn watch_loop(state: &Weak<AtomicU8>, mut read: impl FnMut() -> Option<Appearance>, mut sleep: impl FnMut(Duration)) {
     loop {
         let got = read();
-        let Some(state) = state.upgrade() else { return };
-        if let Some(a) = got {
-            state.store(a.to_u8(), Ordering::Relaxed);
+        if state.strong_count() == 0 {
+            return;
         }
-        drop(state);
+        if let Some(a) = got {
+            store(state, a);
+        }
         sleep(if got.is_some() { APPEARANCE_EVERY } else { APPEARANCE_RETRY });
     }
 }
 
-/// One way of asking the OS, keeping what it can between reads (the D-Bus
-/// connection).
-#[derive(Default)]
-struct Reader {
-    #[cfg(target_os = "linux")]
-    conn: Option<dbus::blocking::Connection>,
+#[cfg(target_os = "macos")]
+fn poll_read() -> Option<Appearance> {
+    // The key exists ("Dark") only in dark mode; `defaults` fails when it's
+    // absent, which is light mode.
+    let out = Command::new("defaults")
+        .args(["read", "-g", "AppleInterfaceStyle"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let dark = out.status.success() && String::from_utf8_lossy(&out.stdout).trim().eq_ignore_ascii_case("dark");
+    Some(if dark { Appearance::Dark } else { Appearance::Light })
 }
 
-impl Reader {
-    #[cfg(target_os = "linux")]
-    fn read(&mut self) -> Option<Appearance> {
-        use dbus::arg::{RefArg, Variant};
-        // Unwraps the portal's variant (two deep from the older `Read`).
-        fn number(a: &dyn RefArg) -> Option<u64> {
-            a.as_u64().or_else(|| a.as_iter()?.next().and_then(number))
+#[cfg(windows)]
+fn poll_read() -> Option<Appearance> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let key = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    let value = wide("AppsUseLightTheme");
+    let mut data: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: both names are NUL-terminated and outlive the call; `data`
+    // holds the REG_DWORD the flags ask for and `size` says how big it is.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut data as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    (status == 0).then_some(if data == 0 { Appearance::Dark } else { Appearance::Light })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn poll_read() -> Option<Appearance> {
+    None
+}
+
+/// What a failed portal read means for the next one.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Miss {
+    /// The session bus went away: reconnect.
+    Disconnected,
+    /// No portal, no appearance backend, or the key unknown: ask again
+    /// rarely, on the same connection.
+    Absent,
+    /// The portal predates `ReadOne`: use `Read`.
+    OldPortal,
+    /// Anything else (a timeout, say): ask again soon.
+    Transient,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl Miss {
+    /// From a D-Bus error name.
+    fn from_error(name: Option<&str>) -> Self {
+        match name.unwrap_or("") {
+            "org.freedesktop.DBus.Error.Disconnected" | "org.freedesktop.DBus.Error.NoServer" => Miss::Disconnected,
+            "org.freedesktop.DBus.Error.ServiceUnknown"
+            | "org.freedesktop.DBus.Error.NameHasNoOwner"
+            | "org.freedesktop.DBus.Error.UnknownObject"
+            | "org.freedesktop.DBus.Error.UnknownInterface"
+            | "org.freedesktop.portal.Error.NotFound" => Miss::Absent,
+            "org.freedesktop.DBus.Error.UnknownMethod" => Miss::OldPortal,
+            _ => Miss::Transient,
         }
-        if self.conn.is_none() {
-            self.conn = dbus::blocking::Connection::new_session().ok();
+    }
+
+    /// How long before the next read.
+    fn retry_in(self) -> Duration {
+        match self {
+            Miss::Absent => Duration::from_secs(60),
+            _ => Duration::from_secs(5),
         }
-        let conn = self.conn.as_ref()?;
-        let portal = conn.with_proxy(
-            "org.freedesktop.portal.Desktop",
-            "/org/freedesktop/portal/desktop",
-            Duration::from_millis(250),
-        );
-        let args = ("org.freedesktop.appearance", "color-scheme");
-        let read = |method| -> Result<(Variant<Box<dyn RefArg>>,), dbus::Error> {
-            portal.method_call("org.freedesktop.portal.Settings", method, args)
+    }
+}
+
+/// The xdg-desktop-portal's `org.freedesktop.appearance color-scheme`.
+#[cfg(target_os = "linux")]
+mod portal {
+    use super::{store, Appearance, Miss};
+    use dbus::arg::{RefArg, Variant};
+    use dbus::blocking::Connection;
+    use dbus::message::MatchRule;
+    use std::sync::atomic::AtomicU8;
+    use std::sync::Weak;
+    use std::time::{Duration, Instant};
+
+    const DEST: &str = "org.freedesktop.portal.Desktop";
+    const PATH: &str = "/org/freedesktop/portal/desktop";
+    const IFACE: &str = "org.freedesktop.portal.Settings";
+    const NAMESPACE: &str = "org.freedesktop.appearance";
+    const KEY: &str = "color-scheme";
+    /// Long enough for the portal to start on demand at login, so the
+    /// first answer isn't a timeout.
+    const TIMEOUT: Duration = Duration::from_secs(2);
+    /// How long one wait for signals lasts before checking the watch is
+    /// still wanted.
+    const WAIT: Duration = Duration::from_secs(2);
+    /// Before connecting again after the bus went away (or wasn't there).
+    const RECONNECT: Duration = Duration::from_secs(30);
+
+    /// Unwraps the portal's variant (two deep from the older `Read`).
+    fn number(a: &dyn RefArg) -> Option<u64> {
+        a.as_u64().or_else(|| a.as_iter()?.next().and_then(number))
+    }
+
+    fn appearance(v: &dyn RefArg) -> Appearance {
+        number(v).and_then(Appearance::from_portal).unwrap_or_default()
+    }
+
+    /// Read the setting once.
+    pub(super) fn read(conn: &Connection) -> Result<Appearance, Miss> {
+        let portal = conn.with_proxy(DEST, PATH, TIMEOUT);
+        let call = |method| -> Result<(Variant<Box<dyn RefArg>>,), Miss> {
+            portal.method_call(IFACE, method, (NAMESPACE, KEY)).map_err(|e: dbus::Error| {
+                log::debug!("appearance: portal {method}: {e}");
+                Miss::from_error(e.name())
+            })
         };
-        match read("ReadOne").or_else(|_| read("Read")) {
-            Ok((v,)) => Some(number(&v).and_then(Appearance::from_portal).unwrap_or_default()),
-            Err(e) => {
-                log::debug!("appearance: portal unreadable ({e})");
-                // A fresh connection next time, in case the bus went away.
-                self.conn = None;
-                None
+        let (v,) = match call("ReadOne") {
+            Err(Miss::OldPortal) => call("Read")?,
+            r => r?,
+        };
+        Ok(appearance(&v))
+    }
+
+    /// Follow the setting until the watch is gone: subscribe to
+    /// `SettingChanged`, read it once, then wait for signals. A missed read
+    /// is retried on the same connection; only a lost bus reconnects.
+    pub(super) fn watch(state: &Weak<AtomicU8>) {
+        while state.strong_count() > 0 {
+            let Ok(conn) = Connection::new_session() else {
+                log::debug!("appearance: no session bus");
+                std::thread::sleep(RECONNECT);
+                continue;
+            };
+            let w = state.clone();
+            let rule = MatchRule::new_signal(IFACE, "SettingChanged").with_path(PATH);
+            let subscribed =
+                conn.add_match(rule, move |(ns, key, v): (String, String, Variant<Box<dyn RefArg>>), _, _| {
+                    if ns == NAMESPACE && key == KEY {
+                        store(&w, appearance(&v));
+                    }
+                    true
+                });
+            if let Err(e) = subscribed {
+                log::debug!("appearance: can't subscribe ({e})");
+                std::thread::sleep(RECONNECT);
+                continue;
+            }
+            let mut next_read = Some(Instant::now());
+            while state.strong_count() > 0 {
+                if next_read.is_some_and(|t| Instant::now() >= t) {
+                    match read(&conn) {
+                        Ok(a) => {
+                            store(state, a);
+                            next_read = None;
+                        }
+                        Err(Miss::Disconnected) => break,
+                        Err(m) => next_read = Some(Instant::now() + m.retry_in()),
+                    }
+                }
+                if conn.process(WAIT).is_err() {
+                    break; // the bus went away
+                }
             }
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    fn read(&mut self) -> Option<Appearance> {
-        // The key exists ("Dark") only in dark mode; `defaults` fails when
-        // it's absent, which is light mode.
-        let out = Command::new("defaults")
-            .args(["read", "-g", "AppleInterfaceStyle"])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        let dark = out.status.success() && String::from_utf8_lossy(&out.stdout).trim().eq_ignore_ascii_case("dark");
-        Some(if dark { Appearance::Dark } else { Appearance::Light })
-    }
-
-    #[cfg(windows)]
-    fn read(&mut self) -> Option<Appearance> {
-        use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
-        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
-        let key = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-        let value = wide("AppsUseLightTheme");
-        let mut data: u32 = 0;
-        let mut size = std::mem::size_of::<u32>() as u32;
-        // SAFETY: both names are NUL-terminated and outlive the call; `data`
-        // holds the REG_DWORD the flags ask for and `size` says how big it is.
-        let status = unsafe {
-            RegGetValueW(
-                HKEY_CURRENT_USER,
-                key.as_ptr(),
-                value.as_ptr(),
-                RRF_RT_REG_DWORD,
-                std::ptr::null_mut(),
-                (&mut data as *mut u32).cast(),
-                &mut size,
-            )
-        };
-        (status == 0).then_some(if data == 0 { Appearance::Dark } else { Appearance::Light })
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    fn read(&mut self) -> Option<Appearance> {
-        None
     }
 }
 
@@ -247,6 +362,17 @@ mod tests {
         assert_eq!(Appearance::from_portal(0), Some(Appearance::Light), "no preference: GNOME's default, light");
         assert_eq!(Appearance::from_portal(7), None);
         assert_eq!(Appearance::default(), Appearance::Dark, "unknown is dark");
+    }
+
+    #[test]
+    fn portal_misses() {
+        assert_eq!(Miss::from_error(Some("org.freedesktop.DBus.Error.ServiceUnknown")), Miss::Absent);
+        assert_eq!(Miss::from_error(Some("org.freedesktop.portal.Error.NotFound")), Miss::Absent);
+        assert_eq!(Miss::from_error(Some("org.freedesktop.DBus.Error.UnknownMethod")), Miss::OldPortal);
+        assert_eq!(Miss::from_error(Some("org.freedesktop.DBus.Error.Disconnected")), Miss::Disconnected);
+        assert_eq!(Miss::from_error(Some("org.freedesktop.DBus.Error.NoReply")), Miss::Transient);
+        assert_eq!(Miss::from_error(None), Miss::Transient);
+        assert!(Miss::Absent.retry_in() >= Duration::from_secs(60), "no portal: rarely");
     }
 
     #[test]

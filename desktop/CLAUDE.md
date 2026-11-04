@@ -82,8 +82,10 @@ is faked behind `FlashHardware`.
   Dark or Light by the OS appearance, `platform::AppearanceWatch`: the
   xdg-desktop-portal `color-scheme` over D-Bus, macOS `AppleInterfaceStyle`,
   Windows `AppsUseLightTheme`; portal "no preference" is GNOME's light
-  default, unreadable = Dark. A background thread reads it every 0.5 s (2 s
-  on macOS) so neither the daemon's runtime nor the UI thread blocks; the
+  default, unreadable = Dark. A background thread keeps it (Linux: one read,
+  then the portal's `SettingChanged` signal; macOS polls every 10 s, Windows
+  every 2 s), so neither the daemon's runtime nor the UI thread blocks; the
+  window watches only while the Device page shows; the
   daemon hands changes to `Engine::set_appearance`, which sends them like any
   device setting), `claude_path`,
   `release_repo`, `update_check`, `onboarding_done`, `alert_on` (alert kinds

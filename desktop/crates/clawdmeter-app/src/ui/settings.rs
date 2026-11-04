@@ -118,10 +118,12 @@ pub struct SettingsView {
     hex_focus: FocusHandle,
     hex_draft: String,
     hex_focused: bool,
-    /// The OS's light/dark mode, for the System theme's preview and the
-    /// first Custom (Dark in tests, which have no watch).
+    /// The OS's light/dark mode, for the first Custom's preview and colours
+    /// while System is chosen. Watched only while the Device page shows, and
+    /// never in tests (`follow_os`), where it stays Dark.
     appearance: Appearance,
     appearance_watch: Option<AppearanceWatch>,
+    follow_os: bool,
     ticks: u32,
 }
 
@@ -131,9 +133,8 @@ impl SettingsView {
     /// Build and load the config. USB is probed while the Device page is up.
     pub fn new(paths: Paths, page: Page, cx: &mut Context<Self>) -> Self {
         let mut v = Self::with_usb(paths, page, true, cx);
-        let watch = AppearanceWatch::spawn();
-        v.appearance = watch.get();
-        v.appearance_watch = Some(watch);
+        v.follow_os = true;
+        v.sync_appearance();
         v
     }
 
@@ -175,6 +176,7 @@ impl SettingsView {
             hex_focused: false,
             appearance: Appearance::default(),
             appearance_watch: None,
+            follow_os: false,
             ticks: 0,
         };
         v.reload();
@@ -187,9 +189,11 @@ impl SettingsView {
     pub fn show(&mut self, page: Page, embedded: bool, cx: &mut Context<Self>) {
         self.visible = matches!(page, Page::Device | Page::Accounts | Page::Hooks | Page::Settings);
         if !self.visible {
+            self.sync_appearance();
             return;
         }
         self.page = page;
+        self.sync_appearance();
         self.embedded = embedded;
         self.reload();
         if page == Page::Device && self.usb && !self.device.probing && self.device.port.is_none() {
@@ -267,12 +271,20 @@ impl SettingsView {
         self.snap = live_status(&self.paths);
     }
 
+    /// Watch the OS's appearance while the Device page (the theme picker)
+    /// shows; stop when it doesn't.
+    fn sync_appearance(&mut self) {
+        if self.follow_os && self.visible && self.page == Page::Device {
+            self.appearance = self.appearance_watch.get_or_insert_with(AppearanceWatch::spawn).get();
+        } else {
+            self.appearance_watch = None;
+        }
+    }
+
     fn tick(&mut self, cx: &mut Context<Self>) {
         self.ticks += 1;
         self.snap = live_status(&self.paths);
-        if let Some(w) = &self.appearance_watch {
-            self.appearance = w.get();
-        }
+        self.sync_appearance();
         // Pick up hand edits and other windows' changes every few seconds,
         // but never under an open diff preview.
         if self.ticks.is_multiple_of(6) && self.preview.is_none() {
