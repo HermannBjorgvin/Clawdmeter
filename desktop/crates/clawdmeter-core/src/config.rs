@@ -12,6 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::paths::Paths;
+use crate::platform::Appearance;
 use crate::themes::{self, ThemePreset};
 
 /// Default seconds between `/usage` polls while a session is working
@@ -369,26 +370,25 @@ pub fn parse_rgb(v: &str) -> Option<u32> {
     }
 }
 
-/// The device's colours: a preset (`theme = <id>`, default `clawd`) or
-/// `theme = custom`, which uses the `color_*` keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The device's colours: `theme = system` (the default), a preset
+/// (`theme = <id>`) or `theme = custom`, which uses the `color_*` keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DeviceTheme {
+    /// Dark or Light, following the OS's appearance.
+    #[default]
+    System,
     /// One of [`crate::themes::PRESETS`].
     Preset(&'static ThemePreset),
     /// [`Settings::custom_colors`].
     Custom,
 }
 
-impl Default for DeviceTheme {
-    fn default() -> Self {
-        DeviceTheme::Preset(themes::default_preset())
-    }
-}
-
 impl DeviceTheme {
-    /// `theme`: a preset id or `custom`; anything else is the default.
+    /// `theme`: `system`, a preset id or `custom`. `clawd`, the default
+    /// before there was a System theme, and anything unknown are System.
     pub fn parse(v: &str) -> Self {
-        if v.trim().eq_ignore_ascii_case("custom") {
+        let v = v.trim();
+        if v.eq_ignore_ascii_case("custom") {
             DeviceTheme::Custom
         } else {
             themes::find(v).map(DeviceTheme::Preset).unwrap_or_default()
@@ -398,6 +398,7 @@ impl DeviceTheme {
     /// The `theme` value.
     pub fn as_str(self) -> &'static str {
         match self {
+            DeviceTheme::System => "system",
             DeviceTheme::Preset(p) => p.id,
             DeviceTheme::Custom => "custom",
         }
@@ -441,7 +442,7 @@ pub struct Settings {
     /// Pace marker on the device's usage bars (`pm`, default off).
     pub pace_marker: bool,
     /// Which colours the device uses (`theme`); [`Settings::colors`] is
-    /// the palette it gets as `th`.
+    /// the palette it gets as `th`, given the OS's appearance.
     pub theme: DeviceTheme,
     /// The custom theme's colours (`color_*`), kept while a preset is chosen;
     /// `None` until it has any.
@@ -544,20 +545,23 @@ fn on_off(v: Option<&str>, default: bool) -> bool {
 }
 
 impl Settings {
-    /// The palette the device gets (`th`): the chosen preset's, or the
-    /// custom colours.
-    pub fn colors(&self) -> Palette {
+    /// The palette the device gets (`th`): Dark or Light for the System
+    /// theme (by the OS's `appearance`), the chosen preset's, or the custom
+    /// colours.
+    pub fn colors(&self, appearance: Appearance) -> Palette {
         match self.theme {
+            DeviceTheme::System => themes::for_appearance(appearance).colors,
             DeviceTheme::Preset(p) => p.colors,
             DeviceTheme::Custom => self.custom_colors.unwrap_or_default(),
         }
     }
 
     /// Switch to the custom theme. The first time, it starts from the colours
-    /// on screen; after that it keeps its own, even if they equal a preset's.
-    pub fn choose_custom(&mut self) {
+    /// on screen (the System theme's as `appearance` has it); after that it
+    /// keeps its own, even if they equal a preset's.
+    pub fn choose_custom(&mut self, appearance: Appearance) {
         if self.custom_colors.is_none() {
-            self.custom_colors = Some(self.colors());
+            self.custom_colors = Some(self.colors(appearance));
         }
         self.theme = DeviceTheme::Custom;
     }
@@ -727,6 +731,8 @@ pub fn parse_config_dirs(raw: Option<&str>, paths: &Paths) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const DARK: Appearance = Appearance::Dark;
+    const LIGHT: Appearance = Appearance::Light;
 
     fn paths() -> Paths {
         Paths::under(Path::new("/home/u"))
@@ -883,15 +889,15 @@ mod tests {
     #[test]
     fn colors_round_trip() {
         let d = settings("");
-        assert_eq!((d.theme, d.colors()), (DeviceTheme::default(), Palette::default()));
-        assert_eq!(d.theme.as_str(), "clawd");
-        assert_eq!(&d.colors().to_hex()[24..30], "d97757", "accent defaults to terra-cotta");
-        assert_eq!(d.colors().to_hex().len(), 66);
+        assert_eq!((d.theme, d.colors(DARK)), (DeviceTheme::System, Palette::default()));
+        assert_eq!(d.theme.as_str(), "system");
+        assert_eq!(&d.colors(DARK).to_hex()[24..30], "d97757", "accent defaults to terra-cotta");
+        assert_eq!(d.colors(DARK).to_hex().len(), 66);
         let s = settings("theme = custom\ncolor_accent = 647D99\ncolor_clawd = 112233  # mine\ncolor_red = nope\n");
         assert_eq!(s.theme, DeviceTheme::Custom);
-        assert_eq!(s.colors().get(ColorToken::Accent), 0x647d99);
-        assert_eq!(s.colors().get(ColorToken::Clawd), 0x112233);
-        assert_eq!(s.colors().get(ColorToken::Red), ColorToken::Red.default_rgb(), "bad values keep the default");
+        assert_eq!(s.colors(DARK).get(ColorToken::Accent), 0x647d99);
+        assert_eq!(s.colors(LIGHT).get(ColorToken::Clawd), 0x112233, "Custom ignores the OS");
+        assert_eq!(s.colors(DARK).get(ColorToken::Red), ColorToken::Red.default_rgb(), "bad values keep the default");
 
         let mut cfg = ConfigFile::parse("");
         let mut s = settings("");
@@ -921,7 +927,7 @@ mod tests {
 
         let mut s = reload(&cfg);
         assert_eq!(s.custom_colors, None, "never customised");
-        s.choose_custom();
+        s.choose_custom(LIGHT);
         assert_eq!((s.theme, s.custom_colors), (DeviceTheme::Custom, Some(dracula.colors)));
         s.apply_to(&mut cfg, &paths());
 
@@ -933,20 +939,28 @@ mod tests {
         s.theme = DeviceTheme::Preset(dracula);
         s.apply_to(&mut cfg, &paths());
         let mut s = reload(&cfg);
-        s.choose_custom();
+        s.choose_custom(DARK);
         assert_eq!(s.custom_colors, Some(Palette::default()));
 
-        // The same from the default theme, whose colours are the defaults.
-        let mut cfg = ConfigFile::parse("");
+        // The same from Dark, whose colours are the defaults.
+        let mut cfg = ConfigFile::parse(
+            "theme = dark
+",
+        );
         let mut s = reload(&cfg);
-        s.choose_custom();
+        s.choose_custom(LIGHT);
         s.apply_to(&mut cfg, &paths());
         let mut s = reload(&cfg);
         s.theme = DeviceTheme::Preset(dracula);
         s.apply_to(&mut cfg, &paths());
         let mut s = reload(&cfg);
-        s.choose_custom();
+        s.choose_custom(DARK);
         assert_eq!(s.custom_colors, Some(Palette::default()), "not Dracula's");
+
+        // From System: whichever of Dark and Light is on screen.
+        let mut s = reload(&ConfigFile::parse(""));
+        s.choose_custom(LIGHT);
+        assert_eq!(s.custom_colors, Some(crate::themes::light().colors));
     }
 
     #[test]
@@ -954,7 +968,7 @@ mod tests {
         let s = settings("theme = Nord\ncolor_accent = 647d99\n");
         let nord = crate::themes::find("nord").unwrap();
         assert_eq!(s.theme, DeviceTheme::Preset(nord));
-        assert_eq!(s.colors(), nord.colors, "a preset's own colours, not the custom ones");
+        assert_eq!(s.colors(LIGHT), nord.colors, "a preset's own colours, not the custom ones");
         assert_eq!(s.custom_colors.unwrap().get(ColorToken::Accent), 0x647d99, "kept for Custom");
         assert_eq!(settings("theme = nope\n").theme, DeviceTheme::default(), "unknown: the default");
 
@@ -967,6 +981,34 @@ mod tests {
         s.theme = DeviceTheme::Custom;
         s.apply_to(&mut cfg, &paths());
         assert_eq!(cfg.get("theme"), Some("custom"));
+    }
+
+    #[test]
+    fn system_is_the_default_and_follows_the_os() {
+        let dark = crate::themes::find("dark").unwrap();
+        let light = crate::themes::light();
+        for text in ["", "theme = system\n", "theme = clawd\n", "theme = Clawd\n", "theme = nope\n"] {
+            let s = settings(text);
+            assert_eq!(s.theme, DeviceTheme::System, "{text:?}");
+            assert_eq!((s.colors(DARK), s.colors(LIGHT)), (dark.colors, light.colors), "{text:?}");
+        }
+        let s = settings("theme = dark\n");
+        assert_eq!((s.theme, s.colors(LIGHT)), (DeviceTheme::Preset(dark), dark.colors), "Dark stays dark");
+        let s = settings("theme = light\n");
+        assert_eq!((s.theme, s.colors(DARK)), (DeviceTheme::Preset(light), light.colors), "Light stays light");
+
+        // An old `theme = clawd` is System already, so it isn't rewritten;
+        // choosing System leaves the key out, Dark writes its own id.
+        let mut cfg = ConfigFile::parse("theme = clawd\n");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("theme"), Some("clawd"));
+        s.theme = DeviceTheme::Preset(dark);
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("theme"), Some("dark"));
+        s.theme = DeviceTheme::System;
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("theme").is_none());
     }
 
     #[test]

@@ -14,6 +14,7 @@ use crate::cadence::{heartbeat_due, AccountClock, Cadence, PollReason, Scheduler
 use crate::config::{Palette, Settings};
 use crate::events::{Activity, HookEvent, Signal};
 use crate::payload::{clock_fields, Payload};
+use crate::platform::Appearance;
 use crate::probe::{self, Plan as ProbePlan, Source};
 use crate::rate::{Mood, RateTracker};
 use crate::selector::PlanSelector;
@@ -147,6 +148,10 @@ pub struct Engine {
     sent_pm: Option<u8>,
     /// Last `th` sent.
     sent_th: Option<Palette>,
+    /// The OS's light/dark mode, which picks the System theme's palette.
+    appearance: Appearance,
+    /// The clock's hour format the device last got (`tf`; 0 = no clock).
+    sent_tf: Option<u8>,
     last_event_ts: Option<i64>,
     /// Latest prompt or tool activity that names no configured account.
     unattributed_activity: Option<i64>,
@@ -186,6 +191,8 @@ impl Engine {
             sent_aa: None,
             sent_pm: None,
             sent_th: None,
+            appearance: Appearance::default(),
+            sent_tf: None,
             last_event_ts: None,
             unattributed_activity: None,
             claude_found: true,
@@ -196,6 +203,17 @@ impl Engine {
     /// Current settings.
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// The OS's light/dark mode. With the System theme, a change goes out
+    /// as a new `th` on the next write check.
+    pub fn set_appearance(&mut self, appearance: Appearance) {
+        self.appearance = appearance;
+    }
+
+    /// The palette the device gets as `th`, the System theme resolved.
+    pub fn colors(&self) -> Palette {
+        self.settings.colors(self.appearance)
     }
 
     /// Apply re-read settings (the config is re-read every few seconds).
@@ -284,6 +302,7 @@ impl Engine {
         self.sent_aa = None;
         self.sent_pm = None;
         self.sent_th = None;
+        self.sent_tf = None;
         if self.active.is_some() || self.logged_out {
             self.fresh_poll = true;
         }
@@ -484,11 +503,14 @@ impl Engine {
         // A changed device setting goes out right away, like an event.
         let aa = self.settings.attention_anim.seconds();
         let pm = u8::from(self.settings.pace_marker);
-        let th = self.settings.colors();
+        let th = self.colors();
+        let clock = clock_fields(self.settings.clock, utc(now), host.utc_offset_secs, host.prefers_12h);
+        let tf = clock.as_ref().map_or(0, |cf| cf.hour_format);
         let prefs_changed = self.sent_lv != Some(self.settings.liveliness)
             || self.sent_aa != Some(aa)
             || self.sent_pm != Some(pm)
-            || self.sent_th != Some(th);
+            || self.sent_th != Some(th)
+            || self.sent_tf != Some(tf);
 
         let (mut payload, kind) = if self.logged_out {
             if !(self.fresh_poll || self.attention.pending()) {
@@ -516,7 +538,7 @@ impl Engine {
             if self.settings.reset_chime {
                 p.c = Some(1);
             }
-            if let Some(cf) = clock_fields(self.settings.clock, utc(now), host.utc_offset_secs, host.prefers_12h) {
+            if let Some(cf) = clock {
                 p.t = Some(cf.local_epoch);
                 p.tf = Some(cf.hour_format);
             }
@@ -581,6 +603,10 @@ impl Engine {
         }
         if let Some(th) = w.payload.th {
             self.sent_th = Some(th);
+        }
+        // Every data payload carries the clock; no `tf` means it's off.
+        if w.kind != WriteKind::NoData {
+            self.sent_tf = Some(w.payload.tf.unwrap_or(0));
         }
     }
 
@@ -1294,10 +1320,70 @@ mod tests {
     }
 
     #[test]
+    fn the_system_theme_follows_the_os_at_once() {
+        use crate::themes;
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.th, Some(themes::default_preset().colors), "dark until told");
+        e.set_appearance(Appearance::Dark);
+        assert!(write(&mut e, T0 + 1).is_none(), "no change, nothing new");
+        e.set_appearance(Appearance::Light);
+        let w = write(&mut e, T0 + 2).expect("the OS went light: sent right away");
+        assert_eq!((w.kind, w.payload.rp, w.payload.th), (WriteKind::Event, Some(1), Some(themes::light().colors)));
+        assert!(write(&mut e, T0 + 3).is_none());
+        e.set_appearance(Appearance::Dark);
+        assert_eq!(write(&mut e, T0 + 4).expect("and back").payload.th, Some(themes::default_preset().colors));
+
+        // A chosen preset doesn't follow the OS.
+        e.update_settings(settings("theme = dracula\n"));
+        let dracula = themes::find("dracula").unwrap().colors;
+        assert_eq!(write(&mut e, T0 + 5).unwrap().payload.th, Some(dracula));
+        e.set_appearance(Appearance::Light);
+        assert!(write(&mut e, T0 + 6).is_none(), "Dracula stays");
+    }
+
+    #[test]
     fn clock_fields_included() {
         let mut e = Engine::new(settings("clock = 12\n"));
         e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
         let w = e.next_write(T0, HostClock { utc_offset_secs: -3600, prefers_12h: false }).unwrap();
         assert_eq!((w.payload.t, w.payload.tf), (Some(T0 - 3600), Some(12)));
+    }
+
+    #[test]
+    fn clock_goes_out_when_it_changes() {
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.tf, None, "off by default");
+        assert!(write(&mut e, T0 + 1).is_none(), "nothing new");
+        e.update_settings(settings("clock = 24\n"));
+        let w = write(&mut e, T0 + 2).expect("a new clock mode is sent right away");
+        assert_eq!((w.kind, w.payload.tf, w.payload.rp), (WriteKind::Event, Some(24), Some(1)));
+        assert!(w.payload.t.is_some());
+        assert!(write(&mut e, T0 + 3).is_none(), "the ticking time alone doesn't resend");
+        e.update_settings(settings("clock = 12\n"));
+        assert_eq!(write(&mut e, T0 + 4).expect("12h ↔ 24h too").payload.tf, Some(12));
+        e.update_settings(settings("clock = off\n"));
+        let w = write(&mut e, T0 + 5).expect("turning it off too");
+        assert_eq!((w.payload.t, w.payload.tf), (None, None));
+        assert!(write(&mut e, T0 + 6).is_none());
+        e.update_settings(settings("clock = 12\n"));
+        assert!(write(&mut e, T0 + 7).is_some());
+        e.on_connected();
+        assert_eq!(write(&mut e, T0 + 8).unwrap().payload.tf, Some(12), "resent on a reconnect");
+        // Stale: the change waits for the next good poll, like the others.
+        let dir = PathBuf::from("/h/.claude");
+        for i in 1..=3 {
+            e.on_poll_results(T0 + 8 + i, vec![(dir.clone(), Err(UsageError::Timeout))]);
+        }
+        e.update_settings(settings("clock = 24\n"));
+        assert!(write(&mut e, T0 + 20).is_none(), "no event write while stale");
+        e.on_poll_results(T0 + 30, vec![(dir.clone(), Ok(reading(15)))]);
+        let w = write(&mut e, T0 + 30).unwrap();
+        assert_eq!((w.kind, w.payload.tf), (WriteKind::Poll, Some(24)));
+        // A no-data write carries no clock and doesn't count as sending one.
+        e.on_poll_results(T0 + 40, vec![(dir, Err(UsageError::NotLoggedIn("x".into())))]);
+        assert_eq!(write(&mut e, T0 + 40).unwrap().kind, WriteKind::NoData);
+        assert_eq!(e.sent_tf, Some(24));
     }
 }

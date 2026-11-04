@@ -48,10 +48,11 @@ is faked behind `FlashHardware`.
   chip + flash size, writes with espflash.
 - `clawdmeter-app`: the `clawdmeter` binary. Tray (`tray/`, ksni on Linux),
   window (`ui/`), `daemon.rs` (drives the engine on its own thread: 0.5 s
-  tick, config re-read every 5 s), `hooks/` (`clawdmeter hook
-  alert|clear|event` and the settings.json installer), `ipc.rs`
-  (single-instance lock, status file, command queues, window lock),
-  `onboarding.rs`, `boards.rs` (names, buy links, illustrations), `chime.rs`.
+  tick, config re-read every 5 s and on `Command::ReloadSettings`),
+  `hooks/` (`clawdmeter hook alert|clear|event` and the settings.json
+  installer), `ipc.rs` (single-instance lock, status file, command queues,
+  window lock), `onboarding.rs`, `boards.rs` (names, buy links,
+  illustrations), `chime.rs`.
 
 ## Running
 
@@ -71,12 +72,22 @@ is faked behind `FlashHardware`.
   this computer via rodio, ALSA on Linux), `clock`, `liveliness` (1–5,
   default 3: the Device page's Animation silliness slider, sent as `lv`),
   `attention_anim` (`off`/`10s`/`30s`/`2m`, default `2m`, sent as `aa`
-  seconds), `pace_marker` (default off, sent as `pm`), `theme` (a preset id from
-  `themes::PRESETS`, default `clawd`, or `custom`) and `color_<token>`
+  seconds), `pace_marker` (default off, sent as `pm`), `theme` (`system`, the
+  default, a preset id from `themes::PRESETS`, or `custom`; the old default
+  `clawd` and unknown values read as `system`) and `color_<token>`
   (`rrggbb`, no `#`; the custom theme's colours, all eleven written once it
   has been chosen, which is how it knows not to start from the current theme
   again); the chosen palette's
-  eleven colours are sent as `th` (`Settings::colors`), `claude_path`,
+  eleven colours are sent as `th` (`Settings::colors`; System resolves to
+  Dark or Light by the OS appearance, `platform::AppearanceWatch`: the
+  xdg-desktop-portal `color-scheme` over D-Bus, macOS `AppleInterfaceStyle`,
+  Windows `AppsUseLightTheme`; portal "no preference" is GNOME's light
+  default, unreadable = Dark. A background thread keeps it (Linux: one read,
+  then the portal's `SettingChanged` signal; macOS polls every 10 s, Windows
+  every 2 s), so neither the daemon's runtime nor the UI thread blocks; the
+  window watches only while the Device page shows; the
+  daemon hands changes to `Engine::set_appearance`, which sends them like any
+  device setting), `claude_path`,
   `release_repo`, `update_check`, `onboarding_done`, `alert_on` (alert kinds
   the daemon lets through: the hook records `k` from `hook_event_name` /
   `notification_type` and `engine.on_attention` drops the rest; default all
@@ -183,6 +194,13 @@ Per account (`probe.rs`, `oauth.rs`):
   Hooks, Settings) or the setup wizard (`ui/setup.rs`) filling the window.
   Pages are `crate::Page`; `Page::parse` also accepts the old
   `background`/`flasher`/`status`/`alerts` names.
+- The window saves settings through `ui::settings::write_settings`, which
+  also queues `settings-changed` on `<state>/app-commands`; the tray (it
+  takes the queue every 200 ms) forwards it as `Command::ReloadSettings`, so
+  a device setting goes out within about a second. `Engine::next_write` sends
+  a changed `lv`/`aa`/`pm`/`th` or clock format (`tf`, off included) at once,
+  unless the numbers are stale (then it waits for the next good poll).
+  The 5 s re-read stays for hand edits and `--daemon` without a tray.
 - Only one window process runs (`<state>/window.lock`). The tray, or a second
   `--window` launch, appends `show <page>` to `<state>/window-commands`; the
   window switches page and raises itself. Child views ask for another page by

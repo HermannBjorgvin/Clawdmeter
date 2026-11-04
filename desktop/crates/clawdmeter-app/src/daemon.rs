@@ -16,6 +16,7 @@ use clawdmeter_core::attention::AttentionInbox;
 use clawdmeter_core::backoff;
 use clawdmeter_core::engine::PollPlan;
 use clawdmeter_core::events::EventTail;
+use clawdmeter_core::platform::AppearanceWatch;
 use clawdmeter_core::probe;
 use clawdmeter_core::usage;
 use clawdmeter_core::{unix_now, Engine, EngineStatus, HostClock, Paths, Settings, WriteKind};
@@ -41,6 +42,9 @@ pub enum Command {
     /// Mute the alert chimes (device and this computer) for this run,
     /// whatever the config says.
     SetChimesMuted(bool),
+    /// Re-read the config now (the window saved it), not at the next
+    /// periodic re-read.
+    ReloadSettings,
     /// Stop the daemon thread.
     Shutdown,
 }
@@ -113,6 +117,22 @@ pub fn spawn(paths: Paths) -> DaemonHandle {
     DaemonHandle { commands: cmd_tx, status: st_rx, thread: Some(thread) }
 }
 
+/// Re-read the config into the engine, keeping a tray mute and finding
+/// `claude` again when its path changed (or it wasn't found). An unreadable
+/// file keeps the settings in use.
+fn reload_settings(paths: &Paths, engine: &mut Engine, claude: &mut Option<PathBuf>, chimes_muted: bool) {
+    let Ok(mut s) = Settings::load(paths) else { return };
+    if chimes_muted {
+        s.alert_chime = false;
+        s.desktop_chime = false;
+    }
+    if s.claude_path != engine.settings().claude_path || claude.is_none() {
+        *claude = usage::find_claude(s.claude_path.as_deref(), &paths.home);
+    }
+    engine.update_settings(s);
+    engine.set_claude_found(claude.is_some());
+}
+
 type PollResults = Vec<(PathBuf, probe::Polled)>;
 type ConnectResult = Result<(DeviceLink, DeviceEvents), LinkError>;
 
@@ -147,6 +167,11 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     engine.restore_blocks(&backoff::load_blocks(&paths.usage_blocks_file()), unix_now());
     let mut saved_blocks = engine.blocks(unix_now());
     let host = HostClock { utc_offset_secs: 0, prefers_12h: clawdmeter_core::platform::prefers_12h() };
+    // The System theme's Dark or Light follows the OS.
+    // The engine has Dark until the first answer (no write goes out before a
+    // link and a poll anyway).
+    let appearance = AppearanceWatch::spawn();
+    let mut shown_appearance = None;
     let inbox = AttentionInbox::new(&paths.state_dir);
     let (mut tail, seed) = EventTail::open(paths.events_log());
     engine.seed_events(&seed);
@@ -202,14 +227,19 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                 }
                 Ok(Command::SetChimesMuted(m)) => {
                     chimes_muted = m;
-                    let mut s = engine.settings().clone();
                     if m {
+                        let mut s = engine.settings().clone();
                         s.alert_chime = false;
                         s.desktop_chime = false;
-                    } else if let Ok(fresh) = Settings::load(&paths) {
-                        s = fresh;
+                        engine.update_settings(s);
+                    } else {
+                        reload_settings(&paths, &mut engine, &mut claude, false);
                     }
-                    engine.update_settings(s);
+                }
+                Ok(Command::ReloadSettings) => {
+                    // This tick's write check sees the new settings.
+                    last_settings = now;
+                    reload_settings(&paths, &mut engine, &mut claude, chimes_muted);
                 }
                 Ok(Command::Shutdown) | Err(mpsc::error::TryRecvError::Disconnected) => {
                     if let Some(l) = link.take() {
@@ -222,23 +252,19 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             }
         }
 
-        // ---- config (re-read every SETTINGS_EVERY) ----
+        // ---- config (re-read every SETTINGS_EVERY, and on ReloadSettings:
+        // this catches hand edits and a `--daemon` with no tray) ----
         if now - last_settings >= SETTINGS_EVERY {
             last_settings = now;
-            if let Ok(mut s) = Settings::load(&paths) {
-                if chimes_muted {
-                    s.alert_chime = false;
-                    s.desktop_chime = false;
-                }
-                if s.claude_path != engine.settings().claude_path || claude.is_none() {
-                    claude = usage::find_claude(s.claude_path.as_deref(), &paths.home);
-                }
-                engine.update_settings(s);
-                engine.set_claude_found(claude.is_some());
-            }
+            reload_settings(&paths, &mut engine, &mut claude, chimes_muted);
         }
 
         // ---- fast clock ----
+        if let Some(a) = appearance.known().filter(|a| shown_appearance != Some(*a)) {
+            log::info!("system appearance: {a:?}");
+            shown_appearance = Some(a);
+            engine.set_appearance(a);
+        }
         for ev in tail.poll() {
             log::debug!("hook {:?} {}", ev.kind, ev.session);
             engine.on_hook_event(&ev, now);
@@ -417,6 +443,7 @@ pub fn once(paths: &Paths) -> i32 {
     let claude = usage::find_claude(settings.claude_path.as_deref(), &paths.home);
     let now = unix_now();
     let mut engine = Engine::new(settings.clone());
+    engine.set_appearance(clawdmeter_core::platform::system_appearance().unwrap_or_default());
     engine.restore_blocks(&backoff::load_blocks(&paths.usage_blocks_file()), now);
     // A blocked account isn't asked: a call during a block lengthens it.
     let blocked = engine.blocks(now);

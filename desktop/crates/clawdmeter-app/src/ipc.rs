@@ -279,6 +279,9 @@ pub enum AppCommand {
     Open(String),
     /// Re-run the firmware update check now.
     CheckUpdate,
+    /// The config file changed: re-read it now, not at the next periodic
+    /// re-read, so a device setting reaches the device at once.
+    SettingsChanged,
     /// Stop the daemon and exit.
     Quit,
 }
@@ -293,6 +296,7 @@ impl AppCommand {
             AppCommand::Mute(on) => format!("mute {}", if *on { "on" } else { "off" }),
             AppCommand::Open(w) => format!("open {w}"),
             AppCommand::CheckUpdate => "check-update".into(),
+            AppCommand::SettingsChanged => "settings-changed".into(),
             AppCommand::Quit => "quit".into(),
         }
     }
@@ -308,6 +312,7 @@ impl AppCommand {
             ("mute", Some("off")) => AppCommand::Mute(false),
             ("open", Some(w)) if crate::Page::parse(w).is_some() => AppCommand::Open(w.to_owned()),
             ("check-update", None) => AppCommand::CheckUpdate,
+            ("settings-changed", None) => AppCommand::SettingsChanged,
             ("quit", None) => AppCommand::Quit,
             _ => return None,
         })
@@ -321,8 +326,11 @@ pub fn send_command(paths: &Paths, cmd: &AppCommand) -> io::Result<()> {
     writeln!(f, "{}", cmd.encode())
 }
 
-/// Take every pending command (the file is renamed first, so a window
-/// appending at the same moment lands in a fresh file, not a lost one).
+/// Take every pending command. The file is renamed first, so a window that
+/// opens it after the rename starts a fresh one; a window that opened it
+/// just before can still lose its line to the removal. For
+/// `settings-changed` that only means waiting for the daemon's periodic
+/// re-read.
 pub fn take_commands(paths: &Paths) -> Vec<AppCommand> {
     let path = commands_file(paths);
     let taking = path.with_extension("taking");
@@ -531,6 +539,7 @@ mod tests {
             AppCommand::Mute(true),
             AppCommand::Open("hooks".into()),
             AppCommand::Forget,
+            AppCommand::SettingsChanged,
             AppCommand::Quit,
         ];
         for c in &cmds {
