@@ -187,6 +187,9 @@ mod tests {
                 assert_ne!((a.id, a.name), (b.id, b.name));
             }
             assert!(PRESETS.iter().all(|p| p.id != a.id && p.name != a.name), "{}", a.id);
+            // The Device page shows its card before its dark preset's.
+            assert!(PRESETS.iter().any(|p| std::ptr::eq(p, a.dark)), "{}: dark isn't in PRESETS", a.id);
+            assert!(PRESETS.iter().any(|p| std::ptr::eq(p, a.light)), "{}: light isn't in PRESETS", a.id);
             assert!(!a.id.eq_ignore_ascii_case("custom") && !a.id.eq_ignore_ascii_case("clawd"));
             assert!(a.id.bytes().all(|c| c.is_ascii_lowercase() || c == b'_'), "{}", a.id);
         }

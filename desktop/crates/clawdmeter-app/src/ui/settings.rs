@@ -119,7 +119,7 @@ pub struct SettingsView {
     hex_draft: String,
     hex_focused: bool,
     /// The OS's light/dark mode, for the first Custom's preview and colours
-    /// while System is chosen. Watched only while the Device page shows, and
+    /// while System or Solarized is chosen. Watched only while the Device page shows, and
     /// never in tests (`follow_os`), where it stays Dark.
     appearance: Appearance,
     appearance_watch: Option<AppearanceWatch>,
@@ -806,9 +806,9 @@ impl SettingsView {
             t,
             "Colors",
             "The board's colors, Clawd's included. System theme switches between Dark and Light with this \
-             computer's light or dark mode, Solarized between Solarized Dark and Light. Pick a theme, or Custom + to choose each color yourself (the first \
-             time, it starts from the theme you're on). The board repaints with the app's next update, within \
-             seconds while usage is current.",
+             computer's light or dark mode, Solarized between Solarized Dark and Light. Pick a theme, or \
+             Custom + to choose each color yourself (the first time, it starts from the theme you're on). The \
+             board repaints with the app's next update, within seconds while usage is current.",
             body,
         )
     }
@@ -1864,7 +1864,9 @@ mod tests {
         let paths = home("cfg");
         let p = paths.clone();
         let (view, cx) = cx.add_window_view(move |_, cx| SettingsView::with_usb(p, Page::Device, false, cx));
-        // Tall enough for the whole Device page, Custom's editor and every theme card included.
+        // Big enough for the whole Device page, Custom's editor included. On
+        // its own (no app column around it) the page doesn't wrap the theme
+        // cards, so it's wider than the app's.
         cx.simulate_resize(gpui::size(px(2400.), px(1600.)));
         click(cx, "reset-chime");
         let text = std::fs::read_to_string(&paths.config_file).unwrap();

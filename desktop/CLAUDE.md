@@ -81,7 +81,8 @@ is faked behind `FlashHardware`.
   again); the chosen palette's
   eleven colours are sent as `th` (`Settings::colors`; System resolves to
   Dark or Light, Solarized to Solarized Dark or Light, by the OS appearance,
-  `platform::AppearanceWatch`: the xdg-desktop-portal `color-scheme` over D-Bus, macOS `AppleInterfaceStyle`,
+  `platform::AppearanceWatch`: the xdg-desktop-portal `color-scheme` over
+  D-Bus, macOS `AppleInterfaceStyle`,
   Windows `AppsUseLightTheme`; portal "no preference" is GNOME's light
   default, unreadable = Dark. A background thread keeps it (Linux: one read,
   then the portal's `SettingChanged` signal; macOS polls every 10 s, Windows
