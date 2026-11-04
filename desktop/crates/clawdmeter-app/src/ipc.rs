@@ -326,8 +326,11 @@ pub fn send_command(paths: &Paths, cmd: &AppCommand) -> io::Result<()> {
     writeln!(f, "{}", cmd.encode())
 }
 
-/// Take every pending command (the file is renamed first, so a window
-/// appending at the same moment lands in a fresh file, not a lost one).
+/// Take every pending command. The file is renamed first, so a window that
+/// opens it after the rename starts a fresh one; a window that opened it
+/// just before can still lose its line to the removal. For
+/// `settings-changed` that only means waiting for the daemon's periodic
+/// re-read.
 pub fn take_commands(paths: &Paths) -> Vec<AppCommand> {
     let path = commands_file(paths);
     let taking = path.with_extension("taking");

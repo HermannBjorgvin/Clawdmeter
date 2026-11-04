@@ -1333,5 +1333,19 @@ mod tests {
         assert!(write(&mut e, T0 + 7).is_some());
         e.on_connected();
         assert_eq!(write(&mut e, T0 + 8).unwrap().payload.tf, Some(12), "resent on a reconnect");
+        // Stale: the change waits for the next good poll, like the others.
+        let dir = PathBuf::from("/h/.claude");
+        for i in 1..=3 {
+            e.on_poll_results(T0 + 8 + i, vec![(dir.clone(), Err(UsageError::Timeout))]);
+        }
+        e.update_settings(settings("clock = 24\n"));
+        assert!(write(&mut e, T0 + 20).is_none(), "no event write while stale");
+        e.on_poll_results(T0 + 30, vec![(dir.clone(), Ok(reading(15)))]);
+        let w = write(&mut e, T0 + 30).unwrap();
+        assert_eq!((w.kind, w.payload.tf), (WriteKind::Poll, Some(24)));
+        // A no-data write carries no clock and doesn't count as sending one.
+        e.on_poll_results(T0 + 40, vec![(dir, Err(UsageError::NotLoggedIn("x".into())))]);
+        assert_eq!(write(&mut e, T0 + 40).unwrap().kind, WriteKind::NoData);
+        assert_eq!(e.sent_tf, Some(24));
     }
 }
