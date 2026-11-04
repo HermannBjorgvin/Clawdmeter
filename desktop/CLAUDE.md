@@ -188,7 +188,8 @@ Per account (`probe.rs`, `oauth.rs`):
   also queues `settings-changed` on `<state>/app-commands`; the tray (it
   takes the queue every 200 ms) forwards it as `Command::ReloadSettings`, so
   a device setting goes out within about a second. `Engine::next_write` sends
-  a changed `lv`/`aa`/`pm`/`th` or clock format (`tf`, off included) at once.
+  a changed `lv`/`aa`/`pm`/`th` or clock format (`tf`, off included) at once,
+  unless the numbers are stale (then it waits for the next good poll).
   The 5 s re-read stays for hand edits and `--daemon` without a tray.
 - Only one window process runs (`<state>/window.lock`). The tray, or a second
   `--window` launch, appends `show <page>` to `<state>/window-commands`; the
