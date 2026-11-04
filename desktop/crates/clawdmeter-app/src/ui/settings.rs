@@ -275,7 +275,10 @@ impl SettingsView {
     /// shows; stop when it doesn't.
     fn sync_appearance(&mut self) {
         if self.follow_os && self.visible && self.page == Page::Device {
-            self.appearance = self.appearance_watch.get_or_insert_with(AppearanceWatch::spawn).get();
+            // A new watch has no answer yet: keep the last one until it does.
+            if let Some(a) = self.appearance_watch.get_or_insert_with(AppearanceWatch::spawn).known() {
+                self.appearance = a;
+            }
         } else {
             self.appearance_watch = None;
         }

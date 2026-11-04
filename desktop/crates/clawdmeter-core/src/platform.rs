@@ -76,14 +76,18 @@ impl Appearance {
         }
     }
 
-    fn from_u8(v: u8) -> Self {
-        if v == 1 {
-            Appearance::Light
-        } else {
-            Appearance::Dark
+    /// `None` for [`UNKNOWN`].
+    fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Appearance::Dark),
+            1 => Some(Appearance::Light),
+            _ => None,
         }
     }
 }
+
+/// The watch's state before its first answer.
+const UNKNOWN: u8 = u8::MAX;
 
 /// The OS's appearance right now, `None` when it can't be read. Linux asks
 /// the desktop portal over D-Bus, macOS reads `AppleInterfaceStyle`, Windows
@@ -123,7 +127,7 @@ pub struct AppearanceWatch {
 impl AppearanceWatch {
     /// Start watching. The first answer arrives within one read.
     pub fn spawn() -> Self {
-        let state = Arc::new(AtomicU8::new(Appearance::default().to_u8()));
+        let state = Arc::new(AtomicU8::new(UNKNOWN));
         let shared = Arc::downgrade(&state);
         let started = std::thread::Builder::new().name("appearance".into()).spawn(move || {
             #[cfg(target_os = "linux")]
@@ -137,8 +141,13 @@ impl AppearanceWatch {
         AppearanceWatch { state }
     }
 
-    /// The appearance as last read.
+    /// The appearance as last read; Dark before the first answer.
     pub fn get(&self) -> Appearance {
+        self.known().unwrap_or_default()
+    }
+
+    /// The appearance as last read, `None` until the OS has answered once.
+    pub fn known(&self) -> Option<Appearance> {
         Appearance::from_u8(self.state.load(Ordering::Relaxed))
     }
 }
@@ -230,7 +239,11 @@ impl Miss {
     fn from_error(name: Option<&str>) -> Self {
         match name.unwrap_or("") {
             "org.freedesktop.DBus.Error.Disconnected" | "org.freedesktop.DBus.Error.NoServer" => Miss::Disconnected,
+            // A portal that can't start, or a policy that refuses it, is as
+            // good as none: don't make the bus spawn it every few seconds.
+            n if n.starts_with("org.freedesktop.DBus.Error.Spawn.") => Miss::Absent,
             "org.freedesktop.DBus.Error.ServiceUnknown"
+            | "org.freedesktop.DBus.Error.AccessDenied"
             | "org.freedesktop.DBus.Error.NameHasNoOwner"
             | "org.freedesktop.DBus.Error.UnknownObject"
             | "org.freedesktop.DBus.Error.UnknownInterface"
@@ -240,10 +253,13 @@ impl Miss {
         }
     }
 
-    /// How long before the next read.
-    fn retry_in(self) -> Duration {
-        match self {
-            Miss::Absent => Duration::from_secs(60),
+    /// How long before the next read, after `streak` misses in a row
+    /// (1 for the first): a transient miss backs off 5 s, 30 s, then a
+    /// minute.
+    fn retry_in(self, streak: u32) -> Duration {
+        match (self, streak) {
+            (Miss::Absent, _) | (_, 3..) => Duration::from_secs(60),
+            (_, 2) => Duration::from_secs(30),
             _ => Duration::from_secs(5),
         }
     }
@@ -324,6 +340,7 @@ mod portal {
                 continue;
             }
             let mut next_read = Some(Instant::now());
+            let mut misses = 0;
             while state.strong_count() > 0 {
                 if next_read.is_some_and(|t| Instant::now() >= t) {
                     match read(&conn) {
@@ -332,7 +349,10 @@ mod portal {
                             next_read = None;
                         }
                         Err(Miss::Disconnected) => break,
-                        Err(m) => next_read = Some(Instant::now() + m.retry_in()),
+                        Err(m) => {
+                            misses += 1;
+                            next_read = Some(Instant::now() + m.retry_in(misses));
+                        }
                     }
                 }
                 if conn.process(WAIT).is_err() {
@@ -372,19 +392,24 @@ mod tests {
         assert_eq!(Miss::from_error(Some("org.freedesktop.DBus.Error.Disconnected")), Miss::Disconnected);
         assert_eq!(Miss::from_error(Some("org.freedesktop.DBus.Error.NoReply")), Miss::Transient);
         assert_eq!(Miss::from_error(None), Miss::Transient);
-        assert!(Miss::Absent.retry_in() >= Duration::from_secs(60), "no portal: rarely");
+        assert_eq!(Miss::from_error(Some("org.freedesktop.DBus.Error.Spawn.ChildExited")), Miss::Absent);
+        assert_eq!(Miss::from_error(Some("org.freedesktop.DBus.Error.AccessDenied")), Miss::Absent);
+        let secs = |m: Miss, n| m.retry_in(n).as_secs();
+        assert_eq!(secs(Miss::Absent, 1), 60, "no portal: rarely");
+        assert_eq!([1, 2, 3, 9].map(|n| secs(Miss::Transient, n)), [5, 30, 60, 60], "timeouts back off");
     }
 
     #[test]
     fn the_watch_keeps_the_last_answer_and_stops_when_dropped() {
         use std::cell::RefCell;
-        let state = Arc::new(AtomicU8::new(Appearance::default().to_u8()));
+        let state = Arc::new(AtomicU8::new(UNKNOWN));
         let weak = Arc::downgrade(&state);
         let answers = RefCell::new(vec![None, Some(Appearance::Light), None, Some(Appearance::Dark)].into_iter());
         let seen = RefCell::new(Vec::new());
         let slept = RefCell::new(Vec::new());
         let holder = RefCell::new(Some(state));
         let get = || Appearance::from_u8(holder.borrow().as_ref().unwrap().load(Ordering::Relaxed));
+        assert_eq!(get(), None, "unknown before any answer");
         watch_loop(
             &weak,
             || match answers.borrow_mut().next() {
@@ -400,7 +425,7 @@ mod tests {
             },
         );
         use Appearance::{Dark, Light};
-        assert_eq!(*seen.borrow(), [Dark, Light, Light, Dark], "dark before any answer; a miss keeps the last");
+        assert_eq!(*seen.borrow(), [None, Some(Light), Some(Light), Some(Dark)], "a miss keeps the last answer");
         let (every, retry) = (APPEARANCE_EVERY, APPEARANCE_RETRY);
         assert_eq!(*slept.borrow(), [retry, every, retry, every]);
     }

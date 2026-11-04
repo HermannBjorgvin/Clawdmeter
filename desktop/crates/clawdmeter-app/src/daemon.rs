@@ -168,7 +168,8 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let mut saved_blocks = engine.blocks(unix_now());
     let host = HostClock { utc_offset_secs: 0, prefers_12h: clawdmeter_core::platform::prefers_12h() };
     // The System theme's Dark or Light follows the OS.
-    // Dark until its first read (no write goes out before a link and a poll).
+    // The engine has Dark until the first answer (no write goes out before a
+    // link and a poll anyway).
     let appearance = AppearanceWatch::spawn();
     let mut shown_appearance = None;
     let inbox = AttentionInbox::new(&paths.state_dir);
@@ -259,8 +260,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         }
 
         // ---- fast clock ----
-        let a = appearance.get();
-        if shown_appearance != Some(a) {
+        if let Some(a) = appearance.known().filter(|a| shown_appearance != Some(*a)) {
             log::info!("system appearance: {a:?}");
             shown_appearance = Some(a);
             engine.set_appearance(a);
