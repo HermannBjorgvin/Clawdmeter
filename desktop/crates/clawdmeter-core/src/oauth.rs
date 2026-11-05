@@ -166,6 +166,20 @@ fn window(v: Option<&Value>, pct_key: &str) -> Option<Window> {
     Some(Window { pct: pct.round().max(0.0) as u32, resets_at })
 }
 
+/// Spend-capped answers can carry the spend only in the top-level `spend`
+/// object (`{"percent": 5, "enabled": true, …}`) or `extra_usage`
+/// (`{"is_enabled": true, "monthly_limit": …, "utilization": 4.91}`), with
+/// an empty `limits` array and every window null. No reset date there.
+fn top_level_spend(v: &Value) -> Option<Spend> {
+    let extra = v.get("extra_usage").filter(|x| x.get("is_enabled").and_then(Value::as_bool) == Some(true));
+    let spend = v.get("spend").filter(|s| s.get("enabled").and_then(Value::as_bool) != Some(false));
+    let pct = spend
+        .and_then(|s| s.get("percent").and_then(Value::as_f64))
+        .or_else(|| extra.and_then(|x| x.get("utilization").and_then(Value::as_f64)))?;
+    let monthly = extra.is_some_and(|x| x.get("monthly_limit").is_some_and(|m| !m.is_null()));
+    Some(Spend { pct: pct.round().max(0.0) as u32, resets_at: None, period: monthly.then_some(SpendPeriod::Monthly) })
+}
+
 /// Read a 200 body. A five-hour window whose reset has passed (or with no
 /// reset) means the window isn't running.
 pub fn parse_usage_json(body: &str, now: DateTime<Utc>) -> Result<UsageReading, UsageError> {
@@ -194,7 +208,8 @@ pub fn parse_usage_json(body: &str, now: DateTime<Utc>) -> Result<UsageReading, 
                 _ => None,
             };
             Some(Spend { pct: w.pct, resets_at: w.resets_at, period })
-        });
+        })
+        .or_else(|| top_level_spend(&v));
     let overage = v.get("extra_usage").and_then(|x| x.get("is_enabled")).and_then(Value::as_bool).unwrap_or(false)
         && v.get("extra_usage").and_then(|x| x.get("used_credits")).and_then(Value::as_f64).is_some_and(|c| c > 0.0);
     let five_hour_null = v.get("five_hour").is_some_and(Value::is_null);
@@ -398,6 +413,26 @@ mod tests {
         assert!(r.is_spend_only());
         assert_eq!(r.spend.as_ref().map(|s| (s.pct, s.period)), Some((54, Some(SpendPeriod::Monthly))));
         assert_eq!(r.session_pct(), 54);
+    }
+
+    // A real spend-capped answer: every window null, `limits` empty, the
+    // spend only in `spend` and `extra_usage`.
+    #[test]
+    fn spend_only_in_top_level_objects() {
+        let body = r#"{"five_hour":null,"seven_day":null,"pace":null,"limits":[],
+            "extra_usage":{"is_enabled":true,"monthly_limit":20000,"used_credits":982.0,"utilization":4.91,"currency":"USD","spend_limit_reached":false},
+            "spend":{"used":{"amount_minor":982,"currency":"USD","exponent":2},"limit":{"amount_minor":20000,"currency":"USD","exponent":2},"percent":5,"severity":"normal","enabled":true}}"#;
+        let r = parse_usage_json(body, at("2026-10-14T01:20:00Z")).unwrap();
+        assert!(r.is_spend_only());
+        assert_eq!(
+            r.spend.as_ref().map(|s| (s.pct, s.period, s.resets_at)),
+            Some((5, Some(SpendPeriod::Monthly), None))
+        );
+        // Only extra_usage, and a disabled one says nothing.
+        let extra = r#"{"five_hour":null,"extra_usage":{"is_enabled":true,"monthly_limit":20000,"utilization":4.91}}"#;
+        assert_eq!(parse_usage_json(extra, at("2026-10-14T01:20:00Z")).unwrap().spend.map(|s| s.pct), Some(5));
+        let off = r#"{"five_hour":null,"extra_usage":{"is_enabled":false,"utilization":4.91},"spend":{"percent":5,"enabled":false}}"#;
+        assert!(parse_usage_json(off, at("2026-10-14T01:20:00Z")).is_err());
     }
 
     #[test]
