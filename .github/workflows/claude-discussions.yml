@@ -5,14 +5,18 @@
 # jobs: `dispatch` catches the owner's comment and re-runs this workflow as a
 # `workflow_dispatch` with the comment's node id; `claude` loads the thread
 # through the API and runs the action.
-#   - Only comments by the repo owner trigger it, and `claude` re-checks the
-#     author from the API, so a manual dispatch can't point it at someone
-#     else's comment. Other people's text in the thread is context, never
-#     instructions.
+#   - Only comments by the repo owner trigger it, and `claude` re-checks from
+#     the API that the owner wrote the comment and nobody else edited it, so a
+#     manual dispatch can't point it at someone else's words. Other people's
+#     text in the thread is context, never instructions.
+#   - The dispatch is made with GITHUB_TOKEN, so the `claude` job's actor is
+#     github-actions[bot]; `allowed_bots` lets the action run for it, which is
+#     safe because the author check above has already passed.
 #   - Claude pushes a branch and opens the PR with the Claude GitHub App's
 #     token (fetched by the action), so CI runs on the PR; `main` is protected
-#     by the ruleset. The job's GITHUB_TOKEN only posts the reply, from a file
-#     Claude writes, after the action finishes.
+#     by the ruleset. The job's GITHUB_TOKEN only posts the reply: a "working
+#     on it" reply with the run link when the job starts, edited into Claude's
+#     answer (from a file Claude writes) after the action finishes.
 name: Claude Discussions
 
 on:
@@ -71,6 +75,7 @@ jobs:
                 ... on DiscussionComment {
                   id url body
                   author { login }
+                  editor { login }
                   replyTo { id body author { login } }
                   discussion {
                     id number title body url
@@ -82,6 +87,11 @@ jobs:
           author=$(jq -r '.data.node.author.login // ""' "$THREAD_DIR/comment.json")
           if [ "$author" != "$OWNER" ]; then
             echo "::error::comment $COMMENT_ID is not by $OWNER (author: ${author:-none})"
+            exit 1
+          fi
+          editor=$(jq -r '.data.node.editor.login // ""' "$THREAD_DIR/comment.json")
+          if [ -n "$editor" ] && [ "$editor" != "$OWNER" ]; then
+            echo "::error::comment $COMMENT_ID was edited by $editor, not $OWNER"
             exit 1
           fi
           jq -r '.data.node |
@@ -97,6 +107,25 @@ jobs:
             echo "reply_to=$(jq -r '.data.node.replyTo.id // .data.node.id' "$THREAD_DIR/comment.json")"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Post a progress reply
+        id: progress
+        continue-on-error: true   # a missing progress reply never stops the work
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISCUSSION_ID: ${{ steps.thread.outputs.discussion_id }}
+          REPLY_TO: ${{ steps.thread.outputs.reply_to }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body="Working on it. Progress: $RUN_URL"
+          # shellcheck disable=SC2016 # GraphQL variables, not shell
+          id=$(gh api graphql -f discussion="$DISCUSSION_ID" -f replyTo="$REPLY_TO" -f body="$body" -f query='
+            mutation($discussion: ID!, $replyTo: ID!, $body: String!) {
+              addDiscussionComment(input: {discussionId: $discussion, replyToId: $replyTo, body: $body}) {
+                comment { id }
+              }
+            }' --jq .data.addDiscussionComment.comment.id)
+          echo "comment_id=$id" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -106,6 +135,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: github-actions
           prompt: |
             The owner of ${{ github.repository }} asked for a change in a GitHub
             Discussion. The thread is in ${{ env.THREAD_DIR }}/thread.md. Only the
@@ -139,6 +169,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DISCUSSION_ID: ${{ steps.thread.outputs.discussion_id }}
           REPLY_TO: ${{ steps.thread.outputs.reply_to }}
+          PROGRESS_ID: ${{ steps.progress.outputs.comment_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -s "$THREAD_DIR/reply.md" ]; then
@@ -146,10 +177,21 @@ jobs:
           else
             body="I couldn't finish this one. The run log: $RUN_URL"
           fi
-          # shellcheck disable=SC2016 # GraphQL variables, not shell
-          gh api graphql -f discussion="$DISCUSSION_ID" -f replyTo="$REPLY_TO" -f body="$body" -f query='
-            mutation($discussion: ID!, $replyTo: ID!, $body: String!) {
-              addDiscussionComment(input: {discussionId: $discussion, replyToId: $replyTo, body: $body}) {
-                comment { url }
-              }
-            }' --jq .data.addDiscussionComment.comment.url
+          # Edit the progress reply; post a new one if it never went out.
+          if [ -n "$PROGRESS_ID" ]; then
+            # shellcheck disable=SC2016 # GraphQL variables, not shell
+            gh api graphql -f id="$PROGRESS_ID" -f body="$body" -f query='
+              mutation($id: ID!, $body: String!) {
+                updateDiscussionComment(input: {commentId: $id, body: $body}) {
+                  comment { url }
+                }
+              }' --jq .data.updateDiscussionComment.comment.url
+          else
+            # shellcheck disable=SC2016 # GraphQL variables, not shell
+            gh api graphql -f discussion="$DISCUSSION_ID" -f replyTo="$REPLY_TO" -f body="$body" -f query='
+              mutation($discussion: ID!, $replyTo: ID!, $body: String!) {
+                addDiscussionComment(input: {discussionId: $discussion, replyToId: $replyTo, body: $body}) {
+                  comment { url }
+                }
+              }' --jq .data.addDiscussionComment.comment.url
+          fi
