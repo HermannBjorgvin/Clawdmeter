@@ -27,7 +27,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
@@ -169,24 +169,29 @@ fn window(v: Option<&Value>, pct_key: &str) -> Option<Window> {
 /// Spend-capped answers can carry the spend only in the top-level `spend`
 /// object (`{"percent": 5, "enabled": true, …}`) or `extra_usage`
 /// (`{"is_enabled": true, "monthly_limit": …, "utilization": 4.91}`), with
-/// an empty `limits` array and every window null. No reset date there.
-fn top_level_spend(v: &Value) -> Option<Spend> {
-    // A real five-hour object means a subscription account, not a spend cap.
-    if v.get("five_hour").is_some_and(|w| !w.is_null()) {
+/// an empty `limits` array and every window null. The endpoint gives no
+/// reset date, so the period is taken as the calendar month (UTC), like the
+/// spend caps that do report one (`2026-11-01T00:00:00Z`).
+fn top_level_spend(v: &Value, now: DateTime<Utc>) -> Option<Spend> {
+    // A real window means a subscription account, not a spend cap.
+    if ["five_hour", "seven_day"].iter().any(|k| v.get(k).is_some_and(|w| !w.is_null())) {
         return None;
     }
-    let extra = v.get("extra_usage").filter(|x| x.get("is_enabled").and_then(Value::as_bool) == Some(true));
-    let spend = v.get("spend").filter(|s| s.get("enabled").and_then(Value::as_bool) != Some(false));
-    let pct = spend
-        .and_then(|s| s.get("percent").and_then(Value::as_f64))
-        .or_else(|| extra.and_then(|x| x.get("utilization").and_then(Value::as_f64)))?;
-    let monthly = extra.is_some_and(|x| x.get("monthly_limit").is_some_and(|m| !m.is_null()));
+    let flag = |o: Option<&Value>, k: &str| o.and_then(|x| x.get(k)).and_then(Value::as_bool);
+    let extra = v.get("extra_usage").filter(|x| flag(Some(x), "is_enabled") == Some(true));
+    let spend = v.get("spend").filter(|x| flag(Some(x), "enabled") != Some(false));
     // A percent means nothing without a cap to measure it against.
-    let capped = monthly || spend.is_some_and(|s| s.get("limit").is_some_and(|l| !l.is_null()));
-    if !capped {
+    let nonnull = |o: Option<&Value>, k: &str| o.is_some_and(|x| x.get(k).is_some_and(|m| !m.is_null()));
+    if !(nonnull(extra, "monthly_limit") || nonnull(spend, "limit")) {
         return None;
     }
-    Some(Spend { pct: pct.round().max(0.0) as u32, resets_at: None, period: monthly.then_some(SpendPeriod::Monthly) })
+    let mut pct = window(spend, "percent").or_else(|| window(extra, "utilization"))?.pct.min(9999);
+    if flag(extra, "spend_limit_reached") == Some(true) {
+        pct = pct.max(100);
+    }
+    let month = now.date_naive().with_day(1)?.checked_add_months(chrono::Months::new(1))?;
+    let resets_at = month.and_hms_opt(0, 0, 0)?.and_utc();
+    Some(Spend { pct, resets_at: Some(resets_at), period: Some(SpendPeriod::Monthly) })
 }
 
 /// Read a 200 body. A five-hour window whose reset has passed (or with no
@@ -202,7 +207,7 @@ pub fn parse_usage_json(body: &str, now: DateTime<Utc>) -> Result<UsageReading, 
         .flatten()
         .filter_map(|m| Some((m.get("display_name")?.as_str()?.to_owned(), window(Some(m), "utilization")?)))
         .collect();
-    let spend = v
+    let limits_spend = v
         .get("limits")
         .and_then(Value::as_array)
         .into_iter()
@@ -217,9 +222,13 @@ pub fn parse_usage_json(body: &str, now: DateTime<Utc>) -> Result<UsageReading, 
                 _ => None,
             };
             Some(Spend { pct: w.pct, resets_at: w.resets_at, period })
-        })
-        .or_else(|| top_level_spend(&v));
-    let overage = v.get("extra_usage").and_then(|x| x.get("is_enabled")).and_then(Value::as_bool).unwrap_or(false)
+        });
+    // The top-level spend cap *is* the cap, not extra usage beyond a plan.
+    let top_spend = if limits_spend.is_none() { top_level_spend(&v, now) } else { None };
+    let from_top = top_spend.is_some();
+    let spend = limits_spend.or(top_spend);
+    let overage = !from_top
+        && v.get("extra_usage").and_then(|x| x.get("is_enabled")).and_then(Value::as_bool).unwrap_or(false)
         && v.get("extra_usage").and_then(|x| x.get("used_credits")).and_then(Value::as_f64).is_some_and(|c| c > 0.0);
     let five_hour_null = v.get("five_hour").is_some_and(Value::is_null);
     let five_hour = v.get("five_hour").is_some_and(|w| !w.is_null());
@@ -435,11 +444,25 @@ mod tests {
         assert!(r.is_spend_only());
         assert_eq!(
             r.spend.as_ref().map(|s| (s.pct, s.period, s.resets_at)),
-            Some((5, Some(SpendPeriod::Monthly), None))
+            Some((5, Some(SpendPeriod::Monthly), Some(at("2026-11-01T00:00:00Z"))))
         );
         // Only extra_usage, and a disabled one says nothing.
         let extra = r#"{"five_hour":null,"extra_usage":{"is_enabled":true,"monthly_limit":20000,"utilization":4.91}}"#;
         assert_eq!(parse_usage_json(extra, at("2026-10-14T01:20:00Z")).unwrap().spend.map(|s| s.pct), Some(5));
+        // The reset is the first of next month, so the period box means something.
+        let p = crate::Payload::from_reading_in(&r, at("2026-10-14T01:20:00Z"), &Utc);
+        assert_eq!(
+            (p.acct.as_deref(), p.st.as_deref(), p.rd.as_deref(), p.pd),
+            (Some("ent"), Some("allowed"), Some("Nov 1"), Some(31))
+        );
+        // A reached cap reads as limited.
+        let hit = body.replace("\"spend_limit_reached\":false", "\"spend_limit_reached\":true");
+        assert_eq!(parse_usage_json(&hit, at("2026-10-14T01:20:00Z")).unwrap().spend.map(|s| s.pct), Some(100));
+        // Real windows mean a subscription account, not a cap.
+        let ultra = r#"{"five_hour":null,"seven_day":{"utilization":48,"resets_at":"2026-10-20T00:00:00Z"},"extra_usage":{"is_enabled":true,"monthly_limit":5000,"utilization":100}}"#;
+        assert!(parse_usage_json(ultra, at("2026-10-14T01:20:00Z")).unwrap().spend.is_none());
+        let sub = r#"{"five_hour":{"utilization":0,"resets_at":null},"extra_usage":{"is_enabled":true,"monthly_limit":5000,"utilization":9}}"#;
+        assert!(parse_usage_json(sub, at("2026-10-14T01:20:00Z")).unwrap().spend.is_none());
         let off = r#"{"five_hour":null,"extra_usage":{"is_enabled":false,"utilization":4.91},"spend":{"percent":5,"enabled":false}}"#;
         assert!(parse_usage_json(off, at("2026-10-14T01:20:00Z")).is_err());
         let uncapped = r#"{"five_hour":null,"spend":{"percent":0,"enabled":true,"limit":null},"extra_usage":{"is_enabled":true,"monthly_limit":null}}"#;
