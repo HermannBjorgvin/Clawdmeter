@@ -171,12 +171,21 @@ fn window(v: Option<&Value>, pct_key: &str) -> Option<Window> {
 /// (`{"is_enabled": true, "monthly_limit": …, "utilization": 4.91}`), with
 /// an empty `limits` array and every window null. No reset date there.
 fn top_level_spend(v: &Value) -> Option<Spend> {
+    // A real five-hour object means a subscription account, not a spend cap.
+    if v.get("five_hour").is_some_and(|w| !w.is_null()) {
+        return None;
+    }
     let extra = v.get("extra_usage").filter(|x| x.get("is_enabled").and_then(Value::as_bool) == Some(true));
     let spend = v.get("spend").filter(|s| s.get("enabled").and_then(Value::as_bool) != Some(false));
     let pct = spend
         .and_then(|s| s.get("percent").and_then(Value::as_f64))
         .or_else(|| extra.and_then(|x| x.get("utilization").and_then(Value::as_f64)))?;
     let monthly = extra.is_some_and(|x| x.get("monthly_limit").is_some_and(|m| !m.is_null()));
+    // A percent means nothing without a cap to measure it against.
+    let capped = monthly || spend.is_some_and(|s| s.get("limit").is_some_and(|l| !l.is_null()));
+    if !capped {
+        return None;
+    }
     Some(Spend { pct: pct.round().max(0.0) as u32, resets_at: None, period: monthly.then_some(SpendPeriod::Monthly) })
 }
 
@@ -433,6 +442,8 @@ mod tests {
         assert_eq!(parse_usage_json(extra, at("2026-10-14T01:20:00Z")).unwrap().spend.map(|s| s.pct), Some(5));
         let off = r#"{"five_hour":null,"extra_usage":{"is_enabled":false,"utilization":4.91},"spend":{"percent":5,"enabled":false}}"#;
         assert!(parse_usage_json(off, at("2026-10-14T01:20:00Z")).is_err());
+        let uncapped = r#"{"five_hour":null,"spend":{"percent":0,"enabled":true,"limit":null},"extra_usage":{"is_enabled":true,"monthly_limit":null}}"#;
+        assert!(parse_usage_json(uncapped, at("2026-10-14T01:20:00Z")).is_err());
     }
 
     #[test]
