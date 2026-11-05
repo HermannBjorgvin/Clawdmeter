@@ -12,11 +12,14 @@
 #   - The dispatch is made with GITHUB_TOKEN, so the `claude` job's actor is
 #     github-actions[bot]; `allowed_bots` lets the action run for it, which is
 #     safe because the author check above has already passed.
+#   - Claude's Bash is unrestricted, as in claude.yml, so it can build and
+#     test; the job's own GITHUB_TOKEN stays read-only apart from discussions.
 #   - Claude pushes a branch and opens the PR with the Claude GitHub App's
 #     token (fetched by the action), so CI runs on the PR; `main` is protected
-#     by the ruleset. The job's GITHUB_TOKEN only posts the reply: a "working
-#     on it" reply with the run link when the job starts, edited into Claude's
-#     answer (from a file Claude writes) after the action finishes.
+#     by the ruleset. The job's GITHUB_TOKEN only posts the replies: a "working
+#     on it" reply with the run link when the job starts, then Claude's answer
+#     (from a file Claude writes) as a second reply after the action finishes.
+#     GITHUB_TOKEN can't edit discussion comments, so the progress reply stays.
 name: Claude Discussions
 
 on:
@@ -108,7 +111,6 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Post a progress reply
-        id: progress
         continue-on-error: true   # a missing progress reply never stops the work
         env:
           GH_TOKEN: ${{ github.token }}
@@ -118,13 +120,12 @@ jobs:
         run: |
           body="Working on it. Progress: $RUN_URL"
           # shellcheck disable=SC2016 # GraphQL variables, not shell
-          id=$(gh api graphql -f discussion="$DISCUSSION_ID" -f replyTo="$REPLY_TO" -f body="$body" -f query='
+          gh api graphql -f discussion="$DISCUSSION_ID" -f replyTo="$REPLY_TO" -f body="$body" -f query='
             mutation($discussion: ID!, $replyTo: ID!, $body: String!) {
               addDiscussionComment(input: {discussionId: $discussion, replyToId: $replyTo, body: $body}) {
-                comment { id }
+                comment { url }
               }
-            }' --jq .data.addDiscussionComment.comment.id)
-          echo "comment_id=$id" >> "$GITHUB_OUTPUT"
+            }' --jq .data.addDiscussionComment.comment.url
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -158,10 +159,11 @@ jobs:
             what the PR does, and its link. If you could not do it, say why
             instead. A later step posts the file; don't post it yourself.
           claude_args: |
-            --max-turns 60
+            --max-turns 80
             --add-dir ${{ env.THREAD_DIR }}
-            --allowedTools "Agent,Task,Read,Edit,Write,Glob,Grep,Bash(git:*),Bash(gh pr create:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh search:*)"
+            --allowedTools "Agent,Task,Read,Edit,Write,Glob,Grep,Bash"
             --disallowedTools "WebFetch,WebSearch"
+            --append-system-prompt "Bash is unrestricted, so build and test what you change, following CLAUDE.md's Build and test but only for what the change touches (pio run -d firmware -e ENV for the affected boards, never every env): the desktop's apt packages are in .github/actions/linux-desktop-deps, run rustup toolchain install in desktop/, install PlatformIO with pip install platformio==6.1.19 (the version .github/actions/setup-pio pins), and the simulator needs libsdl2-dev. Stage only the files you changed, by name; never git add -A or commit -a. The Claude app has no workflows permission, so a push that changes .github/workflows is rejected."
 
       - name: Reply in the thread
         if: always() && steps.thread.outputs.reply_to != ''
@@ -169,7 +171,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DISCUSSION_ID: ${{ steps.thread.outputs.discussion_id }}
           REPLY_TO: ${{ steps.thread.outputs.reply_to }}
-          PROGRESS_ID: ${{ steps.progress.outputs.comment_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -s "$THREAD_DIR/reply.md" ]; then
@@ -177,21 +178,10 @@ jobs:
           else
             body="I couldn't finish this one. The run log: $RUN_URL"
           fi
-          # Edit the progress reply; post a new one if it never went out.
-          if [ -n "$PROGRESS_ID" ]; then
-            # shellcheck disable=SC2016 # GraphQL variables, not shell
-            gh api graphql -f id="$PROGRESS_ID" -f body="$body" -f query='
-              mutation($id: ID!, $body: String!) {
-                updateDiscussionComment(input: {commentId: $id, body: $body}) {
-                  comment { url }
-                }
-              }' --jq .data.updateDiscussionComment.comment.url
-          else
-            # shellcheck disable=SC2016 # GraphQL variables, not shell
-            gh api graphql -f discussion="$DISCUSSION_ID" -f replyTo="$REPLY_TO" -f body="$body" -f query='
-              mutation($discussion: ID!, $replyTo: ID!, $body: String!) {
-                addDiscussionComment(input: {discussionId: $discussion, replyToId: $replyTo, body: $body}) {
-                  comment { url }
-                }
-              }' --jq .data.addDiscussionComment.comment.url
-          fi
+          # shellcheck disable=SC2016 # GraphQL variables, not shell
+          gh api graphql -f discussion="$DISCUSSION_ID" -f replyTo="$REPLY_TO" -f body="$body" -f query='
+            mutation($discussion: ID!, $replyTo: ID!, $body: String!) {
+              addDiscussionComment(input: {discussionId: $discussion, replyToId: $replyTo, body: $body}) {
+                comment { url }
+              }
+            }' --jq .data.addDiscussionComment.comment.url
