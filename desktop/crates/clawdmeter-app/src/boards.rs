@@ -272,6 +272,17 @@ pub const BOARDS: [BoardInfo; 26] = [
         pwr_button: true,
     },
     BoardInfo {
+        env: "upesy_wroom_st7789",
+        name: "uPesy + ST7789 1.9",
+        product: "uPesy ESP32 WROOM DevKit + 1.9\" ST7789 SPI module",
+        width: 170,
+        height: 320,
+        buy_url: "https://www.upesy.com/products/upesy-esp32-wroom-devkit-board",
+        summary: "170×320 · no touch · 1 button",
+        chip: "ESP32",
+        pwr_button: true,
+    },
+    BoardInfo {
         env: "esp32_2432s024c",
         name: "CYD 2.4",
         product: "ESP32-2432S024C Cheap Yellow Display (portrait)",
