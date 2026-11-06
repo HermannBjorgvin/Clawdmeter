@@ -18,4 +18,4 @@ log.workspace = true
 dbus = "0.9"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
