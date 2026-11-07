@@ -2,7 +2,7 @@
 #include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
-#include <SensorQMI8658.hpp>
+#include <ImuDrv.hpp>
 
 // QMI8658 is present on this board, but rotation is disabled in the
 // watch enclosure. We still initialize the chip so the I2C bus is

@@ -2,7 +2,7 @@
 #include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
-#include <SensorQMI8658.hpp>
+#include <ImuDrv.hpp>
 
 // QMI8658 is populated but rotation is disabled (BOARD_HAS_ROTATION=0, and
 // the C6 has no PSRAM headroom for the rotation strip). We still initialize

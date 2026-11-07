@@ -2,7 +2,7 @@
 #include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
-#include <SensorQMI8658.hpp>
+#include <ImuDrv.hpp>
 
 // QMI8658 is populated on this board, but the panel mounts in a fixed
 // orientation in the enclosure. We initialize the device so the shared I2C bus

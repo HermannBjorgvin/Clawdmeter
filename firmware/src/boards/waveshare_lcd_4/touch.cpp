@@ -2,7 +2,7 @@
 #include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
-#include <TouchDrvGT911.hpp>
+#include <TouchDrvGoodix.hpp>
 
 // GT911 via SensorLib. Address is latched from INT at reset — probe 0x5D
 // then fall back to 0x14. Polled (no IRQ): Waveshare's INT pin is GPIO 16,
@@ -34,12 +34,11 @@ void touch_hal_init(void) {
 
 void touch_hal_read(uint16_t* x, uint16_t* y, bool* pressed) {
     if (touch_ok) {
-        int16_t tx[5], ty[5];
-        uint8_t n = touch.getPoint(tx, ty, touch.getSupportTouchPoint());
-        if (n > 0) {
+        const TouchPoints &pts = touch.getTouchPoints();
+        if (pts.hasPoints()) {
             touch_pressed = true;
-            touch_x = (uint16_t)tx[0];
-            touch_y = (uint16_t)ty[0];
+            touch_x = pts.getPoint(0).x;
+            touch_y = pts.getPoint(0).y;
         } else {
             touch_pressed = false;
         }

@@ -2,7 +2,7 @@
 #include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
-#include <TouchDrvCSTXXX.hpp>
+#include <TouchDrvCST.hpp>
 
 // CST816D via SensorLib's unified CST driver. It reports coordinates already
 // aligned with the ST7789 at rotation 0, so no axis swap or mirror is applied.
@@ -19,12 +19,11 @@ static void IRAM_ATTR touch_isr(void) {
 }
 
 static void touch_poll(void) {
-    int16_t tx[5], ty[5];
-    uint8_t n = touch.getPoint(tx, ty, touch.getSupportTouchPoint());
-    if (n > 0) {
+    const TouchPoints &pts = touch.getTouchPoints();
+    if (pts.hasPoints()) {
         touch_pressed = true;
-        touch_x = (uint16_t)tx[0];
-        touch_y = (uint16_t)ty[0];
+        touch_x = pts.getPoint(0).x;
+        touch_y = pts.getPoint(0).y;
     } else {
         touch_pressed = false;
     }
@@ -32,6 +31,9 @@ static void touch_poll(void) {
 
 void touch_hal_init(void) {
     touch.setPins(TP_RST, TP_INT);
+    // Start the probe at the CST8xx family: SensorLib 0.5 tries the CST226
+    // first otherwise, and its init writes to registers the CST816D lacks.
+    touch.setTouchDrvModel(TouchDrv_CST8XX);
     if (!touch.begin(Wire, TOUCH_ADDR, IIC_SDA, IIC_SCL)) {
         Serial.println("Touch init failed");
         return;

@@ -2,7 +2,7 @@
 #include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
-#include <SensorQMI8658.hpp>
+#include <ImuDrv.hpp>
 
 // AMOLED-1.8 ships with QMI8658 populated, but the kit's enclosure mounts
 // the panel in a fixed orientation. We initialize the device anyway so the
