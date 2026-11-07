@@ -21,7 +21,9 @@ void touch_hal_init(void) {
     if (Wire.endTransmission() == 0) gt_addr = 0x5D;
 
     touch.setPins(-1, -1);
-    if (!touch.begin(Wire, gt_addr, IIC_SDA, IIC_SCL)) {
+    // No pins: board_init() already started Wire, and SensorLib would
+    // call Wire.setPins() on the running bus (an [E] log line).
+    if (!touch.begin(Wire, gt_addr)) {
         Serial.printf("Touch GT911 init failed (tried 0x%02X)\n", gt_addr);
         return;
     }

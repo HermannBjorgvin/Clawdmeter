@@ -17,7 +17,9 @@ static void IRAM_ATTR touch_isr(void) {
 
 void touch_hal_init(void) {
     touch.setPins(TP_RST, TP_INT);
-    if (!touch.begin(Wire, CST226_ADDR, IIC_SDA, IIC_SCL)) {
+    // No pins: board_init() already started Wire, and SensorLib would
+    // call Wire.setPins() on the running bus (an [E] log line).
+    if (!touch.begin(Wire, CST226_ADDR)) {
         Serial.println("CST226 init failed");
         return;
     }

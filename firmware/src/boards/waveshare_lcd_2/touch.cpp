@@ -34,7 +34,10 @@ void touch_hal_init(void) {
     // Start the probe at the CST8xx family: SensorLib 0.5 tries the CST226
     // first otherwise, and its init writes to registers the CST816D lacks.
     touch.setTouchDrvModel(TouchDrv_CST8XX);
-    if (!touch.begin(Wire, TOUCH_ADDR, IIC_SDA, IIC_SCL)) {
+    // No pins: board_init() already started Wire, and SensorLib would
+    // call Wire.setPins() on the running bus (an [E] log line).
+    // TouchDrvCSTXXX's begin() has no default pins, so pass -1 explicitly.
+    if (!touch.begin(Wire, TOUCH_ADDR, -1, -1)) {
         Serial.println("Touch init failed");
         return;
     }
