@@ -9,3 +9,8 @@ Waveshare ESP32-C6-Touch-AMOLED-2.16 (CO5300, 480×480, CST9217 touch). Build en
 - ES8311 codec on the shared I2C bus (0x18), I2S MCLK 19, BCLK 20, WS 22, DOUT 23, DIN 21 (from Waveshare's `07_Audio_Test`).
 - No amp-enable line: Waveshare's BSP sets `BSP_POWER_AMP_IO` to `GPIO_NUM_NC`, so `sound.cpp` passes a null `amp_enable` and `chime.cpp` keeps the ES8311 DAC muted between dings. Don't hunt for a PA pin on the TCA9554.
 - No PSRAM, so the ding buffer comes from internal RAM, once, after setup. The whole ding needs the largest free internal block to be at least `CHIME_RAM_RESERVE` (48 KB) + 2 × `ding_frames(SND_SAMPLE_RATE)` bytes: ~85 KB at 11025 Hz. Less and the boot log's `room for N of 18411 frames` drops and the ding is cut short with a fade; below 0.5 s of room it plays nothing and every ding logs `chime: no ding buffer`. The C6 has no FPU, so there's no live-synthesis fallback.
+
+## Rotation
+
+- QMI8658 (0x6B) quadrants map to CO5300 MADCTL values in `display.cpp`. The base, upright on the desk stand, is quadrant 3 (MADCTL 0x30, written at init). `imu.cpp`, `display_hal_tick` and `touch.cpp` all start from quadrant 3, so a board whose IMU fails to init stays upright with touch lined up.
+- The accelerometer runs at 28 Hz in normal mode (polled at 10 Hz): SensorLib 0.5's `configAccel()` has no low-power rates. Same trade-off as the S3 2.16.

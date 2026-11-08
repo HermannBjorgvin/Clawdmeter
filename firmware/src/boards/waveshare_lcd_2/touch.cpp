@@ -4,10 +4,10 @@
 #include <Wire.h>
 #include <TouchDrvCST.hpp>
 
-// CST816D via SensorLib's unified CST driver. It reports coordinates already
+// CST816D via SensorLib's CST816 driver. It reports coordinates already
 // aligned with the ST7789 at rotation 0, so no axis swap or mirror is applied.
 
-static TouchDrvCSTXXX touch;
+static TouchDrvCST816 touch;
 
 static volatile bool     touch_data_ready = false;
 static volatile bool     touch_pressed = false;
@@ -31,13 +31,9 @@ static void touch_poll(void) {
 
 void touch_hal_init(void) {
     touch.setPins(TP_RST, TP_INT);
-    // Start the probe at the CST8xx family: SensorLib 0.5 tries the CST226
-    // first otherwise, and its init writes to registers the CST816D lacks.
-    touch.setTouchDrvModel(TouchDrv_CST8XX);
     // No pins: board_init() already started Wire, and SensorLib would
     // call Wire.setPins() on the running bus (an [E] log line).
-    // TouchDrvCSTXXX's begin() has no default pins, so pass -1 explicitly.
-    if (!touch.begin(Wire, TOUCH_ADDR, -1, -1)) {
+    if (!touch.begin(Wire, TOUCH_ADDR)) {
         Serial.println("Touch init failed");
         return;
     }
