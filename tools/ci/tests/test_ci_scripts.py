@@ -17,6 +17,7 @@ REPO = CI.parents[1]
 sys.path.insert(0, str(CI))
 
 import merge_firmware  # noqa: E402
+import restore_pio_build_scripts  # noqa: E402
 
 
 def run(script: str, *args: str) -> subprocess.CompletedProcess:
@@ -70,6 +71,48 @@ class MergeFirmwareTest(unittest.TestCase):
     def test_frequency_is_normalized_like_the_platform(self):
         self.assertEqual(merge_firmware.normalize_freq("80000000L"), "80m")
         self.assertEqual(merge_firmware.normalize_freq(40000000), "40m")
+
+
+class RestorePioBuildScriptsTest(unittest.TestCase):
+    def test_backup_replaces_the_edited_build_script(self):
+        with tempfile.TemporaryDirectory() as d:
+            mcu = Path(d) / "framework-arduinoespressif32-libs" / "esp32"
+            mcu.mkdir(parents=True)
+            (mcu / "pioarduino-build.py").write_text("edited")
+            (mcu / "pioarduino-build.py.esp32").write_text("original")
+            self.assertEqual(restore_pio_build_scripts.restore(Path(d)),
+                             [mcu / "pioarduino-build.py"])
+            self.assertEqual((mcu / "pioarduino-build.py").read_text(), "original")
+            self.assertFalse((mcu / "pioarduino-build.py.esp32").exists())
+
+    def test_a_second_installed_version_is_restored_too(self):
+        with tempfile.TemporaryDirectory() as d:
+            mcu = Path(d) / "framework-arduinoespressif32-libs@5.5.4" / "esp32"
+            mcu.mkdir(parents=True)
+            (mcu / "pioarduino-build.py").write_text("edited")
+            (mcu / "pioarduino-build.py.esp32").write_text("original")
+            self.assertEqual(restore_pio_build_scripts.restore(Path(d)),
+                             [mcu / "pioarduino-build.py"])
+            self.assertEqual((mcu / "pioarduino-build.py").read_text(), "original")
+
+    def test_only_the_platforms_backup_name_counts(self):
+        with tempfile.TemporaryDirectory() as d:
+            mcu = Path(d) / "framework-arduinoespressif32-libs" / "esp32s3"
+            mcu.mkdir(parents=True)
+            (mcu / "pioarduino-build.py").write_text("original")
+            (mcu / "pioarduino-build.py.bak").write_text("someone's copy")
+            self.assertEqual(restore_pio_build_scripts.restore(Path(d)), [])
+            self.assertEqual((mcu / "pioarduino-build.py").read_text(), "original")
+            self.assertTrue((mcu / "pioarduino-build.py.bak").exists())
+
+    def test_untouched_packages_are_left_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            mcu = Path(d) / "framework-arduinoespressif32-libs" / "esp32s3"
+            mcu.mkdir(parents=True)
+            (mcu / "pioarduino-build.py").write_text("original")
+            self.assertEqual(restore_pio_build_scripts.restore(Path(d)), [])
+            self.assertEqual((mcu / "pioarduino-build.py").read_text(), "original")
+            self.assertEqual(restore_pio_build_scripts.restore(Path(d) / "missing"), [])
 
 
 class ManifestTest(unittest.TestCase):

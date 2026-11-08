@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="92" viewBox="-3.00 -3.84 108.14 91.56">
+<title>Generic ESP32 development board</title>
+<ellipse cx="51.07" cy="80.22" rx="46.98" ry="4.5" fill="#000" opacity="0.14"/>
+<path d="M97.34 8.20 L98.40 8.43 L99.42 8.91 L100.33 9.60 L101.09 10.47 L101.66 11.49 L102.02 12.59 L102.14 13.72 L102.14 70.84 L102.02 71.95 L101.66 72.98 L101.09 73.88 L100.33 74.60 L99.42 75.11 L98.40 75.38 L97.34 75.40 L6.94 66.36 L5.87 66.13 L4.85 65.65 L3.94 64.96 L3.18 64.09 L2.61 63.07 L2.26 61.97 L2.14 60.84 L2.14 3.72 L2.26 2.61 L2.61 1.58 L3.18 0.68 L3.94 -0.04 L4.85 -0.55 L5.87 -0.82 L6.94 -0.84Z" fill="#173f75" stroke="#173f75" stroke-width="0.7" stroke-linejoin="round"/>
+<path d="M96.62 8.64 L97.69 8.87 L98.71 9.35 L99.62 10.04 L100.38 10.91 L100.95 11.93 L101.30 13.03 L101.42 14.16 L101.42 71.28 L101.30 72.39 L100.95 73.42 L100.38 74.32 L99.62 75.04 L98.71 75.55 L97.69 75.82 L96.62 75.84 L6.22 66.80 L5.16 66.57 L4.14 66.09 L3.23 65.40 L2.47 64.53 L1.90 63.51 L1.54 62.41 L1.42 61.28 L1.42 4.16 L1.54 3.05 L1.90 2.02 L2.47 1.12 L3.23 0.40 L4.14 -0.11 L5.16 -0.38 L6.22 -0.40Z" fill="#173f75" stroke="#173f75" stroke-width="0.7" stroke-linejoin="round"/>
+<path d="M95.91 9.08 L96.98 9.31 L97.99 9.79 L98.90 10.48 L99.66 11.35 L100.24 12.37 L100.59 13.47 L100.71 14.60 L100.71 71.72 L100.59 72.83 L100.24 73.86 L99.66 74.76 L98.90 75.48 L97.99 75.99 L96.98 76.26 L95.91 76.28 L5.51 67.24 L4.44 67.01 L3.43 66.53 L2.52 65.84 L1.76 64.97 L1.19 63.95 L0.83 62.85 L0.71 61.72 L0.71 4.60 L0.83 3.49 L1.19 2.46 L1.76 1.56 L2.52 0.84 L3.43 0.33 L4.44 0.06 L5.51 0.04Z" fill="#173f75" stroke="#173f75" stroke-width="0.7" stroke-linejoin="round"/>
+<path d="M4.80 0.48 L95.20 9.52 L97.34 8.20 L6.94 -0.84Z" fill="#2f6fc2"/>
+<path d="M100.00 15.04 L100.00 72.16 L102.14 70.84 L102.14 13.72Z" fill="#173f75"/>
+<path d="M68.44 6.53 L84.44 8.12 L85.69 7.36 L69.69 5.76Z" fill="#c9ccd1" stroke="#c9ccd1" stroke-width="0.50" stroke-linejoin="round"/>
+<g transform="matrix(2.0 0.2 0 2.1 0.0 0.0)">
+<rect x="-0.45" y="-0.45" width="50.9" height="32.9" rx="2.85" fill="#173f75"/>
+<rect x="0" y="0" width="50" height="32" rx="2.4" fill="#1d4c8c"/>
+<rect x="1.2" y="1.2" width="47.6" height="29.6" rx="1.6" fill="none" stroke="#2f6fc2" stroke-width="0.4"/>
+<rect x="24" y="5" width="20" height="22" rx="0.8" fill="#c9ccd1" stroke="#8f9399" stroke-width="0.35"/>
+<rect x="25.2" y="6.2" width="17.6" height="9" rx="0.4" fill="#dcdfe3"/>
+<path d="M26.5 20h4v2h4v-2h4v2h3" fill="none" stroke="#b79a4a" stroke-width="0.7" stroke-linecap="round"/>
+<rect x="41.3" y="6.9" width="1.6" height="1.6" rx="0.2" fill="#8f9399"/>
+<rect x="8" y="11" width="8.5" height="8.5" rx="0.7" fill="#161616"/>
+<circle cx="9.8" cy="12.8" r="0.6" fill="#4a4b4d"/>
+<rect x="-1.6" y="11.6" width="4.6" height="8" rx="1.2" fill="#c9ccd1" stroke="#8f9399" stroke-width="0.3"/>
+<rect x="0.4" y="13.6" width="2" height="4" rx="0.8" fill="#2a2a28"/>
+<rect x="6" y="24.5" width="4" height="3.2" rx="0.5" fill="#e8ebed"/>
+<rect x="13" y="24.5" width="4" height="3.2" rx="0.5" fill="#e8ebed"/>
+<circle cx="8" cy="26.1" r="0.9" fill="#8f9399"/>
+<circle cx="15" cy="26.1" r="0.9" fill="#8f9399"/>
+</g>
+</svg>

@@ -111,10 +111,52 @@ entry on Windows.
 
 | Meters | Show | Screensaver | Attention |
 | --- | --- | --- | --- |
-| ![Meters](../screenshots/director/01-home-meters.png) | ![Show](../screenshots/director/09-show-scene.png) | ![Screensaver](../screenshots/director/15-screensaver-face.png) | ![Attention](../screenshots/director/20-attention-waves.png) |
+| ![Meters](../screenshots/director/01-home-meters.png) | ![Show](../screenshots/director/06-show-scene.png) | ![Screensaver](../screenshots/director/15-screensaver-face.png) | ![Attention](../screenshots/director/20-attention-waves.png) |
 | Session and weekly usage | After sustained activity | After a quiet stretch | A session needs an answer |
 
-The device boots to the meters. Tap a show or screensaver to return to them.
+**Animation silliness** on the Device page sets how lively Clawd is. **No-nonsense**
+keeps him still in his corner: no shows, no screensaver, no idle acts or
+reactions, and the status line changes its word once a minute with a still
+spinner. Taps and alerts still get their reaction. **Some-nonsense** (the
+default) is the behaviour described here. **All-nonsense** earns shows
+sooner, on lighter work, and has him act up far more often. A line under
+the slider says what the chosen level does. **Attention animation** sets how
+long he points and waves when Claude needs you (off, 10 or 30 seconds, or 2
+minutes, the default); the alert itself stays up until you tap it either
+way. The device remembers these settings across restarts.
+
+**Pace marker** puts a thin line on the session and weekly bars at how far
+into each window you are: 3 hours before the session resets, 40% of it has
+gone, so the line sits at 40%. The bar is green while usage is at or behind
+the line, amber when it's ahead, and red at the limit. Off (the default),
+the bars go amber at 50% and red at 80%. A bar with no reset time yet keeps
+those colours, and spend-capped accounts are unchanged.
+
+**Colors** sets the board's palette. **System theme**, the default, follows
+this computer's light or dark mode: the board shows **Dark** (its own
+palette) or **Light** and switches within a couple of seconds when the mode
+changes, while usage is current (with stale numbers it waits for the next
+reading). **Solarized** does the same between **Solarized Dark** and
+**Solarized Light**.
+Pick Dark, Light or another theme to keep one palette, or **Custom +** to
+choose each colour. The e-paper board stays black on white whatever is
+chosen. A setup that makes things dark only through `GTK_THEME` (common on
+tiling window managers) and leaves the desktop's colour scheme at its
+default gets the Light board with System theme or Solarized: pick Dark or
+Solarized Dark there.
+
+Accounts with no 5-hour limit, such as Ultra (formerly Max 20x) once
+Anthropic has verified the account, show only the **Weekly** meter on the
+device, the Overview page and the tray. Clawdmeter goes by what the usage
+server reports, not by the plan's name: an Ultra account that isn't verified
+yet still has a temporary 5-hour limit and keeps the Session meter until the
+limit goes. For these accounts the reset chime and Clawd's fresh-window jump
+mark the weekly reset. Firmware older than this change keeps showing the
+session as not started; update it from the Flash page.
+
+The device boots to the meters. Clawd performs his shows right on them,
+in front of the panels. Tap a show or the screensaver to send him back to
+his seat.
 Tap the meters to bring Clawd's face up to the glass; tap again to send him
 back. A tap that wakes a sleeping panel only wakes it.
 
@@ -129,6 +171,8 @@ alerts expire after 30 seconds. C6 boards show the message without the
 full-size Clawd. Optional alert and reset chimes work on boards with an implemented audio output; those boards also ding once when they start.
 Boards with the **minimal display** capability keep the meters and a still
 Clawd, with no animated scenes. This is a board capability, not a user setting.
+C6 boards have no room for the full-size Clawd: their shows are acts in his
+corner seat.
 
 The status line rotates through Claude Code's whimsical thinking verbs when
 all is well. It shows **Waiting** without a connection, **No data** before a
@@ -146,7 +190,7 @@ and character rules.
 | --- | --- |
 | BOOT | Hold to send Space to the focused window, for Claude Code voice input. GPIO 0 on S3; GPIO 9 on C6. |
 | Secondary, where fitted | Send Shift+Tab to the focused window. S3 2.16: GPIO 18; C6 2.16: GPIO 10; LCD-1.54: GPIO 5. |
-| PWR, where software-controlled | Short press: next scene on the stage, brightness elsewhere. Hold about 3 seconds and release: clear pairing. |
+| PWR, where software-controlled | Short press: brightness. Hold about 3 seconds and release: clear pairing. |
 
 The LCD-4 has one user button, BOOT. Its PWR key is a hardware reset.
 
@@ -160,11 +204,16 @@ seconds and preserves comments and unknown keys when saving.
 
 | Key | Default | Effect |
 | --- | --- | --- |
-| `config_dirs` | `~/.claude` | Comma-separated Claude Code config folders. The app selects the account whose session usage increased most recently. `CLAUDE_CONFIG_DIR` supplies the default when this key is absent. |
+| `config_dirs` | `~/.claude` | Comma-separated Claude Code config folders. The app selects the account whose usage increased most recently (session usage, or weekly usage on an account with no 5-hour limit); before any rise, the one with the highest percentage. `CLAUDE_CONFIG_DIR` supplies the default when this key is absent. |
 | `reset_chime` | `off` | Chime on the device when the session usage resets (boards with a speaker). The older `chime` key still works. |
 | `alert_chime` | `off` | Chime on the device when Claude needs you (boards with a speaker). The older `beep` key still works. |
 | `desktop_chime` | `off` | Play the same chime on this computer when Claude needs you. Follows `alert_on`. |
 | `clock` | `off` | `auto`, `12`, or `24` replaces the device's Usage title with a clock. |
+| `liveliness` | `3` | How lively Clawd is, `1` (No-nonsense) to `5` (All-nonsense). Set with **Animation silliness** on the Device page. |
+| `attention_anim` | `2m` | How long Clawd points and waves for an alert: `off`, `10s`, `30s` or `2m`. The alert itself is unchanged. Set with **Attention animation** on the Device page. |
+| `pace_marker` | `off` | `on` marks the elapsed share of each usage window on the device's bars and colours them by pace. Set with **Pace marker** on the Device page. |
+| `theme` | `system` | The device's colours, Clawd's included: `system` (Dark or Light, following this computer's light or dark mode, and switching when it does; `clawd`, the old default, means the same), `dark` (the board's own palette), `light`, `catppuccin_mocha`, `dracula`, `gruvbox`, `monokai`, `nord`, `one_dark`, `solarized` (Solarized Dark or Light, following the mode like `system`), `solarized_dark`, `solarized_light`, `tokyo_night`, or `custom` for the `color_*` keys below. Set with **Colors** on the Device page. |
+| `color_<name>` | the default palette | The custom theme's colours as `rrggbb` (no `#`, which starts a comment): `color_bg`, `color_panel`, `color_text`, `color_dim`, `color_accent`, `color_green`, `color_amber`, `color_red`, `color_bar_bg`, `color_clawd`, `color_eye`. Used only with `theme = custom` and kept while a preset is chosen. Set with **Custom +** under **Colors** on the Device page (a swatch or a typed hex code). The first time, Custom starts from the theme you're on and writes all eleven keys; from then on it keeps its own colours. |
 | `poll_interval` | automatic | Override working and no-hooks polling intervals, in seconds. The scheduler enforces at least 120 seconds per account. Quiet and other-account schedules still apply. |
 | `heartbeat_interval` | `60` | Resend cached readings between usage checks. This does not fetch usage. Keep the default unless diagnosing the connection. |
 | `claude_path` | found on `PATH` | Full path to the Claude Code executable, if detection fails. |

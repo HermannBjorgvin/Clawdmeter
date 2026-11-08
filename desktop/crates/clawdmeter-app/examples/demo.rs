@@ -8,7 +8,7 @@
 //!   cargo run -p clawdmeter-app --example demo -- [--page PAGE] [--status connected|off]
 //!   [--board none|fresh|current|old] [--setup welcome|board|flash|pair|hooks|done] [--hooks-preview]
 //!   [--flash-to identify|firmware|flash|done] [--shop] [--accounts retrying] [--refresh wait|checking]
-//!   [--advanced] [--session idle]
+//!   [--advanced] [--session idle|week] [--height PX]
 //! ```
 //!
 //! `--accounts retrying` adds a second account that is being rate-limited;
@@ -108,7 +108,10 @@ fn release(paths: &Paths) -> std::path::PathBuf {
     dir.join("manifest.json")
 }
 
-fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, idle: bool) {
+fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, session: Option<String>) {
+    // `idle`: session not started; `week`: no 5-hour limit (verified Ultra).
+    let idle = session.as_deref() == Some("idle");
+    let week = session.as_deref() == Some("week");
     let paths = paths.clone();
     let work = paths.home.join(".claude-work");
     if retrying {
@@ -134,10 +137,11 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, idle: boo
             device_name: Some("Clawdmeter".into()),
             account: Some(paths.home.join(".claude").display().to_string()),
             claude: Some(paths.home.join(".local/bin/claude").display().to_string()),
-            session_pct: Some(if idle { 0 } else { 34 }),
+            session_pct: (!week).then_some(if idle { 0 } else { 34 }),
             week_pct: Some(62),
-            window_started: !idle,
-            session_resets_at: (!idle).then_some(started + 177 * 60),
+            window_started: !idle && !week,
+            no_session_limit: week,
+            session_resets_at: (!idle && !week).then_some(started + 177 * 60),
             week_resets_at: Some(started + (5 * 24 + 11) * 3600 + 30),
             read_at: Some(now - 15),
             hooks: true,
@@ -165,7 +169,7 @@ fn main() {
             &paths,
             arg(&args, "--accounts").as_deref() == Some("retrying"),
             arg(&args, "--refresh"),
-            arg(&args, "--session").as_deref() == Some("idle"),
+            arg(&args, "--session"),
         );
         let _ = ipc::save_firmware_record(&paths, &FirmwareRecord { env: ENV.into(), ver: "1.8.2".into() });
     } else {
@@ -180,8 +184,10 @@ fn main() {
     let hooks_preview = args.iter().any(|a| a == "--hooks-preview");
     let shop = args.iter().any(|a| a == "--shop");
     let advanced = args.iter().any(|a| a == "--advanced");
+    // A taller window, so a long page fits one screenshot.
+    let height = arg(&args, "--height").and_then(|h| h.parse::<f32>().ok());
 
-    clawdmeter_app::ui::open(move |window, cx| {
+    clawdmeter_app::ui::open_with_height(height, move |window, cx| {
         let p = paths.clone();
         let hw: Arc<dyn FlashHardware> = Arc::new(FakeBoard { kind: board });
         let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));

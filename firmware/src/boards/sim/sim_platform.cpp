@@ -28,6 +28,24 @@ bool sim_should_quit(void) { return quit; }
 // Matches the AXP2101 long-press threshold main.cpp's pair gesture expects.
 #define PWR_LONG_MS 1500
 
+void sim_set_pwr(bool down) {
+    if (down && !pwr_down) {
+        pwr_down = true;
+        pwr_down_ms = millis();
+        pwr_long_fired = false;
+    } else if (!down && pwr_down) {
+        pwr_down = false;
+        if (!pwr_long_fired) edge_pressed = true;
+        edge_released = true;
+    }
+}
+
+void sim_set_battery(int pct, bool chg, bool usb_only) {
+    battery = pct < 0 ? 0 : pct > 100 ? 100 : pct;
+    charging = chg;
+    no_battery = usb_only;
+}
+
 void sim_pump(void) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -49,21 +67,13 @@ void sim_pump(void) {
             case SDLK_t:      sim_inject_event('s'); break;
             case SDLK_a:      sim_inject_activity_cycle(); break;
             case SDLK_m:      sim_inject_alert_toggle(); break;
-            case SDLK_p:
-                pwr_down = true;
-                pwr_down_ms = millis();
-                pwr_long_fired = false;
-                break;
+            case SDLK_p:      sim_set_pwr(true); break;
             default:
                 if (k >= SDLK_1 && k <= SDLK_9) sim_playback_jump(k - SDLK_1);
                 break;
             }
         }
-        if (e.type == SDL_KEYUP && e.key.keysym.sym == SDLK_p && pwr_down) {
-            pwr_down = false;
-            if (!pwr_long_fired) edge_pressed = true;
-            edge_released = true;
-        }
+        if (e.type == SDL_KEYUP && e.key.keysym.sym == SDLK_p) sim_set_pwr(false);
     }
     if (pwr_down && !pwr_long_fired && millis() - pwr_down_ms >= PWR_LONG_MS) {
         pwr_long_fired = true;

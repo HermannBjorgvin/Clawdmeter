@@ -38,3 +38,15 @@ node tools/png_to_lvgl.js input.png symbol_name [W_MACRO] [H_MACRO] [--tint=RRGG
 Converts an alpha PNG to an LVGL RGB565A8 C array. Default tint is white —
 Lucide PNGs ship black-on-transparent and would render invisible without it.
 Paste the output into `firmware/src/icons.h`.
+
+## Simulator grid
+
+```bash
+python3 tools/simgrid/simgrid.py serve        # web GUI + action API
+python3 tools/simgrid/simgrid.py run SCRIPT   # headless, deterministic
+```
+
+Every supported panel's simulator on one clock, driven by one set of
+actions. Needs SDL2 dev files and Pillow (ffmpeg for `.mp4`). See
+[docs/sim-grid.md](../docs/sim-grid.md); tests:
+`python3 -m unittest discover -s tools/simgrid`.

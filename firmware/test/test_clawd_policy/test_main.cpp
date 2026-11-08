@@ -14,30 +14,30 @@ void tearDown(void) {}
 
 static void test_show_needs_five_sustained_minutes_of_level_3(void) {
     ShowGate g; show_gate_clear(&g);
-    show_gate_update(&g, 0, 3);
-    show_gate_update(&g, 4 * MIN, 3);
+    show_gate_update(&g, 0, 3, &T);
+    show_gate_update(&g, 4 * MIN, 3, &T);
     TEST_ASSERT_FALSE(show_gate_ready(&g, 4 * MIN, &T));
-    show_gate_update(&g, 5 * MIN, 3);
+    show_gate_update(&g, 5 * MIN, 3, &T);
     TEST_ASSERT_TRUE(show_gate_ready(&g, 5 * MIN, &T));
 }
 
 static void test_show_clock_restarts_when_activity_drops(void) {
     ShowGate g; show_gate_clear(&g);
-    show_gate_update(&g, 0, 3);
-    show_gate_update(&g, 4 * MIN, 2);              // a lull
-    show_gate_update(&g, 4 * MIN + SEC, 3);
+    show_gate_update(&g, 0, 3, &T);
+    show_gate_update(&g, 4 * MIN, 2, &T);              // a lull
+    show_gate_update(&g, 4 * MIN + SEC, 3, &T);
     TEST_ASSERT_FALSE(show_gate_ready(&g, 8 * MIN, &T));
     TEST_ASSERT_TRUE(show_gate_ready(&g, 9 * MIN + SEC, &T));
-    show_gate_update(&g, 10 * MIN, -1);            // expired / unknown counts as a drop
+    show_gate_update(&g, 10 * MIN, -1, &T);            // expired / unknown counts as a drop
     TEST_ASSERT_FALSE(show_gate_ready(&g, 20 * MIN, &T));
 }
 
 static void test_at_most_one_show_per_15_minutes(void) {
     ShowGate g; show_gate_clear(&g);
-    show_gate_update(&g, 0, 3);
+    show_gate_update(&g, 0, 3, &T);
     TEST_ASSERT_TRUE(show_gate_ready(&g, 5 * MIN, &T));
     show_gate_mark_shown(&g, 5 * MIN);
-    show_gate_update(&g, 11 * MIN, 3);             // busy the whole time
+    show_gate_update(&g, 11 * MIN, 3, &T);             // busy the whole time
     TEST_ASSERT_FALSE(show_gate_ready(&g, 11 * MIN, &T));   // 6 min busy, but cooldown
     TEST_ASSERT_FALSE(show_gate_ready(&g, 19 * MIN, &T));
     TEST_ASSERT_TRUE(show_gate_ready(&g, 20 * MIN, &T));
@@ -290,6 +290,94 @@ static void test_attention_over_a_peek_ends_on_the_meters(void) {
     TEST_ASSERT_FALSE(attention_resumes_screensaver(ATTN_FROM_HOME, ATTN_END_TAP, true));
 }
 
+// ─── Liveliness ──────────────────────────────────────────────────────────────
+static void test_some_nonsense_is_the_base_tuning(void) {
+    ClawdTuning out;
+    clawd_tuning_scaled(&T, 3, &out);
+    TEST_ASSERT_EQUAL_MEMORY(&T, &out, sizeof(T));
+}
+
+static void test_no_nonsense_keeps_him_still_but_taps_and_alerts_work(void) {
+    ClawdTuning out;
+    clawd_tuning_scaled(&T, 1, &out);
+    TEST_ASSERT_FALSE(out.shows);
+    TEST_ASSERT_FALSE(out.screensaver);
+    TEST_ASSERT_FALSE(out.idle_acts);
+    TEST_ASSERT_FALSE(out.reactions);
+    TEST_ASSERT_FALSE(out.spinner);
+    TEST_ASSERT_EQUAL_UINT32(60 * SEC, out.verb_ms);
+    // The peek and attention keep their timings.
+    TEST_ASSERT_EQUAL_UINT32(T.peek_curious_ms, out.peek_curious_ms);
+    TEST_ASSERT_EQUAL_UINT32(T.alert_timeout_ms, out.alert_timeout_ms);
+    // The gates stay shut, however long the stretch.
+    ShowGate g; show_gate_clear(&g);
+    show_gate_update(&g, 0, 3, &out);
+    TEST_ASSERT_FALSE(show_gate_ready(&g, 60 * MIN, &out));
+    QuietInput q = { 60 * MIN, 0, true, false, true };
+    TEST_ASSERT_FALSE(screensaver_ready(&q, &out));
+}
+
+static void test_all_nonsense_earns_shows_sooner_and_on_lighter_work(void) {
+    ClawdTuning out;
+    clawd_tuning_scaled(&T, 5, &out);
+    TEST_ASSERT_EQUAL_UINT8(2, out.show_min_activity);
+    TEST_ASSERT_EQUAL_UINT32(100 * SEC, out.show_after_ms);     // 5 min / 3
+    TEST_ASSERT_EQUAL_UINT32(5 * MIN, out.show_cooldown_ms);    // 15 min / 3
+    TEST_ASSERT_EQUAL_UINT32(T.quiet_ms, out.quiet_ms);         // you being away doesn't scale
+    ShowGate g; show_gate_clear(&g);
+    show_gate_update(&g, 0, 2, &out);
+    TEST_ASSERT_TRUE(show_gate_ready(&g, 100 * SEC, &out));
+    // Activity 2 doesn't count at the base level.
+    show_gate_clear(&g);
+    show_gate_update(&g, 0, 2, &T);
+    TEST_ASSERT_FALSE(show_gate_ready(&g, 60 * MIN, &T));
+}
+
+static void test_levels_in_between_interpolate(void) {
+    ClawdTuning l[6];
+    for (int i = 2; i <= 5; i++) clawd_tuning_scaled(&T, i, &l[i]);
+    for (int i = 2; i < 5; i++) {
+        TEST_ASSERT_TRUE(l[i].show_after_ms > l[i + 1].show_after_ms);
+        TEST_ASSERT_TRUE(l[i].show_cooldown_ms > l[i + 1].show_cooldown_ms);
+        TEST_ASSERT_TRUE(l[i].calm_min_ms > l[i + 1].calm_min_ms);
+        TEST_ASSERT_TRUE(l[i].idle_gap_pct > l[i + 1].idle_gap_pct);
+        TEST_ASSERT_TRUE(l[i].long_turn_ms > l[i + 1].long_turn_ms);
+        TEST_ASSERT_TRUE(l[i].shows && l[i].screensaver && l[i].idle_acts && l[i].reactions && l[i].spinner);
+    }
+    TEST_ASSERT_TRUE(l[2].calm_min_ms <= l[2].calm_max_ms);
+    TEST_ASSERT_EQUAL_UINT8(3, l[4].show_min_activity);
+}
+
+static void test_liveliness_clamps_and_rebuilds_from_the_base(void) {
+    TEST_ASSERT_EQUAL_INT(1, clawd_liveliness_clamp(0));
+    TEST_ASSERT_EQUAL_INT(5, clawd_liveliness_clamp(9));
+    ClawdTuning fast; clawd_tuning_fast(&fast);
+    clawd_tuning_set_base(&fast);
+    clawd_set_liveliness(5);
+    clawd_set_liveliness(5);                     // applying twice doesn't compound
+    TEST_ASSERT_EQUAL_UINT32(fast.show_after_ms / 3, clawd_tuning().show_after_ms);
+    clawd_set_liveliness(3);
+    TEST_ASSERT_EQUAL_MEMORY(&fast, &clawd_tuning(), sizeof(fast));
+    clawd_tuning_set_base(&T);
+}
+
+// The attention animation is a share of the alert: 120 s is all of it,
+// 0 is none, and it follows the alert timeout (the sim's 20 s alert).
+static void test_attention_animation_is_a_share_of_the_alert(void) {
+    TEST_ASSERT_EQUAL_UINT32(120000, clawd_attn_anim_ms(120, 120000));
+    TEST_ASSERT_EQUAL_UINT32(30000, clawd_attn_anim_ms(30, 120000));
+    TEST_ASSERT_EQUAL_UINT32(10000, clawd_attn_anim_ms(10, 120000));
+    TEST_ASSERT_EQUAL_UINT32(0, clawd_attn_anim_ms(0, 120000));
+    TEST_ASSERT_EQUAL_UINT32(5000, clawd_attn_anim_ms(30, 20000));
+    TEST_ASSERT_EQUAL_UINT32(120000, clawd_attn_anim_ms(600, 120000));   // clamped
+    TEST_ASSERT_EQUAL_INT(0, clawd_attn_anim_clamp(-5));
+    ClawdTuning before = clawd_tuning();
+    clawd_set_attn_anim(0);                      // not part of the liveliness tuning
+    TEST_ASSERT_EQUAL_MEMORY(&before, &clawd_tuning(), sizeof(before));
+    TEST_ASSERT_EQUAL_INT(0, clawd_attn_anim());
+    clawd_set_attn_anim(CLAWD_ATTN_ANIM_DEFAULT_S);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_show_needs_five_sustained_minutes_of_level_3);
@@ -317,5 +405,11 @@ int main(int, char**) {
     RUN_TEST(test_curious_glances_keep_going_back_to_the_tap);
     RUN_TEST(test_attention_over_a_peek_ends_on_the_meters);
     RUN_TEST(test_only_device_ended_alerts_reach_the_app);
+    RUN_TEST(test_some_nonsense_is_the_base_tuning);
+    RUN_TEST(test_no_nonsense_keeps_him_still_but_taps_and_alerts_work);
+    RUN_TEST(test_all_nonsense_earns_shows_sooner_and_on_lighter_work);
+    RUN_TEST(test_levels_in_between_interpolate);
+    RUN_TEST(test_liveliness_clamps_and_rebuilds_from_the_base);
+    RUN_TEST(test_attention_animation_is_a_share_of_the_alert);
     return UNITY_END();
 }

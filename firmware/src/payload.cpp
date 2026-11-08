@@ -32,6 +32,13 @@ bool payload_parse(const char* json, UsageData* out, const char** err) {
     d.alert_clear = doc["x"].as<bool>();
     const char* acct = doc["acct"] | "pro";
     d.enterprise = (strcmp(acct, "ent") == 0);
+    d.weekly_only = (strcmp(acct, "week") == 0);
+    if (d.weekly_only) {
+        // No 5-hour limit: the app leaves s/sr "not started" for firmware
+        // that predates "week"; here the week is the main meter.
+        d.session_pct = d.weekly_pct;
+        d.session_reset_mins = d.weekly_reset_mins;
+    }
     d.time_pct = doc["tp"] | 0;
     d.period_days = doc["pd"] | 30;
     copy_str(d.reset_date, sizeof(d.reset_date), doc["rd"] | "");
@@ -59,6 +66,24 @@ bool payload_parse(const char* json, UsageData* out, const char** err) {
         d.sessions = (int16_t)(v < 0 ? 0 : v > 999 ? 999 : v);
     }
     d.replay = doc["rp"].as<bool>();
+    JsonVariant lv = doc["lv"];
+    if (lv.isNull()) {
+        d.liveliness = -1;
+    } else {
+        int v = lv | 3;
+        d.liveliness = (int8_t)(v < 1 ? 1 : v > 5 ? 5 : v);
+    }
+    JsonVariant aa = doc["aa"];
+    if (aa.isNull()) {
+        d.attn_anim_s = -1;
+    } else {
+        int v = aa | 120;
+        d.attn_anim_s = (int16_t)(v < 0 ? 0 : v > 120 ? 120 : v);
+    }
+
+    JsonVariant pm = doc["pm"];
+    d.pace_marker = pm.isNull() ? -1 : (int8_t)((pm | 0) ? 1 : 0);
+    d.has_theme = theme_parse_hex(doc["th"] | "", d.theme);
 
     d.ok = doc["ok"] | false;
     d.valid = true;

@@ -6,7 +6,7 @@ Skip the development story and checks already covered by CI. -->
 ## Screenshots or diagrams
 
 <!-- Required when UI or device output changes. Use desktop screenshots,
-serial screenshot.sh captures, or photos. Label simulator output.
+device screenshots (`.claude/skills/capturing-device-screenshots/scripts/screenshot.py`), or photos. Label simulator output.
 Add a Mermaid diagram when it clarifies flow, state, or architecture.
 Remove this section if it does not apply. -->
 
@@ -15,6 +15,15 @@ Remove this section if it does not apply. -->
 <!-- Name the exact boards/revisions tested on real hardware and what you
 verified, or write "not tested on hardware". Builds and simulator runs do
 not count as hardware testing. -->
+
+## Agent review
+
+- [ ] A subagent on a frontier model such as Opus reviewed this PR's full
+      diff before it was opened.
+
+<!-- List only findings left unfixed, and why. If no review could run,
+leave the box unticked and say why. Human-written PRs with no agent
+involvement can remove this section. -->
 
 ## Human involvement
 

@@ -1,22 +1,24 @@
 //! The JSON written to the device's RX characteristic.
 //!
-//! Keys match `parse_json()` in `firmware/src/main.cpp`, in the order the old
-//! daemons wrote them, plus the additive fast-clock fields `a`, `e`, `es`,
-//! `n`, `rp` (old firmware ignores unknown keys).
+//! Keys match `payload_parse()` in `firmware/src/payload.cpp`, in the order
+//! the old daemons wrote them, plus the additive fast-clock fields `a`, `e`,
+//! `es`, `n`, `rp` and the device settings `lv`, `aa`, `pm` and `th`
+//! (old firmware ignores unknown keys).
 
 use chrono::{DateTime, Datelike, Months, TimeZone, Utc};
 use serde::Serialize;
 
-use crate::config::ClockMode;
+use crate::config::{ClockMode, Palette};
 use crate::usage::{SpendPeriod, UsageReading};
 
 /// One device payload. `None` fields are omitted.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Payload {
-    /// Session % used.
+    /// Session % used (spend % for "ent"; 0 for "week").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub s: Option<u32>,
-    /// Minutes until the session resets; -1 = window not started.
+    /// Minutes until the session resets; -1 = window not started (always
+    /// for "week").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sr: Option<i64>,
     /// Weekly % used.
@@ -29,7 +31,8 @@ pub struct Payload {
     /// or "overage" (extra usage is paying). Stored, not shown, by the firmware.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub st: Option<String>,
-    /// Account kind: "pro" (5h/7d windows) or "ent" (spending limit).
+    /// Account kind: "pro" (5h/7d windows), "week" (weekly windows only, no
+    /// 5-hour limit, e.g. verified Ultra) or "ent" (spending limit).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acct: Option<String>,
     /// Enterprise: % of the billing period elapsed.
@@ -73,15 +76,35 @@ pub struct Payload {
     /// Sessions with a hook event in the last 5 minutes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub n: Option<u32>,
-    /// 1 = heartbeat/replay (no fresh poll): the rate math ignores it.
+    /// 1 = the usage numbers are a replay, not a fresh poll (heartbeats and
+    /// writes between polls): the rate math ignores them. Fast-clock fields in
+    /// the same write still count.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rp: Option<u8>,
+    /// How lively Clawd is, 1 (No-nonsense) to 5 (All-nonsense). The device
+    /// keeps the last value it got across reboots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lv: Option<u8>,
+    /// Seconds Clawd points and waves for an alert, 0 = no animation (the
+    /// alert itself is unchanged). The device keeps the last value it got.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aa: Option<u16>,
+    /// 1 = a pace marker on the usage bars: the fill shows whether usage is
+    /// ahead of the elapsed share of its window. The device keeps the last
+    /// value it got.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pm: Option<u8>,
+    /// The device's colours: 11 six-digit hex colours run together
+    /// ([`crate::config::Palette::to_hex`]). The device keeps the last value
+    /// it got.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub th: Option<Palette>,
 }
 
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
     "s", "sr", "w", "wr", "st", "acct", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x", "a", "e", "es", "n",
-    "rp",
+    "rp", "lv", "aa", "pm", "th",
 ];
 /// The fast-clock keys added in v0.4 (old firmware ignores them).
 pub const ADDITIVE_KEYS: &[&str] = &["a", "e", "es", "n", "rp"];
@@ -228,13 +251,17 @@ impl Payload {
             Some(win) => (win.pct, win.resets_at.map_or(-1, |t| minutes_until(t, now))),
             None => (0, -1),
         };
+        // No 5-hour limit: `s`/`sr` stay "not started", so firmware that
+        // doesn't know "week" draws exactly what it always did; newer
+        // firmware shows `w`/`wr` alone and follows the week.
+        let acct = if r.no_session_limit() { "week" } else { "pro" };
         Payload {
             s: Some(s),
             sr: Some(sr),
             w: Some(w),
             wr: Some(wr),
             st: Some(st.to_owned()),
-            acct: Some("pro".to_owned()),
+            acct: Some(acct.to_owned()),
             ok: true,
             ..Default::default()
         }
@@ -489,6 +516,10 @@ mod tests {
             es: Some(7),
             n: Some(1),
             rp: Some(1),
+            lv: Some(3),
+            aa: Some(120),
+            pm: Some(1),
+            th: Some(Palette::default()),
         };
         let v: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&pl.to_json()).unwrap();
         // serde_json's Map is sorted without preserve_order; check membership.

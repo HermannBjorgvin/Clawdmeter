@@ -51,9 +51,26 @@
 #define BTN_BACK_GPIO        9
 #define BTN_FWD_GPIO         10
 
+// ---- Audio (ES8311 codec + onboard speaker, I2S) ----
+// Pins from Waveshare's 07_Audio_Test example for this board (user_config.h
+// and the C6_AMOLED_2_16 entry in its codec_board config). The ES8311 shares
+// the I2C bus above (addr 0x18). There is no amp-enable line: Waveshare sets
+// BSP_POWER_AMP_IO to GPIO_NUM_NC, so the amp is live whenever the rails are
+// (chime.cpp mutes the codec between dings instead).
+// 11025 Hz keeps the ding buffer to ~37 KB of the C6's internal RAM (no
+// PSRAM); the ding's highest partial (~2.8 kHz) is well under its Nyquist.
+#define SND_I2S_MCLK         19
+#define SND_I2S_BCLK         20
+#define SND_I2S_WS           22     // LRCK
+#define SND_I2S_DOUT         23     // ESP → ES8311 (speaker)
+#define SND_I2S_DIN          21     // ES8311 → ESP (mic; unused, set for STD mode)
+#define SND_SAMPLE_RATE      11025
+#define SND_ES8311_ADDR      0x18
+
 // ---- Capability flags ----
 #define BOARD_HAS_SECONDARY_BUTTON 1
 #define BOARD_HAS_ROTATION         1    // via CO5300 MADCTL (panel-side), no rotation strip needed
 #define BOARD_HAS_IMU              1    // QMI8658 drives auto-rotation
 #define BOARD_HAS_BATTERY          1
-#define BOARD_HAS_IO_EXPANDER      0    // TCA9554 exists on board but only services audio
+#define BOARD_HAS_IO_EXPANDER      0
+#define BOARD_HAS_SOUND            1

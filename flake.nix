@@ -53,6 +53,7 @@
                 ./desktop/Cargo.lock
                 ./desktop/crates
                 ./desktop/vendor
+                ./assets
                 ./firmware/src/splash_animations.h
                 ./tools/packaging/icons
                 ./tools/packaging/linux

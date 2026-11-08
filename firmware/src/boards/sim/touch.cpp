@@ -8,6 +8,7 @@ void touch_hal_init(void) {}
 // Mouse position + left button = one finger. Events are pumped every loop
 // by sim_main.cpp, so SDL_GetMouseState is always fresh here.
 void touch_hal_read(uint16_t* x, uint16_t* y, bool* pressed) {
+    if (sim_ctrl_active()) { *pressed = sim_ctrl_touch(x, y); return; }
     if (sim_scripted_touch(x, y)) { *pressed = true; return; }
     int mx, my;
     uint32_t b = SDL_GetMouseState(&mx, &my);

@@ -32,7 +32,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::usage::{Spend, SpendPeriod, UsageError, UsageReading, Window};
+use crate::usage::{SessionLimit, Spend, SpendPeriod, UsageError, UsageReading, Window};
 
 /// The usage endpoint.
 pub const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
@@ -197,11 +197,23 @@ pub fn parse_usage_json(body: &str, now: DateTime<Utc>) -> Result<UsageReading, 
         });
     let overage = v.get("extra_usage").and_then(|x| x.get("is_enabled")).and_then(Value::as_bool).unwrap_or(false)
         && v.get("extra_usage").and_then(|x| x.get("used_credits")).and_then(Value::as_f64).is_some_and(|c| c > 0.0);
-    let has_any = v.get("five_hour").is_some_and(|w| !w.is_null()) || week.is_some() || spend.is_some();
+    let five_hour_null = v.get("five_hour").is_some_and(Value::is_null);
+    let five_hour = v.get("five_hour").is_some_and(|w| !w.is_null());
+    let has_any = five_hour || week.is_some() || spend.is_some();
     if !has_any {
         return Err(UsageError::NoUsageLines("usage endpoint: no windows".into()));
     }
-    Ok(UsageReading { session, week, models, spend, overage })
+    // A five-hour object, even {0 %, no reset}, is a limit with no window
+    // running; an explicit null next to a weekly window is no limit at all
+    // (verified Ultra accounts). A missing key says nothing.
+    let session_limit = if five_hour {
+        SessionLimit::Applies
+    } else if five_hour_null && week.is_some() {
+        SessionLimit::Absent
+    } else {
+        SessionLimit::Unknown
+    };
+    Ok(UsageReading { session, week, models, spend, overage, session_limit })
 }
 
 /// What one endpoint answer means.
@@ -312,6 +324,7 @@ mod tests {
         assert!(!r.window_started());
         assert_eq!(r.week, Some(Window { pct: 40, resets_at: Some(at("2026-10-14T15:00:00.006703Z")) }));
         assert!(r.spend.is_none() && !r.overage && r.models.is_empty());
+        assert_eq!(r.session_limit, SessionLimit::Applies, "the limit is there, its window isn't");
         let p = crate::Payload::from_reading(&r, now);
         assert_eq!((p.s, p.sr, p.w, p.wr), (Some(0), Some(-1), Some(40), Some(750)));
         assert_eq!(p.acct.as_deref(), Some("pro"));
@@ -323,6 +336,47 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(crate::probe::choose_source(&st, None, now.timestamp() + 60), crate::probe::Source::Usage);
+    }
+
+    // A real answer from a verified Ultra (Max 20x) account: five_hour null,
+    // no "session" entry in limits, the week at 48 %.
+    #[test]
+    fn real_no_session_limit_answer() {
+        let body = include_str!("../tests/fixtures/usage-endpoint-no-session-limit.json");
+        let now = at("2026-11-01T13:30:00Z");
+        let r = interpret(200, None, body, now).unwrap();
+        assert_eq!(r.session, None);
+        assert!(r.no_session_limit() && !r.window_started() && !r.is_spend_only());
+        assert_eq!(r.session_pct(), 48, "the week is the main meter");
+        let p = crate::Payload::from_reading(&r, now);
+        // 5 d 12 h 29 min 59.88 s to the reset.
+        assert_eq!((p.s, p.sr, p.w, p.wr), (Some(0), Some(-1), Some(48), Some(7950)), "older firmware: not started");
+        assert_eq!((p.acct.as_deref(), p.st.as_deref()), (Some("week"), Some("allowed")));
+        // Never the probe: there's no window to follow.
+        let st = crate::usage::AccountState {
+            last: Some(r),
+            last_ok_at: Some(now.timestamp()),
+            read_started_at: Some(now.timestamp()),
+            first_activity: Some(now.timestamp() + 30),
+            ..Default::default()
+        };
+        assert_eq!(crate::probe::choose_source(&st, None, now.timestamp() + 60), crate::probe::Source::Usage);
+    }
+
+    #[test]
+    fn session_limit_from_five_hour() {
+        let now = at("2026-10-14T05:00:00Z");
+        let week = r#""seven_day":{"utilization":20,"resets_at":"2026-10-19T00:00:00Z"}"#;
+        let limit = |body: &str| parse_usage_json(body, now).unwrap().session_limit;
+        assert_eq!(limit(&format!(r#"{{"five_hour":null,{week}}}"#)), SessionLimit::Absent);
+        assert_eq!(limit(&format!("{{{week}}}")), SessionLimit::Unknown, "only an explicit null");
+        assert_eq!(
+            limit(&format!(r#"{{"five_hour":{{"utilization":0,"resets_at":null}},{week}}}"#)),
+            SessionLimit::Applies
+        );
+        // No week either (spend-capped): nothing to say about it.
+        let spend = r#"{"five_hour":null,"limits":[{"kind":"spend","group":"monthly","percent":5,"resets_at":null}]}"#;
+        assert_eq!(limit(spend), SessionLimit::Unknown);
     }
 
     #[test]

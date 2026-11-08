@@ -13,6 +13,7 @@
 //! * [`backoff`]: how long an account waits after a failed poll.
 //! * [`selector`]: which account to show.
 //! * [`payload`]: the JSON the firmware parses.
+//! * [`themes`]: the device's colour presets.
 //! * [`rate`]: the slow-clock mood.
 //! * [`engine`]: all of the above as one I/O-free state machine.
 //! * [`autostart`], [`launch`], [`platform`]: start-at-login, the path to
@@ -35,6 +36,7 @@ pub mod platform;
 pub mod probe;
 pub mod rate;
 pub mod selector;
+pub mod themes;
 pub mod usage;
 
 pub use config::{ConfigFile, Settings};

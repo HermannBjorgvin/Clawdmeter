@@ -10,9 +10,16 @@
 // has_event_seq false, sessions -1, replay false).
 //
 //   s  sr  w  wr  st  c  b  m  x  acct  tp  pd  rd  t  tf  ok   (long-standing)
+//   acct "pro" (default), "ent" (s/sr = spend), "week" (no 5-hour limit: s/sr
+//        arrive as 0/-1 for older firmware; w/wr are copied into the session
+//        fields and shown alone in the first card)
 //   a   activity level 0-3 (clamped)          e   latest event, first char used
 //   es  event sequence number (uint32)        n   active sessions (clamped 0..999)
-//   rp  1 on a heartbeat replay
+//   rp  1 = usage numbers are a replay        lv  liveliness 1-5 (clamped), -1 absent
+//   aa  attention animation seconds 0-120 (clamped, 0 = off), -1 absent
+//   pm  pace marker on the usage bars, 1 on / 0 off, -1 absent
+//   th  the palette: TH_COUNT 6-digit hex colours run together (theme_palette.h);
+//       has_theme false when absent or malformed
 //
 // Returns false on malformed JSON; `*err` (if non-null) then points at a
 // static description. `out` is fully overwritten on success, untouched on

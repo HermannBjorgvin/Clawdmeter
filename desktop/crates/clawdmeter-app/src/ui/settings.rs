@@ -8,18 +8,26 @@
 //! re-reads the file every few seconds.
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use clawdmeter_core::autostart::{self, LaunchMode};
-use clawdmeter_core::config::{AlertOn, ClockMode, ConfigFile};
+use clawdmeter_core::config::{
+    parse_rgb, AlertOn, AttentionAnim, ClockMode, ColorToken, ConfigFile, DeviceTheme, Palette, LIVELINESS_MAX,
+};
+use clawdmeter_core::platform::{Appearance, AppearanceWatch};
+use clawdmeter_core::themes::{FollowTheme, FOLLOWING, PRESETS};
 use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::device::{self, FirmwareInfo};
-use gpui::{div, img, prelude::*, px, Context, EventEmitter, PathPromptOptions, SharedString, Window};
+use gpui::{
+    div, img, prelude::*, px, relative, rgb, Context, EventEmitter, FocusHandle, KeyDownEvent, PathPromptOptions,
+    SharedString, Window,
+};
 
-use super::theme::{Theme, FONT_DISPLAY, FONT_MONO, R_M, R_S};
+use super::theme::{Theme, FONT_DISPLAY, FONT_MONO, R_ITEM, R_M, R_S};
 use super::widgets::{
-    button, caption, card, checkbox, field, field_stacked, heading, icon, notice, para, pill, segmented, subheading,
-    toggle, ButtonKind, Tone,
+    button, caption, card, checkbox, field, field_stacked, heading, icon, notice, para, pill, segmented,
+    stepped_slider, subheading, toggle, ButtonKind, Tone,
 };
 use super::{command, live_status, not_running_text, run_blocking, Navigate, REFRESH};
 use crate::diff::{line_diff, with_context, DiffLine};
@@ -103,6 +111,19 @@ pub struct SettingsView {
     notice: Option<(Tone, String)>,
     /// The Settings page's Advanced section is open.
     advanced: bool,
+    /// The Device page's colour being picked (its swatch grid is open).
+    color_pick: Option<ColorToken>,
+    /// The picked colour's hex field: focus, what has been typed so far, and
+    /// whether it had focus at the last render.
+    hex_focus: FocusHandle,
+    hex_draft: String,
+    hex_focused: bool,
+    /// The OS's light/dark mode, for the first Custom's preview and colours
+    /// while System or Solarized is chosen. Watched only while the Device page shows, and
+    /// never in tests (`follow_os`), where it stays Dark.
+    appearance: Appearance,
+    appearance_watch: Option<AppearanceWatch>,
+    follow_os: bool,
     ticks: u32,
 }
 
@@ -111,7 +132,10 @@ impl EventEmitter<Navigate> for SettingsView {}
 impl SettingsView {
     /// Build and load the config. USB is probed while the Device page is up.
     pub fn new(paths: Paths, page: Page, cx: &mut Context<Self>) -> Self {
-        Self::with_usb(paths, page, true, cx)
+        let mut v = Self::with_usb(paths, page, true, cx);
+        v.follow_os = true;
+        v.sync_appearance();
+        v
     }
 
     /// [`SettingsView::new`]; `usb: false` never touches serial ports (tests).
@@ -146,6 +170,13 @@ impl SettingsView {
             legacy: None,
             notice: None,
             advanced: false,
+            color_pick: None,
+            hex_focus: cx.focus_handle(),
+            hex_draft: String::new(),
+            hex_focused: false,
+            appearance: Appearance::default(),
+            appearance_watch: None,
+            follow_os: false,
             ticks: 0,
         };
         v.reload();
@@ -158,9 +189,11 @@ impl SettingsView {
     pub fn show(&mut self, page: Page, embedded: bool, cx: &mut Context<Self>) {
         self.visible = matches!(page, Page::Device | Page::Accounts | Page::Hooks | Page::Settings);
         if !self.visible {
+            self.sync_appearance();
             return;
         }
         self.page = page;
+        self.sync_appearance();
         self.embedded = embedded;
         self.reload();
         if page == Page::Device && self.usb && !self.device.probing && self.device.port.is_none() {
@@ -238,9 +271,23 @@ impl SettingsView {
         self.snap = live_status(&self.paths);
     }
 
+    /// Watch the OS's appearance while the Device page (the theme picker)
+    /// shows; stop when it doesn't.
+    fn sync_appearance(&mut self) {
+        if self.follow_os && self.visible && self.page == Page::Device {
+            // A new watch has no answer yet: keep the last one until it does.
+            if let Some(a) = self.appearance_watch.get_or_insert_with(AppearanceWatch::spawn).known() {
+                self.appearance = a;
+            }
+        } else {
+            self.appearance_watch = None;
+        }
+    }
+
     fn tick(&mut self, cx: &mut Context<Self>) {
         self.ticks += 1;
         self.snap = live_status(&self.paths);
+        self.sync_appearance();
         // Pick up hand edits and other windows' changes every few seconds,
         // but never under an open diff preview.
         if self.ticks.is_multiple_of(6) && self.preview.is_none() {
@@ -567,6 +614,74 @@ impl SettingsView {
                 },
             ),
         ));
+        let me = cx.entity().downgrade();
+        let level = self.settings.liveliness;
+        pane = pane.child(field_stacked(
+            t,
+            "Animation silliness",
+            "How lively Clawd is",
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(10.))
+                .child(stepped_slider(
+                    t,
+                    "liveliness",
+                    LIVELINESS_MAX,
+                    level,
+                    &[(1, "No-nonsense"), (3, "Some-nonsense"), (5, "All-nonsense")],
+                    true,
+                    move |level, _, cx| {
+                        let _ = me.update(cx, |v, cx| {
+                            v.save(|s, _| s.liveliness = level);
+                            cx.notify();
+                        });
+                    },
+                ))
+                .child(
+                    div()
+                        .debug_selector(move || format!("liveliness-info-{level}"))
+                        .text_size(px(13.))
+                        .text_color(t.dim)
+                        .text_center()
+                        .child(liveliness_info(level)),
+                ),
+        ));
+        let me = cx.entity().downgrade();
+        pane = pane.child(field(
+            t,
+            "Attention animation",
+            "How long Clawd points and waves when Claude needs you. The alert stays up either way.",
+            segmented(
+                t,
+                "attention-anim",
+                &AttentionAnim::ALL.map(|a| (a, attention_anim_label(a))),
+                &self.settings.attention_anim,
+                true,
+                move |a, _, cx| {
+                    let _ = me.update(cx, |v, cx| {
+                        v.save(|s, _| s.attention_anim = a);
+                        cx.notify();
+                    });
+                },
+            ),
+        ));
+        let me = cx.entity().downgrade();
+        let pace = self.settings.pace_marker;
+        pane = pane.child(field(
+            t,
+            "Pace marker",
+            "Marks how far into the session and the week you are. Bars turn amber when usage is ahead of it.",
+            toggle(t, "pace-marker", pace, true, move |_, _, cx| {
+                let _ = me.update(cx, |v, cx| {
+                    v.save(|s, _| s.pace_marker = !pace);
+                    cx.notify();
+                });
+            }),
+        ));
+        pane = pane.child(self.colors_field(t, cx));
         let (me1, me2) = (cx.entity().downgrade(), cx.entity().downgrade());
         let (alert, reset) = (self.settings.alert_chime, self.settings.reset_chime);
         pane = pane
@@ -584,7 +699,8 @@ impl SettingsView {
             .child(field(
                 t,
                 "Session reset chime",
-                "Chimes when your session usage resets, on boards with a speaker.",
+                "Chimes when your session usage resets (weekly usage, on accounts with no 5-hour limit), \
+                 on boards with a speaker.",
                 toggle(t, "reset-chime", reset, true, move |_, _, cx| {
                     let _ = me2.update(cx, |v, cx| {
                         v.save(|s, _| s.reset_chime = !reset);
@@ -632,6 +748,284 @@ impl SettingsView {
         pane
     }
 
+    /// The board's colours: a card per preset, each a small preview in its
+    /// own colours, with each OS-following theme (System, Solarized) just
+    /// before its dark preset, half dark and half light; then Custom +, which
+    /// opens a chip per colour; the chosen chip opens a grid of swatches to
+    /// pick from.
+    fn colors_field(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.settings.theme;
+        let mut cards = div().w_full().flex().flex_wrap().items_start().gap(px(8.));
+        let choices = PRESETS.iter().flat_map(|p| {
+            let follow = FOLLOWING.iter().copied().filter(move |f| std::ptr::eq(f.dark, p));
+            follow.map(|f| (f.id, f.name, DeviceTheme::Follow(f), follow_board(t, f))).chain(std::iter::once((
+                p.id,
+                p.name,
+                DeviceTheme::Preset(p),
+                theme_board(t, &p.colors),
+            )))
+        });
+        for (id, name, choice, board) in choices {
+            let me = cx.entity().downgrade();
+            cards = cards.child(theme_card(t, id, name, board, theme == choice).on_click(move |_, window, cx| {
+                window.blur(); // the hex field shows the new colour
+                let _ = me.update(cx, |v, cx| {
+                    v.color_pick = None;
+                    v.save(|s, cfg| {
+                        s.theme = choice;
+                        // An old `theme = clawd` already reads as System; clear it too.
+                        if choice == DeviceTheme::default() {
+                            cfg.remove("theme");
+                        }
+                    });
+                    cx.notify();
+                });
+            }));
+        }
+        // Custom starts from the theme on screen until it has colours of its own.
+        let on = theme == DeviceTheme::Custom;
+        let me = cx.entity().downgrade();
+        let appearance = self.appearance;
+        let preview = self.settings.custom_colors.unwrap_or_else(|| self.settings.colors(appearance));
+        cards = cards.child(
+            theme_card(t, "custom", if on { "Custom" } else { "Custom +" }, theme_board(t, &preview), on).on_click(
+                move |_, window, cx| {
+                    window.blur(); // the hex field shows the new colour
+                    let _ = me.update(cx, |v, cx| {
+                        v.save(|s, _| s.choose_custom(appearance));
+                        cx.notify();
+                    });
+                },
+            ),
+        );
+        let mut body = div().w_full().flex().flex_col().gap(px(10.)).child(cards);
+        if on {
+            body = body.child(self.custom_colors(t, cx));
+        }
+        field_stacked(
+            t,
+            "Colors",
+            "The board's colors, Clawd's included. System theme switches between Dark and Light with this \
+             computer's light or dark mode, Solarized between Solarized Dark and Light. Pick a theme, or \
+             Custom + to choose each color yourself (the first time, it starts from the theme you're on). The \
+             board repaints with the app's next update, within seconds while usage is current.",
+            body,
+        )
+    }
+
+    /// Custom: a chip per colour; the chosen one opens a grid of swatches.
+    fn custom_colors(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.settings.custom_colors.unwrap_or_default();
+        let pick = self.color_pick;
+        let mut chips = div().w_full().flex().flex_wrap().gap(px(6.));
+        for tok in ColorToken::ALL {
+            let me = cx.entity().downgrade();
+            let on = pick == Some(tok);
+            chips = chips.child(
+                div()
+                    .id(tok.key())
+                    .debug_selector(move || tok.key().to_owned())
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(8.))
+                    .py(px(5.))
+                    .rounded(px(R_ITEM))
+                    .border_1()
+                    .border_color(if on { t.text } else { t.line })
+                    .when(on, |d| d.bg(t.selected))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.hover))
+                    .on_click(move |_, window, cx| {
+                        window.blur(); // the hex field shows the new colour
+                        let _ = me.update(cx, |v, cx| {
+                            v.color_pick = if on { None } else { Some(tok) };
+                            v.hex_draft.clear();
+                            cx.notify();
+                        });
+                    })
+                    .child(swatch(t, colors.get(tok), 16.))
+                    .child(div().text_size(px(13.)).text_color(t.text).child(tok.label()))
+                    .child(
+                        div()
+                            .font_family(FONT_MONO)
+                            .text_size(px(11.5))
+                            .text_color(t.mute)
+                            .child(format!("{:06x}", colors.get(tok))),
+                    ),
+            );
+        }
+        let me = cx.entity().downgrade();
+        let mut body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(caption(t, "Pick a color, then click a swatch or type a hex code such as 647d99."))
+            .child(chips);
+        if let Some(tok) = pick {
+            body = body.child(self.color_grid(t, tok, cx));
+        }
+        body.child(div().flex().child(button(
+            t,
+            "colors-reset-all",
+            "Reset all colors",
+            ButtonKind::Small,
+            colors != Palette::default(),
+            move |_, window, cx| {
+                window.blur(); // the hex field shows the new colour
+                let _ = me.update(cx, |v, cx| {
+                    v.save(|s, _| s.custom_colors = Some(Palette::default()));
+                    cx.notify();
+                });
+            },
+        )))
+    }
+
+    /// Swatches for `tok`, its current colour outlined.
+    fn color_grid(&self, t: &Theme, tok: ColorToken, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.settings.custom_colors.unwrap_or_default().get(tok);
+        let mut grid = div().flex().flex_col().gap(px(4.));
+        for (r, row) in SWATCH_ROWS.iter().enumerate() {
+            let mut line = div().flex().flex_wrap().gap(px(4.));
+            for (c, &color) in row.iter().enumerate() {
+                let me = cx.entity().downgrade();
+                let id = format!("swatch-{r}-{c}");
+                let sel = id.clone();
+                line = line.child(
+                    div()
+                        .id(SharedString::from(id))
+                        .debug_selector(move || sel)
+                        .size(px(22.))
+                        .rounded(px(5.))
+                        .bg(rgb(color))
+                        .map(|d| {
+                            if color == current {
+                                d.border_2().border_color(t.text)
+                            } else {
+                                d.border_1().border_color(t.line)
+                            }
+                        })
+                        .cursor_pointer()
+                        .on_click(move |_, window, cx| {
+                            window.blur(); // the hex field shows the new colour
+                            let _ = me.update(cx, |v, cx| {
+                                v.save(|s, _| s.custom_colors.get_or_insert_default().set(tok, color));
+                                cx.notify();
+                            });
+                        }),
+                );
+            }
+            grid = grid.child(line);
+        }
+        let me = cx.entity().downgrade();
+        card(t)
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(swatch(t, current, 22.))
+                    .child(div().flex_1().child(subheading(t, tok.label())))
+                    .child(self.hex_field(t, current, cx))
+                    .child(button(
+                        t,
+                        "color-default",
+                        "Default",
+                        ButtonKind::Small,
+                        current != tok.default_rgb(),
+                        move |_, window, cx| {
+                            window.blur(); // the hex field shows the new colour
+                            let _ = me.update(cx, |v, cx| {
+                                v.save(|s, _| s.custom_colors.get_or_insert_default().set(tok, tok.default_rgb()));
+                                cx.notify();
+                            });
+                        },
+                    )),
+            )
+            .child(grid)
+    }
+
+    /// A field for an exact colour: click it, then type or paste six hex
+    /// digits (a leading `#` is fine); the sixth one applies it.
+    fn hex_field(&self, t: &Theme, current: u32, cx: &mut Context<Self>) -> impl IntoElement {
+        let focused = self.hex_focused;
+        let (text, color) =
+            if focused { (format!("#{}", self.hex_draft), t.text) } else { (format!("#{current:06x}"), t.dim) };
+        div()
+            .id("color-hex")
+            .debug_selector(|| "color-hex".to_owned())
+            .track_focus(&self.hex_focus)
+            .flex()
+            .items_center()
+            .w(px(96.))
+            .h(px(28.))
+            .px(px(8.))
+            .rounded(px(R_ITEM))
+            .bg(t.surface)
+            .border_1()
+            .border_color(if focused { t.focus } else { t.line })
+            .cursor_text()
+            .font_family(FONT_MONO)
+            .text_size(px(13.))
+            .text_color(color)
+            .child(text)
+            .when(focused, |d| d.child(div().w(px(1.)).h(px(15.)).bg(t.text)))
+            .on_click(cx.listener(|v, _, window, cx| {
+                v.hex_draft.clear();
+                window.focus(&v.hex_focus);
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(|v, ev: &KeyDownEvent, window, cx| v.hex_key(ev, window, cx)))
+    }
+
+    /// A key in the hex field: hex digits, Backspace, Escape (leave), Enter
+    /// (leave), and paste.
+    fn hex_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tok) = self.color_pick else { return };
+        let k = &ev.keystroke;
+        let shortcut = k.modifiers.control || k.modifiers.platform || k.modifiers.alt;
+        if k.modifiers.secondary() && k.key == "v" {
+            if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                if let Some(hex) = pasted_hex(&text) {
+                    self.hex_draft = hex;
+                }
+            }
+        } else {
+            match k.key.as_str() {
+                "backspace" => {
+                    self.hex_draft.pop();
+                }
+                "escape" | "enter" | "tab" => {
+                    self.hex_draft.clear();
+                    window.blur();
+                }
+                _ if shortcut => {} // Ctrl+A and the like are not hex digits
+                key => {
+                    let typed = k.key_char.as_deref().unwrap_or(key);
+                    let mut chars = typed.chars();
+                    if let (Some(c), None) = (chars.next(), chars.next()) {
+                        if c.is_ascii_hexdigit() {
+                            if self.hex_draft.len() >= 6 {
+                                self.hex_draft.clear(); // a new colour after a full one
+                            }
+                            self.hex_draft.push(c);
+                        }
+                    }
+                }
+            }
+        }
+        self.hex_draft.make_ascii_lowercase();
+        if let Some(rgb) = parse_rgb(&self.hex_draft) {
+            if rgb != self.settings.custom_colors.unwrap_or_default().get(tok) {
+                self.save(|s, _| s.custom_colors.get_or_insert_default().set(tok, rgb));
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     fn accounts_pane(&mut self, t: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let me = cx.entity().downgrade();
         let mut pane = div()
@@ -651,7 +1045,8 @@ impl SettingsView {
             .child(para(
                 t,
                 "The default Claude Code folder is ~/.claude. Add a config folder for each other account you want \
-                 to monitor. The device follows the account whose session usage increased most recently.",
+                 to monitor. The device follows the account whose usage increased most recently (weekly usage, on \
+                 accounts with no 5-hour limit).",
             ))
             .when_some(self.snap.as_ref(), |d, snap| {
                 d.child(caption(
@@ -1256,6 +1651,7 @@ fn with_alpha(c: gpui::Rgba, a: f32) -> gpui::Hsla {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.hex_focused = self.hex_focus.is_focused(window);
         let t = Theme::for_appearance(window.appearance());
         let mut pane = match self.page {
             Page::Accounts => self.accounts_pane(&t, cx),
@@ -1270,8 +1666,8 @@ impl Render for SettingsView {
     }
 }
 
-/// Re-read the config file, apply `change`, and write only the keys whose
-/// value differs.
+/// Re-read the config file, apply `change`, write only the keys whose
+/// value differs, and tell the tray's daemon to re-read it.
 pub(crate) fn write_settings(
     paths: &Paths,
     change: impl FnOnce(&mut Settings, &mut ConfigFile),
@@ -1284,7 +1680,160 @@ pub(crate) fn write_settings(
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    cfg.save(path)
+    cfg.save(path)?;
+    // The daemon re-reads the file every few seconds anyway; this makes a
+    // device setting reach the device at once.
+    command(paths, AppCommand::SettingsChanged);
+    Ok(())
+}
+
+/// An OS-following theme's preview: its dark board on the left, its light
+/// one on the right.
+fn follow_board(t: &Theme, f: &FollowTheme) -> gpui::Div {
+    div().relative().w_full().child(theme_board(t, &f.dark.colors)).child(
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .w(relative(0.5))
+            .overflow_hidden()
+            .child(div().absolute().top_0().right_0().w(relative(2.)).child(theme_board(t, &f.light.colors))),
+    )
+}
+
+/// A small board in a palette's colours: background, a card with a bar, Clawd.
+fn theme_board(t: &Theme, c: &Palette) -> gpui::Div {
+    let col = |tok| rgb(c.get(tok));
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .p(px(6.))
+        .rounded(px(5.))
+        .bg(col(ColorToken::Bg))
+        .border_1()
+        .border_color(t.line)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(div().w(px(26.)).h(px(5.)).rounded(px(2.)).bg(col(ColorToken::Text)))
+                .child(div().size(px(10.)).rounded(px(2.)).bg(col(ColorToken::Clawd))),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .p(px(5.))
+                .rounded(px(3.))
+                .bg(col(ColorToken::Panel))
+                .child(div().w(px(18.)).h(px(4.)).rounded(px(1.)).bg(col(ColorToken::Dim)))
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(5.))
+                        .rounded(px(2.))
+                        .bg(col(ColorToken::BarBg))
+                        .child(div().w(relative(0.6)).h_full().rounded(px(2.)).bg(col(ColorToken::Green))),
+                ),
+        )
+}
+
+/// A theme to pick: its board over its name.
+fn theme_card(
+    t: &Theme,
+    id: &'static str,
+    name: &'static str,
+    board: impl IntoElement,
+    on: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let sel = format!("theme-{id}");
+    div()
+        .id(SharedString::from(sel.clone()))
+        .debug_selector(move || sel)
+        .w(px(140.))
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .p(px(5.))
+        .rounded(px(R_M))
+        .border_2()
+        .border_color(if on { t.text } else { gpui::transparent_black().into() })
+        .cursor_pointer()
+        .hover(|s| s.bg(t.hover))
+        .child(board)
+        .child(div().px(px(2.)).text_size(px(12.5)).text_color(t.text).child(name))
+}
+
+/// A colour sample with a hairline edge (black and the panel's grey still show).
+fn swatch(t: &Theme, color: u32, size: f32) -> impl IntoElement {
+    div().flex_shrink_0().size(px(size)).rounded(px(4.)).bg(rgb(color)).border_1().border_color(t.line)
+}
+
+/// The colour picker's swatches: the default palette, a grey ramp, then
+/// twelve hues (every 30°) from light to nearly black, with a greyish row.
+static SWATCH_ROWS: LazyLock<Vec<Vec<u32>>> = LazyLock::new(|| {
+    let mut defaults: Vec<u32> = Vec::new();
+    for c in ColorToken::ALL.map(ColorToken::default_rgb) {
+        if !defaults.contains(&c) {
+            defaults.push(c);
+        }
+    }
+    let mut rows = vec![defaults, (0..12).map(|i| (i * 255 / 11) * 0x010101).collect()];
+    for (s, l) in [(0.85, 0.80), (0.75, 0.64), (0.62, 0.50), (0.60, 0.36), (0.22, 0.50), (0.25, 0.22), (0.15, 0.10)] {
+        rows.push((0..12).map(|i| hsl_rgb(i as f32 * 30.0, s, l)).collect());
+    }
+    rows
+});
+
+/// A pasted colour: six hex digits, optionally after `#` or `0x`; anything
+/// else is ignored rather than half-read.
+fn pasted_hex(text: &str) -> Option<String> {
+    let t = text.trim();
+    let t = t.strip_prefix('#').or_else(|| t.strip_prefix("0x")).or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    (t.len() == 6 && t.bytes().all(|b| b.is_ascii_hexdigit())).then(|| t.to_owned())
+}
+
+/// HSL (hue in degrees, saturation and lightness 0-1) to 0xRRGGBB.
+fn hsl_rgb(h: f32, s: f32, l: f32) -> u32 {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = (h.rem_euclid(360.0)) / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    let to = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u32;
+    (to(r) << 16) | (to(g) << 8) | to(b)
+}
+
+/// What Clawd does at a liveliness level, under the slider.
+fn liveliness_info(level: u8) -> &'static str {
+    match level {
+        1 => "Still in his corner, a new verb once a minute. Taps and alerts still get a reaction.",
+        2 => "Mostly still: fewer corner acts, and shows only after long busy stretches.",
+        3 => "Corner acts now and then, a show after a busy stretch, a screensaver while you're away.",
+        4 => "Livelier: more corner acts, and shows come sooner and more often.",
+        _ => "Frequent shows and reactions. Even a moderately busy stretch earns a show.",
+    }
+}
+
+fn attention_anim_label(a: AttentionAnim) -> &'static str {
+    match a {
+        AttentionAnim::Min2 => "2m",
+        AttentionAnim::S30 => "30s",
+        AttentionAnim::S10 => "10s",
+        AttentionAnim::Off => "Off",
+    }
 }
 
 #[cfg(test)]
@@ -1315,10 +1864,89 @@ mod tests {
         let paths = home("cfg");
         let p = paths.clone();
         let (view, cx) = cx.add_window_view(move |_, cx| SettingsView::with_usb(p, Page::Device, false, cx));
+        // Big enough for the whole Device page, Custom's editor included. On
+        // its own (no app column around it) the page doesn't wrap the theme
+        // cards, so it's wider than the app's.
+        cx.simulate_resize(gpui::size(px(2400.), px(1600.)));
         click(cx, "reset-chime");
         let text = std::fs::read_to_string(&paths.config_file).unwrap();
         assert!(text.starts_with("# mine\n"), "comments kept: {text}");
         assert!(text.contains("reset_chime = on"), "{text}");
+        assert!(cx.debug_bounds("liveliness-info-3").is_some(), "the default level's line");
+        click(cx, "liveliness-1");
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("liveliness = 1"));
+        assert!(cx.debug_bounds("liveliness-info-1").is_some(), "the line follows the slider");
+        click(cx, "liveliness-3"); // Back to the default: the key stays, the value follows.
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("liveliness = 3"));
+        click(cx, "attention-anim-0"); // Off
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("attention_anim = off"));
+        click(cx, "attention-anim-2"); // 30 s
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("attention_anim = 30s"));
+        click(cx, "pace-marker");
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("pace_marker = on"));
+        // A preset is one click; Custom opens the per-colour editor, starting
+        // from the theme on screen. System theme comes first; Solarized sits
+        // just before Solarized Dark and Light.
+        let config = || std::fs::read_to_string(&paths.config_file).unwrap();
+        let xs: Vec<_> = ["theme-system", "theme-dark", "theme-light"]
+            .map(|id| cx.debug_bounds(id).expect(id).origin.x)
+            .into_iter()
+            .collect();
+        assert!(xs[0] < xs[1] && xs[1] < xs[2], "{xs:?}");
+        let at = |id: &'static str| {
+            let o = cx.debug_bounds(id).expect(id).origin;
+            (o.y, o.x)
+        };
+        let order = ["theme-one_dark", "theme-solarized", "theme-solarized_dark", "theme-solarized_light"].map(at);
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
+        click(cx, "theme-solarized");
+        assert!(config().contains("theme = solarized\n"), "{}", config());
+        click(cx, "theme-dark");
+        assert!(config().contains("theme = dark"));
+        click(cx, "theme-dracula");
+        assert!(config().contains("theme = dracula"));
+        click(cx, "theme-custom");
+        let text = config();
+        assert!(text.contains("theme = custom") && text.contains("color_bg = 21222c"), "{text}");
+        click(cx, "theme-system");
+        assert!(!config().contains("theme ="), "the default leaves the file");
+        std::fs::write(&paths.config_file, config() + "theme = clawd\n").unwrap();
+        view.update(cx, |v, _| v.reload());
+        click(cx, "theme-system");
+        assert!(!config().contains("theme ="), "the old default goes too");
+        assert!(config().contains("color_bg = 21222c"), "Custom keeps its colours for later");
+        click(cx, "theme-custom");
+        assert!(config().contains("theme = custom"));
+        click(cx, "colors-reset-all");
+        assert!(config().contains("color_bg = 000000"), "reset: the defaults, now Custom's own");
+        assert_eq!(view.update(cx, |v, _| v.color_pick), None, "the grid opens on a pick");
+        click(cx, "color_accent");
+        assert_eq!(view.update(cx, |v, _| v.color_pick), Some(ColorToken::Accent));
+        click(cx, "swatch-1-0"); // black, from the grey ramp
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("color_accent = 000000"));
+        click(cx, "color-default");
+        assert!(config().contains("color_accent = d97757"));
+        click(cx, "color-hex");
+        cx.simulate_keystrokes("ctrl-a ctrl-c"); // shortcuts type nothing
+        cx.simulate_input("#647D9");
+        assert!(config().contains("color_accent = d97757"), "five digits: not yet");
+        cx.simulate_keystrokes("9");
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("color_accent = 647d99"));
+        cx.simulate_keystrokes("backspace 8");
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("color_accent = 647d98"));
+        cx.simulate_keystrokes("escape");
+        click(cx, "swatch-1-11"); // white
+        click(cx, "color_accent"); // closes the grid again
+        assert_eq!(view.update(cx, |v, _| v.color_pick), None);
+        click(cx, "colors-reset-all");
+        let text = config();
+        assert!(text.contains("color_accent = d97757"), "{text}");
+        // Only the first Custom starts from the theme on screen, even when
+        // Custom's colours are the defaults.
+        click(cx, "theme-dracula");
+        click(cx, "theme-custom");
+        let text = config();
+        assert!(text.contains("color_bg = 000000") && !text.contains("21222c"), "{text}");
 
         view.update(cx, |v, cx| v.show(Page::Settings, false, cx));
         click(cx, "poll-2"); // While working: 5 min
@@ -1327,6 +1955,24 @@ mod tests {
         click(cx, "poll-0"); // Automatic removes the key again.
         assert!(!std::fs::read_to_string(&paths.config_file).unwrap().contains("poll_interval"));
         let _ = std::fs::remove_dir_all(&paths.home);
+    }
+
+    #[test]
+    fn pasted_hex_takes_six_digits_or_nothing() {
+        assert_eq!(pasted_hex("647d99").as_deref(), Some("647d99"));
+        assert_eq!(pasted_hex(" #647D99\n").as_deref(), Some("647D99"));
+        assert_eq!(pasted_hex("0x647D99").as_deref(), Some("647D99"));
+        assert_eq!(pasted_hex("647d9"), None);
+        assert_eq!(pasted_hex("rgb(100, 125, 153)"), None);
+        assert_eq!(pasted_hex("#647d99ff"), None);
+    }
+
+    #[test]
+    fn hsl_hits_the_primaries() {
+        assert_eq!(hsl_rgb(0.0, 1.0, 0.5), 0xff0000);
+        assert_eq!(hsl_rgb(120.0, 1.0, 0.5), 0x00ff00);
+        assert_eq!(hsl_rgb(240.0, 1.0, 0.5), 0x0000ff);
+        assert_eq!(hsl_rgb(30.0, 0.0, 1.0), 0xffffff);
     }
 
     #[gpui::test]

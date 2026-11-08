@@ -11,9 +11,10 @@ use chrono::{DateTime, TimeZone, Utc};
 use crate::attention::{Alert, AttentionState};
 use crate::backoff::SavedBlock;
 use crate::cadence::{heartbeat_due, AccountClock, Cadence, PollReason, Scheduler};
-use crate::config::Settings;
+use crate::config::{Palette, Settings};
 use crate::events::{Activity, HookEvent, Signal};
 use crate::payload::{clock_fields, Payload};
+use crate::platform::Appearance;
 use crate::probe::{self, Plan as ProbePlan, Source};
 use crate::rate::{Mood, RateTracker};
 use crate::selector::PlanSelector;
@@ -139,6 +140,18 @@ pub struct Engine {
     sent_a: Option<u8>,
     sent_a_at: i64,
     sent_n: Option<u32>,
+    /// The liveliness the device last got (`lv`).
+    sent_lv: Option<u8>,
+    /// The attention animation the device last got (`aa`).
+    sent_aa: Option<u16>,
+    /// The pace marker the device last got (`pm`).
+    sent_pm: Option<u8>,
+    /// Last `th` sent.
+    sent_th: Option<Palette>,
+    /// The OS's light/dark mode, which picks System's or Solarized's palette.
+    appearance: Appearance,
+    /// The clock's hour format the device last got (`tf`; 0 = no clock).
+    sent_tf: Option<u8>,
     last_event_ts: Option<i64>,
     /// Latest prompt or tool activity that names no configured account.
     unattributed_activity: Option<i64>,
@@ -174,6 +187,12 @@ impl Engine {
             sent_a: None,
             sent_a_at: i64::MIN / 2,
             sent_n: None,
+            sent_lv: None,
+            sent_aa: None,
+            sent_pm: None,
+            sent_th: None,
+            appearance: Appearance::default(),
+            sent_tf: None,
             last_event_ts: None,
             unattributed_activity: None,
             claude_found: true,
@@ -184,6 +203,17 @@ impl Engine {
     /// Current settings.
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// The OS's light/dark mode. With a theme that follows it (System,
+    /// Solarized), a change goes out as a new `th` on the next write check.
+    pub fn set_appearance(&mut self, appearance: Appearance) {
+        self.appearance = appearance;
+    }
+
+    /// The palette the device gets as `th`, a following theme resolved.
+    pub fn colors(&self) -> Palette {
+        self.settings.colors(self.appearance)
     }
 
     /// Apply re-read settings (the config is re-read every few seconds).
@@ -268,6 +298,11 @@ impl Engine {
         self.attention.reset();
         self.sent_a = None;
         self.sent_n = None;
+        self.sent_lv = None;
+        self.sent_aa = None;
+        self.sent_pm = None;
+        self.sent_th = None;
+        self.sent_tf = None;
         if self.active.is_some() || self.logged_out {
             self.fresh_poll = true;
         }
@@ -285,7 +320,7 @@ impl Engine {
     pub fn blocks(&self, now: i64) -> BTreeMap<PathBuf, SavedBlock> {
         self.accounts
             .iter()
-            .filter(|(_, a)| a.last_error.as_ref().is_some_and(UsageError::is_throttle))
+            .filter(|(_, a)| a.backoff.throttled())
             .filter_map(|(d, a)| {
                 let until = a.backoff.until().filter(|u| *u > now)?;
                 Some((d.clone(), SavedBlock { strikes: a.backoff.strikes(), until }))
@@ -323,9 +358,10 @@ impl Engine {
             // The backoff is `/usage`'s (its endpoint's rate limit).
             blocked_until: st.and_then(|a| a.backoff.until()).filter(|_| source == Source::Usage),
             usage_only: source == Source::Usage,
+            // With no 5-hour limit the week's reset is the one to catch.
             wake_at: st
                 .and_then(|a| a.last.as_ref())
-                .and_then(|r| r.session.as_ref())
+                .and_then(|r| if r.no_session_limit() { r.week.as_ref() } else { r.session.as_ref() })
                 .and_then(|w| w.resets_at)
                 .map(|t| t.timestamp()),
         }
@@ -378,16 +414,27 @@ impl Engine {
         let results: Vec<(PathBuf, probe::Polled)> = results.into_iter().map(|(d, r)| (d, r.into())).collect();
         let polled = !results.is_empty();
         let ok_dirs: Vec<PathBuf> = results.iter().filter(|(_, r)| r.result.is_ok()).map(|(d, _)| d.clone()).collect();
+        // Accounts whose main meter now measures something else (session,
+        // week or spend: verified for no 5-hour limit, or a first reading
+        // that couldn't tell). The jump is neither a rise nor a reset.
+        let mut rekinded: Vec<PathBuf> = Vec::new();
         for (dir, r) in results {
             let st = self.accounts.entry(dir.clone()).or_default();
             // Results without a `begin_poll` (`--once`) count as attempted now.
             if !self.in_flight.contains(&dir) {
                 st.last_attempt_at = Some(now);
             }
+            let kind = st.last.as_ref().map(UsageReading::meter_kind);
             st.record_polled(now, r);
+            if kind.is_some_and(|k| st.last.as_ref().is_some_and(|l| l.meter_kind() != k)) {
+                rekinded.push(dir.clone());
+            }
             if let (Some(left), Some(e)) = (st.backoff.remaining(now), &st.last_error) {
                 log::info!("{}: {e}; not polling it for {left}s", dir.display());
             }
+        }
+        for d in &rekinded {
+            self.selector.forget(d);
         }
         // Every configured account's latest answer is a login problem.
         let all_auth = !self.settings.config_dirs.is_empty()
@@ -415,6 +462,9 @@ impl Engine {
         // write, so they would only ride along on a replay.
         let active_fresh = self.active.as_ref().is_some_and(|a| ok_dirs.contains(a));
         if active_fresh {
+            if self.active.as_ref().is_some_and(|a| rekinded.contains(a)) {
+                self.rate = RateTracker::default();
+            }
             if let Some(r) = self.active_reading() {
                 let pct = r.session_pct();
                 self.rate.sample(now, pct, false);
@@ -450,6 +500,17 @@ impl Engine {
         let new_event = event_fresh && self.activity.seq != self.sent_seq;
         let a_changed = hooks && self.sent_a != Some(level) && now - self.sent_a_at >= ACTIVITY_MIN_INTERVAL;
         let n_changed = hooks && self.sent_n != Some(sessions);
+        // A changed device setting goes out right away, like an event.
+        let aa = self.settings.attention_anim.seconds();
+        let pm = u8::from(self.settings.pace_marker);
+        let th = self.colors();
+        let clock = clock_fields(self.settings.clock, utc(now), host.utc_offset_secs, host.prefers_12h);
+        let tf = clock.as_ref().map_or(0, |cf| cf.hour_format);
+        let prefs_changed = self.sent_lv != Some(self.settings.liveliness)
+            || self.sent_aa != Some(aa)
+            || self.sent_pm != Some(pm)
+            || self.sent_th != Some(th)
+            || self.sent_tf != Some(tf);
 
         let (mut payload, kind) = if self.logged_out {
             if !(self.fresh_poll || self.attention.pending()) {
@@ -463,7 +524,7 @@ impl Engine {
                 WriteKind::Poll
             } else if self.attention.pending() {
                 WriteKind::Attention
-            } else if (new_event || a_changed || n_changed) && !self.stale(now) {
+            } else if (new_event || a_changed || n_changed || prefs_changed) && !self.stale(now) {
                 // Any ok payload refreshes the device's DATA_FRESH_MS, so
                 // while the numbers are stale only alerts and polls go out
                 // and the device can show its stale state.
@@ -477,13 +538,17 @@ impl Engine {
             if self.settings.reset_chime {
                 p.c = Some(1);
             }
-            if let Some(cf) = clock_fields(self.settings.clock, utc(now), host.utc_offset_secs, host.prefers_12h) {
+            if let Some(cf) = clock {
                 p.t = Some(cf.local_epoch);
                 p.tf = Some(cf.hour_format);
             }
             if kind != WriteKind::Poll {
                 p.rp = Some(1);
             }
+            p.lv = Some(self.settings.liveliness);
+            p.aa = Some(aa);
+            p.pm = Some(pm);
+            p.th = Some(th);
             (p, kind)
         };
 
@@ -527,6 +592,22 @@ impl Engine {
         if let Some(n) = w.payload.n {
             self.sent_n = Some(n);
         }
+        if let Some(lv) = w.payload.lv {
+            self.sent_lv = Some(lv);
+        }
+        if let Some(aa) = w.payload.aa {
+            self.sent_aa = Some(aa);
+        }
+        if let Some(pm) = w.payload.pm {
+            self.sent_pm = Some(pm);
+        }
+        if let Some(th) = w.payload.th {
+            self.sent_th = Some(th);
+        }
+        // Every data payload carries the clock; no `tf` means it's off.
+        if w.kind != WriteKind::NoData {
+            self.sent_tf = Some(w.payload.tf.unwrap_or(0));
+        }
     }
 
     /// Snapshot for the UI.
@@ -542,16 +623,17 @@ impl Engine {
                 .accounts
                 .iter()
                 .filter_map(|(k, a)| {
-                    a.last_error.as_ref().map(|e| AccountError {
-                        dir: k.clone(),
-                        message: match a.backoff.until().filter(|u| *u > now) {
-                            Some(until) if e.is_throttle() => {
-                                crate::usage::paused_message(until, crate::platform::utc_offset_secs())
-                            }
-                            _ => e.user_message(a.backoff.remaining(now)),
-                        },
-                        retrying: e.is_transient(),
-                    })
+                    // A 429's pause comes from the backoff, as the Overview's
+                    // does: a probe's answer clears the error, not the pause.
+                    let paused = a.backoff.until().filter(|u| a.backoff.throttled() && *u > now);
+                    let (message, retrying) = match (paused, &a.last_error) {
+                        (Some(until), _) => {
+                            (crate::usage::paused_message(until, crate::platform::utc_offset_secs()), true)
+                        }
+                        (None, Some(e)) => (e.user_message(a.backoff.remaining(now)), e.is_transient()),
+                        (None, None) => return None,
+                    };
+                    Some(AccountError { dir: k.clone(), message, retrying })
                 })
                 .collect(),
             attention: self.attention.active(),
@@ -567,7 +649,7 @@ impl Engine {
                 .as_ref()
                 .or(self.settings.config_dirs.first())
                 .and_then(|d| self.accounts.get(d))
-                .filter(|a| a.last_error.as_ref().is_some_and(UsageError::is_throttle))
+                .filter(|a| a.backoff.throttled())
                 .and_then(|a| a.backoff.until())
                 .filter(|u| *u > now),
             polling: self.active.as_ref().is_some_and(|a| self.in_flight.contains(a)),
@@ -596,6 +678,9 @@ mod tests {
         UsageReading {
             session: Some(Window { pct: s, resets_at: Some(utc(T0 + 3600)) }),
             week: Some(Window { pct: 10, resets_at: Some(utc(T0 + 86_400)) }),
+            // As `AccountState::record` labels a reading with a session
+            // window, so recorded readings compare equal.
+            session_limit: crate::usage::SessionLimit::Applies,
             ..Default::default()
         }
     }
@@ -618,8 +703,35 @@ mod tests {
         e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
         let w = write(&mut e, T0).unwrap();
         assert_eq!(w.kind, WriteKind::Poll);
-        assert_eq!(w.payload.to_json(), r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true}"#);
+        assert_eq!(
+            w.payload.to_json(),
+            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413"}"#
+        );
         assert!(write(&mut e, T0 + 1).is_none());
+    }
+
+    // No 5-hour limit: "week" on the wire with the session left "not
+    // started" for older firmware, and the weekly reset wakes the account.
+    #[test]
+    fn no_session_limit_payload_and_weekly_wake() {
+        let mut e = Engine::new(settings(""));
+        let dir = PathBuf::from("/h/.claude");
+        let ultra = UsageReading {
+            week: Some(Window { pct: 48, resets_at: Some(utc(T0 + 86_400)) }),
+            session_limit: crate::usage::SessionLimit::Absent,
+            ..Default::default()
+        };
+        e.on_poll_results(T0, vec![(dir.clone(), Ok(ultra))]);
+        assert_eq!(e.clock(&dir, T0 + 60).wake_at, Some(T0 + 86_400));
+        assert_eq!(e.source(&dir, T0 + 60), Source::Usage);
+        let w = write(&mut e, T0).unwrap();
+        assert_eq!(
+            w.payload.to_json(),
+            r#"{"s":0,"sr":-1,"w":48,"wr":1440,"st":"allowed","acct":"week","ok":true,"lv":3,"aa":120,"pm":0,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413"}"#
+        );
+        // An account with the limit still wakes at its session reset.
+        e.on_poll_results(T0 + 200, vec![(dir.clone(), Ok(reading(5)))]);
+        assert_eq!(e.clock(&dir, T0 + 260).wake_at, Some(T0 + 3600));
     }
 
     // Heartbeat replays (bash parity + rp marker), and none once stale.
@@ -634,7 +746,7 @@ mod tests {
         assert_eq!(hb.kind, WriteKind::Heartbeat);
         assert_eq!(
             hb.payload.to_json(),
-            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1}"#
+            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120,"pm":0,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413"}"#
         );
         // Three misses: stale, heartbeats stop so the device's freshness lapses.
         for i in 1..=3 {
@@ -662,6 +774,32 @@ mod tests {
         // B tokenless/logged out doesn't matter while A works.
         e.on_poll_results(T0 + 180, vec![(a.clone(), Ok(reading(20))), (b, Err(UsageError::NotLoggedIn("x".into())))]);
         assert!(!e.status(T0 + 180).logged_out);
+    }
+
+    // An account whose main meter changes kind (verified for no 5-hour
+    // limit, or a first reading that couldn't tell): its jump from the
+    // session's 0 % to the week's 48 % is not a rise, so the shown account
+    // stays, and the rate math starts over rather than read it as heavy use.
+    #[test]
+    fn a_change_of_meter_kind_is_not_a_rise() {
+        use crate::usage::SessionLimit;
+        let week = |pct| UsageReading { week: Some(Window { pct, resets_at: None }), ..Default::default() };
+        let ultra = |pct| UsageReading { session_limit: SessionLimit::Absent, ..week(pct) };
+        let mut e = Engine::new(settings("config_dirs = ~/.claude, ~/.claude-work\n"));
+        let a = PathBuf::from("/h/.claude");
+        let b = PathBuf::from("/h/.claude-work");
+        e.on_poll_results(T0, vec![(a.clone(), Ok(reading(10))), (b.clone(), Ok(week(48)))]);
+        e.on_poll_results(T0 + 60, vec![(a.clone(), Ok(reading(12))), (b.clone(), Ok(week(48)))]);
+        assert_eq!(e.status(T0 + 60).active_account, Some(a.clone()));
+        e.on_poll_results(T0 + 120, vec![(a.clone(), Ok(reading(12))), (b.clone(), Ok(ultra(48)))]);
+        assert_eq!(e.status(T0 + 120).active_account, Some(a.clone()), "B's 0 → 48 isn't activity");
+        e.on_poll_results(T0 + 180, vec![(a.clone(), Ok(reading(12))), (b.clone(), Ok(ultra(49)))]);
+        assert_eq!(e.status(T0 + 180).active_account, Some(b), "B's week moving is");
+        // One account: the change doesn't read as 48 points in ten minutes.
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(a.clone(), Ok(week(48)))]);
+        e.on_poll_results(T0 + 600, vec![(a, Ok(ultra(48)))]);
+        assert_eq!(e.status(T0 + 600).mood, Some(Mood::Idle));
     }
 
     // A miss on the shown account is never a poll, even when another
@@ -1044,6 +1182,35 @@ mod tests {
         assert_eq!(plans(&mut e, T0 + 4500), vec![ProbePlan::Probe { usage_fallback: true }]);
     }
 
+    // A probe answering (or missing) during a 429 block leaves it in place:
+    // still saved for a restart and shown as a pause, on the Overview and
+    // the Accounts page alike, until it runs out.
+    #[test]
+    fn a_probe_result_keeps_the_saved_block() {
+        let mut e = Engine::new(settings(""));
+        let a = PathBuf::from("/h/.claude");
+        e.on_poll_results(T0, vec![(a.clone(), Err(UsageError::Throttled { retry_after_secs: Some(3600) }))]);
+        let probe = |result: Result<UsageReading, UsageError>| {
+            let run = if result.is_ok() { probe::ProbeRun::Answered } else { probe::ProbeRun::Missed };
+            probe::Polled { result, idle: false, probe: run, idle_miss: None }
+        };
+        let paused = |e: &Engine, now| {
+            let errors = e.status(now).errors;
+            let [err] = errors.as_slice() else { panic!("{errors:?}") };
+            assert!(err.message.starts_with("Usage paused by Anthropic until ") && err.retrying, "{err:?}");
+        };
+        e.on_poll_results(T0 + 120, vec![(a.clone(), probe(Ok(reading(5))))]);
+        assert_eq!(e.blocks(T0 + 130).get(&a).map(|b| b.until), Some(T0 + 3600));
+        assert_eq!(e.status(T0 + 130).paused_until, Some(T0 + 3600));
+        assert_eq!(e.accounts[&a].last_error, None, "the probe's reading is fresh");
+        paused(&e, T0 + 130);
+        e.on_poll_results(T0 + 300, vec![(a.clone(), probe(Err(UsageError::Timeout)))]);
+        assert_eq!(e.blocks(T0 + 310).get(&a).map(|b| b.until), Some(T0 + 3600));
+        paused(&e, T0 + 310);
+        assert!(e.blocks(T0 + 3600).is_empty(), "until it runs out");
+        assert!(e.status(T0 + 3600).errors[0].message.starts_with("Claude Code took too long"));
+    }
+
     // Only a 429 is saved as a block (and called a pause by Anthropic); a
     // timeout or odd output backs off in memory only.
     #[test]
@@ -1092,10 +1259,140 @@ mod tests {
     }
 
     #[test]
+    fn liveliness_goes_out_with_the_data_and_when_it_changes() {
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        let w = write(&mut e, T0).unwrap();
+        assert_eq!(w.payload.lv, Some(3), "every data payload carries it");
+        assert!(write(&mut e, T0 + 1).is_none(), "nothing new");
+        e.update_settings(settings("liveliness = 1\n"));
+        let w = write(&mut e, T0 + 2).expect("a new liveliness is sent right away");
+        assert_eq!((w.kind, w.payload.lv, w.payload.rp), (WriteKind::Event, Some(1), Some(1)));
+        assert!(write(&mut e, T0 + 3).is_none());
+        e.on_connected();
+        assert_eq!(write(&mut e, T0 + 4).unwrap().payload.lv, Some(1), "resent on a reconnect");
+    }
+
+    #[test]
+    fn attention_animation_goes_out_with_the_data_and_when_it_changes() {
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.aa, Some(120), "every data payload carries it");
+        assert!(write(&mut e, T0 + 1).is_none(), "nothing new");
+        e.update_settings(settings("attention_anim = off\n"));
+        let w = write(&mut e, T0 + 2).expect("a new setting is sent right away");
+        assert_eq!((w.kind, w.payload.aa, w.payload.rp), (WriteKind::Event, Some(0), Some(1)));
+        assert!(write(&mut e, T0 + 3).is_none());
+        e.on_connected();
+        assert_eq!(write(&mut e, T0 + 4).unwrap().payload.aa, Some(0), "resent on a reconnect");
+    }
+
+    #[test]
+    fn pace_marker_goes_out_with_the_data_and_when_it_changes() {
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.pm, Some(0), "every data payload carries it");
+        assert!(write(&mut e, T0 + 1).is_none(), "nothing new");
+        e.update_settings(settings("pace_marker = on\n"));
+        let w = write(&mut e, T0 + 2).expect("a new setting is sent right away");
+        assert_eq!((w.kind, w.payload.pm, w.payload.rp), (WriteKind::Event, Some(1), Some(1)));
+        assert!(write(&mut e, T0 + 3).is_none());
+        e.on_connected();
+        assert_eq!(write(&mut e, T0 + 4).unwrap().payload.pm, Some(1), "resent on a reconnect");
+    }
+
+    #[test]
+    fn colors_go_out_with_the_data_and_when_they_change() {
+        use crate::config::ColorToken;
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        let w = write(&mut e, T0).unwrap();
+        assert_eq!(w.payload.th, Some(Palette::default()), "every data payload carries it");
+        assert!(write(&mut e, T0 + 1).is_none(), "nothing new");
+        e.update_settings(settings("theme = custom\ncolor_accent = 647d99\n"));
+        let w = write(&mut e, T0 + 2).expect("a new colour is sent right away");
+        assert_eq!((w.kind, w.payload.rp), (WriteKind::Event, Some(1)));
+        assert_eq!(w.payload.th.unwrap().get(ColorToken::Accent), 0x647d99);
+        assert!(write(&mut e, T0 + 3).is_none());
+        e.on_connected();
+        let resent = write(&mut e, T0 + 4).unwrap().payload.th.unwrap();
+        assert_eq!(resent.get(ColorToken::Accent), 0x647d99, "resent on a reconnect");
+    }
+
+    #[test]
+    fn the_system_theme_follows_the_os_at_once() {
+        use crate::themes;
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.th, Some(themes::default_preset().colors), "dark until told");
+        e.set_appearance(Appearance::Dark);
+        assert!(write(&mut e, T0 + 1).is_none(), "no change, nothing new");
+        e.set_appearance(Appearance::Light);
+        let w = write(&mut e, T0 + 2).expect("the OS went light: sent right away");
+        assert_eq!((w.kind, w.payload.rp, w.payload.th), (WriteKind::Event, Some(1), Some(themes::light().colors)));
+        assert!(write(&mut e, T0 + 3).is_none());
+        e.set_appearance(Appearance::Dark);
+        assert_eq!(write(&mut e, T0 + 4).expect("and back").payload.th, Some(themes::default_preset().colors));
+
+        // A chosen preset doesn't follow the OS.
+        e.update_settings(settings("theme = dracula\n"));
+        let dracula = themes::find("dracula").unwrap().colors;
+        assert_eq!(write(&mut e, T0 + 5).unwrap().payload.th, Some(dracula));
+        e.set_appearance(Appearance::Light);
+        assert!(write(&mut e, T0 + 6).is_none(), "Dracula stays");
+
+        // Solarized follows it too, between its own Dark and Light.
+        e.update_settings(settings("theme = solarized\n"));
+        let w = write(&mut e, T0 + 7).expect("the theme changed");
+        assert_eq!(w.payload.th, Some(themes::find("solarized_light").unwrap().colors));
+        e.set_appearance(Appearance::Dark);
+        let w = write(&mut e, T0 + 8).expect("the OS went dark: sent right away");
+        assert_eq!((w.kind, w.payload.th), (WriteKind::Event, Some(themes::find("solarized_dark").unwrap().colors)));
+        assert!(write(&mut e, T0 + 9).is_none());
+    }
+
+    #[test]
     fn clock_fields_included() {
         let mut e = Engine::new(settings("clock = 12\n"));
         e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
         let w = e.next_write(T0, HostClock { utc_offset_secs: -3600, prefers_12h: false }).unwrap();
         assert_eq!((w.payload.t, w.payload.tf), (Some(T0 - 3600), Some(12)));
+    }
+
+    #[test]
+    fn clock_goes_out_when_it_changes() {
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.tf, None, "off by default");
+        assert!(write(&mut e, T0 + 1).is_none(), "nothing new");
+        e.update_settings(settings("clock = 24\n"));
+        let w = write(&mut e, T0 + 2).expect("a new clock mode is sent right away");
+        assert_eq!((w.kind, w.payload.tf, w.payload.rp), (WriteKind::Event, Some(24), Some(1)));
+        assert!(w.payload.t.is_some());
+        assert!(write(&mut e, T0 + 3).is_none(), "the ticking time alone doesn't resend");
+        e.update_settings(settings("clock = 12\n"));
+        assert_eq!(write(&mut e, T0 + 4).expect("12h ↔ 24h too").payload.tf, Some(12));
+        e.update_settings(settings("clock = off\n"));
+        let w = write(&mut e, T0 + 5).expect("turning it off too");
+        assert_eq!((w.payload.t, w.payload.tf), (None, None));
+        assert!(write(&mut e, T0 + 6).is_none());
+        e.update_settings(settings("clock = 12\n"));
+        assert!(write(&mut e, T0 + 7).is_some());
+        e.on_connected();
+        assert_eq!(write(&mut e, T0 + 8).unwrap().payload.tf, Some(12), "resent on a reconnect");
+        // Stale: the change waits for the next good poll, like the others.
+        let dir = PathBuf::from("/h/.claude");
+        for i in 1..=3 {
+            e.on_poll_results(T0 + 8 + i, vec![(dir.clone(), Err(UsageError::Timeout))]);
+        }
+        e.update_settings(settings("clock = 24\n"));
+        assert!(write(&mut e, T0 + 20).is_none(), "no event write while stale");
+        e.on_poll_results(T0 + 30, vec![(dir.clone(), Ok(reading(15)))]);
+        let w = write(&mut e, T0 + 30).unwrap();
+        assert_eq!((w.kind, w.payload.tf), (WriteKind::Poll, Some(24)));
+        // A no-data write carries no clock and doesn't count as sending one.
+        e.on_poll_results(T0 + 40, vec![(dir, Err(UsageError::NotLoggedIn("x".into())))]);
+        assert_eq!(write(&mut e, T0 + 40).unwrap().kind, WriteKind::NoData);
+        assert_eq!(e.sent_tf, Some(24));
     }
 }

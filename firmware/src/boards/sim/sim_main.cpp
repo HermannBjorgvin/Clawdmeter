@@ -21,12 +21,18 @@ int main(void) {
     // SIM_FAST=1: director timings in seconds instead of minutes (show after
     // 8 s of activity 3, screensaver after 15 s quiet) for walkthroughs.
     if (getenv("SIM_FAST")) {
-        clawd_tuning_fast(&clawd_tuning());
+        ClawdTuning fast;
+        clawd_tuning_fast(&fast);
+        clawd_tuning_set_base(&fast);
         printf("[sim] SIM_FAST: compressed director timings\n");
     }
     // SIM_TRACE=1: print every director beat step with a timestamp (the
     // timings walkthrough screenshots are picked from). Beat changes always print.
     if (getenv("SIM_TRACE")) director_set_trace(true);
+    if (sim_ctrl_active()) {
+        sim_ctrl_run();
+        return 0;
+    }
     setup();
     while (!sim_should_quit()) {
         sim_pump();

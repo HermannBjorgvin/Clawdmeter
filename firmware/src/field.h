@@ -6,8 +6,8 @@
 // A flat-colour shape on an overlay layer that redraws only what changes: a
 // body rectangle plus a couple of small extra rectangles (the face's arms).
 //
-// The face and the orange streak are big solid rectangles that slide across
-// the screen. As plain LVGL objects, every move invalidates their whole old
+// The face is a big solid rectangle that slides up and down the screen.
+// As a plain LVGL object, every move invalidates its whole old
 // and new area (for the rising face that's most of the screen, every frame),
 // and each frame becomes a near full-screen render + panel flush. A field is
 // instead a full-screen object that never moves: it draws its rectangle in

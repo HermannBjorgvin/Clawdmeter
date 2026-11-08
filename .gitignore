@@ -1,12 +1,14 @@
 # PlatformIO build artifacts
 firmware/.pio/
 firmware/.vscode/
+firmware/monitor_output.txt
 
 # OS
 .DS_Store
 
-# Claude Code
-.claude/
+# Claude Code: local state and worktrees stay out; project skills are shared
+.claude/*
+!.claude/skills/
 
 # Node tooling deps (npm install --no-save)
 tools/node_modules/

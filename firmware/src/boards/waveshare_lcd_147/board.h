@@ -55,13 +55,12 @@
 // ---- Buttons ----
 // The kit ships exactly two keys: BOOT (GPIO 0) and RESET (tied to EN, not
 // readable). So there is only ONE usable user button, and it is given the
-// PWR role — screens / brightness / the hold-3s-release pairing gesture —
+// PWR role — brightness / the hold-3s-release pairing gesture —
 // because without it the device could never be paired at all. The HID
 // push-to-talk (Space) and mode-toggle (Shift+Tab) buttons the bigger boards
 // have simply don't exist here; input.cpp reports no buttons and
-// BoardCaps.button_count is 0. Screen switching is also available by tapping
-// the touchscreen.
-#define BTN_PWR_GPIO         0     // BOOT — PWR role (screens/brightness; hold ~3s + release to pair)
+// BoardCaps.button_count is 0.
+#define BTN_PWR_GPIO         0     // BOOT — PWR role (brightness; hold ~3s + release to pair)
 
 // ---- Capability flags ----
 #define BOARD_HAS_SECONDARY_BUTTON 0
