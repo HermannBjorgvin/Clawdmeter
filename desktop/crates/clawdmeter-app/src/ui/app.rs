@@ -309,7 +309,7 @@ impl Render for AppView {
                     ),
             )
         };
-        chrome(&t, window, body)
+        chrome(&t, window, cx, body)
     }
 }
 

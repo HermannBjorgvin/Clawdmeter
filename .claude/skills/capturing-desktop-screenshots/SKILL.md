@@ -50,7 +50,9 @@ flags (`setup-2-board-shop.png` = `--setup board --shop`,
 `overview-refresh-wait.png` = `--refresh wait`, …). `device.png` is taken
 with `--height 1160` so the whole settings list shows.
 `overview-gnome-header.png` is the client-drawn Adwaita header bar: run with
-`CLAWDMETER_DECORATIONS=client` in the environment.
+`CLAWDMETER_DECORATIONS=client` in the environment. Its buttons follow the
+capturing desktop's GNOME `button-layout` (the reference shows
+`:minimize,maximize,close`).
 
 Don't add `observe_window_appearance` while working on the UI: on X11, GPUI
 0.2.2 redraws inside the portal callback and panics. The root polls the

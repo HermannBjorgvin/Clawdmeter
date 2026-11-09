@@ -105,6 +105,16 @@ pub fn system_appearance() -> Option<Appearance> {
     }
 }
 
+/// A string from the desktop portal's settings
+/// (`org.freedesktop.portal.Settings`), such as GNOME's
+/// `org.gnome.desktop.wm.preferences button-layout`. `None` when the portal,
+/// the namespace or the key is missing, or the value isn't a string. Blocks
+/// for the read, at most two seconds.
+#[cfg(target_os = "linux")]
+pub fn portal_string(namespace: &str, key: &str) -> Option<String> {
+    portal::read_string(namespace, key)
+}
+
 /// How often the watch asks on macOS (each read spawns `defaults`) and
 /// Windows (a registry read). Linux is told of changes instead.
 #[cfg(any(not(target_os = "linux"), test))]
@@ -265,7 +275,8 @@ impl Miss {
     }
 }
 
-/// The xdg-desktop-portal's `org.freedesktop.appearance color-scheme`.
+/// The xdg-desktop-portal's settings: `org.freedesktop.appearance
+/// color-scheme`, followed, and one-off string reads.
 #[cfg(target_os = "linux")]
 mod portal {
     use super::{store, Appearance, Miss};
@@ -295,16 +306,21 @@ mod portal {
         a.as_u64().or_else(|| a.as_iter()?.next().and_then(number))
     }
 
+    /// Unwraps a string the same way.
+    fn string(a: &dyn RefArg) -> Option<String> {
+        a.as_str().map(str::to_owned).or_else(|| a.as_iter()?.next().and_then(string))
+    }
+
     fn appearance(v: &dyn RefArg) -> Appearance {
         number(v).and_then(Appearance::from_portal).unwrap_or_default()
     }
 
-    /// Read the setting once.
-    pub(super) fn read(conn: &Connection) -> Result<Appearance, Miss> {
+    /// Read one setting: `ReadOne`, or `Read` on a portal that predates it.
+    fn read_value(conn: &Connection, namespace: &str, key: &str) -> Result<Variant<Box<dyn RefArg>>, Miss> {
         let portal = conn.with_proxy(DEST, PATH, TIMEOUT);
         let call = |method| -> Result<(Variant<Box<dyn RefArg>>,), Miss> {
-            portal.method_call(IFACE, method, (NAMESPACE, KEY)).map_err(|e: dbus::Error| {
-                log::debug!("appearance: portal {method}: {e}");
+            portal.method_call(IFACE, method, (namespace, key)).map_err(|e: dbus::Error| {
+                log::debug!("portal {method} {namespace} {key}: {e}");
                 Miss::from_error(e.name())
             })
         };
@@ -312,7 +328,18 @@ mod portal {
             Err(Miss::OldPortal) => call("Read")?,
             r => r?,
         };
-        Ok(appearance(&v))
+        Ok(v)
+    }
+
+    /// Read the appearance once.
+    pub(super) fn read(conn: &Connection) -> Result<Appearance, Miss> {
+        read_value(conn, NAMESPACE, KEY).map(|v| appearance(&v))
+    }
+
+    /// Read a string setting once, on a connection of its own.
+    pub(super) fn read_string(namespace: &str, key: &str) -> Option<String> {
+        let conn = Connection::new_session().ok()?;
+        string(&read_value(&conn, namespace, key).ok()?)
     }
 
     /// Follow the setting until the watch is gone: subscribe to

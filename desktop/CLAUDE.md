@@ -224,7 +224,11 @@ Per account (`probe.rs`, `oauth.rs`):
   decorations and `ui::chrome` draws an Adwaita-style header bar. gpui 0.2.2
   reports "server" even with no decoration manager, so
   `decorations::wanted()` probes the Wayland registry itself.
-  `CLAWDMETER_DECORATIONS=client|server` overrides.
+  `CLAWDMETER_DECORATIONS=client|server` overrides. The bar's minimize,
+  maximize/restore and close buttons follow GNOME's `button-layout` (sides
+  and order), read from the portal once before the window opens
+  (`decorations::load_button_layout`); unreadable means GTK's default,
+  `menu:minimize,maximize,close`.
 - Board art is bundled by `ui::Assets` and drawn with
   `img(board.illustration())`. Use `img()`, not `svg()`: `svg()` renders a
   monochrome mask, `img()` renders the SVG through resvg in full colour.
