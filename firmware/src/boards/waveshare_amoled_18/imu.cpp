@@ -2,7 +2,7 @@
 #include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
-#include <SensorQMI8658.hpp>
+#include <ImuDrv.hpp>
 
 // AMOLED-1.8 ships with QMI8658 populated, but the kit's enclosure mounts
 // the panel in a fixed orientation. We initialize the device anyway so the
@@ -11,7 +11,9 @@
 static SensorQMI8658 imu;
 
 void imu_hal_init(void) {
-    if (!imu.begin(Wire, QMI8658_L_SLAVE_ADDRESS, IIC_SDA, IIC_SCL)) {
+    // No pins: board_init() already started Wire, and SensorLib would
+    // call Wire.setPins() on the running bus (an [E] log line).
+    if (!imu.begin(Wire, QMI8658_L_SLAVE_ADDRESS)) {
         Serial.println("QMI8658 init failed");
         return;
     }
