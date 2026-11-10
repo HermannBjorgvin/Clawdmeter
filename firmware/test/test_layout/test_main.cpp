@@ -287,6 +287,7 @@ static void test_row_320x172(void) {
     TEST_ASSERT_EQUAL_INT16((320 - L.card[0].w) / 2, layout_lone_card_x(L));
     TEST_ASSERT_EQUAL_INT16(L.card[0].y, layout_lone_card_y(L));
     TEST_ASSERT_EQUAL_PTR(&font_styrene_24, L.pct_font);
+    TEST_ASSERT_EQUAL_PTR(&font_tiempos_34, L.ent_pct_font);   // the serif, as on SMALL
     TEST_ASSERT_EQUAL_PTR(PILL_TEXT, L.pills);
 }
 

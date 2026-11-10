@@ -165,10 +165,10 @@ static const Design SMALL = {
 // A landscape strip (320x172, LCD-1.47): the small design's chrome with the
 // cards side by side, for a panel too short to stack them.
 static const Design ROW = {
-    .chrome = &CHROME_SMALL, .top = 44, .margin = 8, .card_h = 92, .gap = 8,
+    .chrome = &CHROME_SMALL, .top = 44, .margin = 6, .card_h = 92, .gap = 6,
     .bar_y = 40, .bar_h = 12, .reset_y = 54,
-    .pad_x = 6, .pad_y = 6, .pill_pad_x = 6, .pill_pad_y = 2,
-    .pct = &font_styrene_24, .ent_pct = &font_styrene_24, .pill = &font_styrene_12,
+    .pad_x = 6, .pad_y = 6, .pill_pad_x = 4, .pill_pad_y = 2,
+    .pct = &font_styrene_24, .ent_pct = &font_tiempos_34, .pill = &font_styrene_12,
     .reset = &font_styrene_12, .pace = &font_styrene_12,
     .pair_y = { 0, 32, 56, 82 },
     .row = true,
