@@ -125,9 +125,10 @@ void display_hal_init(void) {
     // Constructed in the panel's native portrait geometry with the GRAM
     // column offset; setRotation() below swaps the axes (and maps the offset
     // onto the right one) to give the UI a 320x172 landscape canvas.
-    // ips=false matches the vendor sequence, which turns inversion on itself
-    // (0x21 at the tail of jd9853_reg_init) — passing true here would send a
-    // second INVON and cancel it back out.
+    // Inversion comes from the vendor sequence: jd9853_reg_init() runs after
+    // begin() and ends with INVON (0x21), whatever begin() sent. `ips` only
+    // decides what begin()'s invertDisplay(false) sends (INVOFF here) and how
+    // a later invertDisplay() reads its argument; nothing else calls it.
     gfx = new Arduino_ST7789(bus, LCD_RST, 0 /* rotation */, false /* ips */,
                              LCD_PANEL_W, LCD_PANEL_H,
                              LCD_COL_OFFSET, 0, LCD_COL_OFFSET, 0);
