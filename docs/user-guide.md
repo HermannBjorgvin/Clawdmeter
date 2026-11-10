@@ -188,9 +188,55 @@ and character rules.
 
 | Button | Action |
 | --- | --- |
-| BOOT | Hold to send Space to the focused window, for Claude Code voice input. GPIO 0 on S3; GPIO 9 on C6. |
-| Secondary, where fitted | Send Shift+Tab to the focused window. S3 2.16: GPIO 18; C6 2.16: GPIO 10; LCD-1.54: GPIO 5. |
-| PWR, where software-controlled | Short press: brightness. Hold about 3 seconds and release: clear pairing. |
+| BOOT | By default, hold to send Space to the focused window, for Claude Code voice input. GPIO 0 on S3; GPIO 9 on C6. |
+| Secondary, where fitted | By default, send Shift+Tab to the focused window. S3 2.16: GPIO 18; C6 2.16: GPIO 10; LCD-1.54: GPIO 5. |
+| PWR, where software-controlled | Short press: by default, brightness. Hold about 3 seconds and release: clear pairing. |
+
+Each button can do something else. **Controls** on the app's Device page
+shows your board's buttons as keys, in the order they sit on it and under
+their names there (on the 2.16: Left, PWR, Right), each with what it does.
+Click one to change it:
+
+- **Keys**: send Space, Shift+Tab, Tab, Enter or Esc. Space is held while you
+  hold the button; the others are tapped once per press.
+- **Media**: Play/Pause, Previous, Next, Volume down, Volume up or Mute.
+  Volume repeats while you hold the button.
+- **Other**: **Brightness** cycles the screen brightness, so a board without
+  a PWR button can have one; **Nothing** leaves the button to wake the
+  screen.
+- **Shortcut**: a keyboard shortcut of your own. Click the shortcut field
+  (or Record) and press the keys, such as Ctrl+Shift+M or Cmd+Shift+M for
+  Teams mute, Alt+A for Zoom, or Win+Alt+K for the Windows 11 microphone.
+  Escape is recorded like any other key; Cancel stops listening. Turn the
+  Ctrl, Shift, Alt and Cmd/Win/Super switches on or off afterwards for
+  shortcuts your system keeps to itself while recording. **Hold while
+  pressed** keeps the keys down while you hold the button, for push to talk
+  such as Teams' Ctrl+Space; otherwise they are tapped.
+
+PWR can only tap: a short press registers when you let go, so it has no
+Hold switch, and volume doesn't repeat on it. Holding PWR to clear the
+pairing works whatever its action. On boards without a touchscreen, the
+first press of BOOT (or of PWR, if it's the only button) during an alert
+dismisses the alert instead.
+
+The board sends key positions as on a US keyboard, and your computer reads
+them with its own layout. The app records the character a key types and
+sends the US key that types it, so recording is reliable on US-like layouts
+(QWERTY with US punctuation). On others, such as AZERTY or QWERTZ, some
+letters, digits and punctuation land on a different key: check the shortcut
+after recording it. The app says so when a key can't be sent, such as a
+letter that isn't on a US keyboard. Keypad digits are recorded as the digits
+above the letters.
+
+Media keys and F13–F24 came with a change to the board's Bluetooth keyboard
+description. After updating from older firmware, the board tells your
+computer when they next connect, so it reads the description again. If
+media keys or F13–F24 still do nothing, your computer kept the old
+description: forget Clawdmeter in your Bluetooth settings, clear the
+board's pairing (hold PWR about 3 seconds and release, or **Clear the
+board's pairing** on the Device page over USB) and pair it again. You only
+need to do this once. After going back to older firmware and updating again,
+re-pair the same way if the keys misbehave.
 
 The LCD-4 has one user button, BOOT. Its PWR key is a hardware reset.
 

@@ -28,7 +28,8 @@ is faked behind `FlashHardware`.
   optional year; fixtures in `tests/fixtures/` are real or derived from the
   CLI source), `probe` / `oauth` (usage sources), `cadence` (when to poll),
   `backoff`, `selector` (which account is shown), `events` (tails
-  `events.log`), `attention`, `payload`, `rate`, `engine` (I/O-free state
+  `events.log`), `attention`, `payload`, `buttons` (device button actions,
+  their config spelling and `k1`–`k3` codes), `rate`, `engine` (I/O-free state
   machine: `next_write` / `mark_written`), `autostart` (systemd / XDG /
   LaunchAgent / Run key, legacy-daemon detection + `disable_legacy`),
   `launch`, `platform`.
@@ -72,7 +73,21 @@ is faked behind `FlashHardware`.
   this computer via rodio, ALSA on Linux), `clock`, `liveliness` (1–5,
   default 3: the Device page's Animation silliness slider, sent as `lv`),
   `attention_anim` (`off`/`10s`/`30s`/`2m`, default `2m`, sent as `aa`
-  seconds), `pace_marker` (default off, sent as `pm`), `theme` (`system`, the
+  seconds), `pace_marker` (default off, sent as `pm`), `button_primary`
+  (default `space`), `button_secondary` (default `shift-tab`) and
+  `button_pwr` (default `brightness`): `none`, `space`, `shift-tab`, `tab`,
+  `enter`, `escape`, `brightness`, a media key (`play-pause`,
+  `previous-track`, `next-track`, `volume-down`, `volume-up`, `mute`) or a
+  shortcut, modifiers and a key joined by `+` with an optional `hold`
+  (`ctrl+shift+m`, `super+alt+k`, `ctrl+space hold`; `tap` marks one
+  that would read as a preset, `space tap`). `clawdmeter_core::buttons` has
+  the grammar, the key table and the keystroke→HID mapping; sent as
+  `k1`/`k2`/`k3`. The Device page's Controls field draws a keycap per button
+  the board has, in the order and under the names in `BoardInfo.buttons`
+  (checked against the firmware's `caps.cpp`, as is `pwr_button`); a
+  keycap opens its editor underneath, which records a shortcut from the
+  next key press.
+  `theme` (`system`, the
   default, or `solarized`: the OS-following themes in `themes::FOLLOWING`; a
   preset id from `themes::PRESETS`; or `custom`; the old default
   `clawd` and unknown values read as `system`) and `color_<token>`
@@ -200,8 +215,9 @@ Per account (`probe.rs`, `oauth.rs`):
   also queues `settings-changed` on `<state>/app-commands`; the tray (it
   takes the queue every 200 ms) forwards it as `Command::ReloadSettings`, so
   a device setting goes out within about a second. `Engine::next_write` sends
-  a changed `lv`/`aa`/`pm`/`th` or clock format (`tf`, off included) at once,
-  unless the numbers are stale (then it waits for the next good poll).
+  a changed `lv`/`aa`/`pm`/`k1`–`k3`/`th` or clock format (`tf`, off
+  included) at once, unless the numbers are stale (then it waits for the
+  next good poll).
   The 5 s re-read stays for hand edits and `--daemon` without a tray.
 - Only one window process runs (`<state>/window.lock`). The tray, or a second
   `--window` launch, appends `show <page>` to `<state>/window-commands`; the

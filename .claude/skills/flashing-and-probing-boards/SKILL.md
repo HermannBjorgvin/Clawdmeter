@@ -45,6 +45,7 @@ and fails with a clear message when no board or several are attached. If
 | `clawd peek <x>` | The peek beat, as a tap at x would |
 | `liveliness [1-5]` | Print or set Clawd's liveliness (kept in NVS) until the app sends its own `lv` |
 | `attention_anim [seconds]` | Print or set how long Clawd points and waves for an alert (0 = off; kept in NVS) until the app sends its own `aa` |
+| `buttons` | JSON: the primary, secondary and PWR actions (`k1`..`k3`) |
 | `pace_marker [0\|1]` | Print or set the pace marker on the usage bars (kept in NVS) until the app sends its own `pm` |
 | `chime` (`buzz` is an alias) | Play the ding |
 | `chime <gain> [volume]` | Tune the speaker until reboot: gain 0..1, ES8311 volume 0..100. The 2.16 ships 0.7 / 77 (tuned by ear); the 1.8, LCD-1.54 and C6 2.16 ship 0.7 / 75 (not tuned by ear); the M5StickS3 ships 0.7 / 65 |

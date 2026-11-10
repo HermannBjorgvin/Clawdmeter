@@ -151,10 +151,11 @@ void ble_request_refresh(void) {}
 void ble_send_dismiss(void) { printf("[sim] TX {\"dismiss\":true}\n"); }
 void ble_set_battery_level(int pct) { (void)pct; }
 
-void ble_keyboard_press(uint8_t key, uint8_t modifier) {
-    printf("[sim] HID press key=0x%02X mod=0x%02X\n", key, modifier);
+void ble_keyboard_report(const uint8_t r[8]) {
+    printf("[sim] HID report mod=0x%02X keys=%02X %02X %02X\n", r[0], r[2], r[3], r[4]);
 }
-void ble_keyboard_release(void) { printf("[sim] HID release\n"); }
+void ble_consumer_press(uint16_t usage) { printf("[sim] HID consumer 0x%03X\n", usage); }
+void ble_consumer_release(void) { printf("[sim] HID consumer release\n"); }
 
 // ---- Playback controls (called from the sim_platform event pump) ----
 void sim_playback_toggle(void) {
