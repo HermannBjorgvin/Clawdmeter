@@ -171,6 +171,8 @@ pub fn open_with_height(
     build: impl FnOnce(&mut Window, &mut gpui::Context<app::AppView>) -> app::AppView + 'static,
 ) {
     let height = height.unwrap_or(SIZE.1).max(MIN_SIZE.1);
+    let window_decorations = decorations::wanted();
+    decorations::follow_button_layout(window_decorations);
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
         if let Err(e) = cx.text_system().add_fonts(FONTS.iter().map(|f| Cow::Borrowed(*f)).collect()) {
             log::warn!("bundled fonts not registered ({e}); using system fonts");
@@ -182,8 +184,7 @@ pub fn open_with_height(
             }
         })
         .detach();
-        let window_decorations = decorations::wanted();
-        decorations::load_button_layout(window_decorations);
+        decorations::await_button_layout(window_decorations);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(SIZE.0), px(height)), cx))),
             titlebar: Some(TitlebarOptions { title: Some("Clawdmeter".into()), ..Default::default() }),
@@ -288,12 +289,12 @@ pub fn chrome(t: &Theme, window: &mut Window, cx: &mut App, body: impl IntoEleme
     // press) or a resize edge: only that press may turn into a window move.
     let move_armed = window.use_keyed_state("titlebar-move-armed", cx, |_, _| false);
     let window: &Window = window;
-    let buttons = |side: Vec<Control>| {
+    let buttons = |side: &[Control]| {
         div()
             .flex()
             .items_center()
             .gap(px(BUTTON_GAP))
-            .children(side.into_iter().filter_map(|c| window_button(t, window, c)))
+            .children(side.iter().filter_map(|&c| window_button(t, window, c)))
     };
     div()
         .id("frame")
@@ -363,8 +364,8 @@ pub fn chrome(t: &Theme, window: &mut Window, cx: &mut App, body: impl IntoEleme
                             .text_size(px(14.))
                             .child("Clawdmeter"),
                     )
-                    .child(buttons(layout.left))
-                    .child(buttons(layout.right)),
+                    .child(buttons(&layout.left))
+                    .child(buttons(&layout.right)),
             )
         })
         .child(div().flex_1().min_h_0().child(body))

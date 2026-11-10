@@ -14,10 +14,11 @@
 //! render time, so that case draws our bar too.
 //!
 //! Our bar's buttons follow the desktop's layout, as a GTK app's do:
-//! GNOME's `button-layout`, read from the portal once before the window
-//! opens ([`load_button_layout`]).
+//! GNOME's `button-layout`, followed through the portal on a background
+//! thread ([`follow_button_layout`]), so a change in GNOME Tweaks shows at
+//! once.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use gpui::WindowDecorations;
 
@@ -82,29 +83,84 @@ impl ButtonLayout {
     }
 }
 
-static LAYOUT: OnceLock<ButtonLayout> = OnceLock::new();
+/// A GNOME `button-layout` string that replaces the desktop's, so reference
+/// screenshots come out the same on any machine. Empty counts as unset
+/// (`:` is the layout with no buttons).
+const LAYOUT_ENV: &str = "CLAWDMETER_BUTTON_LAYOUT";
 
-/// Read the desktop's button layout, for a window about to open with
-/// `decorations`. It blocks on the portal, so it's asked only when we ask
-/// for client decorations, which is when our header bar shows. A compositor
-/// that offers server decorations yet answers client-side gets GTK's
-/// default.
-pub fn load_button_layout(decorations: WindowDecorations) {
+/// How long the window waits for the portal's first answer before opening
+/// with GTK's default: a running portal answers in milliseconds; one still
+/// starting at login answers later, and the bar changes then.
+#[cfg(target_os = "linux")]
+const FIRST_ANSWER: std::time::Duration = std::time::Duration::from_millis(250);
+
+static DEFAULT: LazyLock<Arc<ButtonLayout>> = LazyLock::new(|| Arc::new(ButtonLayout::default()));
+
+/// Where the bar's layout comes from.
+enum Source {
+    /// [`LAYOUT_ENV`], or GTK's default where there's no portal.
+    Fixed(Arc<ButtonLayout>),
+    /// GNOME's setting, kept current.
     #[cfg(target_os = "linux")]
-    if matches!(decorations, WindowDecorations::Client) {
-        LAYOUT.get_or_init(|| {
-            let read = clawdmeter_core::platform::portal_string("org.gnome.desktop.wm.preferences", "button-layout");
-            log::info!("header bar buttons: {}", read.as_deref().unwrap_or("not set, GTK's default"));
-            read.as_deref().map(ButtonLayout::parse).unwrap_or_default()
-        });
+    Portal(clawdmeter_core::platform::SettingWatch<Arc<ButtonLayout>>),
+}
+
+static SOURCE: OnceLock<Source> = OnceLock::new();
+
+/// Start following the desktop's button layout, for a window about to open
+/// with `decorations`. The portal is followed wherever our bar can show:
+/// client decorations, or any Wayland compositor, since one that offers
+/// server decorations may still answer client-side. Call it before GPUI
+/// starts, so the first portal read overlaps the start-up;
+/// [`await_button_layout`] then waits for it.
+pub fn follow_button_layout(decorations: WindowDecorations) {
+    SOURCE.get_or_init(|| {
+        if let Some(fixed) = std::env::var(LAYOUT_ENV).ok().filter(|v| !v.trim().is_empty()) {
+            log::info!("header bar buttons: {fixed:?} from {LAYOUT_ENV}");
+            return Source::Fixed(Arc::new(ButtonLayout::parse(&fixed)));
+        }
+        #[cfg(target_os = "linux")]
+        if matches!(decorations, WindowDecorations::Client) || gpui::guess_compositor() == "Wayland" {
+            return Source::Portal(clawdmeter_core::platform::SettingWatch::spawn(
+                "org.gnome.desktop.wm.preferences",
+                "button-layout",
+                |read| {
+                    log::debug!("header bar buttons: {read:?} from the portal (None: GTK's default)");
+                    Arc::new(read.map(ButtonLayout::parse).unwrap_or_default())
+                },
+            ));
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = decorations;
+        Source::Fixed(DEFAULT.clone())
+    });
+}
+
+/// Wait up to `FIRST_ANSWER` (250 ms) for the portal's first answer, so the
+/// window usually opens with the right buttons. Only a window that asks for
+/// client decorations waits: elsewhere the bar shows only if the compositor
+/// insists, and the answer is drawn when it lands.
+pub fn await_button_layout(decorations: WindowDecorations) {
+    #[cfg(target_os = "linux")]
+    if let (WindowDecorations::Client, Some(Source::Portal(watch))) = (decorations, SOURCE.get()) {
+        match watch.wait(FIRST_ANSWER) {
+            Some(layout) => log::info!("header bar buttons: {layout:?}"),
+            None => log::info!("header bar buttons: no portal answer yet; GTK's default until it comes"),
+        }
     }
     #[cfg(not(target_os = "linux"))]
     let _ = decorations;
 }
 
-/// The layout [`load_button_layout`] read, else GTK's default.
-pub fn button_layout() -> ButtonLayout {
-    LAYOUT.get().cloned().unwrap_or_default()
+/// The layout to draw now: the override, the portal's latest answer, or
+/// GTK's default.
+pub fn button_layout() -> Arc<ButtonLayout> {
+    match SOURCE.get() {
+        Some(Source::Fixed(layout)) => layout.clone(),
+        #[cfg(target_os = "linux")]
+        Some(Source::Portal(watch)) => watch.get().unwrap_or_else(|| DEFAULT.clone()),
+        None => DEFAULT.clone(),
+    }
 }
 
 /// The decorations to ask for. `CLAWDMETER_DECORATIONS=client|server`

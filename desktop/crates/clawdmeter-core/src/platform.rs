@@ -1,4 +1,5 @@
-//! Small host queries: hour format, UTC offset and light/dark appearance.
+//! Small host queries: hour format, UTC offset, light/dark appearance and,
+//! on Linux, desktop portal settings.
 
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -105,14 +106,91 @@ pub fn system_appearance() -> Option<Appearance> {
     }
 }
 
-/// A string from the desktop portal's settings
+/// A string setting from the desktop portal
 /// (`org.freedesktop.portal.Settings`), such as GNOME's
-/// `org.gnome.desktop.wm.preferences button-layout`. `None` when the portal,
-/// the namespace or the key is missing, or the value isn't a string. Blocks
-/// for the read, at most two seconds.
+/// `org.gnome.desktop.wm.preferences button-layout`, kept current by a
+/// background thread so reading it never blocks: one read, then the
+/// portal's `SettingChanged` signal. A missed read is retried as the
+/// appearance watch retries it, so a portal still starting at login
+/// answers late rather than never. Each answer goes through `parse` on that
+/// thread: the string, or `None` when the portal has no such setting (or it
+/// isn't a string). The thread ends after the watch is dropped.
 #[cfg(target_os = "linux")]
-pub fn portal_string(namespace: &str, key: &str) -> Option<String> {
-    portal::read_string(namespace, key)
+pub struct SettingWatch<T> {
+    answer: Arc<Answer<T>>,
+}
+
+#[cfg(target_os = "linux")]
+impl<T: Clone + Send + 'static> SettingWatch<T> {
+    /// Start watching `namespace` `key`.
+    pub fn spawn(namespace: &'static str, key: &'static str, parse: fn(Option<&str>) -> T) -> Self {
+        let answer = Arc::new(Answer::new());
+        let shared = Arc::downgrade(&answer);
+        let started = std::thread::Builder::new().name(format!("portal {key}")).spawn(move || {
+            let alive = shared.clone();
+            portal::follow(
+                namespace,
+                key,
+                move || alive.strong_count() > 0,
+                move |v| {
+                    if let Some(a) = shared.upgrade() {
+                        a.set(parse(v.and_then(portal::string).as_deref()));
+                    }
+                },
+            );
+        });
+        if let Err(e) = started {
+            log::warn!("portal: no thread to watch {namespace} {key} ({e})");
+        }
+        SettingWatch { answer }
+    }
+
+    /// The setting as last parsed, `None` until the portal has answered.
+    pub fn get(&self) -> Option<T> {
+        self.answer.get()
+    }
+
+    /// [`get`](Self::get), first waiting up to `timeout` for the portal's
+    /// first answer.
+    pub fn wait(&self, timeout: Duration) -> Option<T> {
+        self.answer.wait(timeout)
+    }
+}
+
+/// A watch's latest answer, and a wake-up for whoever waits on the first.
+#[cfg(target_os = "linux")]
+struct Answer<T> {
+    value: std::sync::Mutex<Option<T>>,
+    first: std::sync::Condvar,
+}
+
+#[cfg(target_os = "linux")]
+impl<T: Clone> Answer<T> {
+    fn new() -> Self {
+        Answer { value: std::sync::Mutex::new(None), first: std::sync::Condvar::new() }
+    }
+
+    /// The value is a plain answer: a panic mid-update can't leave it torn.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<T>> {
+        self.value.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn set(&self, v: T) {
+        *self.lock() = Some(v);
+        self.first.notify_all();
+    }
+
+    fn get(&self) -> Option<T> {
+        self.lock().clone()
+    }
+
+    fn wait(&self, timeout: Duration) -> Option<T> {
+        let (value, _) = self
+            .first
+            .wait_timeout_while(self.lock(), timeout, |v| v.is_none())
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        value.clone()
+    }
 }
 
 /// How often the watch asks on macOS (each read spawns `defaults`) and
@@ -276,7 +354,7 @@ impl Miss {
 }
 
 /// The xdg-desktop-portal's settings: `org.freedesktop.appearance
-/// color-scheme`, followed, and one-off string reads.
+/// color-scheme`, and any setting a [`SettingWatch`] follows.
 #[cfg(target_os = "linux")]
 mod portal {
     use super::{store, Appearance, Miss};
@@ -307,7 +385,7 @@ mod portal {
     }
 
     /// Unwraps a string the same way.
-    fn string(a: &dyn RefArg) -> Option<String> {
+    pub(super) fn string(a: &dyn RefArg) -> Option<String> {
         a.as_str().map(str::to_owned).or_else(|| a.as_iter()?.next().and_then(string))
     }
 
@@ -336,47 +414,65 @@ mod portal {
         read_value(conn, NAMESPACE, KEY).map(|v| appearance(&v))
     }
 
-    /// Read a string setting once, on a connection of its own.
-    pub(super) fn read_string(namespace: &str, key: &str) -> Option<String> {
-        let conn = Connection::new_session().ok()?;
-        string(&read_value(&conn, namespace, key).ok()?)
+    /// Follow the appearance until the watch is gone.
+    pub(super) fn watch(state: &Weak<AtomicU8>) {
+        let alive = state.clone();
+        let w = state.clone();
+        follow(
+            NAMESPACE,
+            KEY,
+            move || alive.strong_count() > 0,
+            move |v| {
+                if let Some(v) = v {
+                    store(&w, appearance(v));
+                }
+            },
+        );
     }
 
-    /// Follow the setting until the watch is gone: subscribe to
-    /// `SettingChanged`, read it once, then wait for signals. A missed read
-    /// is retried on the same connection; only a lost bus reconnects.
-    pub(super) fn watch(state: &Weak<AtomicU8>) {
-        while state.strong_count() > 0 {
+    /// Follow `namespace` `key` while `alive`: subscribe to
+    /// `SettingChanged`, read it once, then wait for signals. `on` gets
+    /// each value, or `None` when the portal has no such setting. A missed
+    /// read is retried on the same connection (a transient one without
+    /// telling `on`); only a lost bus reconnects.
+    pub(super) fn follow<F>(namespace: &'static str, key: &'static str, alive: impl Fn() -> bool, on: F)
+    where
+        F: Fn(Option<&dyn RefArg>) + Clone + Send + 'static,
+    {
+        while alive() {
             let Ok(conn) = Connection::new_session() else {
-                log::debug!("appearance: no session bus");
+                log::debug!("portal {key}: no session bus");
                 std::thread::sleep(RECONNECT);
                 continue;
             };
-            let w = state.clone();
+            let signal = on.clone();
             let rule = MatchRule::new_signal(IFACE, "SettingChanged").with_path(PATH);
             let subscribed =
-                conn.add_match(rule, move |(ns, key, v): (String, String, Variant<Box<dyn RefArg>>), _, _| {
-                    if ns == NAMESPACE && key == KEY {
-                        store(&w, appearance(&v));
+                conn.add_match(rule, move |(ns, k, v): (String, String, Variant<Box<dyn RefArg>>), _, _| {
+                    if ns == namespace && k == key {
+                        signal(Some(&v));
                     }
                     true
                 });
             if let Err(e) = subscribed {
-                log::debug!("appearance: can't subscribe ({e})");
+                log::debug!("portal {key}: can't subscribe ({e})");
                 std::thread::sleep(RECONNECT);
                 continue;
             }
             let mut next_read = Some(Instant::now());
             let mut misses = 0;
-            while state.strong_count() > 0 {
+            while alive() {
                 if next_read.is_some_and(|t| Instant::now() >= t) {
-                    match read(&conn) {
-                        Ok(a) => {
-                            store(state, a);
+                    match read_value(&conn, namespace, key) {
+                        Ok(v) => {
+                            on(Some(&v));
                             next_read = None;
                         }
                         Err(Miss::Disconnected) => break,
                         Err(m) => {
+                            if m == Miss::Absent {
+                                on(None);
+                            }
                             misses += 1;
                             next_read = Some(Instant::now() + m.retry_in(misses));
                         }
@@ -409,6 +505,24 @@ mod tests {
         assert_eq!(Appearance::from_portal(0), Some(Appearance::Light), "no preference: GNOME's default, light");
         assert_eq!(Appearance::from_portal(7), None);
         assert_eq!(Appearance::default(), Appearance::Dark, "unknown is dark");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn setting_answers() {
+        let a = Answer::<u8>::new();
+        assert_eq!(a.get(), None);
+        assert_eq!(a.wait(Duration::from_millis(20)), None, "no answer: the wait runs out");
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(20));
+                a.set(7);
+            });
+            assert_eq!(a.wait(Duration::from_secs(10)), Some(7), "the first answer ends the wait");
+        });
+        a.set(9);
+        assert_eq!(a.get(), Some(9), "a later answer replaces it");
+        assert_eq!(a.wait(Duration::ZERO), Some(9), "an answered watch doesn't wait");
     }
 
     #[test]
