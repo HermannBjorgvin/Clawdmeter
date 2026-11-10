@@ -334,9 +334,12 @@ static void fit_period(Layout& L) {
 
 // ─── Rectangular panels: top-down ────────────────────────────────────────────
 
+static void fit_height(Layout& L, const Chrome& c);
+
 // The design as tuned: header at the top, cards from d.top, the status line
 // at the bottom. False when the cards, the title or the status line don't
-// fit this panel.
+// fit this panel. A row design is the strip's only one, so it is fitted to
+// the panel's height first.
 static bool place_flow(Layout& L, const Design& d, const Chrome** chrome) {
     const Chrome& c = *(*chrome = d.chrome);
     place_header(L, c, c.margin, L.w - c.margin, 0);
@@ -345,6 +348,7 @@ static bool place_flow(Layout& L, const Design& d, const Chrome** chrome) {
     L.status_w = L.w - 2 * d.margin;
     L.pair_w = L.w - d.margin;     // free text keeps half a margin off the edges
     place_cards(L, d, d.margin, L.w - 2 * d.margin, d.top);
+    if (d.row) fit_height(L, c);
     fit_title(L, c);
     return cards_fit(L) && L.title_font[0] && status_top(L) - stack_bottom(L) >= c.band_min;
 }
@@ -372,28 +376,39 @@ static void fit_narrow(Layout& L) {
     L.ent_pct_font = &font_styrene_20;
 }
 
-static int16_t card_gap(const Layout& L) { return L.card[1].y - (L.card[0].y + L.card[0].h); }
+static bool side_by_side(const Layout& L) { return L.card[1].y == L.card[0].y; }
 
+// Space between stacked cards; side by side, their gap is horizontal and
+// height has none to give.
+static int16_t card_gap(const Layout& L) {
+    return side_by_side(L) ? 0 : L.card[1].y - (L.card[0].y + L.card[0].h);
+}
+
+// Both cards `dy` lower and `grow` taller; stacked, the gap between them
+// changes by `gap_add`.
 static void move_cards(Layout& L, int16_t dy, int16_t grow, int16_t gap_add) {
+    const bool row = side_by_side(L);
     const int16_t gap = card_gap(L) + gap_add;
     L.card[0].y += dy;
     L.card[0].h += grow;
     L.card[1].h += grow;
-    L.card[1].y = L.card[0].y + L.card[0].h + gap;
+    L.card[1].y = row ? L.card[0].y : L.card[0].y + L.card[0].h + gap;
 }
 
 // Height the design wasn't tuned for. A tall panel shares its spare height
-// beyond band_max out (a quarter to each card, an eighth each to the gap
-// and above the cards; the rest stays under them), so there's no empty
-// band. One too short for the small design squeezes, in turn: the status
-// line's inset down to 4 px, each card up to 10 px shorter (a slimmer bar,
-// the reset line higher), the gap down to 4 px, the cards up to the header.
+// beyond band_max out (stacked: a quarter to each card, an eighth each to
+// the gap and above the cards; side by side: half to the cards, a quarter
+// above them; the rest stays under them), so there's no empty band. One too
+// short squeezes, in turn: the status line's inset down to 4 px, each card
+// up to 10 px shorter (a slimmer bar, the reset line higher), the gap down
+// to 4 px, the cards up to the header.
 static void fit_height(Layout& L, const Chrome& c) {
+    const bool row = side_by_side(L);
     const int16_t band = status_top(L) - stack_bottom(L);
     if (band > c.band_max) {
         const int16_t spare = band - c.band_max;
-        const int16_t grow = spare / 4;
-        move_cards(L, spare / 8, grow, spare / 8);
+        const int16_t grow = row ? spare / 2 : spare / 4;
+        move_cards(L, row ? spare / 4 : spare / 8, grow, spare / 8);
         L.bar_y += grow / 3;
         L.reset_y += 2 * grow / 3;
         return;
@@ -406,7 +421,7 @@ static void fit_height(Layout& L, const Chrome& c) {
         return t;
     };
     L.status_y += take(-L.status_y - 4);
-    const int16_t shrink = take(20) / 2;
+    const int16_t shrink = row ? take(10) : take(20) / 2;
     move_cards(L, 0, -shrink, 0);
     L.bar_y -= shrink / 5;
     L.bar_h -= shrink / 5;

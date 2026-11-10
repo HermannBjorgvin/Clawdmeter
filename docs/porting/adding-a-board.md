@@ -74,7 +74,8 @@ title and status line fit, measured with the real fonts. Then, by shape:
 - **Short** (under the small design's 240 px): the status line, cards and
   gaps squeeze.
 - **Landscape strip** (wider than tall, and stacking doesn't fit): the cards
-  sit side by side.
+  sit side by side, taller or squeezed to the strip's height like the
+  stacked ones.
 - **Round** (`round_panel`): the cards are centred and as wide as the
   circle allows at their corners; the header sits right above them and the
   status line right under them, both inside the circle (the small header
