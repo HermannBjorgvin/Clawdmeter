@@ -289,6 +289,11 @@ static void test_row_320x172(void) {
     TEST_ASSERT_EQUAL_PTR(&font_styrene_24, L.pct_font);
     TEST_ASSERT_EQUAL_PTR(&font_tiempos_34, L.ent_pct_font);   // the serif, as on SMALL
     TEST_ASSERT_EQUAL_PTR(PILL_TEXT, L.pills);
+    // A half-width card has no room for the pace word, even in the smallest
+    // type: the period line is "Resets May 30" and the bar's colour shows
+    // the pace.
+    TEST_ASSERT_TRUE(L.period_short);
+    TEST_ASSERT_EQUAL_PTR(&font_styrene_12, L.period_font);
 }
 
 // Kerned, per-glyph-rounded widths, as lv_font_get_glyph_width sums them.
