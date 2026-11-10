@@ -136,13 +136,22 @@ static void check_panel(const Panel& p) {
     }
     check_apart("cards", card(0), card(1));
 
-    // The first card alone (acct "week"): centred on the space both take, so
-    // it keeps clear of everything the two cards keep clear of.
-    const Box lone = { L.card[0].x, layout_lone_card_y(L), L.card[0].w, L.card[0].h };
+    // The first card alone (acct "week"), where ui.cpp draws it: centred on
+    // the space both take, clear of the header.
+    const Box lone = { layout_lone_card_x(L), layout_lone_card_y(L), L.card[0].w, L.card[0].h };
     check_on_glass("lone card", lone, 8);
+    check_apart("lone card vs corner Clawd", lone, logo_art());
+    check_apart("lone card vs battery", lone, battery());
+    for (title_fmt = 0; title_fmt < 2; title_fmt++) {
+        const lv_font_t* f = L.title_font[title_fmt];
+        if (f) check_apart("lone card vs title", lone, { 0, L.title_y[title_fmt], p.w, ink_h(f) });
+    }
     const int above = lone.y - L.card[0].y;
     const int below = L.card[1].y + L.card[1].h - (lone.y + lone.h);
     if (above < 0 || below < 0 || abs(above - below) > 1) fail("lone card not centred on the cards", lone);
+    const int left = lone.x - L.card[0].x;
+    const int right = L.card[1].x + L.card[1].w - (lone.x + lone.w);
+    if (left < 0 || right < 0 || abs(left - right) > 1) fail("lone card not centred across the cards", lone);
 
     // Inside a card.
     const int inner_w = L.card[0].w - 2 * L.pad_x, inner_h = L.card[0].h - 2 * L.pad_y;
