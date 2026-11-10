@@ -50,6 +50,10 @@ static void touch_read_into_shared_state(void) {
 
     uint16_t raw_x = ((uint16_t)(data[2] & 0x0F) << 8) | data[3];   // 0..171
     uint16_t raw_y = ((uint16_t)(data[4] & 0x0F) << 8) | data[5];   // 0..319
+    // The controller can overshoot the edge by a few counts; clamp so the
+    // mirrored mappings below never wrap.
+    if (raw_x > LCD_PANEL_W - 1) raw_x = LCD_PANEL_W - 1;
+    if (raw_y > LCD_PANEL_H - 1) raw_y = LCD_PANEL_H - 1;
 
 #if LCD_ROTATION == 1
     // 90° — swap axes, no mirror.
