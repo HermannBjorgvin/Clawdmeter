@@ -162,8 +162,6 @@ static const Design SMALL = {
     .pair_y = { 12, 56, 80, 112 },
 };
 
-static const Design* const DESIGNS[] = { &LARGE, &COMPACT, &SMALL };
-
 // A landscape strip (320x172, LCD-1.47): the small design's chrome with the
 // cards side by side, for a panel too short to stack them.
 static const Design ROW = {
@@ -175,6 +173,9 @@ static const Design ROW = {
     .pair_y = { 0, 32, 56, 82 },
     .row = true,
 };
+
+// Largest first; ROW only on a panel wider than it is tall.
+static const Design* const DESIGNS[] = { &LARGE, &COMPACT, &SMALL, &ROW };
 
 #define TITLE_GAP   4   // title keeps this far from the logo and the battery
 #define PILL_GAP    4   // the percentage keeps this far from its pill
@@ -474,26 +475,23 @@ Layout layout_compute(const LayoutShape& shape) {
     L.w = shape.w;
     L.h = shape.h;
 
-    // The largest design that fits; the small one is kept regardless and
-    // adapted to the panel below.
+    // The largest design that fits; else the small one, adapted to the
+    // panel below.
     const Design* d = nullptr;
     const Chrome* c = nullptr;
-    bool placed = false;
     for (const Design* each : DESIGNS) {
-        d = each;
-        if (shape.round ? place_round(L, *d, &c) : place_flow(L, *d, &c)) {
-            placed = true;
+        if (each->row && (shape.round || shape.w <= shape.h)) continue;
+        if (shape.round ? place_round(L, *each, &c) : place_flow(L, *each, &c)) {
+            d = each;
             break;
         }
     }
-    // Stacking doesn't fit a panel wider than it is tall: side by side.
-    bool row = false;
-    if (!placed && !shape.round && shape.w > shape.h) {
-        row = place_flow(L, ROW, &c);
-        if (row) d = &ROW;
-        else     place_flow(L, *d, &c);
+    if (!d) {
+        d = &SMALL;
+        if (shape.round) place_round(L, *d, &c);
+        else             place_flow(L, *d, &c);
     }
-    if (!shape.round && !row) {
+    if (!shape.round && !d->row) {
         fit_narrow(L);
         fit_height(L, *c);
     }
