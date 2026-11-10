@@ -44,7 +44,10 @@ static void sample_battery(void) {
     for (int i = 0; i < 4; i++) mv += analogReadMilliVolts(BAT_ADC_PIN);
     float vbat = (mv / 4) * BAT_VOLT_DIVIDER / 1000.0f;
 
-    if (vbat < 3.0f) {          // divider floating — no battery connected
+    // Divider floating: no battery. On USB with no cell the charger may hold
+    // VBAT anywhere up to full, so a missing cell can also read as a
+    // battery (empty or full, per unit); see this board's CLAUDE.md.
+    if (vbat < 3.0f) {
         cached_pct = -1;
         return;
     }
