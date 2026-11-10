@@ -3,6 +3,7 @@
 #include <lvgl.h>
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
+#include <driver/gpio.h>
 
 #include "data.h"
 #include "ui.h"
@@ -251,6 +252,13 @@ static void check_serial_cmd() {
 extern "C" void board_init(void);
 
 void setup() {
+    // Install the GPIO ISR service first, before Serial and the drivers start
+    // their interrupts. On dual-core chips the install runs esp_intr_alloc on
+    // the ipc task, whose stack is 1 KB, and an interrupt landing mid-install
+    // can overflow it (a boot panic, #264); this early, that is rare.
+    // attachInterrupt() accepts the service already being installed.
+    gpio_install_isr_service(ARDUINO_ISR_FLAG);
+
     Serial.begin(115200);
     delay(300);
     Serial.println("{\"ready\":true}");
