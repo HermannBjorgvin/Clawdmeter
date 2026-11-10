@@ -79,7 +79,7 @@ impl AppView {
                 if let Some(page) = pages.last() {
                     v.go(*page, cx);
                     if !window.is_window_active() {
-                        log::info!(
+                        log::debug!(
                             "asked to show {}: raising the window (a Wayland compositor may refuse, \
                              and then a minimized window stays minimized)",
                             page.as_str()

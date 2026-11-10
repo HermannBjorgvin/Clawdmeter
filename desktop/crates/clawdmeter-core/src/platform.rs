@@ -112,7 +112,9 @@ pub fn system_appearance() -> Option<Appearance> {
 /// background thread so reading it never blocks: one read, then the
 /// portal's `SettingChanged` signal. A missed read is retried as the
 /// appearance watch retries it, so a portal still starting at login
-/// answers late rather than never. Each answer goes through `parse` on that
+/// answers late rather than never; a portal that answers it has no such
+/// setting isn't asked again, since a value added later arrives as
+/// `SettingChanged`. Each answer goes through `parse` on that
 /// thread: the string, or `None` when the portal has no such setting (or it
 /// isn't a string). The thread ends after the watch is dropped.
 #[cfg(target_os = "linux")]
@@ -312,9 +314,13 @@ fn poll_read() -> Option<Appearance> {
 enum Miss {
     /// The session bus went away: reconnect.
     Disconnected,
-    /// No portal, no appearance backend, or the key unknown: ask again
-    /// rarely, on the same connection.
+    /// No portal, no settings interface, or one that refuses us: ask again
+    /// rarely, on the same connection (a portal can start later).
     Absent,
+    /// The portal answered that it has no such setting, as KDE's and
+    /// wlroots' portals do for GNOME's keys. A value added later arrives as
+    /// `SettingChanged`, so it isn't asked again.
+    Unset,
     /// The portal predates `ReadOne`: use `Read`.
     OldPortal,
     /// Anything else (a timeout, say): ask again soon.
@@ -334,8 +340,8 @@ impl Miss {
             | "org.freedesktop.DBus.Error.AccessDenied"
             | "org.freedesktop.DBus.Error.NameHasNoOwner"
             | "org.freedesktop.DBus.Error.UnknownObject"
-            | "org.freedesktop.DBus.Error.UnknownInterface"
-            | "org.freedesktop.portal.Error.NotFound" => Miss::Absent,
+            | "org.freedesktop.DBus.Error.UnknownInterface" => Miss::Absent,
+            "org.freedesktop.portal.Error.NotFound" => Miss::Unset,
             "org.freedesktop.DBus.Error.UnknownMethod" => Miss::OldPortal,
             _ => Miss::Transient,
         }
@@ -376,8 +382,16 @@ mod portal {
     /// How long one wait for signals lasts before checking the watch is
     /// still wanted.
     const WAIT: Duration = Duration::from_secs(2);
-    /// Before connecting again after the bus went away (or wasn't there).
+    /// Before connecting again when there's no bus, and the most a lost
+    /// connection waits (see [`reconnect_delay`]).
     const RECONNECT: Duration = Duration::from_secs(30);
+
+    /// Before reconnecting after `lost` connections in a row went away:
+    /// 1 s, doubling up to [`RECONNECT`]. Without it, a bus that accepts
+    /// connections but fails every call would be dialled in a tight loop.
+    pub(super) fn reconnect_delay(lost: u32) -> Duration {
+        Duration::from_secs(1 << lost.saturating_sub(1).min(5)).min(RECONNECT)
+    }
 
     /// Unwraps the portal's variant (two deep from the older `Read`).
     fn number(a: &dyn RefArg) -> Option<u64> {
@@ -432,13 +446,17 @@ mod portal {
 
     /// Follow `namespace` `key` while `alive`: subscribe to
     /// `SettingChanged`, read it once, then wait for signals. `on` gets
-    /// each value, or `None` when the portal has no such setting. A missed
-    /// read is retried on the same connection (a transient one without
-    /// telling `on`); only a lost bus reconnects.
+    /// each value, or `None` when there's no such setting. A portal that
+    /// answers it has none ([`Miss::Unset`]) isn't asked again; with no
+    /// portal at all ([`Miss::Absent`]) it's asked every minute; a transient
+    /// miss is retried without telling `on`. Only a lost bus reconnects,
+    /// after [`reconnect_delay`].
     pub(super) fn follow<F>(namespace: &'static str, key: &'static str, alive: impl Fn() -> bool, on: F)
     where
         F: Fn(Option<&dyn RefArg>) + Clone + Send + 'static,
     {
+        // Connections lost in a row since the portal last answered.
+        let mut lost = 0;
         while alive() {
             let Ok(conn) = Connection::new_session() else {
                 log::debug!("portal {key}: no session bus");
@@ -467,6 +485,12 @@ mod portal {
                         Ok(v) => {
                             on(Some(&v));
                             next_read = None;
+                            lost = 0;
+                        }
+                        Err(Miss::Unset) => {
+                            on(None);
+                            next_read = None;
+                            lost = 0;
                         }
                         Err(Miss::Disconnected) => break,
                         Err(m) => {
@@ -481,6 +505,10 @@ mod portal {
                 if conn.process(WAIT).is_err() {
                     break; // the bus went away
                 }
+            }
+            lost += 1;
+            if alive() {
+                std::thread::sleep(reconnect_delay(lost));
             }
         }
     }
@@ -509,6 +537,14 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn reconnects_back_off() {
+        let secs: Vec<u64> = (1..=8).map(|n| portal::reconnect_delay(n).as_secs()).collect();
+        assert_eq!(secs, [1, 2, 4, 8, 16, 30, 30, 30], "1 s, doubling, capped at RECONNECT");
+        assert_eq!(portal::reconnect_delay(u32::MAX).as_secs(), 30, "no overflow however many are lost");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn setting_answers() {
         let a = Answer::<u8>::new();
         assert_eq!(a.get(), None);
@@ -528,7 +564,11 @@ mod tests {
     #[test]
     fn portal_misses() {
         assert_eq!(Miss::from_error(Some("org.freedesktop.DBus.Error.ServiceUnknown")), Miss::Absent);
-        assert_eq!(Miss::from_error(Some("org.freedesktop.portal.Error.NotFound")), Miss::Absent);
+        assert_eq!(
+            Miss::from_error(Some("org.freedesktop.portal.Error.NotFound")),
+            Miss::Unset,
+            "the portal answered: no such setting, so it isn't asked again"
+        );
         assert_eq!(Miss::from_error(Some("org.freedesktop.DBus.Error.UnknownMethod")), Miss::OldPortal);
         assert_eq!(Miss::from_error(Some("org.freedesktop.DBus.Error.Disconnected")), Miss::Disconnected);
         assert_eq!(Miss::from_error(Some("org.freedesktop.DBus.Error.NoReply")), Miss::Transient);
