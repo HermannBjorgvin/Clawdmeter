@@ -68,6 +68,7 @@ PROFILES = (
     Profile("cube", 284, 240, ("Xingzhi Cube 1.83",), buttons=2, touch=False),
     Profile("lcd183", 240, 284, ("Waveshare LCD-1.83",)),
     Profile("tdisplay", 170, 320, ("LilyGO T-Display S3",), touch=False),
+    Profile("lcd147", 320, 172, ("Waveshare LCD-1.47",), buttons=0),
     Profile("stick", 135, 240, ("M5StickS3",), touch=False),
     Profile("epaper", 200, 200, ("ePaper 1.54",), minimal=True, touch=False),
 )
