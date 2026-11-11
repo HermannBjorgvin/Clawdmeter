@@ -80,6 +80,8 @@ pub struct UpdateView {
     notes_tag: Option<String>,
     /// The page is on screen.
     active: bool,
+    /// "Skip this update" couldn't be saved.
+    skip_failed: bool,
 }
 
 impl EventEmitter<Navigate> for UpdateView {}
@@ -106,6 +108,7 @@ impl UpdateView {
             notes: Notes::Unloaded,
             notes_tag: None,
             active: false,
+            skip_failed: false,
         };
         v.reload();
         v
@@ -115,10 +118,20 @@ impl UpdateView {
     fn reload(&mut self) -> bool {
         let latest = if self.offer { newer_release(&self.paths) } else { None };
         let (repo, skipped) = match Settings::load(&self.paths) {
-            Ok(s) => (s.release_repo, s.skipped_update),
+            // A hand-written `2.5.0` skips `v2.5.0` too.
+            Ok(s) => (s.release_repo, s.skipped_update.as_deref().and_then(release::release_tag)),
             Err(_) => (self.repo.clone(), self.skipped.clone()),
         };
         let changed = latest != self.latest || skipped != self.skipped || repo != self.repo;
+        if repo != self.repo {
+            // Another repo's release of the same name is another release.
+            self.notes = Notes::Unloaded;
+            self.notes_tag = None;
+            if !matches!(self.download, Download::Running(_)) {
+                self.download = Download::Idle;
+                self.download_tag = None;
+            }
+        }
         self.latest = latest;
         self.skipped = skipped;
         self.repo = repo;
@@ -151,6 +164,11 @@ impl UpdateView {
         self.active = active;
         if active {
             self.reload();
+            // Coming back to the page asks again for notes that didn't load.
+            if matches!(self.notes, Notes::Failed) {
+                self.notes_tag = None;
+            }
+            self.skip_failed = false;
             self.load_notes(cx);
         }
         cx.notify();
@@ -221,17 +239,27 @@ impl UpdateView {
     /// announced again.
     fn skip(&mut self, cx: &mut Context<Self>) {
         let Some(tag) = self.latest.clone() else { return };
-        self.set_skipped(Some(tag));
-        cx.emit(Navigate(Page::Overview));
+        if self.set_skipped(Some(tag)) {
+            cx.emit(Navigate(Page::Overview));
+        }
         cx.notify();
     }
 
-    fn set_skipped(&mut self, tag: Option<String>) {
+    /// Save the skipped release; false (and a message on the page) when the
+    /// config couldn't be written.
+    fn set_skipped(&mut self, tag: Option<String>) -> bool {
         let saved = tag.clone();
         match write_settings(&self.paths, move |s, _| s.skipped_update = saved) {
-            Ok(()) => self.skipped = tag,
-            Err(e) => log::warn!("couldn't save skipped_update: {e}"),
+            Ok(()) => {
+                self.skipped = tag;
+                self.skip_failed = false;
+            }
+            Err(e) => {
+                log::warn!("couldn't save skipped_update: {e}");
+                self.skip_failed = true;
+            }
         }
+        !self.skip_failed
     }
 
     /// Download the package of release `tag` to the Downloads folder, then
@@ -340,7 +368,8 @@ impl UpdateView {
                 "update-skip",
                 "Skip this update",
                 ButtonKind::Normal,
-                true,
+                // Not while its download runs: that ends by opening it.
+                running.is_none(),
                 cx.listener(|v, _, _, cx| v.skip(cx)),
             ))
         };
@@ -376,6 +405,9 @@ impl UpdateView {
         if failed {
             block = block.child(notice(t, Tone::Bad, "Couldn't download it. Try again, or get it from GitHub."));
         }
+        if self.skip_failed {
+            block = block.child(notice(t, Tone::Bad, "Couldn't save that to the config file."));
+        }
         block
     }
 
@@ -385,7 +417,9 @@ impl UpdateView {
         match &self.notes {
             Notes::Unloaded | Notes::Loading => list.child(para(t, "Loading the release notes.")),
             Notes::Failed => list.child(para(t, "Couldn't load the release notes. They are on the GitHub page.")),
-            Notes::Ready(notes) if notes.is_empty() => list.child(para(t, "This release has no notes.")),
+            Notes::Ready(notes) if notes.is_empty() => {
+                list.child(para(t, "No release notes were found. See the GitHub page."))
+            }
             Notes::Ready(notes) => list.children(notes.iter().map(|n| release_card(t, n))),
         }
     }
@@ -444,12 +478,14 @@ fn note_lines(body: &str) -> Vec<NoteLine> {
             comment = !text.contains("-->");
             continue;
         }
-        if text.is_empty() || text.chars().all(|c| matches!(c, '-' | '*' | '_' | ' ')) {
+        if text.is_empty() || text.starts_with("```") || text.chars().all(|c| matches!(c, '-' | '*' | '_' | ' ')) {
             continue;
         }
         let indent = line.len() - text.len();
-        let item = if let Some(rest) = text.strip_prefix('#') {
-            NoteLine::Heading(plain(rest.trim_start_matches('#')))
+        let text = text.strip_prefix("> ").unwrap_or(text);
+        let heading = text.trim_start_matches('#').strip_prefix(' ').filter(|_| text.starts_with('#'));
+        let item = if let Some(rest) = heading {
+            NoteLine::Heading(plain(rest))
         } else if let Some(rest) = ["- ", "* ", "+ "].iter().find_map(|m| text.strip_prefix(m)) {
             NoteLine::Bullet(plain(rest), (indent / 2).min(3))
         } else {
@@ -465,19 +501,13 @@ fn note_lines(body: &str) -> Vec<NoteLine> {
 fn plain(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s.trim();
-    while let Some(open) = rest.find('[') {
-        let link = rest[open..].find("](").and_then(|mid| {
-            let end = rest[open + mid..].find(')')?;
-            Some((open + mid, open + mid + end))
-        });
-        match link {
-            Some((mid, end)) => {
-                out.push_str(&rest[..open]);
-                out.push_str(&rest[open + 1..mid]);
-                rest = &rest[end + 1..];
-            }
-            None => break,
-        }
+    // Each `](` closes a link whose text starts at the nearest `[` before it.
+    while let Some(mid) = rest.find("](") {
+        let (Some(open), Some(end)) = (rest[..mid].rfind('['), rest[mid..].find(')')) else { break };
+        // `![alt](image)` keeps its alt text.
+        out.push_str(rest[..open].strip_suffix('!').unwrap_or(&rest[..open]));
+        out.push_str(&rest[open + 1..mid]);
+        rest = &rest[mid + end + 1..];
     }
     out.push_str(rest);
     out.replace("**", "").replace("__", "").replace('`', "")
@@ -520,7 +550,7 @@ impl Render for UpdateView {
         let page = div().flex_1().flex().flex_col().gap(px(20.));
         let Some(tag) = self.latest.clone() else {
             let detail = if self.offer {
-                format!("Version {} is the latest release.", crate::version())
+                format!("The daily check has found no release newer than {}.", crate::version())
             } else {
                 format!("Version {} is a local build, so it isn't offered releases.", crate::version())
             };
@@ -529,7 +559,7 @@ impl Render for UpdateView {
                     .flex()
                     .flex_col()
                     .gap(px(6.))
-                    .child(heading(&t, "Clawdmeter is up to date"))
+                    .child(heading(&t, if self.offer { "No update available" } else { "Updates are off" }))
                     .child(para(&t, detail)),
             );
         };
@@ -569,6 +599,12 @@ mod tests {
             ]
         );
         assert_eq!(plain("a [b](c) d [e](f)"), "a b d e");
+        assert_eq!(plain("[Desktop] Fix ([#12](u)) ![shot](s.png)"), "[Desktop] Fix (#12) shot");
+        assert_eq!(plain("é [ü](x) ](  ) ["), "é ü ](  ) [");
+        assert_eq!(
+            note_lines("#262 fixed\n> quoted\n```rust\nlet a = 1;\n```"),
+            [NoteLine::Text("#262 fixed".into()), NoteLine::Text("quoted".into()), NoteLine::Text("let a = 1;".into()),]
+        );
         assert_eq!(plain("an [open bracket"), "an [open bracket");
         assert!(note_lines("\n\n").is_empty());
     }

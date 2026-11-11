@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(ago(12), "12 s ago");
         assert_eq!(ago(200), "3 min ago");
         assert_eq!(ago(7300), "2 h ago");
-        for p in Page::SIDEBAR.into_iter().chain([Page::Setup]) {
+        for p in Page::SIDEBAR.into_iter().chain([Page::Update, Page::Setup]) {
             assert_eq!(Page::parse(p.as_str()), Some(p));
         }
         assert_eq!(Page::parse("background"), Some(Page::Settings));

@@ -457,6 +457,8 @@ mod tests {
 
         click(cx, "update-skip");
         view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Overview));
+        // (gpui 0.2.2 never forgets a `debug_bounds` entry, so the footer row
+        // going away can only be checked through what it is drawn from.)
         update.read_with(cx, |u, _| {
             assert_eq!(u.available(), Some("v999.0.0"), "still there for Settings to open");
             assert_eq!(u.announced(), None);

@@ -319,7 +319,20 @@ pub fn releases_url(repo: &str) -> String {
 /// updating to `latest`, newest first: `latest` itself and the releases
 /// between the two. Prereleases other than `latest` are left out.
 pub fn release_notes(repo: &str, app_version: &str, latest: &str) -> Result<Vec<ReleaseNotes>, ReleaseError> {
-    release_notes_from_api(&get_string(&releases_url(repo))?, app_version, latest)
+    // Timed: the page waits on this, and nothing retries a hung request.
+    let url = releases_url(repo);
+    let api = ureq::get(&url)
+        .config()
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .header("User-Agent", USER_AGENT)
+        .header("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|e| ReleaseError::from_ureq(&url, e))?
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| ReleaseError::Offline(format!("{url}: {e}")))?;
+    release_notes_from_api(&api, app_version, latest)
 }
 
 /// [`release_notes`] from the API's answer (split out for tests).
