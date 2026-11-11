@@ -8,6 +8,7 @@
 //!   cargo run -p clawdmeter-app --example demo -- [--page PAGE] [--status connected|off]
 //!   [--board none|fresh|current|old] [--setup welcome|board|flash|pair|hooks|done] [--hooks-preview]
 //!   [--flash-to identify|firmware|flash|done] [--shop] [--accounts retrying] [--refresh wait|checking]
+//!   [--app-update download|downloading|ready|failed|none]
 //!   [--advanced] [--session idle|week] [--buttons custom] [--edit primary|secondary|pwr] [--record]
 //!   [--height PX]
 //! ```
@@ -202,6 +203,7 @@ fn main() {
         writeln!(f, "button_secondary = ctrl+shift+m hold\nbutton_pwr = volume-up").unwrap();
     }
     // A taller window, so a long page fits one screenshot.
+    let app_update = arg(&args, "--app-update");
     let height = arg(&args, "--height").and_then(|h| h.parse::<f32>().ok());
 
     clawdmeter_app::ui::open_with_height(height, move |window, cx| {
@@ -210,7 +212,15 @@ fn main() {
         let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));
         let settings = cx.new(|cx| SettingsView::with_usb(p.clone(), Page::Device, false, cx));
         let flasher = cx.new(|cx| FlasherView::with_hardware(p.clone(), Some(manifest), hw, cx));
-        let app = AppView::build(p, page, overview, settings.clone(), flasher.clone(), window, cx);
+        let mut app = AppView::build(p, page, overview, settings.clone(), flasher.clone(), window, cx);
+        // `--app-update` offers the fake release as an app update too, in the
+        // given state (`none`: an install with no package to download).
+        app.offer_app_update(app_update.is_some());
+        match app_update.as_deref() {
+            Some("none") => app.set_update_package(None),
+            Some(state) => app.show_update_state(&format!("v{VERSION}"), state),
+            None => {}
+        }
         if shop {
             flasher.update(cx, |f, cx| f.show_shop(true, cx));
         }

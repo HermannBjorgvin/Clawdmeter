@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -153,6 +154,21 @@ fn get(url: &str) -> Result<ureq::http::Response<ureq::Body>, ReleaseError> {
         .map_err(|e| ReleaseError::from_ureq(url, e))
 }
 
+/// [`get`] for a large download: nothing is left waiting for good on a
+/// connection that went quiet (sleep, a network change).
+fn get_download(url: &str) -> Result<ureq::http::Response<ureq::Body>, ReleaseError> {
+    ureq::get(url)
+        .config()
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_recv_body(Some(Duration::from_secs(20 * 60)))
+        .build()
+        .header("User-Agent", USER_AGENT)
+        .header("Accept", "application/octet-stream, */*")
+        .call()
+        .map_err(|e| ReleaseError::from_ureq(url, e))
+}
+
 fn get_string(url: &str) -> Result<String, ReleaseError> {
     get(url)?.body_mut().read_to_string().map_err(|e| ReleaseError::Offline(format!("{url}: {e}")))
 }
@@ -268,6 +284,188 @@ pub fn fetch_image(
     fs::File::create(&tmp)?.write_all(&data)?;
     fs::rename(&tmp, &path)?;
     Ok(data)
+}
+
+/// Asset name of the release's checksum list (`sha256sum` output).
+pub const SUMS_ASSET: &str = "SHA256SUMS";
+
+/// A desktop app package a release publishes (`release.yml`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppPackage {
+    /// macOS disk image (universal).
+    Dmg,
+    /// Windows installer (x86_64).
+    Msi,
+    /// Debian/Ubuntu package (amd64).
+    Deb,
+    /// Portable Linux build (x86_64).
+    AppImage,
+}
+
+impl AppPackage {
+    /// The package that updates this install, if the release has one: the
+    /// `.dmg` on macOS, the `.msi` on x86_64 Windows when running from where
+    /// it installs (`…\Programs\Clawdmeter`), and on x86_64 Linux the AppImage
+    /// when running from one or the `.deb` when the binary is the packaged
+    /// `/usr/bin/clawdmeter`. Anything else (Nix, a zip or tarball, a local
+    /// build, other architectures) has none: a package would install a
+    /// second copy beside the one that keeps running.
+    pub fn for_install(os: &str, arch: &str, appimage: bool, exe: &Path) -> Option<Self> {
+        match (os, arch) {
+            ("macos", _) => Some(AppPackage::Dmg),
+            ("windows", "x86_64") => {
+                let exe = exe.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+                exe.ends_with("/programs/clawdmeter/clawdmeter.exe").then_some(AppPackage::Msi)
+            }
+            ("linux", "x86_64") if appimage => Some(AppPackage::AppImage),
+            ("linux", "x86_64") if exe == Path::new("/usr/bin/clawdmeter") => Some(AppPackage::Deb),
+            _ => None,
+        }
+    }
+
+    /// [`AppPackage::for_install`] for the running process.
+    pub fn for_this_install() -> Option<Self> {
+        let exe = std::env::current_exe().unwrap_or_default();
+        let appimage = std::env::var_os("APPIMAGE").is_some_and(|v| !v.is_empty());
+        Self::for_install(std::env::consts::OS, std::env::consts::ARCH, appimage, &exe)
+    }
+
+    /// The asset's file name in the release tagged `tag` (`v2.5.0`).
+    pub fn asset(self, tag: &str) -> String {
+        match self {
+            AppPackage::Dmg => format!("clawdmeter-{tag}-macos-universal.dmg"),
+            AppPackage::Msi => format!("clawdmeter-{tag}-windows-x86_64.msi"),
+            AppPackage::Deb => format!("clawdmeter_{}_amd64.deb", tag.trim_start_matches('v')),
+            AppPackage::AppImage => format!("clawdmeter-{tag}-x86_64.AppImage"),
+        }
+    }
+
+    /// The OS opens this package into an installer (a mounted disk image, the
+    /// Windows installer). The others are files to install by hand.
+    pub fn opens_installer(self) -> bool {
+        matches!(self, AppPackage::Dmg | AppPackage::Msi)
+    }
+}
+
+/// The git tag for a release version: `2.5.0` and `v2.5.0` both give
+/// `v2.5.0`. `None` for anything that isn't a plain version, since the value
+/// comes from the network and ends up in URLs and file names.
+pub fn release_tag(version: &str) -> Option<String> {
+    let v = version.trim().trim_start_matches(['v', 'V']);
+    let plain = v.starts_with(|c: char| c.is_ascii_digit())
+        && v.len() <= 40
+        && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'));
+    plain.then(|| format!("v{v}"))
+}
+
+/// The release's page on GitHub.
+pub fn release_page_url(repo: &str, tag: &str) -> String {
+    format!("https://github.com/{repo}/releases/tag/{tag}")
+}
+
+/// The download URL of one of a release's assets.
+pub fn asset_url(repo: &str, tag: &str, asset: &str) -> String {
+    format!("https://github.com/{repo}/releases/download/{tag}/{asset}")
+}
+
+/// The hash `sha256sum` listed for `name`.
+pub fn sums_entry<'a>(sums: &'a str, name: &str) -> Option<&'a str> {
+    sums.lines().find_map(|line| {
+        let (hash, file) = line.trim().split_once(char::is_whitespace)?;
+        (file.trim_start().trim_start_matches('*') == name).then_some(hash)
+    })
+}
+
+fn file_sha256(path: &Path) -> io::Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    io::copy(&mut file, &mut hasher)?;
+    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Download the app package for `tag` from `repo` into `dir`, check it
+/// against the release's `SHA256SUMS`, and return where it is. A copy already
+/// there with the right hash is reused. `progress` gets `(downloaded,
+/// total)`; total is 0 when unknown.
+pub fn fetch_app_package(
+    repo: &str,
+    tag: &str,
+    package: AppPackage,
+    dir: &Path,
+    progress: impl FnMut(u64, u64),
+) -> Result<PathBuf, ReleaseError> {
+    fetch_app_package_with(repo, tag, package, dir, progress, get_string, |url| {
+        let resp = get_download(url)?;
+        let total = resp
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        Ok((Box::new(resp.into_body().into_reader()) as Box<dyn Read>, total))
+    })
+}
+
+/// [`fetch_app_package`] with the HTTP side injected (tests): `fetch` reads
+/// a text asset, `open` streams a binary one and gives its length.
+fn fetch_app_package_with(
+    repo: &str,
+    tag: &str,
+    package: AppPackage,
+    dir: &Path,
+    mut progress: impl FnMut(u64, u64),
+    fetch: impl Fn(&str) -> Result<String, ReleaseError>,
+    open: impl Fn(&str) -> Result<(Box<dyn Read>, u64), ReleaseError>,
+) -> Result<PathBuf, ReleaseError> {
+    let tag = release_tag(tag).ok_or_else(|| ReleaseError::Manifest(format!("bad release tag {tag:?}")))?;
+    let name = package.asset(&tag);
+    let sums = fetch(&asset_url(repo, &tag, SUMS_ASSET))?;
+    let expected = sums_entry(&sums, &name).ok_or_else(|| ReleaseError::MissingAsset(name.clone()))?.to_owned();
+    let path = dir.join(&name);
+    if file_sha256(&path).is_ok_and(|have| have.eq_ignore_ascii_case(&expected)) {
+        let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        progress(len, len);
+        return Ok(path);
+    }
+    let url = asset_url(repo, &tag, &name);
+    let (mut reader, total) = open(&url)?;
+    fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!("{name}.part"));
+    let written = (|| {
+        let mut file = fs::File::create(&tmp)?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        let mut done = 0u64;
+        loop {
+            let n = reader.read(&mut buf).map_err(|e| ReleaseError::Offline(format!("{url}: {e}")))?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n])?;
+            hasher.update(&buf[..n]);
+            done += n as u64;
+            progress(done, total);
+        }
+        file.flush()?;
+        let actual: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        if !actual.eq_ignore_ascii_case(&expected) {
+            return Err(ReleaseError::HashMismatch { file: name.clone(), expected: expected.clone(), actual });
+        }
+        drop(file);
+        // An AppImage is run as it is.
+        #[cfg(unix)]
+        if package == AppPackage::AppImage {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
+        }
+        fs::rename(&tmp, &path)?;
+        Ok(())
+    })();
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(path)
 }
 
 /// Remembers the last update check in `<cache>/last-update-check`.
@@ -422,6 +620,91 @@ mod tests {
         assert!(off.detail().unwrap().contains(&latest), "but the log keeps it");
         let bad = ReleaseError::HashMismatch { file: "a.bin".into(), expected: "aa".into(), actual: "bb".into() };
         assert!(bad.to_string().starts_with("Checksum mismatch for a.bin."));
+    }
+
+    #[test]
+    fn app_package_per_install() {
+        let exe = Path::new("/usr/bin/clawdmeter");
+        let home = Path::new("/home/me/.cargo/bin/clawdmeter");
+        assert_eq!(AppPackage::for_install("macos", "aarch64", false, home), Some(AppPackage::Dmg));
+        let msi = Path::new(r"C:\Users\me\AppData\Local\Programs\Clawdmeter\clawdmeter.exe");
+        assert_eq!(AppPackage::for_install("windows", "x86_64", false, msi), Some(AppPackage::Msi));
+        let zip = Path::new(r"C:\Tools\clawdmeter.exe");
+        assert_eq!(AppPackage::for_install("windows", "x86_64", false, zip), None, "an unzipped copy");
+        assert_eq!(AppPackage::for_install("linux", "x86_64", true, home), Some(AppPackage::AppImage));
+        assert_eq!(AppPackage::for_install("linux", "x86_64", false, exe), Some(AppPackage::Deb));
+        assert_eq!(AppPackage::for_install("linux", "x86_64", false, home), None, "tarball, Nix or local build");
+        assert_eq!(AppPackage::for_install("linux", "aarch64", true, exe), None);
+        // The names release.yml publishes.
+        assert_eq!(AppPackage::Dmg.asset("v2.5.0"), "clawdmeter-v2.5.0-macos-universal.dmg");
+        assert_eq!(AppPackage::Msi.asset("v2.5.0"), "clawdmeter-v2.5.0-windows-x86_64.msi");
+        assert_eq!(AppPackage::Deb.asset("v2.5.0-rc.1"), "clawdmeter_2.5.0-rc.1_amd64.deb");
+        assert_eq!(AppPackage::AppImage.asset("v2.5.0"), "clawdmeter-v2.5.0-x86_64.AppImage");
+    }
+
+    #[test]
+    fn tags_and_urls() {
+        assert_eq!(release_tag("2.5.0").as_deref(), Some("v2.5.0"));
+        assert_eq!(release_tag(" v2.5.0-rc.1\n").as_deref(), Some("v2.5.0-rc.1"));
+        for bad in ["", "dev", "v", "2.5.0/../x", "2.5.0?x=1", "2.5.0 beta"] {
+            assert_eq!(release_tag(bad), None, "{bad:?}");
+        }
+        assert_eq!(
+            release_page_url("HermannBjorgvin/Clawdmeter", "v2.5.0"),
+            "https://github.com/HermannBjorgvin/Clawdmeter/releases/tag/v2.5.0"
+        );
+        let sums = "aa11  manifest.json\nbb22 *clawdmeter-v2.5.0-macos-universal.dmg\n";
+        assert_eq!(sums_entry(sums, "manifest.json"), Some("aa11"));
+        assert_eq!(sums_entry(sums, "clawdmeter-v2.5.0-macos-universal.dmg"), Some("bb22"));
+        assert_eq!(sums_entry(sums, "universal.dmg"), None);
+    }
+
+    #[test]
+    fn app_package_is_downloaded_and_verified() {
+        let dir = std::env::temp_dir().join(format!("cm-pkg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let name = "clawdmeter-v2.5.0-macos-universal.dmg";
+        let sums = format!("{}  {name}\n", sha256_hex(b"hello"));
+        let fetch = |u: &str| {
+            assert_eq!(u, "https://github.com/o/r/releases/download/v2.5.0/SHA256SUMS");
+            Ok(sums.clone())
+        };
+        let body = |bytes: &'static [u8]| {
+            move |u: &str| {
+                assert_eq!(u, format!("https://github.com/o/r/releases/download/v2.5.0/{name}"));
+                Ok((Box::new(bytes) as Box<dyn Read>, bytes.len() as u64))
+            }
+        };
+        let mut seen = (0, 0);
+        let got =
+            fetch_app_package_with("o/r", "2.5.0", AppPackage::Dmg, &dir, |d, t| seen = (d, t), fetch, body(b"hello"))
+                .unwrap();
+        assert_eq!(got, dir.join(name));
+        assert_eq!(fs::read(&got).unwrap(), b"hello");
+        assert_eq!(seen, (5, 5));
+        // A verified copy is reused: nothing is downloaded again.
+        let again =
+            fetch_app_package_with("o/r", "v2.5.0", AppPackage::Dmg, &dir, |_, _| {}, fetch, |_| unreachable!());
+        assert_eq!(again.unwrap(), got);
+        // Wrong bytes are refused and leave nothing behind.
+        fs::remove_file(&got).unwrap();
+        let bad = fetch_app_package_with("o/r", "v2.5.0", AppPackage::Dmg, &dir, |_, _| {}, fetch, body(b"jello"));
+        assert!(matches!(bad, Err(ReleaseError::HashMismatch { .. })));
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        // A package the release doesn't list, and a tag that isn't a version.
+        let none = fetch_app_package_with("o/r", "v2.5.0", AppPackage::Msi, &dir, |_, _| {}, fetch, |_| unreachable!());
+        assert!(matches!(none, Err(ReleaseError::MissingAsset(_))));
+        let evil = fetch_app_package_with(
+            "o/r",
+            "../x",
+            AppPackage::Dmg,
+            &dir,
+            |_, _| {},
+            |_| unreachable!(),
+            |_| unreachable!(),
+        );
+        assert!(matches!(evil, Err(ReleaseError::Manifest(_))));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

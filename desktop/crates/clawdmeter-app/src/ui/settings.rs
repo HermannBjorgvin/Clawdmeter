@@ -750,8 +750,8 @@ impl SettingsView {
         let on = self.settings.update_check;
         pane = pane.child(field(
             t,
-            "Check for firmware updates",
-            "Checks GitHub daily. Updates appear here and in the tray.",
+            "Check for updates",
+            "Checks GitHub daily. Firmware updates appear here and in the tray, app updates in the sidebar.",
             toggle(t, "update-check", on, true, move |_, _, cx| {
                 let _ = me.update(cx, |v, cx| {
                     v.save(|s, _| s.update_check = !on);

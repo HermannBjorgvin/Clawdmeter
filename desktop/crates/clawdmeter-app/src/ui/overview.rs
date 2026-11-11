@@ -74,6 +74,11 @@ impl OverviewView {
     pub fn update_available(&self) -> bool {
         self.snap.as_ref().is_some_and(|s| s.update_available().is_some())
     }
+
+    /// The tag of a release newer than this app.
+    pub fn app_update(&self) -> Option<String> {
+        self.snap.as_ref().and_then(|s| s.app_update(crate::version()))
+    }
 }
 
 /// After a refresh press, how long to wait for the poll to start.

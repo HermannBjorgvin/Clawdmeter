@@ -22,6 +22,12 @@ pub mod onboarding;
 pub mod tray;
 pub mod ui;
 
+/// Built as a release: `CLAWDMETER_VERSION` was set, so [`version`] is a
+/// release's and can be compared with newer ones.
+pub fn is_release_build() -> bool {
+    option_env!("CLAWDMETER_VERSION").is_some_and(|v| !v.trim().is_empty())
+}
+
 /// The app's version: `CLAWDMETER_VERSION` at build time (CI sets it from
 /// the release tag; a leading `v` is dropped), else the crate version.
 pub fn version() -> &'static str {

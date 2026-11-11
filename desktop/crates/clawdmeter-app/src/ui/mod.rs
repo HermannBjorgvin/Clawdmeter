@@ -83,6 +83,7 @@ const ASSETS: &[(&str, &[u8])] = bundled![
         "spotpear_s3_154",
     ],
     "icons": [
+        "arrow-down-to-line",
         "gauge",
         "tablet",
         "zap",

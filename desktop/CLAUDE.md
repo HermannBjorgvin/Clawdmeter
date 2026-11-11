@@ -226,6 +226,17 @@ Per account (`probe.rs`, `oauth.rs`):
 - Nothing competes for the serial port: the flasher (`ui/flasher.rs`) touches
   USB only while on screen (`set_active`), the Device page probes only while
   shown, and the sidebar locks while a board is being written.
+- App updates: the daily check's tag (`StatusSnapshot::app_update`) newer
+  than a release build's version puts a control in the sidebar footer
+  (`AppView::update_control`). It downloads this install's package to
+  `~/Downloads` (`release::fetch_app_package`: `.dmg`, `.msi` from its install folder, `.deb` for
+  `/usr/bin/clawdmeter`, AppImage under `$APPIMAGE`), checks it against the
+  release's `SHA256SUMS`, then opens the installer (a `.deb` or AppImage is
+  shown in the file manager), and links to the release page. Other installs
+  get the link only. Builds without `CLAWDMETER_VERSION` are never offered
+  one, nor is a prerelease whose own tag is published (the check stores that
+  tag). The demo's `--app-update` shows each state; clicking the button
+  there fetches for real.
 - The wizard reuses the flasher (`FlashMode::Setup`: no step header,
   up-to-date boards can skip) and the Hooks page
   (`SettingsView::show(Page::Hooks, embedded)`). First run = no
