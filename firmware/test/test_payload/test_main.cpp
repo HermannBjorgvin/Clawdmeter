@@ -141,6 +141,33 @@ static void test_pace_marker(void) {
     TEST_ASSERT_EQUAL_INT(1, d.pace_marker);
 }
 
+static void test_button_actions(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_primary);      // absent: keep the saved action
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_secondary);
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_pwr);
+    TEST_ASSERT_TRUE(payload_parse("{\"k1\":4,\"k2\":0,\"k3\":1}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(4, d.btn_primary);
+    TEST_ASSERT_EQUAL_INT(0, d.btn_secondary);
+    TEST_ASSERT_EQUAL_INT(1, d.btn_pwr);
+    // A Ctrl+Shift+M chord, a held Ctrl+Space, play/pause.
+    TEST_ASSERT_TRUE(payload_parse("{\"k1\":66320,\"k2\":69932,\"k3\":131277}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(0x10310, d.btn_primary);
+    TEST_ASSERT_EQUAL_INT(0x1112C, d.btn_secondary);
+    TEST_ASSERT_EQUAL_INT(0x200CD, d.btn_pwr);
+    // Unknown (a newer app) or not an integer: as if absent, so the saved
+    // action stays.
+    TEST_ASSERT_TRUE(payload_parse("{\"k1\":99,\"k2\":-3,\"k3\":65536}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_primary);
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_secondary);
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_pwr);
+    TEST_ASSERT_TRUE(payload_parse("{\"k1\":\"x\",\"k2\":1.5,\"k3\":1e12}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_primary);
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_secondary);
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_pwr);
+}
+
 static void test_theme(void) {
     UsageData d;
     TEST_ASSERT_TRUE(payload_parse("{\"ok\":true}", &d, nullptr));
@@ -187,6 +214,7 @@ int main(void) {
     RUN_TEST(test_liveliness);
     RUN_TEST(test_attention_animation);
     RUN_TEST(test_pace_marker);
+    RUN_TEST(test_button_actions);
     RUN_TEST(test_theme);
     RUN_TEST(test_long_strings_truncate);
     return UNITY_END();

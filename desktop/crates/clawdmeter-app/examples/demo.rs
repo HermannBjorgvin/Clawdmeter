@@ -8,8 +8,13 @@
 //!   cargo run -p clawdmeter-app --example demo -- [--page PAGE] [--status connected|off]
 //!   [--board none|fresh|current|old] [--setup welcome|board|flash|pair|hooks|done] [--hooks-preview]
 //!   [--flash-to identify|firmware|flash|done] [--shop] [--accounts retrying] [--refresh wait|checking]
-//!   [--advanced] [--session idle|week] [--height PX]
+//!   [--advanced] [--session idle|week] [--buttons custom] [--edit primary|secondary|pwr] [--record]
+//!   [--height PX]
 //! ```
+//!
+//! `--buttons custom` gives the secondary button a held shortcut and PWR a
+//! media key; `--edit` opens a button's editor on the Device page, and
+//! `--record` has it listening for a shortcut.
 //!
 //! `--accounts retrying` adds a second account that is being rate-limited;
 //! `--refresh` shows the Overview's refresh button waiting out the
@@ -184,6 +189,18 @@ fn main() {
     let hooks_preview = args.iter().any(|a| a == "--hooks-preview");
     let shop = args.iter().any(|a| a == "--shop");
     let advanced = args.iter().any(|a| a == "--advanced");
+    let record = args.iter().any(|a| a == "--record");
+    let edit = arg(&args, "--edit").map(|b| match b.as_str() {
+        "secondary" => clawdmeter_core::config::Button::Secondary,
+        "pwr" => clawdmeter_core::config::Button::Pwr,
+        _ => clawdmeter_core::config::Button::Primary,
+    });
+    if arg(&args, "--buttons").as_deref() == Some("custom") {
+        use std::io::Write as _;
+        std::fs::create_dir_all(paths.config_file.parent().unwrap()).unwrap();
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&paths.config_file).unwrap();
+        writeln!(f, "button_secondary = ctrl+shift+m hold\nbutton_pwr = volume-up").unwrap();
+    }
     // A taller window, so a long page fits one screenshot.
     let height = arg(&args, "--height").and_then(|h| h.parse::<f32>().ok());
 
@@ -202,6 +219,9 @@ fn main() {
         }
         if hooks_preview {
             settings.update(cx, |s, cx| s.review_hook_install(cx));
+        }
+        if let Some(b) = edit {
+            settings.update(cx, |s, cx| s.edit_button(b, record, window, cx));
         }
         let wizard = app.wizard().clone();
         if let Some(step) = setup_step {
