@@ -60,12 +60,15 @@ pub enum Page {
     Hooks,
     /// Start at login, polling, files, quit.
     Settings,
+    /// A newer app release: its notes, the download, skip.
+    Update,
     /// The first-run setup wizard.
     Setup,
 }
 
 impl Page {
-    /// Pages in sidebar order (setup is reached from the sidebar footer).
+    /// Pages in sidebar order (setup and update are reached from the sidebar
+    /// footer, update from Settings too).
     pub const SIDEBAR: [Page; 6] =
         [Page::Overview, Page::Device, Page::Flash, Page::Accounts, Page::Hooks, Page::Settings];
 
@@ -80,6 +83,7 @@ impl Page {
             "accounts" => Page::Accounts,
             "hooks" => Page::Hooks,
             "settings" | "background" => Page::Settings,
+            "update" => Page::Update,
             "setup" => Page::Setup,
             _ => return None,
         })
@@ -94,6 +98,7 @@ impl Page {
             Page::Accounts => "accounts",
             Page::Hooks => "hooks",
             Page::Settings => "settings",
+            Page::Update => "update",
             Page::Setup => "setup",
         }
     }
@@ -107,6 +112,7 @@ impl Page {
             Page::Accounts => "Accounts",
             Page::Hooks => "Hooks",
             Page::Settings => "Settings",
+            Page::Update => "Update",
             Page::Setup => "Setup",
         }
     }

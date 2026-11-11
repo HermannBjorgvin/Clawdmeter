@@ -286,6 +286,65 @@ pub fn fetch_image(
     Ok(data)
 }
 
+/// What a release says about itself on GitHub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseNotes {
+    /// Git tag, `v2.5.0`.
+    pub tag: String,
+    /// Day it was published, `2026-11-02` (empty when unknown).
+    pub published: String,
+    /// The release's description, as Markdown.
+    pub body: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhReleaseNotes {
+    tag_name: String,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    published_at: Option<String>,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+}
+
+/// The API URL listing `repo`'s most recent releases.
+pub fn releases_url(repo: &str) -> String {
+    format!("https://api.github.com/repos/{repo}/releases?per_page=30")
+}
+
+/// The notes of every release an app at `app_version` would pick up by
+/// updating to `latest`, newest first: `latest` itself and the releases
+/// between the two. Prereleases other than `latest` are left out.
+pub fn release_notes(repo: &str, app_version: &str, latest: &str) -> Result<Vec<ReleaseNotes>, ReleaseError> {
+    release_notes_from_api(&get_string(&releases_url(repo))?, app_version, latest)
+}
+
+/// [`release_notes`] from the API's answer (split out for tests).
+fn release_notes_from_api(api_json: &str, app_version: &str, latest: &str) -> Result<Vec<ReleaseNotes>, ReleaseError> {
+    let all: Vec<GhReleaseNotes> = serde_json::from_str(api_json).map_err(|e| ReleaseError::Manifest(e.to_string()))?;
+    let latest = release_tag(latest).ok_or_else(|| ReleaseError::Manifest(format!("bad release tag {latest:?}")))?;
+    let mut notes: Vec<ReleaseNotes> = all
+        .into_iter()
+        .filter(|r| !r.draft)
+        .filter_map(|r| {
+            let tag = release_tag(&r.tag_name)?;
+            let wanted = crate::manifest::is_newer(&tag, app_version)
+                && !crate::manifest::is_newer(&tag, &latest)
+                && (!r.prerelease || tag == latest);
+            wanted.then(|| ReleaseNotes {
+                tag,
+                published: r.published_at.unwrap_or_default().chars().take(10).collect(),
+                body: r.body.unwrap_or_default(),
+            })
+        })
+        .collect();
+    notes.sort_by(|a, b| crate::manifest::compare_versions(&b.tag, &a.tag));
+    Ok(notes)
+}
+
 /// Asset name of the release's checksum list (`sha256sum` output).
 pub const SUMS_ASSET: &str = "SHA256SUMS";
 
@@ -673,6 +732,28 @@ mod tests {
         assert_eq!(AppPackage::Msi.asset("v2.5.0"), "clawdmeter-v2.5.0-windows-x86_64.msi");
         assert_eq!(AppPackage::Deb.asset("v2.5.0-rc.1"), "clawdmeter_2.5.0-rc.1_amd64.deb");
         assert_eq!(AppPackage::AppImage.asset("v2.5.0"), "clawdmeter-v2.5.0-x86_64.AppImage");
+    }
+
+    #[test]
+    fn notes_cover_the_releases_being_installed() {
+        let api = r###"[
+          {"tag_name":"v2.6.0-rc.1","prerelease":true,"body":"rc","published_at":"2026-11-20T10:00:00Z"},
+          {"tag_name":"v2.4.1","body":"## Fixed\n- a","published_at":"2026-11-05T10:00:00Z"},
+          {"tag_name":"v2.5.0","body":"## New\n- b","published_at":"2026-11-10T08:30:00Z"},
+          {"tag_name":"v2.5.1","draft":true,"body":"draft"},
+          {"tag_name":"v2.4.0","body":"old","published_at":"2026-10-01T10:00:00Z"},
+          {"tag_name":"nightly","body":"not a version"},
+          {"tag_name":"v2.3.0","body":null}]"###;
+        let notes = release_notes_from_api(api, "2.4.0", "v2.5.0").unwrap();
+        let tags: Vec<&str> = notes.iter().map(|n| n.tag.as_str()).collect();
+        assert_eq!(tags, ["v2.5.0", "v2.4.1"], "newest first, nothing older, newer or unpublished");
+        assert_eq!(notes[0].published, "2026-11-10");
+        assert_eq!(notes[0].body, "## New\n- b");
+        // A prerelease is listed only when it is the one being installed.
+        let rc = release_notes_from_api(api, "2.5.0", "2.6.0-rc.1").unwrap();
+        assert_eq!(rc.iter().map(|n| n.tag.as_str()).collect::<Vec<_>>(), ["v2.6.0-rc.1"]);
+        assert!(release_notes_from_api("{}", "2.4.0", "v2.5.0").is_err());
+        assert_eq!(releases_url("o/r"), "https://api.github.com/repos/o/r/releases?per_page=30");
     }
 
     #[test]

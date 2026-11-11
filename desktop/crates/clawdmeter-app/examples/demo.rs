@@ -165,6 +165,22 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, session: 
     });
 }
 
+fn demo_notes() -> Vec<clawdmeter_flash::release::ReleaseNotes> {
+    let note = |tag: &str, published: &str, body: &str| clawdmeter_flash::release::ReleaseNotes {
+        tag: tag.into(),
+        published: published.into(),
+        body: body.into(),
+    };
+    vec![
+        note(
+            "v1.9.0",
+            "2026-11-10",
+            "## New\n- App updates: release notes, download and skip, from the sidebar\n- Remap the board's buttons from the Device page\n## Fixed\n- The weekly meter no longer jumps after a reset",
+        ),
+        note("v1.8.3", "2026-10-28", "## Fixed\n- Pairing on macOS after a firmware update\n- Start at login under an AppImage"),
+    ]
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let paths = Paths::for_user();
@@ -212,14 +228,20 @@ fn main() {
         let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));
         let settings = cx.new(|cx| SettingsView::with_usb(p.clone(), Page::Device, false, cx));
         let flasher = cx.new(|cx| FlasherView::with_hardware(p.clone(), Some(manifest), hw, cx));
-        let mut app = AppView::build(p, page, overview, settings.clone(), flasher.clone(), window, cx);
-        // `--app-update` offers the fake release as an app update too, in the
-        // given state (`none`: an install with no package to download).
-        app.offer_app_update(app_update.is_some());
-        match app_update.as_deref() {
-            Some("none") => app.set_update_package(None),
-            Some(state) => app.show_update_state(&format!("v{VERSION}"), state),
-            None => {}
+        let app = AppView::build(p, page, overview, settings.clone(), flasher.clone(), window, cx);
+        // `--app-update` offers the fake release as an app update too, with
+        // made-up notes and the download in the given state (`none`: an
+        // install with no package to download).
+        if let Some(state) = app_update {
+            let tag = format!("v{VERSION}");
+            app.update_view().update(cx, |u, _| {
+                u.offer(true);
+                u.show_notes(&tag, demo_notes());
+                match state.as_str() {
+                    "none" => u.set_package(None),
+                    state => u.show_download_state(&tag, state),
+                }
+            });
         }
         if shop {
             flasher.update(cx, |f, cx| f.show_shop(true, cx));

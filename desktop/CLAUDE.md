@@ -105,7 +105,8 @@ is faked behind `FlashHardware`.
   window watches only while the Device page shows; the
   daemon hands changes to `Engine::set_appearance`, which sends them like any
   device setting), `claude_path`,
-  `release_repo`, `update_check`, `onboarding_done`, `alert_on` (alert kinds
+  `release_repo`, `update_check`, `skipped_update` (the app release tag the
+  Update page was told to skip), `onboarding_done`, `alert_on` (alert kinds
   the daemon lets through: the hook records `k` from `hook_event_name` /
   `notification_type` and `engine.on_attention` drops the rest; default all
   but `idle`).
@@ -209,6 +210,7 @@ Per account (`probe.rs`, `oauth.rs`):
   window is a `clawdmeter --window [PAGE]` child process.
 - `ui/app.rs` is the root: a sidebar (Overview, Device, Flash, Accounts,
   Hooks, Settings) or the setup wizard (`ui/setup.rs`) filling the window.
+  `Page::Update` has no sidebar item: the footer notice and Settings open it.
   Pages are `crate::Page`; `Page::parse` also accepts the old
   `background`/`flasher`/`status`/`alerts` names.
 - The window saves settings through `ui::settings::write_settings`, which
@@ -226,22 +228,27 @@ Per account (`probe.rs`, `oauth.rs`):
 - Nothing competes for the serial port: the flasher (`ui/flasher.rs`) touches
   USB only while on screen (`set_active`), the Device page probes only while
   shown, and the sidebar locks while a board is being written.
-- App updates: the daily check's tag (`StatusSnapshot::app_update`) newer
-  than a release build's version puts a control in the sidebar footer
-  (`AppView::update_control`). It downloads this install's package to
-  `~/Downloads` (`release::fetch_app_package`: `.dmg`, `.msi` from its
-  install folder, `.deb` for `/usr/bin/clawdmeter`, AppImage under
+- App updates (`ui/update.rs`, `Page::Update`): when the daily check's tag
+  (`StatusSnapshot::app_update`, or the check's cache file with no tray) is
+  newer than a release build's version, the sidebar footer shows "Update
+  available" until that release is skipped (`skipped_update`; a later one
+  is announced again). It opens the Update page, which Settings opens too:
+  the notes of every release up to the new one (`release::release_notes`,
+  Markdown drawn as headings, bullets and text), the download, "Skip this
+  update" and a link to the release page. The download takes this install's
+  package to `~/Downloads` (`release::fetch_app_package`: `.dmg`, `.msi`
+  from its install folder, `.deb` for `/usr/bin/clawdmeter`, AppImage under
   `$APPIMAGE`), checks it against the release's `SHA256SUMS`, marks it as
   downloaded (macOS quarantine, Windows `Zone.Identifier`) and opens the
-  installer (a `.deb` or AppImage is shown in the file manager); a link
-  opens the release page. The mark makes Gatekeeper and SmartScreen treat it
-  like a browser download: the builds aren't notarized or signed, so the
-  user approves each update (Open Anyway / Run anyway). A verified copy
-  already in the folder is reused as it is. Other installs get the link
-  only. Builds without `CLAWDMETER_VERSION` are never offered one, nor is a
-  prerelease whose own tag is published (the check stores that tag). The
-  demo's `--app-update` shows each state; clicking the button there fetches
-  for real.
+  installer (a `.deb` or AppImage is shown in the file manager). The mark
+  makes Gatekeeper and SmartScreen treat it like a browser download: the
+  builds aren't notarized or signed, so the user approves each update (Open
+  Anyway / Run anyway). A verified copy already in the folder is reused as
+  it is. Other installs get a button to the release page. Builds without
+  `CLAWDMETER_VERSION` are never offered one, nor is a prerelease whose own
+  tag is published (the check stores that tag). The demo's `--app-update`
+  shows each download state with made-up notes; clicking Download there
+  fetches for real.
 - The wizard reuses the flasher (`FlashMode::Setup`: no step header,
   up-to-date boards can skip) and the Hooks page
   (`SettingsView::show(Page::Hooks, embedded)`). First run = no

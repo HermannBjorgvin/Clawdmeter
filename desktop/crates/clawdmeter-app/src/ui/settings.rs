@@ -759,6 +759,19 @@ impl SettingsView {
                 });
             }),
         ));
+        pane = pane.child(field(
+            t,
+            "App update",
+            "Release notes and the download for a newer version, a skipped one included.",
+            button(
+                t,
+                "open-update",
+                "Open",
+                ButtonKind::Small,
+                true,
+                cx.listener(|_, _, _, cx| cx.emit(Navigate(Page::Update))),
+            ),
+        ));
         let p = self.paths.clone();
         pane = pane.child(field(
             t,

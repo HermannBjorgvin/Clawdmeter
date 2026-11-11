@@ -9,6 +9,7 @@ pub mod overview;
 pub mod settings;
 pub mod setup;
 pub mod theme;
+pub mod update;
 pub mod widgets;
 
 use std::borrow::Cow;

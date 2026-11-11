@@ -3,57 +3,22 @@
 //! second launches do it through `window-commands` ([`crate::ipc`]).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
-use clawdmeter_core::{Paths, Settings};
-use clawdmeter_flash::release::{self, AppPackage};
-use gpui::{div, prelude::*, px, relative, Context, Entity, SharedString, Window};
+use clawdmeter_core::Paths;
+use gpui::{div, prelude::*, px, Context, Entity, SharedString, Window};
 
 use super::flasher::FlasherView;
 use super::overview::OverviewView;
 use super::settings::SettingsView;
 use super::setup::{SetupEvent, SetupView};
 use super::theme::{Theme, R_ITEM, R_PILL};
+use super::update::UpdateView;
 use super::widgets::icon;
-use super::{chrome, run_blocking, Navigate, REFRESH};
+use super::{chrome, Navigate, REFRESH};
 use crate::{ipc, Page};
-
-/// Bytes of an app download so far, shared with the thread fetching it.
-#[derive(Debug, Default)]
-struct Progress {
-    done: AtomicU64,
-    /// 0 while unknown.
-    total: AtomicU64,
-}
-
-/// Where the download of a newer app stands.
-#[derive(Debug, Clone)]
-enum AppUpdate {
-    /// Not asked for.
-    Idle,
-    /// On its way.
-    Downloading(Arc<Progress>),
-    /// Downloaded and verified.
-    Ready(PathBuf),
-    /// The download or its checksum failed.
-    Failed,
-}
 
 /// The app window.
 pub struct AppView {
-    paths: Paths,
-    /// The package that updates this install; `None` where the release has
-    /// none, and the footer then links to the release page.
-    package: Option<AppPackage>,
-    /// The download of a newer app, and the release tag it is for.
-    update: AppUpdate,
-    update_tag: Option<String>,
-    /// Only release builds are offered one: a local build has no release
-    /// version to compare (the firmware check skips `dev` boards likewise).
-    offer_update: bool,
-    /// `release_repo`, as read when the window opened or a download began.
-    repo: String,
     page: Page,
     /// Dark appearance as last drawn.
     dark: Option<bool>,
@@ -62,6 +27,7 @@ pub struct AppView {
     overview: Entity<OverviewView>,
     settings: Entity<SettingsView>,
     flasher: Entity<FlasherView>,
+    update: Entity<UpdateView>,
     wizard: Entity<SetupView>,
 }
 
@@ -95,6 +61,8 @@ impl AppView {
         cx.subscribe(&overview, |v, _, n: &Navigate, cx| v.go(n.0, cx)).detach();
         cx.subscribe(&settings, |v, _, n: &Navigate, cx| v.go(n.0, cx)).detach();
         cx.subscribe(&flasher, |v, _, n: &Navigate, cx| v.go(n.0, cx)).detach();
+        let update = cx.new(|cx| UpdateView::new(paths.clone(), cx));
+        cx.subscribe(&update, |v, _, n: &Navigate, cx| v.go(n.0, cx)).detach();
         cx.subscribe(&wizard, |v, _, e: &SetupEvent, cx| match e {
             SetupEvent::Finished => {
                 v.setup = false;
@@ -103,7 +71,7 @@ impl AppView {
         })
         .detach();
         // `show <page>` from the tray or a second launch.
-        let p = paths.clone();
+        let p = paths;
         cx.spawn_in(window, async move |this, cx| loop {
             cx.background_executor().timer(REFRESH).await;
             let pages = ipc::take_window_commands(&p);
@@ -117,7 +85,7 @@ impl AppView {
                 // observed: GPUI 0.2.2's X11 client redraws inside the portal
                 // callback when someone observes it, and panics.
                 let dark = Theme::for_appearance(window.appearance()).dark;
-                if v.dark != Some(dark) || matches!(v.update, AppUpdate::Downloading(_)) {
+                if v.dark != Some(dark) {
                     v.dark = Some(dark);
                     cx.notify();
                 }
@@ -127,24 +95,15 @@ impl AppView {
             }
         })
         .detach();
-        let mut v = AppView {
-            paths,
-            package: AppPackage::for_this_install(),
-            update: AppUpdate::Idle,
-            update_tag: None,
-            offer_update: crate::is_release_build(),
-            repo: String::new(),
-            dark: None,
-            page: Page::Overview,
-            setup: false,
-            overview,
-            settings,
-            flasher,
-            wizard,
-        };
-        v.repo = v.release_repo();
+        let mut v =
+            AppView { dark: None, page: Page::Overview, setup: false, overview, settings, flasher, update, wizard };
         v.go(page, cx);
         v
+    }
+
+    /// The Update page.
+    pub fn update_view(&self) -> &Entity<UpdateView> {
+        &self.update
     }
 
     /// The setup wizard.
@@ -179,175 +138,44 @@ impl AppView {
             self.page = page;
             self.settings.update(cx, |s, cx| s.show(page, false, cx));
             self.flasher.update(cx, |f, cx| f.set_active(page == Page::Flash, cx));
+            self.update.update(cx, |u, cx| u.set_active(page == Page::Update, cx));
         }
         cx.notify();
     }
 
-    /// The repo releases come from (`release_repo`).
-    fn release_repo(&self) -> String {
-        Settings::load(&self.paths)
-            .map(|s| s.release_repo)
-            .unwrap_or_else(|_| clawdmeter_flash::DEFAULT_RELEASE_REPO.into())
-    }
-
-    /// Whether the footer offers a newer release (tests and the demo).
-    pub fn offer_app_update(&mut self, on: bool) {
-        self.offer_update = on;
-    }
-
-    /// Pretend this install updates from `package` (tests and the demo).
-    pub fn set_update_package(&mut self, package: Option<AppPackage>) {
-        self.package = package;
-    }
-
-    /// Put the download of release `tag` in a given state without fetching
-    /// anything (the demo): `downloading`, `ready`, `failed`, else idle.
-    pub fn show_update_state(&mut self, tag: &str, state: &str) {
-        self.update_tag = Some(tag.to_owned());
-        self.update = match state {
-            "downloading" => {
-                AppUpdate::Downloading(Arc::new(Progress { done: AtomicU64::new(42), total: AtomicU64::new(100) }))
-            }
-            "ready" => AppUpdate::Ready(PathBuf::new()),
-            "failed" => AppUpdate::Failed,
-            _ => AppUpdate::Idle,
-        };
-    }
-
-    /// Download the app package of release `tag` to the Downloads folder,
-    /// then hand it to the OS: an installer opens, any other package is
-    /// shown in the file manager.
-    fn download_update(&mut self, tag: String, cx: &mut Context<Self>) {
-        let Some(package) = self.package else { return };
-        if matches!(self.update, AppUpdate::Downloading(_)) {
-            return;
-        }
-        let progress = Arc::new(Progress::default());
-        self.update = AppUpdate::Downloading(progress.clone());
-        self.update_tag = Some(tag.clone());
-        self.repo = self.release_repo();
-        let repo = self.repo.clone();
-        // The Downloads folder, or the cache when there is none or it can't
-        // be written (macOS asks before an app may use it).
-        let downloads = self.paths.home.join("Downloads");
-        let cache = self.paths.cache_dir.clone();
-        run_blocking(
-            cx,
-            move || {
-                let fetch = |dir: &std::path::Path| {
-                    release::fetch_app_package(&repo, &tag, package, dir, |done, total| {
-                        progress.done.store(done, Ordering::Relaxed);
-                        progress.total.store(total, Ordering::Relaxed);
-                    })
-                };
-                if !downloads.is_dir() {
-                    return fetch(&cache);
-                }
-                match fetch(&downloads) {
-                    Err(release::ReleaseError::Io(e)) => {
-                        log::info!("app update: {}: {e}; using the cache", downloads.display());
-                        fetch(&cache)
-                    }
-                    r => r,
-                }
-            },
-            move |v, r, cx| match r {
-                Ok(path) => {
-                    log::info!("app update downloaded to {}", path.display());
-                    open_package(package, &path, cx);
-                    v.update = AppUpdate::Ready(path);
-                }
-                Err(e) => {
-                    log::warn!("app update download: {e} ({})", e.detail().unwrap_or_default());
-                    v.update = AppUpdate::Failed;
-                }
-            },
-        );
-        cx.notify();
-    }
-
-    /// The footer's update control, shown while a newer release is out: a
-    /// button that downloads it (and fills as it arrives), and a link to the
-    /// release notes.
-    fn update_control(&self, t: &Theme, tag: String, cx: &mut Context<Self>) -> impl IntoElement {
-        let version: SharedString = tag.trim_start_matches('v').to_owned().into();
-        let page_url = release::release_page_url(&self.repo, &tag);
-        // A download belongs to one release and a newer one starts over, but
-        // only once the one on its way has landed.
-        let same = self.update_tag.as_deref() == Some(tag.as_str());
-        let state = if same || matches!(self.update, AppUpdate::Downloading(_)) {
-            self.update.clone()
-        } else {
-            AppUpdate::Idle
-        };
-        let package = self.package;
-        let (glyph, label, fill): (&str, SharedString, f32) = match (&state, package) {
-            (_, None) => ("arrow-down-to-line", format!("Get {version}").into(), 0.),
-            (AppUpdate::Idle, _) => ("arrow-down-to-line", format!("Download {version}").into(), 0.),
-            (AppUpdate::Downloading(p), _) => {
-                let (done, total) = (p.done.load(Ordering::Relaxed), p.total.load(Ordering::Relaxed));
-                if total == 0 {
-                    ("arrow-down-to-line", "Downloading".into(), 0.)
-                } else {
-                    let frac = (done as f32 / total as f32).clamp(0., 1.);
-                    ("arrow-down-to-line", format!("Downloading {:.0}%", frac * 100.).into(), frac)
-                }
-            }
-            (AppUpdate::Ready(_), Some(p)) if p.opens_installer() => ("check", "Open installer".into(), 0.),
-            (AppUpdate::Ready(_), _) => ("check", "Show download".into(), 0.),
-            (AppUpdate::Failed, _) => ("rotate-ccw", "Try again".into(), 0.),
-        };
-        let busy = matches!(state, AppUpdate::Downloading(_));
-        let failed = matches!(state, AppUpdate::Failed) && package.is_some();
+    /// The footer's notice of a newer release, until it is skipped: a row
+    /// that opens the Update page.
+    fn update_notice(&self, t: &Theme, tag: &str, locked: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let on = self.page == Page::Update;
+        let enabled = on || !locked;
         let text = t.text;
-        let url = page_url.clone();
-        let button = div()
+        let ink = if enabled { t.text } else { t.mute };
+        div()
             .id("app-update")
             .group("app-update")
             .debug_selector(|| "app-update".into())
-            .relative()
-            .overflow_hidden()
             .flex()
             .items_center()
             .gap(px(8.))
             .h(px(28.))
+            .mt(px(4.))
             .px(px(9.))
             .rounded(px(R_ITEM))
             .border_1()
             .border_color(t.line)
-            .bg(t.surface)
+            .bg(if on { t.selected } else { t.surface })
             .text_size(px(12.5))
-            .text_color(t.text)
+            .text_color(ink)
             .whitespace_nowrap()
-            .child(div().absolute().top_0().left_0().h_full().w(relative(fill)).rounded(px(R_ITEM - 1.)).bg(t.selected))
-            .child(icon(glyph, 14., t.dim).relative().group_hover("app-update", move |s| s.text_color(text)))
-            .child(div().relative().child(label))
-            .when(!busy, |d| {
-                d.cursor_pointer().hover(|s| s.bg(t.hover)).on_click(cx.listener(move |v, _, _, cx| {
-                    match (&state, v.package) {
-                        (_, None) => cx.open_url(&url),
-                        (AppUpdate::Ready(path), Some(p)) if path.exists() => open_package(p, path, cx),
-                        _ => v.download_update(tag.clone(), cx),
-                    }
-                }))
-            });
-        let notes = div()
-            .id("app-update-notes")
-            .debug_selector(|| "app-update-notes".into())
-            .text_color(t.dim)
-            .cursor_pointer()
-            .hover(|s| s.text_color(t.text).underline())
-            .on_click(move |_, _, cx| cx.open_url(&page_url))
-            .child(if failed { "Open the release page" } else { "What's new" });
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .pt(px(4.))
-            .child(button)
-            .when(failed, |d| d.child(div().text_color(t.bad).child("Couldn't download it.")))
-            // With no package the button already goes to the release page.
-            .when(package.is_some(), |d| d.child(div().flex().child(notes)))
+            .when(enabled && !on, |d| {
+                d.cursor_pointer().hover(|s| s.bg(t.hover)).on_click(cx.listener(|v, _, _, cx| v.go(Page::Update, cx)))
+            })
+            .child(
+                icon("arrow-down-to-line", 14., if enabled { t.dim } else { t.mute })
+                    .group_hover("app-update", move |s| s.text_color(text)),
+            )
+            .child(div().flex_1().child("Update available"))
+            .child(div().text_color(t.mute).child(tag.trim_start_matches('v').to_owned()))
     }
 
     fn nav_item(
@@ -415,7 +243,7 @@ impl AppView {
         let pending_hooks = self.settings.read(cx).pending_hooks();
         let update = self.overview.read(cx).update_available();
         let locked = self.flasher.read(cx).flashing();
-        let app_update = self.overview.read(cx).app_update().filter(|_| self.offer_update);
+        let app_update = self.update.read(cx).announced().map(str::to_owned);
         let badge = |page: Page| -> Option<SharedString> {
             match page {
                 Page::Hooks if pending_hooks > 0 => Some(pending_hooks.to_string().into()),
@@ -455,7 +283,7 @@ impl AppView {
                 ),
             )
             .child(format!("Version {}", crate::version()))
-            .when_some(app_update, |d, tag| d.child(self.update_control(t, tag, cx)));
+            .when_some(app_update, |d, tag| d.child(self.update_notice(t, &tag, locked, cx)));
         div()
             .flex()
             .flex_col()
@@ -475,16 +303,6 @@ impl AppView {
     }
 }
 
-/// Hand a downloaded package to the OS: mount the disk image or start the
-/// installer; show a `.deb` or AppImage in the file manager.
-fn open_package(package: AppPackage, path: &std::path::Path, cx: &mut gpui::App) {
-    if package.opens_installer() {
-        cx.open_with_system(path);
-    } else {
-        cx.reveal_path(path);
-    }
-}
-
 /// The author's profile, linked from the sidebar footer.
 const CREDIT_URL: &str = "https://x.com/HermannBjorgvin";
 
@@ -497,6 +315,7 @@ fn page_icon(page: Page) -> &'static str {
         Page::Accounts => "users",
         Page::Hooks => "webhook",
         Page::Settings => "settings",
+        Page::Update => "arrow-down-to-line",
         Page::Setup => "rotate-ccw",
     }
 }
@@ -510,6 +329,7 @@ impl Render for AppView {
             let content = match self.page {
                 Page::Overview => self.overview.clone().into_any_element(),
                 Page::Flash => self.flasher.clone().into_any_element(),
+                Page::Update => self.update.clone().into_any_element(),
                 _ => self.settings.clone().into_any_element(),
             };
             let header = match window.window_decorations() {
@@ -545,6 +365,7 @@ impl Render for AppView {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
 
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
 
@@ -589,7 +410,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn footer_offers_a_newer_release(cx: &mut TestAppContext) {
+    fn a_newer_release_is_announced_until_skipped(cx: &mut TestAppContext) {
         let root = std::env::temp_dir().join(format!("cm-app-update-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let paths = Paths::under(&root);
@@ -610,10 +431,19 @@ mod tests {
             let flasher = cx.new(|cx| FlasherView::with_hardware(p.clone(), None, Arc::new(FakeBoard::default()), cx));
             AppView::build(p, Page::Overview, overview, settings, flasher, window, cx)
         });
-        // An install the release has no package for gets one link, to the page.
-        view.update(cx, |v, _| {
-            v.offer_app_update(true);
-            v.set_update_package(None);
+        let update = view.read_with(cx, |v, _| v.update_view().clone());
+        // Notes are given, so opening the page asks GitHub nothing.
+        let notes = |tag: &str| {
+            vec![clawdmeter_flash::release::ReleaseNotes {
+                tag: tag.into(),
+                published: "2026-11-10".into(),
+                body: "## New\n- A thing".into(),
+            }]
+        };
+        update.update(cx, |u, _| {
+            u.offer(true);
+            u.set_package(None);
+            u.show_notes("v999.0.0", notes("v999.0.0"));
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("app-update").is_none(), "this version is the latest");
@@ -621,17 +451,25 @@ mod tests {
         status("v999.0.0");
         cx.executor().advance_clock(REFRESH * 2);
         cx.run_until_parked();
-        assert!(cx.debug_bounds("app-update").is_some());
-        assert!(cx.debug_bounds("app-update-notes").is_none());
+        click(cx, "app-update");
+        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Update));
+        assert!(cx.debug_bounds("update-download").is_some());
 
-        // One it can download also links to the release notes.
-        view.update(cx, |v, cx| {
-            v.set_update_package(Some(AppPackage::Dmg));
-            cx.notify();
+        click(cx, "update-skip");
+        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Overview));
+        update.read_with(cx, |u, _| {
+            assert_eq!(u.available(), Some("v999.0.0"), "still there for Settings to open");
+            assert_eq!(u.announced(), None);
         });
+        let saved = clawdmeter_core::Settings::load(&paths).unwrap().skipped_update;
+        assert_eq!(saved.as_deref(), Some("v999.0.0"));
+
+        // The release after the skipped one is announced again.
+        status("v999.1.0");
+        update.update(cx, |u, _| u.show_notes("v999.1.0", notes("v999.1.0")));
+        cx.executor().advance_clock(REFRESH * 2);
         cx.run_until_parked();
-        assert!(cx.debug_bounds("app-update").is_some());
-        assert!(cx.debug_bounds("app-update-notes").is_some());
+        update.read_with(cx, |u, _| assert_eq!(u.announced(), Some("v999.1.0")));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
