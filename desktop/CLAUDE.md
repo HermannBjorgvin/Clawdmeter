@@ -231,7 +231,9 @@ Per account (`probe.rs`, `oauth.rs`):
   (`AppView::update_control`). It downloads this install's package to
   `~/Downloads` (`release::fetch_app_package`: `.dmg`, `.msi` from its install folder, `.deb` for
   `/usr/bin/clawdmeter`, AppImage under `$APPIMAGE`), checks it against the
-  release's `SHA256SUMS`, then opens the installer (a `.deb` or AppImage is
+  release's `SHA256SUMS`, marks it as downloaded (macOS quarantine, Windows `Zone.Identifier`) so
+  Gatekeeper and SmartScreen check it as they would a browser download,
+  then opens the installer (a `.deb` or AppImage is
   shown in the file manager), and links to the release page. Other installs
   get the link only. Builds without `CLAWDMETER_VERSION` are never offered
   one, nor is a prerelease whose own tag is published (the check stores that

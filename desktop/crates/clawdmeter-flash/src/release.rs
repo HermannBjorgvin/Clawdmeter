@@ -383,6 +383,36 @@ fn file_sha256(path: &Path) -> io::Result<String> {
     Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Mark `path` as downloaded from the internet, as a browser would, so the
+/// OS runs its usual check when the file is opened: the quarantine attribute
+/// on macOS (Gatekeeper), the `Zone.Identifier` stream on Windows
+/// (SmartScreen). Best effort: a failure is logged.
+fn mark_downloaded(path: &Path, url: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let value = format!("0081;{now:x};Clawdmeter;");
+        let done = std::process::Command::new("/usr/bin/xattr")
+            .args(["-w", "com.apple.quarantine", &value])
+            .arg(path)
+            .status();
+        if !done.as_ref().is_ok_and(|s| s.success()) {
+            log::warn!("couldn't quarantine {}: {done:?}", path.display());
+        }
+        let _ = url;
+    }
+    #[cfg(windows)]
+    {
+        let mut stream = path.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        if let Err(e) = fs::write(&stream, format!("[ZoneTransfer]\r\nZoneId=3\r\nHostUrl={url}\r\n")) {
+            log::warn!("couldn't mark {} as downloaded: {e}", path.display());
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let _ = (path, url);
+}
+
 /// Download the app package for `tag` from `repo` into `dir`, check it
 /// against the release's `SHA256SUMS`, and return where it is. A copy already
 /// there with the right hash is reused. `progress` gets `(downloaded,
@@ -465,6 +495,7 @@ fn fetch_app_package_with(
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
+    mark_downloaded(&path, &url);
     Ok(path)
 }
 
@@ -682,6 +713,11 @@ mod tests {
         assert_eq!(got, dir.join(name));
         assert_eq!(fs::read(&got).unwrap(), b"hello");
         assert_eq!(seen, (5, 5));
+        #[cfg(target_os = "macos")]
+        {
+            let out = std::process::Command::new("/usr/bin/xattr").arg(&got).output().unwrap();
+            assert!(String::from_utf8_lossy(&out.stdout).contains("com.apple.quarantine"), "marked as downloaded");
+        }
         // A verified copy is reused: nothing is downloaded again.
         let again =
             fetch_app_package_with("o/r", "v2.5.0", AppPackage::Dmg, &dir, |_, _| {}, fetch, |_| unreachable!());
