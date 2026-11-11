@@ -488,6 +488,9 @@ fn fetch_app_package_with(
             use std::os::unix::fs::PermissionsExt as _;
             fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
         }
+        // Before the rename, which keeps the mark: a file under its final
+        // name is one that has it.
+        mark_downloaded(&tmp, &url);
         fs::rename(&tmp, &path)?;
         Ok(())
     })();
@@ -495,7 +498,6 @@ fn fetch_app_package_with(
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
-    mark_downloaded(&path, &url);
     Ok(path)
 }
 

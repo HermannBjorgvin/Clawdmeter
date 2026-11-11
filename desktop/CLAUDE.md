@@ -229,16 +229,19 @@ Per account (`probe.rs`, `oauth.rs`):
 - App updates: the daily check's tag (`StatusSnapshot::app_update`) newer
   than a release build's version puts a control in the sidebar footer
   (`AppView::update_control`). It downloads this install's package to
-  `~/Downloads` (`release::fetch_app_package`: `.dmg`, `.msi` from its install folder, `.deb` for
-  `/usr/bin/clawdmeter`, AppImage under `$APPIMAGE`), checks it against the
-  release's `SHA256SUMS`, marks it as downloaded (macOS quarantine, Windows `Zone.Identifier`) so
-  Gatekeeper and SmartScreen check it as they would a browser download,
-  then opens the installer (a `.deb` or AppImage is
-  shown in the file manager), and links to the release page. Other installs
-  get the link only. Builds without `CLAWDMETER_VERSION` are never offered
-  one, nor is a prerelease whose own tag is published (the check stores that
-  tag). The demo's `--app-update` shows each state; clicking the button
-  there fetches for real.
+  `~/Downloads` (`release::fetch_app_package`: `.dmg`, `.msi` from its
+  install folder, `.deb` for `/usr/bin/clawdmeter`, AppImage under
+  `$APPIMAGE`), checks it against the release's `SHA256SUMS`, marks it as
+  downloaded (macOS quarantine, Windows `Zone.Identifier`) and opens the
+  installer (a `.deb` or AppImage is shown in the file manager); a link
+  opens the release page. The mark makes Gatekeeper and SmartScreen treat it
+  like a browser download: the builds aren't notarized or signed, so the
+  user approves each update (Open Anyway / Run anyway). A verified copy
+  already in the folder is reused as it is. Other installs get the link
+  only. Builds without `CLAWDMETER_VERSION` are never offered one, nor is a
+  prerelease whose own tag is published (the check stores that tag). The
+  demo's `--app-update` shows each state; clicking the button there fetches
+  for real.
 - The wizard reuses the flasher (`FlashMode::Setup`: no step header,
   up-to-date boards can skip) and the Hooks page
   (`SettingsView::show(Page::Hooks, embedded)`). First run = no
