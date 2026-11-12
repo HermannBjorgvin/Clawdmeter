@@ -8,7 +8,7 @@
 //!   cargo run -p clawdmeter-app --example demo -- [--page PAGE] [--status connected|off]
 //!   [--board none|fresh|current|old] [--setup welcome|board|flash|pair|hooks|done] [--hooks-preview]
 //!   [--flash-to identify|firmware|flash|done] [--shop] [--accounts retrying] [--refresh wait|checking]
-//!   [--app-update download|downloading|ready|failed|none]
+//!   [--app-update download|downloading|ready|failed|none|linux|linux-menu]
 //!   [--advanced] [--session idle|week] [--buttons custom] [--edit primary|secondary|pwr] [--record]
 //!   [--height PX]
 //! ```
@@ -239,6 +239,11 @@ fn main() {
                 u.show_notes(&tag, demo_notes());
                 match state.as_str() {
                     "none" => u.set_package(None),
+                    // Linux's package menu, closed or open, on a `.deb` install.
+                    "linux" | "linux-menu" => {
+                        use clawdmeter_flash::release::AppPackage;
+                        u.set_choices(AppPackage::for_linux("x86_64"), Some(AppPackage::Deb), state == "linux-menu");
+                    }
                     state => {
                         // Whatever this build would update from.
                         u.set_package(Some(clawdmeter_flash::release::AppPackage::Dmg));

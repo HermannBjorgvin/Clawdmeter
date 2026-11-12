@@ -15,7 +15,7 @@ use super::settings::SettingsView;
 use super::setup::{SetupEvent, SetupView};
 use super::theme::{Theme, R_ITEM, R_PILL};
 use super::update::UpdateView;
-use super::widgets::icon;
+use super::widgets::{icon, update_pill};
 use super::{chrome, Navigate, REFRESH};
 use crate::{ipc, Page};
 
@@ -67,6 +67,7 @@ impl AppView {
         cx.subscribe(&flasher, |v, _, n: &Navigate, cx| v.go(n.0, cx)).detach();
         let update = cx.new(|cx| UpdateView::new(paths.clone(), cx));
         cx.subscribe(&update, |v, _, n: &Navigate, cx| v.go(n.0, cx)).detach();
+        settings.update(cx, |s, cx| s.follow_update(update.clone(), cx));
         cx.subscribe(&wizard, |v, _, e: &SetupEvent, cx| match e {
             SetupEvent::Finished => {
                 v.setup = false;
@@ -176,34 +177,9 @@ impl AppView {
     fn update_notice(&self, t: &Theme, tag: &str, locked: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let on = self.page == Page::Update;
         let enabled = on || !locked;
-        let text = t.text;
-        let ink = if enabled { t.text } else { t.mute };
-        div()
-            .id("app-update")
-            .group("app-update")
-            .debug_selector(|| "app-update".into())
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .h(px(28.))
+        update_pill(t, "app-update", tag, on, enabled)
             .mt(px(4.))
-            .px(px(9.))
-            .rounded(px(R_ITEM))
-            .border_1()
-            .border_color(t.line)
-            .bg(if on { t.selected } else { t.surface })
-            .text_size(px(12.5))
-            .text_color(ink)
-            .whitespace_nowrap()
-            .when(enabled && !on, |d| {
-                d.cursor_pointer().hover(|s| s.bg(t.hover)).on_click(cx.listener(|v, _, _, cx| v.go(Page::Update, cx)))
-            })
-            .child(
-                icon("arrow-down-to-line", 14., if enabled { t.dim } else { t.mute })
-                    .group_hover("app-update", move |s| s.text_color(text)),
-            )
-            .child(div().flex_1().child("Update available"))
-            .child(div().text_color(t.mute).child(tag.trim_start_matches('v').to_owned()))
+            .when(enabled && !on, |d| d.on_click(cx.listener(|v, _, _, cx| v.go(Page::Update, cx))))
     }
 
     fn nav_item(
@@ -507,6 +483,117 @@ mod tests {
         cx.executor().advance_clock(REFRESH * 12);
         cx.run_until_parked();
         update.read_with(cx, |u, _| assert_eq!((u.available(), u.announced()), (None, None)));
+
+        // A skipped release is still there beside the Settings heading.
+        crate::ui::settings::write_settings(&paths, |s, _| {
+            s.update_check = true;
+            s.skipped_update = Some("v999.1.0".into());
+        })
+        .unwrap();
+        cx.executor().advance_clock(REFRESH * 12);
+        cx.run_until_parked();
+        update.read_with(cx, |u, _| assert_eq!((u.available(), u.announced()), (Some("v999.1.0"), None)));
+        view.update(cx, |v, cx| v.go(Page::Settings, cx));
+        click(cx, "settings-app-update");
+        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Update));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    fn firmware_nudge_can_be_skipped(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("cm-app-fw-skip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths::under(&root);
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let status = |latest: &str| {
+            let snap = ipc::StatusSnapshot {
+                updated_at: clawdmeter_core::unix_now(),
+                latest_firmware: Some(latest.into()),
+                device_firmware: Some("v1.0.0".into()),
+                ..Default::default()
+            };
+            ipc::write_status(&paths, &snap).unwrap();
+        };
+        status("v999.0.0");
+        let p = paths.clone();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));
+            let settings = cx.new(|cx| SettingsView::with_usb(p.clone(), Page::Device, false, cx));
+            let flasher = cx.new(|cx| FlasherView::with_hardware(p.clone(), None, Arc::new(FakeBoard::default()), cx));
+            AppView::build(p, Page::Overview, overview, settings, flasher, window, cx)
+        });
+        let overview = view.read_with(cx, |v, _| v.overview.clone());
+        overview.read_with(cx, |o, _| assert!(o.update_available()));
+
+        click(cx, "skip-firmware");
+        overview.read_with(cx, |o, _| assert!(!o.update_available(), "no nudge and no Flash badge"));
+        let saved = clawdmeter_core::Settings::load(&paths).unwrap().skipped_firmware;
+        assert_eq!(saved.as_deref(), Some("v999.0.0"));
+
+        // The same release written without its `v` is still skipped.
+        status("999.0.0");
+        cx.executor().advance_clock(REFRESH * 2);
+        cx.run_until_parked();
+        overview.read_with(cx, |o, _| assert!(!o.update_available()));
+
+        // A later release nudges again.
+        status("v999.1.0");
+        cx.executor().advance_clock(REFRESH * 2);
+        cx.run_until_parked();
+        overview.read_with(cx, |o, _| assert!(o.update_available()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    fn linux_picks_a_package_from_a_menu(cx: &mut TestAppContext) {
+        use clawdmeter_flash::release::{AppPackage, ReleaseNotes};
+        let root = std::env::temp_dir().join(format!("cm-app-linux-menu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths::under(&root);
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let snap = ipc::StatusSnapshot {
+            updated_at: clawdmeter_core::unix_now(),
+            latest_firmware: Some("v999.0.0".into()),
+            ..Default::default()
+        };
+        ipc::write_status(&paths, &snap).unwrap();
+        let p = paths.clone();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));
+            let settings = cx.new(|cx| SettingsView::with_usb(p.clone(), Page::Device, false, cx));
+            let flasher = cx.new(|cx| FlasherView::with_hardware(p.clone(), None, Arc::new(FakeBoard::default()), cx));
+            AppView::build(p, Page::Overview, overview, settings, flasher, window, cx)
+        });
+        let update = view.read_with(cx, |v, _| v.update_view().clone());
+        update.update(cx, |u, _| {
+            u.offer(true);
+            u.set_choices(AppPackage::for_linux("x86_64"), Some(AppPackage::Deb), false);
+            let notes = ReleaseNotes { tag: "v999.0.0".into(), published: String::new(), body: String::new() };
+            u.show_notes("v999.0.0", vec![notes]);
+        });
+        cx.executor().advance_clock(REFRESH * 2);
+        click(cx, "app-update");
+        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Update));
+
+        click(cx, "update-download");
+        update.read_with(cx, |u, _| assert!(u.menu_open()));
+        assert!(cx.debug_bounds("update-menu-deb").is_some());
+        assert!(cx.debug_bounds("update-menu-appimage").is_some());
+        // A click anywhere else closes it, and goes no further: not to the
+        // sidebar item under it.
+        click(cx, "nav-overview");
+        update.read_with(cx, |u, _| assert!(!u.menu_open()));
+        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Update));
+
+        click(cx, "update-download");
+        update.read_with(cx, |u, _| assert!(u.menu_open()));
+        cx.simulate_keystrokes("escape");
+        update.read_with(cx, |u, _| assert!(!u.menu_open(), "Escape closes it"));
+
+        // After a failed download the menu is back, to try another package.
+        update.update(cx, |u, _| u.show_download_state("v999.0.0", "failed"));
+        click(cx, "update-download");
+        update.read_with(cx, |u, _| assert!(u.menu_open()));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

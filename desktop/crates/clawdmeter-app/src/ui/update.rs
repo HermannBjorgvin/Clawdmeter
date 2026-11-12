@@ -5,8 +5,10 @@
 //!
 //! The download takes this install's package ([`AppPackage`]) to the
 //! Downloads folder, checked against the release's `SHA256SUMS`, and hands it
-//! to the OS. Installs the release has no package for get a link to the
-//! release page instead.
+//! to the OS. On x86_64 Linux the button opens a menu of the release's
+//! packages (`.deb`, AppImage) to pick from, whatever the install. Elsewhere,
+//! installs the release has no package for get a link to the release page
+//! instead.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,11 +16,14 @@ use std::sync::Arc;
 
 use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::release::{self, AppPackage, ReleaseNotes};
-use gpui::{div, prelude::*, px, Context, EventEmitter, SharedString, Window};
+use gpui::{
+    anchored, deferred, div, point, prelude::*, px, AnyElement, Context, Corner, EventEmitter, FocusHandle,
+    KeyDownEvent, SharedString, Window,
+};
 
 use super::settings::write_settings;
-use super::theme::Theme;
-use super::widgets::{bar, button, card, heading, notice, para, subheading, ButtonKind, Tone};
+use super::theme::{Theme, R_M, R_S};
+use super::widgets::{bar, button, card, heading, menu_button, notice, para, subheading, ButtonKind, Tone};
 use super::{live_status, run_blocking, Navigate, REFRESH};
 use crate::{ipc, Page};
 
@@ -59,9 +64,19 @@ enum Notes {
 /// The Update page.
 pub struct UpdateView {
     paths: Paths,
-    /// The package that updates this install; `None` where the release has
-    /// none, and the page then links to the release page.
+    /// The package that updates this install (on Linux, the one picked);
+    /// `None` where the release has none, and the page then links to the
+    /// release page unless there is a menu to pick from.
     package: Option<AppPackage>,
+    /// Linux: the packages the download button offers in its menu.
+    choices: &'static [AppPackage],
+    /// The package this install came from, as far as it can be told: the
+    /// menu marks it.
+    detected: Option<AppPackage>,
+    /// The menu is open.
+    menu_open: bool,
+    /// Focus for the open menu, so Escape closes it.
+    menu_focus: FocusHandle,
     /// Only release builds are offered a release: a local build has no
     /// release version to compare (the firmware check skips `dev` boards
     /// likewise).
@@ -106,9 +121,14 @@ impl UpdateView {
             }
         })
         .detach();
+        let package = AppPackage::for_this_install();
         let mut v = UpdateView {
             paths,
-            package: AppPackage::for_this_install(),
+            package,
+            choices: AppPackage::linux_choices(),
+            detected: package,
+            menu_open: false,
+            menu_focus: cx.focus_handle(),
             offer: crate::is_release_build(),
             checks: true,
             repo: clawdmeter_flash::DEFAULT_RELEASE_REPO.into(),
@@ -145,6 +165,10 @@ impl UpdateView {
                 self.download_tag = None;
             }
         }
+        if latest != self.latest {
+            // The menu belongs to the release it was opened for.
+            self.menu_open = false;
+        }
         self.latest = latest;
         self.skipped = skipped;
         self.repo = repo;
@@ -180,6 +204,7 @@ impl UpdateView {
     /// The page came on screen or left it. The notes load when it shows.
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         self.active = active;
+        self.menu_open = false;
         if active {
             self.reload();
             // Coming back to the page asks again for notes that didn't load.
@@ -199,9 +224,43 @@ impl UpdateView {
         self.reload();
     }
 
-    /// Pretend this install updates from `package` (tests and the demo).
+    /// Pretend this install updates from `package`, with no menu to pick
+    /// from (tests and the demo).
     pub fn set_package(&mut self, package: Option<AppPackage>) {
         self.package = package;
+        self.choices = &[];
+    }
+
+    /// Pretend this install picks from the Linux packages `choices`, came
+    /// from `detected`, and has the menu open or not (tests and the demo).
+    pub fn set_choices(&mut self, choices: &'static [AppPackage], detected: Option<AppPackage>, open: bool) {
+        self.package = detected;
+        self.choices = choices;
+        self.detected = detected;
+        self.menu_open = open;
+    }
+
+    /// Whether the download button's menu is open (tests).
+    pub fn menu_open(&self) -> bool {
+        self.menu_open
+    }
+
+    fn open_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_open = true;
+        window.focus(&self.menu_focus);
+        cx.notify();
+    }
+
+    fn close_menu(&mut self, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        cx.notify();
+    }
+
+    /// Download `package` of release `tag`, picked from the menu.
+    fn pick(&mut self, package: AppPackage, tag: String, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        self.package = Some(package);
+        self.start_download(tag, cx);
     }
 
     /// Show these notes for release `tag` without asking GitHub (tests and
@@ -336,7 +395,7 @@ impl UpdateView {
     }
 
     /// The download button and what it is doing, for release `tag`.
-    fn download_block(&self, t: &Theme, tag: &str, cx: &mut Context<Self>) -> gpui::Div {
+    fn download_block(&self, t: &Theme, tag: &str, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let version = tag.trim_start_matches('v').to_owned();
         let page_url = release::release_page_url(&self.repo, tag);
         // A download belongs to one release and a newer one starts over, but
@@ -348,7 +407,13 @@ impl UpdateView {
         // an older one than the page offers.
         let coming = self.download_tag.as_deref().unwrap_or(tag).trim_start_matches('v').to_owned();
         let package = self.package;
+        // Linux picks a package from the button's menu; once one is on its
+        // way or downloaded, the button follows that one. After a failure
+        // the menu is back, so another package can be tried.
+        let menu = !self.choices.is_empty() && matches!(state, Download::Idle | Download::Failed);
         let label: SharedString = match (&state, package) {
+            (Download::Failed, _) if menu => "Try again".into(),
+            _ if menu => format!("Download {version}").into(),
             (_, None) => format!("Get {version} on GitHub").into(),
             (Download::Ready(_), Some(p)) if p.opens_installer() => "Open installer".into(),
             (Download::Ready(_), _) => "Show download".into(),
@@ -364,18 +429,21 @@ impl UpdateView {
         let skipped = self.skipped.as_deref() == Some(tag);
         let owned = tag.to_owned();
         let url = page_url.clone();
-        let mut row = div().flex().items_center().flex_wrap().gap(px(10.)).child(button(
-            t,
-            "update-download",
-            label,
-            ButtonKind::Primary,
-            running.is_none(),
-            cx.listener(move |v, _, _, cx| match (&state, v.package) {
-                (_, None) => cx.open_url(&url),
-                (Download::Ready(path), Some(p)) if path.exists() => open_package(p, path, cx),
-                _ => v.start_download(owned.clone(), cx),
-            }),
-        ));
+        let on_click = cx.listener(move |v, _, window, cx| match (&state, v.package) {
+            _ if menu => v.open_menu(window, cx),
+            (_, None) => cx.open_url(&url),
+            (Download::Ready(path), Some(p)) if path.exists() => open_package(p, path, cx),
+            _ => v.start_download(owned.clone(), cx),
+        });
+        let main: AnyElement = if menu {
+            div()
+                .child(menu_button(t, "update-download", Some("linux"), label, ButtonKind::Primary, true, on_click))
+                .when(self.menu_open, |d| d.children(self.package_menu(t, tag, window, cx)))
+                .into_any_element()
+        } else {
+            button(t, "update-download", label, ButtonKind::Primary, running.is_none(), on_click).into_any_element()
+        };
+        let mut row = div().flex().items_center().flex_wrap().gap(px(10.)).child(main);
         row = if skipped {
             row.child(button(
                 t,
@@ -400,7 +468,7 @@ impl UpdateView {
             ))
         };
         // With no package the button already goes to the release page.
-        if package.is_some() {
+        if package.is_some() || !self.choices.is_empty() {
             row = row.child(
                 div()
                     .id("update-page-link")
@@ -439,6 +507,79 @@ impl UpdateView {
             block = block.child(notice(t, Tone::Bad, "Couldn't save that to the config file."));
         }
         block
+    }
+
+    /// The download button's menu, under the button: the release's Linux
+    /// packages, the one this install came from marked. A click outside it
+    /// or Escape closes it.
+    fn package_menu(&self, t: &Theme, tag: &str, window: &Window, cx: &mut Context<Self>) -> [AnyElement; 2] {
+        // A clear layer over the window takes the click that closes the
+        // menu, so that click doesn't also land on what is under it.
+        let viewport = window.viewport_size();
+        let backdrop = deferred(
+            anchored().position(point(px(0.), px(0.))).child(
+                div()
+                    .id("update-menu-backdrop")
+                    .debug_selector(|| "update-menu-backdrop".into())
+                    .w(viewport.width)
+                    .h(viewport.height)
+                    .occlude()
+                    .on_any_mouse_down(cx.listener(|v, _, _, cx| v.close_menu(cx))),
+            ),
+        )
+        .with_priority(1);
+        let hover = t.hover;
+        let items = self.choices.iter().map(|&p| {
+            let (id, name, hint) = match p {
+                AppPackage::Deb => ("update-menu-deb", ".deb", "Debian, Ubuntu"),
+                AppPackage::AppImage => ("update-menu-appimage", "AppImage", "Any distribution"),
+                AppPackage::Dmg => ("update-menu-dmg", ".dmg", "macOS"),
+                AppPackage::Msi => ("update-menu-msi", ".msi", "Windows"),
+            };
+            let (hint, hint_color) = if self.detected == Some(p) { ("This install", t.accent) } else { (hint, t.mute) };
+            let owned = tag.to_owned();
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(24.))
+                .h(px(34.))
+                .px(px(10.))
+                .rounded(px(R_S))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .child(div().text_size(px(13.5)).text_color(t.text).child(name))
+                .child(div().text_size(px(12.5)).text_color(hint_color).child(hint))
+                .on_click(cx.listener(move |v, _, _, cx| v.pick(p, owned.clone(), cx)))
+        });
+        let menu = deferred(
+            // Laid out after the button, so this is the gap under it.
+            anchored().anchor(Corner::TopLeft).offset(point(px(0.), px(4.))).snap_to_window_with_margin(px(8.)).child(
+                div()
+                    .id("update-menu")
+                    .track_focus(&self.menu_focus)
+                    .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
+                        if e.keystroke.key == "escape" {
+                            v.close_menu(cx);
+                        }
+                    }))
+                    .occlude()
+                    .flex()
+                    .flex_col()
+                    .min_w(px(260.))
+                    .p(px(4.))
+                    .rounded(px(R_M))
+                    .border_1()
+                    .border_color(t.line)
+                    .bg(t.surface)
+                    .shadow_lg()
+                    .children(items),
+            ),
+        )
+        .with_priority(2);
+        [backdrop.into_any_element(), menu.into_any_element()]
     }
 
     /// The release notes, one card per release.
@@ -614,7 +755,7 @@ impl Render for UpdateView {
                 .child(heading(&t, format!("Clawdmeter {version} is available")))
                 .child(para(&t, detail)),
         )
-        .child(self.download_block(&t, &tag, cx))
+        .child(self.download_block(&t, &tag, window, cx))
         .child(self.notes_block(&t))
     }
 }

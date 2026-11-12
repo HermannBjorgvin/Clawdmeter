@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use gpui::{
     canvas, div, fill, percentage, point, prelude::*, px, relative, rgb, size, svg, Animation, AnimationExt as _,
-    AnyView, App, Bounds, ClickEvent, ElementId, Hsla, MouseButton, Rgba, SharedString, Svg, Transformation, Window,
+    AnyView, App, Bounds, ClickEvent, Div, ElementId, Hsla, MouseButton, Rgba, SharedString, Stateful, Svg,
+    Transformation, Window,
 };
 
 use super::theme::{Theme, FONT_BODY, FONT_DISPLAY, FONT_MONO, R_ITEM, R_M, R_PILL, R_S};
@@ -31,6 +32,33 @@ pub enum ButtonKind {
 pub fn button(
     t: &Theme,
     id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    kind: ButtonKind,
+    enabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    button_with(t, id, None, label, kind, enabled, on_click)
+}
+
+/// A [`button`] that opens a menu: an icon before the label (`lead`, if
+/// any) and a chevron after it.
+pub fn menu_button(
+    t: &Theme,
+    id: impl Into<ElementId>,
+    lead: Option<&str>,
+    label: impl Into<SharedString>,
+    kind: ButtonKind,
+    enabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    button_with(t, id, Some(lead), label, kind, enabled, on_click)
+}
+
+/// [`button`], or with `menu` a [`menu_button`] with that leading icon.
+fn button_with(
+    t: &Theme,
+    id: impl Into<ElementId>,
+    menu: Option<Option<&str>>,
     label: impl Into<SharedString>,
     kind: ButtonKind,
     enabled: bool,
@@ -64,7 +92,9 @@ pub fn button(
         .text_color(fg)
         .text_size(px(size))
         .whitespace_nowrap()
-        .child(label.into());
+        .when_some(menu.flatten(), |el, lead| el.child(icon(lead, 18., fg).ml(px(-2.)).mr(px(7.))))
+        .child(label.into())
+        .when(menu.is_some(), |el| el.child(icon("chevron-down", 15., fg).ml(px(6.)).mr(px(-4.))));
     if enabled {
         let handler: Handler = Box::new(on_click);
         el.cursor_pointer().hover(move |s| s.bg(hover_bg)).on_click(move |e, w, cx| handler(e, w, cx))
@@ -558,6 +588,40 @@ pub fn para(t: &Theme, text: impl Into<SharedString>) -> impl IntoElement {
 /// Inline data in the mono face.
 pub fn mono(t: &Theme, text: impl Into<SharedString>) -> impl IntoElement {
     div().font_family(FONT_MONO).text_size(px(12.5)).text_color(t.dim).child(text.into())
+}
+
+/// "Update available" and the version, in a small outlined pill: the
+/// sidebar footer and the Settings heading announce a newer app release
+/// with it. `selected` while the Update page shows; the caller adds the
+/// click.
+pub fn update_pill(t: &Theme, id: &'static str, tag: &str, selected: bool, enabled: bool) -> Stateful<Div> {
+    let text = t.text;
+    let ink = if enabled { t.text } else { t.mute };
+    let hover = t.hover;
+    div()
+        .id(id)
+        .group(id)
+        .debug_selector(move || id.into())
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap(px(8.))
+        .h(px(28.))
+        .px(px(9.))
+        .rounded(px(R_ITEM))
+        .border_1()
+        .border_color(t.line)
+        .bg(if selected { t.selected } else { t.surface })
+        .text_size(px(12.5))
+        .text_color(ink)
+        .whitespace_nowrap()
+        .when(enabled && !selected, |d| d.cursor_pointer().hover(move |s| s.bg(hover)))
+        .child(
+            icon("arrow-down-to-line", 14., if enabled { t.dim } else { t.mute })
+                .group_hover(id, move |s| s.text_color(text)),
+        )
+        .child(div().flex_1().child("Update available"))
+        .child(div().text_color(t.mute).child(tag.trim_start_matches('v').to_owned()))
 }
 
 /// A panel card.

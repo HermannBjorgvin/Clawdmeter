@@ -106,7 +106,11 @@ is faked behind `FlashHardware`.
   daemon hands changes to `Engine::set_appearance`, which sends them like any
   device setting), `claude_path`,
   `release_repo`, `update_check`, `skipped_update` (the app release tag the
-  Update page was told to skip), `onboarding_done`, `alert_on` (alert kinds
+  Update page was told to skip), `skipped_firmware` (the firmware release
+  the Overview's "Skip this update" quiets: no nudge there and no Flash
+  badge; the Device page and the tray menu still offer it. Only a plain
+  version, `release_tag`, is nudged about or saved, since it comes from the
+  release's manifest), `onboarding_done`, `alert_on` (alert kinds
   the daemon lets through: the hook records `k` from `hook_event_name` /
   `notification_type` and `engine.on_attention` drops the rest; default all
   but `idle`).
@@ -210,7 +214,9 @@ Per account (`probe.rs`, `oauth.rs`):
   window is a `clawdmeter --window [PAGE]` child process.
 - `ui/app.rs` is the root: a sidebar (Overview, Device, Flash, Accounts,
   Hooks, Settings) or the setup wizard (`ui/setup.rs`) filling the window.
-  `Page::Update` has no sidebar item: the footer notice and Settings open it.
+  `Page::Update` has no sidebar item: the "Update available" pill
+  (`widgets::update_pill`) in the footer and beside the Settings heading
+  opens it.
   Pages are `crate::Page`; `Page::parse` also accepts the old
   `background`/`flasher`/`status`/`alerts` names.
 - The window saves settings through `ui::settings::write_settings`, which
@@ -232,7 +238,8 @@ Per account (`probe.rs`, `oauth.rs`):
   (`StatusSnapshot::app_update`, or the check's cache file with no tray) is
   newer than a release build's version, the sidebar footer shows "Update
   available" until that release is skipped (`skipped_update`; a later one
-  is announced again). It opens the Update page, which Settings opens too:
+  is announced again). It opens the Update page, which the same pill
+  beside the Settings heading opens too, a skipped release included:
   the notes of every release up to the new one (`release::release_notes`,
   Markdown drawn as headings, bullets and text), the download, "Skip this
   update" and a link to the release page. The download takes this install's
@@ -240,7 +247,9 @@ Per account (`probe.rs`, `oauth.rs`):
   where installing it replaces the running copy, `AppPackage::for_install`:
   `.dmg` from `/Applications/Clawdmeter.app`, `.msi` from its install
   folder, `.deb` for a `/usr/bin/clawdmeter` that dpkg lists as its
-  package's, AppImage under `$APPIMAGE`), fetched in 2 MB range requests
+  package's, AppImage under `$APPIMAGE`; on x86_64 Linux the button is a
+  menu of the `.deb` and AppImage instead, `AppPackage::for_linux`, with the
+  detected one marked "This install"), fetched in 2 MB range requests
   that are asked for again from the byte reached when one fails or stalls
   (ureq has no idle timeout, only a cap per body), checks it against the
   release's `SHA256SUMS`, marks it as
@@ -254,8 +263,8 @@ Per account (`probe.rs`, `oauth.rs`):
   tag is published (the check stores that tag), and with `update_check` off
   nothing is announced. Off screen the page re-reads the status and config
   every 5 s, not every tick. The demo's `--app-update`
-  shows each download state with made-up notes; clicking Download there
-  fetches for real.
+  shows each download state with made-up notes (`linux`, `linux-menu`: the
+  Linux menu closed or open); clicking Download there fetches for real.
 - The wizard reuses the flasher (`FlashMode::Setup`: no step header,
   up-to-date boards can skip) and the Hooks page
   (`SettingsView::show(Page::Hooks, embedded)`). First run = no
