@@ -184,7 +184,8 @@ jobs:
               tar -C stage -czf "dist/clawdmeter-$tag-${{ matrix.name }}.tar.gz" .
               # Drag-to-Applications disk image of the same signed bundle,
               # its window laid out by tools/packaging/macos/.
-              tools/packaging/dmg.sh "$app" "dist/clawdmeter-$tag-${{ matrix.name }}.dmg" dmgwork
+              tools/packaging/dmg.sh "$app" "dist/clawdmeter-$tag-${{ matrix.name }}.dmg" \
+                "$RUNNER_TEMP/dmg"
               ;;
             windows-*)
               cp desktop/target/x86_64-pc-windows-msvc/release/clawdmeter.exe stage/

@@ -15,12 +15,16 @@ here=$(cd "$(dirname "$0")" && pwd)
 volume=/Volumes/Clawdmeter
 [ ! -e "$volume" ] || { echo "$volume is mounted; eject it first" >&2; exit 1; }
 
-read -r width height app_x applications_x icon_y \
-  < <(python3 "$here/make_dmg_background.py" --layout)
 # Finder's window bounds include the title bar; the picture fills the rest.
-title_bar=28
-left=200
-top=120
+read -r width height app_x applications_x icon_y title_bar left bottom \
+  < <(python3 "$here/make_dmg_background.py" --layout)
+# Finder stores the window's place from the bottom of the main screen, and
+# the layout ships to every screen size: put the window where the stored
+# number comes out as $bottom whatever this Mac's screen is.
+screen=$(osascript -l JavaScript \
+  -e 'ObjC.import("AppKit"); $.NSScreen.screens.objectAtIndex(0).frame.size.height')
+top=$((screen - bottom - height - title_bar))
+[ "$top" -ge 30 ] || { echo "the main screen is too short for the window" >&2; exit 1; }
 
 # A fixed scratch folder: Finder records the image's path in the layout, and
 # that file ships in every release.
@@ -28,13 +32,18 @@ work=/tmp/clawdmeter-dmg-layout
 rm -rf "$work"
 mkdir -p "$work"
 
+eject() {
+  hdiutil detach "$1" -quiet 2>/dev/null \
+    || { sleep 3; hdiutil detach "$1" -quiet 2>/dev/null; } \
+    || hdiutil detach "$1" -force -quiet
+}
+
 cleanup() {
-  if [ -e "$volume" ]; then
-    hdiutil detach "$volume" -quiet 2>/dev/null \
-      || { sleep 3; hdiutil detach "$volume" -quiet 2>/dev/null; } \
-      || hdiutil detach "$volume" -force -quiet \
-      || echo "couldn't eject $volume; eject it before building an image" >&2
-  fi
+  for mounted in "$volume" "$work/mnt"; do
+    if mount | grep -q " on $mounted "; then
+      eject "$mounted" || echo "couldn't eject $mounted; eject it before building an image" >&2
+    fi
+  done
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -74,14 +83,16 @@ tell application "Finder"
 end tell
 SCRIPT
 
-# Finder writes the file a moment after the window closes.
-sync
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  [ -s "$volume/.DS_Store" ] && break
-  sleep 1
-done
-[ -s "$volume/.DS_Store" ] || { echo "Finder wrote no .DS_Store" >&2; exit 1; }
-cp "$volume/.DS_Store" "$here/macos/dmg-DS_Store"
+# Finder writes the file a moment after a window closes, and it closed two.
+# Ejecting the volume makes it finish; then read the file from a mount Finder
+# doesn't see.
+sleep 2
+eject "$volume"
+mkdir -p "$work/mnt"
+hdiutil attach "$work/layout.dmg" -readonly -nobrowse -noautoopen -quiet -mountpoint "$work/mnt"
+[ -s "$work/mnt/.DS_Store" ] || { echo "Finder wrote no .DS_Store" >&2; exit 1; }
+cp "$work/mnt/.DS_Store" "$here/macos/dmg-DS_Store"
+eject "$work/mnt"
 # Finder also records which volumes the picture was on: the scratch one and
 # this Mac's own disk, by UUID. Neither exists where the image is opened
 # (the picture is found by its path), so blank them, keeping the length.

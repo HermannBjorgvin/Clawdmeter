@@ -32,6 +32,10 @@ from pathlib import Path
 OUT = Path(__file__).resolve().parent / "macos"
 LAYOUT = OUT / "dmg-DS_Store"
 TITLE_BAR = 28  # Finder's window height includes it
+# Where the window opens: its left edge, and its bottom edge measured from
+# the bottom of the screen, as Finder stores it. Low enough that the title
+# bar is on screen on a 13-inch laptop.
+WINDOW_LEFT, WINDOW_BOTTOM = 200, 400
 
 # The window's content, in points. macos/dmg-DS_Store holds the same numbers.
 WIDTH, HEIGHT = 640, 360
@@ -132,21 +136,26 @@ def png_pixels(data):
 
 def layout_problems():
     """What macos/dmg-DS_Store (Finder's layout) says differently from the
-    numbers here: the two icons' centres and the window's size."""
+    numbers here: the two icons' centres and the window's place and size.
+
+    It searches the bytes instead of walking the file's index, so each record
+    must be there exactly once: a file with an old copy of one left in its
+    free space is reported, not guessed at. make_dmg_layout.sh starts from an
+    empty volume, which leaves none."""
     if not LAYOUT.exists():
         return [f"{LAYOUT.name} is missing"]
     data = LAYOUT.read_bytes()
     problems = []
     for name, want in (("Clawdmeter.app", (APP_X, ICON_Y)), ("Applications", (APPLICATIONS_X, ICON_Y))):
         # An icon's record: its name in UTF-16, then Iloc, blob, 16, x, y.
-        at = data.find(name.encode("utf-16-be") + b"Ilocblob\x00\x00\x00\x10")
-        have = struct.unpack(">II", data[at + len(name) * 2 + 12 :][:8]) if at >= 0 else None
-        if have != want:
+        found = re.findall(re.escape(name.encode("utf-16-be")) + rb"Ilocblob\x00\x00\x00\x10(.{8})", data, re.S)
+        have = [struct.unpack(">II", f) for f in found]
+        if have != [want]:
             problems.append(f"{name} is at {have}, not {want}")
-    bounds = re.search(rb"\{\{\d+, \d+\}, \{(\d+), (\d+)\}\}", data)
-    have = tuple(map(int, bounds.groups())) if bounds else None
-    if have != (WIDTH, HEIGHT + TITLE_BAR):
-        problems.append(f"the window is {have}, not {(WIDTH, HEIGHT + TITLE_BAR)}")
+    want = (WINDOW_LEFT, WINDOW_BOTTOM, WIDTH, HEIGHT + TITLE_BAR)
+    have = [tuple(map(int, m)) for m in re.findall(rb"\{\{(\d+), (\d+)\}, \{(\d+), (\d+)\}\}", data)]
+    if have != [want]:
+        problems.append(f"the window is {have}, not {want}")
     return problems
 
 
@@ -158,8 +167,10 @@ def outputs():
 
 
 def main():
+    if sys.argv[1:] not in ([], ["--check"], ["--layout"]):
+        sys.exit("usage: make_dmg_background.py [--check | --layout]")
     if sys.argv[1:] == ["--layout"]:
-        print(WIDTH, HEIGHT, APP_X, APPLICATIONS_X, ICON_Y)
+        print(WIDTH, HEIGHT, APP_X, APPLICATIONS_X, ICON_Y, TITLE_BAR, WINDOW_LEFT, WINDOW_BOTTOM)
         return
     files = outputs()
     if sys.argv[1:] == ["--check"]:

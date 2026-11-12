@@ -19,6 +19,9 @@ if [ -z "$work" ]; then
   work=$(mktemp -d)
   scratch=$work
 fi
+# Absolute, since the image is mounted inside it.
+mkdir -p "$work"
+work=$(cd "$work" && pwd)
 mnt="$work/mnt"
 attached=0
 
