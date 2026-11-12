@@ -308,11 +308,12 @@ static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
     lv_obj_set_style_text_font(lbl, L.pill_font, 0);
-    // mono_panel: ink pill, paper text. The grey sits just above the ink
-    // threshold so the text's thin strokes still print as paper.
+    // mono_panel: the dark fill would print as paper, leaving bare text, so
+    // the pill inverts to paper text on a fixed ink grey (THEME_MONO_PILL
+    // says why that grey; a mono panel never takes a new palette).
     if (board_caps().mono_panel) {
         themed_text(lbl, TH_BG);
-        lv_obj_set_style_bg_color(lbl, lv_color_hex(0x585858), 0);
+        lv_obj_set_style_bg_color(lbl, THEME_MONO_PILL, 0);
     } else {
         themed_text(lbl, TH_TEXT);
         themed_bg(lbl, TH_BAR_BG);

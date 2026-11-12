@@ -1,4 +1,5 @@
 #include "../../hal/display_hal.h"
+#include "../../hal/mono_panel.h"
 #include "board.h"
 #include "epd.h"
 #include <Arduino.h>
@@ -42,24 +43,6 @@ static int      dirty_x1 = 0, dirty_y1 = 0, dirty_x2 = 0, dirty_y2 = 0;
 // time for another ghost-clearing full refresh (and epd_init re-runs to
 // reload the full-refresh LUT).
 static bool partial_mode = false;
-
-// Threshold an RGB565 pixel to 1bpp (1=white, 0=black) via BT.601 luminance.
-// Coefficients (76, 150, 30) are Q8 approximations of 0.299/0.587/0.114.
-// The 64 threshold is tuned for the shared dark theme so EVERY foreground
-// colour becomes panel-ink while backgrounds stay white. Luminance (0-255):
-// BG=0, PANEL=26, BAR_BG(track)=40 (all stay white paper); RED=94,
-// GREEN=127, ACCENT/AMBER=144, TEXT=249 (all become ink). 64 sits safely
-// between the highest background (40) and the lowest foreground (RED 94),
-// so even red — invisible at the old 128 threshold — renders. This is what
-// lets us drop ALL of the epaper branch's slow_refresh colour overrides
-// with zero ui.cpp colour edits.
-static inline bool rgb565_is_white(uint16_t p) {
-    uint8_t r = (p >> 11) & 0x1F;
-    uint8_t g = (p >>  5) & 0x3F;
-    uint8_t b =  p        & 0x1F;
-    uint16_t lum = (uint16_t)((r << 3) * 76 + (g << 2) * 150 + (b << 3) * 30);
-    return (lum >> 8) >= 64;
-}
 
 static inline void expand_dirty(int x, int y, int w, int h) {
     int x2 = x + w - 1;
@@ -116,9 +99,12 @@ void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
             // on AMOLED but unnatural on e-paper. Map LVGL-light pixels
             // (text/icons) to panel-black, and LVGL-dark pixels
             // (background) to panel-white — gives black-on-white output
-            // on the panel without touching shared UI code.
-            if (rgb565_is_white(pixels[row * w + col])) *byte &= ~bit;
-            else                                         *byte |=  bit;
+            // on the panel without touching shared UI code. The threshold
+            // is the mono_panel rule (hal/mono_panel.h): luminance 64 or
+            // more is ink, between the theme's brightest background (the
+            // bar track, 40) and its darkest foreground (red, 94).
+            if (mono_ink565(pixels[row * w + col])) *byte &= ~bit;
+            else                                    *byte |=  bit;
         }
     }
     expand_dirty(x, y, w, h);

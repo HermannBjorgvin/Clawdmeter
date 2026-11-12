@@ -17,3 +17,4 @@ static inline lv_color_t theme_color(ThemeColor c) { return lv_color_hex(theme_h
 #define THEME_AMBER    theme_color(TH_AMBER)
 #define THEME_RED      theme_color(TH_RED)
 #define THEME_BAR_BG   theme_color(TH_BAR_BG)   // unfilled bar track
+#define THEME_MONO_PILL lv_color_hex(THEME_MONO_PILL_HEX)   // pill fill on a 1-bit panel (theme_palette.h)
