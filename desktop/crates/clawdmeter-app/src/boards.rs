@@ -153,7 +153,7 @@ pub const BOARDS: [BoardInfo; 28] = [
         product: "Waveshare ESP32-C6-Touch-LCD-1.47",
         width: 320,
         height: 172,
-        buy_url: "https://www.waveshare.com/esp32-c6-touch-lcd-1.47.htm?aff_id=149786",
+        buy_url: "https://www.waveshare.com/esp32-c6-touch-lcd-1.47.htm?&aff_id=149786",
         summary: "320×172 · ESP32-C6",
         chip: "ESP32-C6",
         pwr_button: true,
