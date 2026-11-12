@@ -4,11 +4,9 @@
 #include <Arduino_GFX_Library.h>
 
 // JD9853 172x320 IPS over plain 4-wire SPI, run rotated to a 320x172
-// landscape canvas. Same panel/init sequence as the (unmerged) S3 sibling
-// port (PR #148) — the JD9853's vendor init sequence is a panel property,
-// not an SoC one. Pins below are this board's own, confirmed empirically
-// (see board.h) — the S3 sibling's pin numbers don't apply on the C6 (it
-// only has GPIO0-30).
+// landscape canvas. Same panel and init sequence as waveshare_lcd_147 (the
+// JD9853's vendor init is a panel property, not an SoC one); only the pins
+// differ (board.h).
 //
 // The JD9853 speaks the ST7789's command set for everything the framebuffer
 // path touches (CASET/RASET/RAMWR/MADCTL/INVON), so Arduino_GFX's ST7789
@@ -23,9 +21,9 @@
 static Arduino_DataBus* bus = nullptr;
 static Arduino_ST7789*  gfx = nullptr;
 
-// Vendor init sequence for the JD9853, lifted from Waveshare's own Arduino
-// demo for this panel family (lcd_reg_init()) — identical across both the S3
-// and C6 kits since it's a panel-controller property.
+// Vendor init sequence for the JD9853, lifted from Waveshare's Arduino demo
+// for this panel (lcd_reg_init()), the same on the S3 and C6 kits. Pushed
+// after gfx->begin() so the ST7789 driver's own init can't clobber it.
 static void jd9853_reg_init(void) {
     static const uint8_t init_operations[] = {
     BEGIN_WRITE,
@@ -128,9 +126,10 @@ void display_hal_init(void) {
     // Constructed in the panel's native portrait geometry with the GRAM
     // column offset; setRotation() below swaps the axes (and maps the offset
     // onto the right one) to give the UI a 320x172 landscape canvas.
-    // ips=false matches the vendor sequence, which turns inversion on itself
-    // (0x21 at the tail of jd9853_reg_init) — passing true here would send a
-    // second INVON and cancel it back out.
+    // Inversion comes from the vendor sequence: jd9853_reg_init() runs after
+    // begin() and ends with INVON (0x21), whatever begin() sent. `ips` only
+    // decides what begin()'s invertDisplay(false) sends (INVOFF here) and how
+    // a later invertDisplay() reads its argument; nothing else calls it.
     gfx = new Arduino_ST7789(bus, LCD_RST, 0 /* rotation */, false /* ips */,
                              LCD_PANEL_W, LCD_PANEL_H,
                              LCD_COL_OFFSET, 0, LCD_COL_OFFSET, 0);

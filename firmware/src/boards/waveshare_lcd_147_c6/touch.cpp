@@ -4,8 +4,8 @@
 #include <Wire.h>
 
 // Minimal AXS5106L reader, vendored (like the FocalTech/CST readers on the
-// other ports) to keep the dependency tree copyleft-free. Identical protocol
-// to the S3 sibling — the AXS5106L doesn't care which SoC it's wired to,
+// other ports) to keep the dependency tree copyleft-free. The same reader as
+// waveshare_lcd_147: the controller and its mapping don't depend on the SoC,
 // only the GPIO numbers differ (see board.h).
 //
 // Protocol (from Waveshare's driver for this panel/touch combo):
@@ -51,6 +51,10 @@ static void touch_read_into_shared_state(void) {
 
     uint16_t raw_x = ((uint16_t)(data[2] & 0x0F) << 8) | data[3];   // 0..171
     uint16_t raw_y = ((uint16_t)(data[4] & 0x0F) << 8) | data[5];   // 0..319
+    // The controller can overshoot the edge by a few counts; clamp so the
+    // mirrored mappings below never wrap.
+    if (raw_x > LCD_PANEL_W - 1) raw_x = LCD_PANEL_W - 1;
+    if (raw_y > LCD_PANEL_H - 1) raw_y = LCD_PANEL_H - 1;
 
 #if LCD_ROTATION == 1
     // 90° — swap axes, no mirror.
@@ -61,8 +65,8 @@ static void touch_read_into_shared_state(void) {
     touch_x = (LCD_PANEL_H - 1) - raw_y;
     touch_y = (LCD_PANEL_W - 1) - raw_x;
 #else
-    // 0° portrait — mirror X only (matches the controller's native reading
-    // against the panel on this kit family).
+    // 0° portrait — mirror X only (the controller's native reading is flipped
+    // against the panel on this kit).
     touch_x = (LCD_PANEL_W - 1) - raw_x;
     touch_y = raw_y;
 #endif
@@ -72,7 +76,7 @@ static void touch_read_into_shared_state(void) {
 void touch_hal_init(void) {
     // Hardware reset. The AXS5106L needs a long, clean pulse before it
     // answers on I2C — Waveshare's driver uses 200 ms low / 300 ms settle
-    // and shorter pulses were not reliable on the S3 sibling.
+    // and shorter pulses were not reliable on the S3 kit.
     pinMode(TP_RST, OUTPUT);
     digitalWrite(TP_RST, LOW);
     delay(200);

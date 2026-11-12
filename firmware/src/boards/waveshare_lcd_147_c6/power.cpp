@@ -2,21 +2,17 @@
 #include "board.h"
 #include <Arduino.h>
 
-// No PMU on this kit, but there IS a real battery circuit: an ETA6098
-// charger + a VBAT divider on GPIO0 (BAT_ADC, R21=200K/R22=100K per
-// Waveshare's documentation, VBAT = VADC * 3 — see board.h). The sampling
-// code below is correct, but BOARD_HAS_BATTERY defaults to 0 — with no
-// battery attached (the common case on this bare, connector-less kit), the
-// ETA6098 free-runs its output toward ~4.2V with nothing to load it down,
-// indistinguishable from a genuinely full battery on a single voltage read.
-// Flip BOARD_HAS_BATTERY on and recompile if you've wired an actual battery
-// to VBAT. The charger has no digital interface and no separate CHG/STAT
-// pin is broken out, so charging/VBUS state stays unknowable regardless —
-// both always report false.
+// No PMU on this kit — the ETA6098 charger is a standalone part that exposes
+// nothing over I2C and has no CHG/STAT pin broken out, so charging / VBUS
+// state is unknowable and both report false. Battery percentage comes from
+// the VBAT divider on BAT_ADC_PIN (GPIO0, VBAT = VADC * 3), but only when
+// BOARD_HAS_BATTERY is set (board.h): without a cell the charger holds VBAT
+// near full on the tested unit. Otherwise the percentage stays -1, so neither
+// the screen nor the BLE battery service reports a battery.
 //
 // The PWR-role button is the BOOT key (GPIO9), a plain active-LOW GPIO — the
 // kit's only readable button, see board.h. Same software edge synthesis as
-// the LCD-1.54 / S3 1.47 ports:
+// the LCD-1.54 and S3 LCD-1.47 ports:
 //   short    — fired on release if the hold was shorter than PWR_LONG_MS
 //   long     — fired once when a hold crosses PWR_LONG_MS
 //   release  — fired on every release edge
@@ -27,7 +23,7 @@
 // boot strapping pin — waking from deep sleep on an ext0 LOW level means the
 // ROM samples GPIO9 while the button is still held and drops the chip into
 // USB download mode, which looks like a brick to the user. Holding past the
-// pairing window simply does nothing here (same reasoning as the S3 1.47).
+// pairing window simply does nothing here.
 
 #define BATTERY_POLL_MS  2000
 #define PWR_POLL_MS      50
@@ -44,13 +40,18 @@ static uint32_t last_battery_ms   = 0;
 static uint32_t last_pwr_ms       = 0;
 
 static void sample_battery(void) {
+    if (!BOARD_HAS_BATTERY) return;   // cached_pct stays -1, see board.h
+
     // Average a few reads — the divider is high-impedance and single ADC
     // samples on the C6 are noisy.
     uint32_t mv = 0;
     for (int i = 0; i < 4; i++) mv += analogReadMilliVolts(BAT_ADC_PIN);
     float vbat = (mv / 4) * BAT_VOLT_DIVIDER / 1000.0f;
 
-    if (vbat < 3.0f) {          // divider floating — no battery connected
+    // Divider floating: no battery. On USB with no cell the charger may hold
+    // VBAT anywhere up to full, so a missing cell can also read as a
+    // battery; see this board's CLAUDE.md.
+    if (vbat < 3.0f) {
         cached_pct = -1;
         return;
     }
