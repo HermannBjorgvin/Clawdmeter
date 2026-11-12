@@ -22,8 +22,22 @@ title_bar=28
 left=200
 top=120
 
-work=$(mktemp -d)
-trap 'hdiutil detach "$volume" -quiet 2>/dev/null || true; rm -rf "$work"' EXIT
+# A fixed scratch folder: Finder records the image's path in the layout, and
+# that file ships in every release.
+work=/tmp/clawdmeter-dmg-layout
+rm -rf "$work"
+mkdir -p "$work"
+
+cleanup() {
+  if [ -e "$volume" ]; then
+    hdiutil detach "$volume" -quiet 2>/dev/null \
+      || { sleep 3; hdiutil detach "$volume" -quiet 2>/dev/null; } \
+      || hdiutil detach "$volume" -force -quiet \
+      || echo "couldn't eject $volume; eject it before building an image" >&2
+  fi
+  rm -rf "$work"
+}
+trap cleanup EXIT
 
 # The same names dmg.sh puts in the image; the app can be an empty folder.
 root="$work/root"

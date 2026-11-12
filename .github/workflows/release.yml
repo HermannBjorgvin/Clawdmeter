@@ -200,7 +200,7 @@ jobs:
           bin=desktop/target/x86_64-unknown-linux-gnu/release/clawdmeter
           # The committed icons must match the firmware's art.
           python3 tools/packaging/make_icons.py --check
-          # And the disk image's picture what its script draws.
+          # And the disk image's picture and layout what its script says.
           python3 tools/packaging/make_dmg_background.py --check
           cargo install --locked cargo-deb@3.8.0
           # Debian sorts 1.2.0~rc.1 before 1.2.0; the file keeps the tag's spelling.

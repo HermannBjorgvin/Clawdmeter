@@ -22,7 +22,7 @@ Release checks:
 - [ ] main is green: firmware.yml and desktop.yml passed on the commit
 - [ ] Every hardware env has a DISPLAY_NAMES entry in tools/ci/make_manifest.py
 - [ ] python3 tools/packaging/make_icons.py --check   (icons match the firmware art)
-- [ ] python3 tools/packaging/make_dmg_background.py --check   (the disk image's picture matches its script)
+- [ ] python3 tools/packaging/make_dmg_background.py --check   (the disk image's picture and layout match its script)
 - [ ] python3 -m unittest discover -s tools/ci/tests
 - [ ] Packaging changed? Run the local checks below
 - [ ] .github/ changed? actionlint (+ shellcheck) passes

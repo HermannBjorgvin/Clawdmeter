@@ -19,16 +19,19 @@ Only the standard library. The outputs are committed; rerun this when the
 picture changes, and make_dmg_layout.sh too when a size or position does:
 
   python3 tools/packaging/make_dmg_background.py
-  python3 tools/packaging/make_dmg_background.py --check    # release.yml: files match
+  python3 tools/packaging/make_dmg_background.py --check    # release.yml: pictures and layout match
   python3 tools/packaging/make_dmg_background.py --layout   # the numbers, for make_dmg_layout.sh
 """
 
+import re
 import struct
 import sys
 import zlib
 from pathlib import Path
 
 OUT = Path(__file__).resolve().parent / "macos"
+LAYOUT = OUT / "dmg-DS_Store"
+TITLE_BAR = 28  # Finder's window height includes it
 
 # The window's content, in points. macos/dmg-DS_Store holds the same numbers.
 WIDTH, HEIGHT = 640, 360
@@ -112,6 +115,41 @@ def png(w, h, rows):
     )
 
 
+def png_pixels(data):
+    """Size and raw scanlines of one of our PNGs, for --check: compressed
+    bytes can differ between zlib builds, pixels can't."""
+    pos, size, idat = 8, None, b""
+    while pos < len(data):
+        (length,) = struct.unpack(">I", data[pos : pos + 4])
+        kind, body = data[pos + 4 : pos + 8], data[pos + 8 : pos + 8 + length]
+        if kind == b"IHDR":
+            size = struct.unpack(">II", body[:8])
+        elif kind == b"IDAT":
+            idat += body
+        pos += 12 + length
+    return size, zlib.decompress(idat)
+
+
+def layout_problems():
+    """What macos/dmg-DS_Store (Finder's layout) says differently from the
+    numbers here: the two icons' centres and the window's size."""
+    if not LAYOUT.exists():
+        return [f"{LAYOUT.name} is missing"]
+    data = LAYOUT.read_bytes()
+    problems = []
+    for name, want in (("Clawdmeter.app", (APP_X, ICON_Y)), ("Applications", (APPLICATIONS_X, ICON_Y))):
+        # An icon's record: its name in UTF-16, then Iloc, blob, 16, x, y.
+        at = data.find(name.encode("utf-16-be") + b"Ilocblob\x00\x00\x00\x10")
+        have = struct.unpack(">II", data[at + len(name) * 2 + 12 :][:8]) if at >= 0 else None
+        if have != want:
+            problems.append(f"{name} is at {have}, not {want}")
+    bounds = re.search(rb"\{\{\d+, \d+\}, \{(\d+), (\d+)\}\}", data)
+    have = tuple(map(int, bounds.groups())) if bounds else None
+    if have != (WIDTH, HEIGHT + TITLE_BAR):
+        problems.append(f"the window is {have}, not {(WIDTH, HEIGHT + TITLE_BAR)}")
+    return problems
+
+
 def outputs():
     return {
         OUT / "dmg-background.png": png(*render(1)),
@@ -125,10 +163,15 @@ def main():
         return
     files = outputs()
     if sys.argv[1:] == ["--check"]:
-        stale = [p.name for p, data in files.items() if not p.exists() or p.read_bytes() != data]
+        stale = [
+            p.name for p, data in files.items() if not p.exists() or png_pixels(p.read_bytes()) != png_pixels(data)
+        ]
         if stale:
             sys.exit(f"stale: {', '.join(stale)}; run tools/packaging/make_dmg_background.py")
-        print("dmg background matches")
+        problems = layout_problems()
+        if problems:
+            sys.exit(f"{LAYOUT.name}: {'; '.join(problems)}; run tools/packaging/make_dmg_layout.sh on a Mac")
+        print("dmg background and layout match")
         return
     OUT.mkdir(exist_ok=True)
     for path, data in files.items():
