@@ -82,4 +82,9 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 [ -s "$volume/.DS_Store" ] || { echo "Finder wrote no .DS_Store" >&2; exit 1; }
 cp "$volume/.DS_Store" "$here/macos/dmg-DS_Store"
+# Finder also records which volumes the picture was on: the scratch one and
+# this Mac's own disk, by UUID. Neither exists where the image is opened
+# (the picture is found by its path), so blank them, keeping the length.
+perl -0777 -pi -e 's/[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}/00000000-0000-0000-0000-000000000000/g' \
+  "$here/macos/dmg-DS_Store"
 echo "wrote tools/packaging/macos/dmg-DS_Store"
