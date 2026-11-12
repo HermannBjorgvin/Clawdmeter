@@ -5,9 +5,8 @@
 #include <ImuDrv.hpp>
 
 // QMI8658 is populated but rotation is disabled (BOARD_HAS_ROTATION=0): the
-// panel runs at one fixed orientation, and the C6 has no PSRAM headroom for
-// the rotation strip. We still initialize it to keep the shared I2C bus
-// healthy. Always reports quadrant 0.
+// landscape strip runs at one fixed orientation. We still initialize it to
+// keep the shared I2C bus healthy. Always reports quadrant 0.
 
 static SensorQMI8658 imu;
 

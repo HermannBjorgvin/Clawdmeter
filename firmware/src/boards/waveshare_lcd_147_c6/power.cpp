@@ -19,11 +19,9 @@
 // which keeps the hold-to-pair gesture in main.cpp board-agnostic.
 //
 // Deliberately NO hold-to-power-off: this board has no power-hold latch to
-// drop (so "off" could only ever mean deep sleep), and GPIO9 is the C6's
-// boot strapping pin — waking from deep sleep on an ext0 LOW level means the
-// ROM samples GPIO9 while the button is still held and drops the chip into
-// USB download mode, which looks like a brick to the user. Holding past the
-// pairing window simply does nothing here.
+// drop, so "off" could only mean deep sleep, and nothing could wake it: on
+// the C6 only the LP GPIOs (0-7) can wake the chip from deep sleep, and BOOT
+// is GPIO9. Holding past the pairing window simply does nothing here.
 
 #define BATTERY_POLL_MS  2000
 #define PWR_POLL_MS      50
