@@ -159,8 +159,10 @@ void io_expander_init(void) {
                   is_ch32 ? "CH32V003" : "TCA9554", expander_addr,
                   ok ? "OK" : "WRITE FAILED", output_latch);
     if (is_ch32)
-        Serial.println("LCD-4 backlight: CH32 PWM assumed inverted (reg 0x05 = 255 - level), "
-                       "written only once a battery is detected");
+        Serial.println(BOARD_HAS_BATTERY
+            ? "LCD-4 backlight: CH32 PWM assumed inverted (reg 0x05 = 255 - level), "
+              "written only once a battery is detected"
+            : "LCD-4 backlight: CH32 PWM left at power-on (BOARD_HAS_BATTERY 0)");
 }
 
 static void pwm_try(void) {
@@ -244,7 +246,9 @@ int io_expander_charging(void) {
     return -1;
 }
 
-bool io_expander_has_battery(void) { return expander_addr && is_ch32 && !found_late; }
+bool io_expander_has_battery(void) {
+    return BOARD_HAS_BATTERY && expander_addr && is_ch32 && !found_late;
+}
 
 int io_expander_battery_mv(void) {
     if (!io_expander_has_battery()) return -1;

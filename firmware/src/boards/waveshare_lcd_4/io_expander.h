@@ -30,6 +30,6 @@ void io_expander_enable_pwm(void);
 int io_expander_battery_mv(void);
 // Charger STAT line: 1 = charging, 0 = not charging, -1 = unavailable.
 int io_expander_charging(void);
-// True on the CH32V003 revision found at boot: the only one whose battery
-// voltage is readable.
+// True on the CH32V003 revision found at boot (the only one whose battery
+// voltage is readable), in a build with BOARD_HAS_BATTERY 1.
 bool io_expander_has_battery(void);

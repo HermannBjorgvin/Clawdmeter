@@ -102,6 +102,11 @@
 #define BOARD_HAS_SECONDARY_BUTTON 0
 #define BOARD_HAS_ROTATION         0
 #define BOARD_HAS_IMU              0
-#define BOARD_HAS_BATTERY          1   // optional 3.7 V LiPo on the PH2.0 jack
+// Off by default: with no cell fitted the ETA6098 charger holds VBAT near
+// 4.2 V (the ADC divider sits on its output), so a missing battery reads as
+// a full one and presence can't be told from the voltage. Set to 1 with a
+// 3.7 V LiPo on the PH2.0 jack of a CH32V003 (V4.0) board: battery level,
+// and the backlight PWM for brightness steps (see io_expander.cpp).
+#define BOARD_HAS_BATTERY          0
 #define BOARD_HAS_IO_EXPANDER      1
 #define BOARD_HAS_SOUND            0

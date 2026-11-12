@@ -23,8 +23,9 @@
 // is written to NVS until it has settled. The first time a battery is seen,
 // the backlight PWM is switched on (io_expander_enable_pwm).
 //
-// On the TCA9554 revision (no ADC) none of this runs: it reports USB power
-// and no battery, and never touches NVS.
+// None of this runs on the TCA9554 revision (no ADC) or in a build with
+// BOARD_HAS_BATTERY 0, the default (board.h): it reports USB power and no
+// battery, never touches NVS, and the backlight PWM is never enabled.
 
 #define BATTERY_POLL_MS    2000
 #define TREND_WINDOW_MS    120000UL   // compare against the reading 2 min ago
