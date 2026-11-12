@@ -145,6 +145,7 @@ pub const BOARDS: [BoardInfo; 27] = [
         summary: "320×172 · landscape",
         chip: "ESP32-S3",
         pwr_button: true,
+        buttons: &[(Button::Pwr, "BOOT")],
     },
     BoardInfo {
         env: "lilygo_t4s3",
