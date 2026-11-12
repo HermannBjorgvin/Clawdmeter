@@ -37,6 +37,7 @@ static uint32_t reprobe_ms    = 0;
 static bool     pwm_enabled   = false;
 static int      pwm_want      = 255;
 static int      pwm_written   = -1;
+static bool     pwm_retry_pending = false;
 static uint32_t pwm_retry_ms  = 0;
 
 bool io_expander_recover_bus(void) {
@@ -168,14 +169,16 @@ void io_expander_init(void) {
 static void pwm_try(void) {
     if (iox_write(CH32_REG_PWM, (uint8_t)(255 - pwm_want))) {
         pwm_written = pwm_want;
+        pwm_retry_pending = false;
     } else {
+        pwm_retry_pending = true;
         pwm_retry_ms = millis() + RETRY_MS;
     }
 }
 
 static bool pwm_due(void) {
-    return pwm_enabled && pwm_want != pwm_written &&
-           (int32_t)(millis() - pwm_retry_ms) >= 0;
+    if (!pwm_enabled || pwm_want == pwm_written) return false;
+    return !pwm_retry_pending || (int32_t)(millis() - pwm_retry_ms) >= 0;
 }
 
 void io_expander_set_brightness(uint8_t level) {
