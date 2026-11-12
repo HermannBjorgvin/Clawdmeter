@@ -39,7 +39,6 @@ struct BoardCaps {
                              // as ink: it keeps the default palette and
                              // ignores `th` (clawd_prefs.cpp); outlined bars,
                              // inverted pills, no stale fade
-    bool    minimal_verbs;   // minimal mode keeps the rotating status verbs
 };
 
 const BoardCaps& board_caps(void);

@@ -771,7 +771,7 @@ void ui_tick_anim(void) {
     update_view_state();
     if (pair_hint == PAIR_HINT_CLEARED && lv_tick_get() - pair_hint_since >= PAIR_CLEARED_SHOW_MS)
         ui_set_pair_hint(PAIR_HINT_NORMAL);
-    const bool still = minimal_mode() && !board_caps().minimal_verbs;   // minimal: nothing moves but the numbers
+    const bool still = minimal_mode();   // minimal: nothing moves but the numbers
 
     uint32_t now = lv_tick_get();
 
@@ -815,14 +815,13 @@ void ui_tick_anim(void) {
     // and the spinner holds still, so the line only redraws when the word
     // does (clawd_policy.h, liveliness).
     const ClawdTuning& tune = clawd_tuning();
-    const bool spin = tune.spinner && !minimal_mode();   // minimal_verbs: spinner held still
     if (now - anim_msg_start >= tune.verb_ms) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
         anim_verb_idx = fitting_verb((anim_verb_idx + 1) % ANIM_MSG_COUNT);
         anim_msg_start = now;
     }
 
-    if (spin) {
+    if (tune.spinner) {
         if (now - anim_last_ms < spinner_ms[anim_spinner_idx]) return;
         anim_last_ms = now;
         anim_phase = (anim_phase + 1) % SPINNER_PHASES;
@@ -838,14 +837,16 @@ void ui_tick_anim(void) {
     if (!s_ble_connected) {
         text = "Waiting";              // advertising / waiting for a host connection
     } else if (view_state == 1) {      // stale — alternate so it reads as alive AND not live
-        text = (anim_msg_idx & 1) ? (data_received ? "Stale" : "No data") : "Listening";
+        // A mono panel doesn't dim stale meters, so the word is the only cue: hold it.
+        const char* stale = data_received ? "Stale" : "No data";
+        text = (board_caps().mono_panel || (anim_msg_idx & 1)) ? stale : "Listening";
     } else if (now - connected_at_ms < 5000) {
         text = "Connected";
     } else {
         text = anim_messages[anim_verb_idx];
     }
 
-    if (!spin) {
+    if (!tune.spinner) {
         if (text == frozen_shown) return;
         frozen_shown = text;
     }
