@@ -83,6 +83,7 @@ void display_hal_set_brightness(uint8_t level) {
 void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
                              const uint16_t* pixels) {
     if (!framebuf || !pixels) return;
+    bool changed = false;
     for (int32_t row = 0; row < h; row++) {
         int32_t py = y + row;
         if (py < 0 || py >= LCD_HEIGHT) continue;
@@ -91,6 +92,7 @@ void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
             if (px < 0 || px >= LCD_WIDTH) continue;
             uint8_t bit  = 1 << (7 - (px & 7));
             uint8_t* byte = &framebuf[py * (LCD_WIDTH / 8) + (px >> 3)];
+            const uint8_t was = *byte;
             // INVERTED for e-paper: the shared UI uses a dark theme
             // (THEME_BG=0x000000, THEME_TEXT=0xfaf9f5) which is natural
             // on AMOLED but unnatural on e-paper. Map LVGL-light pixels
@@ -102,8 +104,14 @@ void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
             // bar track, 40) and its darkest foreground (red, 94).
             if (mono_ink565(pixels[row * w + col])) *byte &= ~bit;
             else                                    *byte |=  bit;
+            changed |= *byte != was;
         }
     }
+    // LVGL redraws whatever was invalidated, and a payload with the same
+    // numbers (a heartbeat, a hook event) still sets every label's text, so
+    // the same 1-bit image comes back. A panel refresh blocks loop() for
+    // about 300 ms: only a flush that changed the image asks for one.
+    if (!changed) return;
     expand_dirty(x, y, w, h);
     last_flush_ms = millis();
 }
