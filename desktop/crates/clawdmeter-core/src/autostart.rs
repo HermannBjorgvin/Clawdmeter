@@ -211,9 +211,19 @@ pub fn entry_path(home: &Path, mode: LaunchMode) -> Option<PathBuf> {
 
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 
+/// Keep a child from opening a console window: the app is a GUI-subsystem
+/// process, so on Windows each `reg.exe` would otherwise get its own console.
+pub(crate) fn no_console(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 fn run_quiet(cmd: &str, args: &[&str]) -> io::Result<bool> {
-    let st = Command::new(cmd)
-        .args(args)
+    let st = no_console(Command::new(cmd).args(args))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()?;
@@ -316,8 +326,7 @@ pub fn is_stale(home: &Path, mode: LaunchMode, want: &Path) -> bool {
 
 /// The current `Clawdmeter` Run value (Windows), if any.
 fn windows_run_value() -> Option<String> {
-    let out = Command::new("reg")
-        .args(["query", RUN_KEY, "/v", RUN_VALUE])
+    let out = no_console(Command::new("reg").args(["query", RUN_KEY, "/v", RUN_VALUE]))
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()

@@ -3,11 +3,12 @@
 #include <lvgl.h>
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
+#include <driver/gpio.h>
 
 #include "data.h"
 #include "ui.h"
 #include "ble.h"
-#include "splash.h"
+#include "performer.h"
 #include "mascot.h"
 #include "clawd_director.h"
 #include "usage_rate.h"
@@ -18,6 +19,7 @@
 #include "idle.h"
 #include "idle_cfg.h"
 #include "brightness.h"
+#include "clawd_prefs.h"
 #include "perf.h"
 #include "pair_hold.h"
 
@@ -25,6 +27,7 @@
 #include "hal/display_hal.h"
 #include "hal/touch_hal.h"
 #include "hal/input_hal.h"
+#include "button_action.h"
 #include "hal/power_hal.h"
 #include "hal/imu_hal.h"
 #include "hal/sound_hal.h"
@@ -132,7 +135,7 @@ static void clear_pairing(const char* why) {
 }
 
 // ---- Serial command buffer ----
-#define CMD_BUF_SIZE 64
+#define CMD_BUF_SIZE 80   // fits `theme` + the 66-digit palette
 static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_pos = 0;
 
@@ -208,6 +211,37 @@ static void check_serial_cmd() {
                 clear_pairing("serial");
                 Serial.println("{\"unpair\":true}");
             }
+            else if (strcmp(cmd_buf, "liveliness") == 0 || strncmp(cmd_buf, "liveliness ", 11) == 0) {
+                // QA: `liveliness [1-5]` (until the app sends its own).
+                if (cmd_buf[10] == ' ') liveliness_set(atoi(cmd_buf + 11));
+                Serial.printf("{\"liveliness\":%d}\n", liveliness_get());
+            }
+            else if (strcmp(cmd_buf, "attention_anim") == 0 || strncmp(cmd_buf, "attention_anim ", 15) == 0) {
+                // QA: `attention_anim [seconds]` (0 = off; until the app sends its own).
+                if (cmd_buf[14] == ' ') attn_anim_set(atoi(cmd_buf + 15));
+                Serial.printf("{\"attention_anim\":%d}\n", attn_anim_get());
+            }
+            else if (strcmp(cmd_buf, "buttons") == 0) {
+                // QA: what the primary, secondary and PWR buttons do (`k1`..`k3`).
+                Serial.printf("{\"k1\":%ld,\"k2\":%ld,\"k3\":%ld}\n",
+                              (long)button_action_get(BTN_SLOT_PRIMARY),
+                              (long)button_action_get(BTN_SLOT_SECONDARY),
+                              (long)button_action_get(BTN_SLOT_PWR));
+            }
+            else if (strcmp(cmd_buf, "pace_marker") == 0 || strncmp(cmd_buf, "pace_marker ", 12) == 0) {
+                // QA: `pace_marker [0|1]` (until the app sends its own).
+                if (cmd_buf[11] == ' ') pace_marker_set(atoi(cmd_buf + 12) != 0);
+                Serial.printf("{\"pace_marker\":%s}\n", pace_marker_get() ? "true" : "false");
+            }
+            else if (strcmp(cmd_buf, "theme") == 0 || strncmp(cmd_buf, "theme ", 6) == 0) {
+                // QA: `theme [hex]`, the `th` string (theme_palette.h; until the app sends its own).
+                uint32_t p[TH_COUNT];
+                if (cmd_buf[5] == ' ' && theme_parse_hex(cmd_buf + 6, p)) theme_set(p);
+                char hex[THEME_HEX_LEN + 1];
+                for (int i = 0; i < TH_COUNT; i++) p[i] = theme_hex((ThemeColor)i);
+                theme_format_hex(p, hex);
+                Serial.printf("{\"theme\":\"%s\"}\n", hex);
+            }
             else if (strncmp(cmd_buf, "clawd ", 6) == 0) {
                 const bool ok = director_debug(cmd_buf + 6);
                 Serial.printf("{\"clawd\":\"%s\",\"ok\":%s}\n", cmd_buf + 6, ok ? "true" : "false");
@@ -226,6 +260,13 @@ static void check_serial_cmd() {
 extern "C" void board_init(void);
 
 void setup() {
+    // Install the GPIO ISR service first, before Serial and the drivers start
+    // their interrupts. On dual-core chips the install runs esp_intr_alloc on
+    // the ipc task, whose stack is 1 KB, and an interrupt landing mid-install
+    // can overflow it (a boot panic, #264); this early, that is rare.
+    // attachInterrupt() accepts the service already being installed.
+    gpio_install_isr_service(ARDUINO_ISR_FLAG);
+
     Serial.begin(115200);
     delay(300);
     Serial.println("{\"ready\":true}");
@@ -267,10 +308,12 @@ void setup() {
     ble_init();
     input_hal_init();
 
+    theme_prefs_load();  // the saved palette, so the meters are built in it
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging(), power_hal_is_vbus_in());
     director_init();    // rooms + beats; boots on the meters (home)
+    clawd_prefs_init();  // the saved device settings, before the app says otherwise
 
     Serial.printf("Dashboard ready (%s, %dx%d) %lu ms after boot, waiting for data on BLE...\n",
         board_caps().name, W, H, (unsigned long)millis());
@@ -350,6 +393,74 @@ static void touch_pair_tick(void) {
     }
 }
 
+// A button's configured action (button_action.h). On press it taps the keys,
+// or keeps them down until release (`hold`), or taps a volume key now and
+// again while held (`repeat`); brightness fires once. Held keys live in
+// `kb_held` per button, so every report carries all of them.
+struct ButtonRun {
+    uint16_t repeat_usage;    // consumer usage being repeated, 0 = none
+    uint32_t next_repeat_ms;
+};
+
+static KeyboardHeld kb_held = {};
+
+static void kb_send(uint8_t extra_mods, uint8_t extra_key) {
+    uint8_t report[8];
+    keyboard_report(&kb_held, extra_mods, extra_key, report);
+    ble_keyboard_report(report);
+}
+
+static void button_run_press(ButtonSlot slot, ButtonRun* r, int32_t action, bool can_hold) {
+    const ButtonBinding b = button_action_decode(action);
+    switch (b.kind) {
+    case BTN_KIND_KEY:
+        // Modifiers first, then the key: some hosts miss a modifier that
+        // arrives in the same report as the key.
+        if (b.modifiers) kb_send(b.modifiers, 0);
+        if (b.hold && can_hold) {
+            kb_held.mods[slot] = b.modifiers;
+            kb_held.keys[slot] = b.key;
+            kb_send(0, 0);
+        } else {
+            kb_send(b.modifiers, b.key);
+            if (b.modifiers) kb_send(b.modifiers, 0);
+            kb_send(0, 0);
+        }
+        break;
+    case BTN_KIND_CONSUMER:
+        ble_consumer_press(b.consumer);
+        ble_consumer_release();
+        if (b.repeat && can_hold) {
+            r->repeat_usage = b.consumer;
+            r->next_repeat_ms = millis() + BTN_REPEAT_DELAY_MS;
+        }
+        break;
+    case BTN_KIND_BRIGHTNESS:
+        brightness_cycle();
+        break;
+    default:
+        break;
+    }
+}
+
+static void button_run_tick(ButtonRun* r) {
+    if (!r->repeat_usage || (int32_t)(millis() - r->next_repeat_ms) < 0) return;
+    ble_consumer_press(r->repeat_usage);
+    ble_consumer_release();
+    r->next_repeat_ms = millis() + BTN_REPEAT_INTERVAL_MS;
+}
+
+static void button_run_release(ButtonSlot slot, ButtonRun* r) {
+    if (kb_held.keys[slot]) {
+        // The key first, then its modifiers.
+        kb_held.keys[slot] = 0;
+        if (kb_held.mods[slot]) kb_send(0, 0);
+        kb_held.mods[slot] = 0;
+        kb_send(0, 0);
+    }
+    *r = ButtonRun{};
+}
+
 void loop() {
     idle_tick();
     lv_timer_handler();
@@ -358,7 +469,7 @@ void loop() {
     power_hal_tick();
     imu_hal_tick();
     sound_hal_tick();
-    splash_tick();
+    performer_tick();
     mascot_tick();
     director_tick();
     if (director_take_dismissed()) ble_send_dismiss();
@@ -368,10 +479,13 @@ void loop() {
     if (!idle_is_asleep()) display_hal_tick();
 
     // ---- Physical buttons ----
-    //   PRIMARY   → HID Space  (Claude Code voice-mode PTT)
-    //   SECONDARY → HID Shift+Tab  (mode toggle; only if the board has one)
-    //   PWR       → on the stage: next scene in the group; elsewhere: cycle
-    //               brightness; hold ~3s + release: pairing mode
+    //   PRIMARY   → its configured action (`k1`; default HID Space held,
+    //               Claude Code voice-mode PTT)
+    //   SECONDARY → its configured action (`k2`; default HID Shift+Tab; only
+    //               if the board has one)
+    //   PWR       → short press: its configured action (`k3`; default cycle
+    //               brightness; always a tap, as the press registers on
+    //               release); hold ~3s + release: pairing mode
     // Any press also tells the director you're here (wakes the screensaver).
     // First press from sleep is consumed as a wake-only event by
     // idle_consume_wake_press(); the normal action fires from the second
@@ -380,41 +494,60 @@ void loop() {
     {
         static bool primary_was = false;
         static bool primary_wake_swallowed = false;
+        static ButtonRun primary_run = {};
         bool primary_now = input_hal_is_held(INPUT_BTN_PRIMARY);
         if (primary_now != primary_was) {
             if (primary_now) {
                 if (idle_consume_wake_press()) primary_wake_swallowed = true;
-                else { ble_keyboard_press(0x2C, 0); director_button(); }  // HID Space, no mods
+                // No touchscreen: BOOT dismisses an active alert first and is
+                // not a push-to-talk press then.
+                else if (director_button(true)) primary_wake_swallowed = true;
+                else button_run_press(BTN_SLOT_PRIMARY, &primary_run, button_action_get(BTN_SLOT_PRIMARY), true);
             } else {
                 if (primary_wake_swallowed) primary_wake_swallowed = false;
-                else                        ble_keyboard_release();
+                else                        button_run_release(BTN_SLOT_PRIMARY, &primary_run);
             }
             primary_was = primary_now;
+        } else if (primary_now) {
+            button_run_tick(&primary_run);
         }
 
         if (board_caps().button_count >= 2) {
             static bool secondary_was = false;
             static bool secondary_wake_swallowed = false;
+            static ButtonRun secondary_run = {};
             bool secondary_now = input_hal_is_held(INPUT_BTN_SECONDARY);
             if (secondary_now != secondary_was) {
                 if (secondary_now) {
                     if (idle_consume_wake_press()) secondary_wake_swallowed = true;
-                    else { ble_keyboard_press(0x2B, 0x02); director_button(); }  // HID Tab + LEFT_SHIFT
+                    else {
+                        button_run_press(BTN_SLOT_SECONDARY, &secondary_run, button_action_get(BTN_SLOT_SECONDARY), true);
+                        director_button(false);
+                    }
                 } else {
                     if (secondary_wake_swallowed) secondary_wake_swallowed = false;
-                    else                          ble_keyboard_release();
+                    else                          button_run_release(BTN_SLOT_SECONDARY, &secondary_run);
                 }
                 secondary_was = secondary_now;
+            } else if (secondary_now) {
+                button_run_tick(&secondary_run);
             }
         }
 
         if (power_hal_pwr_pressed()) {
             if (!idle_consume_wake_press()) {
-                // On the stage PWR swaps the scene and stays in the room (a
-                // screensaver calm dip steps to the other calm scene);
-                // anywhere else it cycles brightness and counts as you being here.
-                if (director_room() == ROOM_STAGE) director_stage_next();
-                else { brightness_cycle(); director_button(); }
+                // Counts as you being here. On a touchless board whose only
+                // button this is, it dismisses an active alert first; else it
+                // runs its action, once (the press registers on release).
+                // A board without a PWR button may still report a press (the
+                // T4-S3 makes one from a long BOOT hold): that stays brightness,
+                // as the app offers no PWR field there.
+                if (!director_button(board_caps().button_count == 0)) {
+                    ButtonRun pwr_run = {};
+                    const int32_t action = board_caps().has_pwr_button ? button_action_get(BTN_SLOT_PWR)
+                                                                       : (int32_t)BTN_ACT_BRIGHTNESS;
+                    button_run_press(BTN_SLOT_PWR, &pwr_run, action, false);
+                }
             }
         }
 
@@ -469,12 +602,19 @@ void loop() {
                 Serial.println("attention — chime");
                 sound_hal_chime();
             }
+            if (usage.pace_marker >= 0) pace_marker_set(usage.pace_marker != 0);
+            if (usage.btn_primary >= 0)   button_action_set(BTN_SLOT_PRIMARY, usage.btn_primary);
+            if (usage.btn_secondary >= 0) button_action_set(BTN_SLOT_SECONDARY, usage.btn_secondary);
+            if (usage.btn_pwr >= 0)       button_action_set(BTN_SLOT_PWR, usage.btn_pwr);
+            if (usage.has_theme) theme_set(usage.theme);
             ui_update(&usage);
             // A prompt (or you're back after a gap): you're at the computer,
             // so a dimmed or dark panel wakes before Clawd notices you. A
             // Stop or tool activity doesn't: Claude working alone isn't you.
             if (sig.event_fired && (sig.event == 'p' || sig.event == 'b'))
                 idle_note_activity();
+            if (usage.liveliness > 0) liveliness_set(usage.liveliness);
+            if (usage.attn_anim_s >= 0) attn_anim_set(usage.attn_anim_s);
             director_on_payload(&usage, &sig);
             if (usage.alert_msg[0]) {
                 Serial.println("attention — mascot");
@@ -493,7 +633,7 @@ void loop() {
 
     // The mood group also moves without a payload: the 15-min window decays
     // to Idle on its own and a hook activity lift expires. Nothing needs to
-    // react (the corner and the stage read the group when they pick), but log
+    // react (the corner and the performer read the group when they pick), but log
     // it so the serial trace matches what Clawd does.
     {
         static uint32_t last_check = 0;

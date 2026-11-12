@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "theme_palette.h"
 
 // Plain data, no Arduino types, so payload parsing and the signal logic can be
 // unit-tested on the host (test/test_signals).
@@ -15,6 +16,9 @@ struct UsageData {
     char alert_msg[128];     // attention message for the status line; empty = no alert
     bool alert_clear;        // the session moved on: end the alert
     bool enterprise;         // true = Enterprise spending-limit account
+    bool weekly_only;        // true = no 5-hour limit (acct "week", verified Ultra):
+                             //   session_pct / session_reset_mins carry the week,
+                             //   copied from w / wr by payload_parse
     int time_pct;            // 0-100: fraction of billing period elapsed (Enterprise)
     int period_days;         // total billing period length in days (Enterprise)
     char reset_date[12];     // formatted reset date e.g. "Jul 1" (Enterprise)
@@ -30,8 +34,22 @@ struct UsageData {
     bool     has_event_seq;  // `es` present
     uint32_t event_seq;      // `es` sequence number; react once per change
     int16_t  sessions;       // `n`  sessions with a hook event in the last 5 min; -1 = absent
-    bool     replay;         // `rp` 1 = heartbeat replay of the last payload;
+    bool     replay;         // `rp` 1 = the usage numbers repeat the last poll;
                              //      the rate math and reset detection skip it
+    int8_t   liveliness;     // `lv` 1-5 (clamped); -1 = absent (keep the saved level)
+    int16_t  attn_anim_s;    // `aa` attention animation, seconds 0-120 (0 = off); -1 = absent
+    int8_t   pace_marker;    // `pm` 1 = pace marker on the usage bars, 0 = off; -1 = absent
+    int32_t  btn_primary;    // `k1` PRIMARY button action (button_action.h); -1 = absent
+    int32_t  btn_secondary;  // `k2` the same for SECONDARY; -1 = absent
+    int32_t  btn_pwr;        // `k3` the same for a PWR short press; -1 = absent
+    bool     has_theme;      // `th` present and well-formed
+    uint32_t theme[TH_COUNT];// `th` the palette, 0xRRGGBB per token (theme_palette.h)
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
 };
+
+// What session_pct measures: 0 the 5-hour session, 1 the week (weekly_only),
+// 2 the spend (enterprise). A change of kind is not a reset or a rise.
+static inline int usage_meter_kind(const UsageData* d) {
+    return d->enterprise ? 2 : d->weekly_only ? 1 : 0;
+}

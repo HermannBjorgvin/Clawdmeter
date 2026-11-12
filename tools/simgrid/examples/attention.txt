@@ -1,0 +1,7 @@
+# Every board through an attention alert, recorded as a GIF.
+#   python3 tools/simgrid/simgrid.py run tools/simgrid/examples/attention.txt
+step 6000
+record /tmp/simgrid-attention.gif fps=12 scale=0.4
+alert "Claude needs your permission"
+step 9000
+record_stop

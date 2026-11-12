@@ -16,8 +16,12 @@
 // false, and every getter returns its "unknown" value.
 
 struct SignalsUpdate {
-    bool     session_reset;   // a real sample dropped > 5 points (chime trigger)
-    bool     replay;          // payload was a heartbeat replay (rp=1)
+    bool     session_reset;   // a real sample dropped > 5 points (chime trigger);
+                              // never when the meter's kind changed (usage_meter_kind)
+    bool     meter_kind_changed; // a real sample measures something else than the
+                              // last (session, week, spend): its % is a new
+                              // baseline, not a rise or a reset
+    bool     replay;          // usage numbers repeat the last poll (rp=1)
     bool     event_fired;     // a hook event the device hasn't reacted to yet
     char     event;           // 'p' prompt, 's' stop, 'b' back after a gap,
                               // or a future char; valid when event_fired
@@ -29,7 +33,8 @@ struct SignalsUpdate {
 
 // Event dedupe rule: the device reacts once per distinct `es`. The first `es`
 // seen after boot only sets the baseline (it describes something that
-// happened before we were listening), and replays never fire. Any change in
+// happened before we were listening). A replay (`rp:1`) fires like any other
+// payload: `rp` only marks the usage numbers as repeated. Any change in
 // `es` fires, not just an increase, so a daemon restart that resets its
 // counter is still noticed.
 
@@ -45,13 +50,7 @@ bool     signals_hooks_seen(void);
 int      signals_activity_at(uint32_t now_ms);    // 0-3, -1 unknown/expired
 int      signals_sessions(void);                  // -1 unknown
 char     signals_last_event(void);                // '\0' none since boot
-// ms since the last fired event (or since the last real usage sample);
-// UINT32_MAX when there hasn't been one.
-uint32_t signals_ms_since_event_at(uint32_t now_ms);
-uint32_t signals_ms_since_sample_at(uint32_t now_ms);
 
 // ---- millis() wrappers (usage_rate_clock.cpp) ----
 SignalsUpdate signals_ingest(const UsageData* d);
 int      signals_activity(void);
-uint32_t signals_ms_since_event(void);
-uint32_t signals_ms_since_sample(void);

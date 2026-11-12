@@ -31,3 +31,11 @@ runs:
         key: pio-${{ runner.os }}-${{ inputs.cache-key }}-${{ hashFiles('firmware/platformio.ini') }}
         restore-keys: |
           pio-${{ runner.os }}-${{ inputs.cache-key }}-
+
+    # A cache saved after an env with lib_ignore ran `pio project metadata`
+    # (merge_firmware.py does) holds the platform's edited framework build
+    # script, e.g. without the SD include paths; repair it before this job
+    # builds anything (tools/ci/restore_pio_build_scripts.py).
+    - name: Undo cached lib_ignore edits to the framework
+      shell: bash
+      run: python tools/ci/restore_pio_build_scripts.py

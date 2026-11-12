@@ -2,6 +2,8 @@
 //! where to buy one, and its illustration (`assets/boards/<env>.svg`, drawn
 //! for the app; bundled into the binary by [`crate::ui::Assets`]).
 
+use clawdmeter_core::buttons::Button;
+
 /// One supported board.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoardInfo {
@@ -21,14 +23,22 @@ pub struct BoardInfo {
     pub summary: &'static str,
     /// SoC.
     pub chip: &'static str,
-    /// Has a PWR button the firmware reads (hold 3 s, release: clear the
-    /// pairing). The LCD-4's KEY/PWR is a hardware reset; it clears the
-    /// pairing with a 5 s hold on the screen while the pairing hint shows.
+    /// Has a PWR button the firmware reads (`BoardCaps::has_pwr_button`):
+    /// a short press runs its action (`k3`, default brightness); hold 3 s
+    /// and release to clear the pairing. The LCD-4's KEY/PWR is a hardware
+    /// reset; it clears the pairing with a 5 s hold on the screen while the
+    /// pairing hint shows.
     pub pwr_button: bool,
+    /// The buttons the app can remap, in the order they sit on the board (left
+    /// to right, or top to bottom), each with the name the Device page gives
+    /// it: the one on its case or silkscreen, or where it is. The primary and
+    /// secondary buttons match the firmware's `BoardCaps::button_count`, PWR
+    /// [`Self::pwr_button`].
+    pub buttons: &'static [(Button, &'static str)],
 }
 
 /// Every hardware env in `firmware/platformio.ini` (not `sim` / `native`).
-pub const BOARDS: [BoardInfo; 8] = [
+pub const BOARDS: [BoardInfo; 28] = [
     BoardInfo {
         env: "waveshare_amoled_216",
         name: "AMOLED 2.16",
@@ -39,6 +49,7 @@ pub const BOARDS: [BoardInfo; 8] = [
         summary: "480×480 · 3 buttons",
         chip: "ESP32-S3",
         pwr_button: true,
+        buttons: &[(Button::Primary, "Left"), (Button::Pwr, "PWR"), (Button::Secondary, "Right")],
     },
     BoardInfo {
         env: "waveshare_amoled_18",
@@ -50,6 +61,7 @@ pub const BOARDS: [BoardInfo; 8] = [
         summary: "368×448 · 2 buttons",
         chip: "ESP32-S3",
         pwr_button: true,
+        buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "PWR")],
     },
     BoardInfo {
         env: "waveshare_amoled_206",
@@ -61,6 +73,7 @@ pub const BOARDS: [BoardInfo; 8] = [
         summary: "410×502 · watch",
         chip: "ESP32-S3",
         pwr_button: true,
+        buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "PWR")],
     },
     BoardInfo {
         env: "waveshare_lcd_154",
@@ -72,6 +85,7 @@ pub const BOARDS: [BoardInfo; 8] = [
         summary: "240×240 · SPI TFT",
         chip: "ESP32-S3",
         pwr_button: true,
+        buttons: &[(Button::Primary, "BOOT"), (Button::Secondary, "Button 2"), (Button::Pwr, "PWR")],
     },
     BoardInfo {
         env: "waveshare_lcd_4",
@@ -83,6 +97,19 @@ pub const BOARDS: [BoardInfo; 8] = [
         summary: "480×480 · RGB TFT",
         chip: "ESP32-S3",
         pwr_button: false,
+        buttons: &[(Button::Primary, "BOOT")],
+    },
+    BoardInfo {
+        env: "waveshare_lcd_21",
+        name: "LCD 2.1\"",
+        product: "Waveshare ESP32-S3-Touch-LCD-2.1",
+        width: 480,
+        height: 480,
+        buy_url: "https://www.waveshare.com/esp32-s3-touch-lcd-2.1.htm?&aff_id=149786",
+        summary: "480×480 · round",
+        chip: "ESP32-S3",
+        pwr_button: false,
+        buttons: &[(Button::Primary, "BOOT")],
     },
     BoardInfo {
         env: "waveshare_amoled_216_c6",
@@ -94,6 +121,7 @@ pub const BOARDS: [BoardInfo; 8] = [
         summary: "480×480 · ESP32-C6",
         chip: "ESP32-C6",
         pwr_button: true,
+        buttons: &[(Button::Primary, "Left"), (Button::Pwr, "PWR"), (Button::Secondary, "Right")],
     },
     BoardInfo {
         env: "waveshare_amoled_18_c6",
@@ -105,6 +133,19 @@ pub const BOARDS: [BoardInfo; 8] = [
         summary: "368×448 · ESP32-C6",
         chip: "ESP32-C6",
         pwr_button: true,
+        buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "PWR")],
+    },
+    BoardInfo {
+        env: "waveshare_lcd_147",
+        name: "LCD 1.47",
+        product: "Waveshare ESP32-S3-Touch-LCD-1.47",
+        width: 320,
+        height: 172,
+        buy_url: "https://www.waveshare.com/esp32-s3-touch-lcd-1.47.htm?&aff_id=149786",
+        summary: "320×172 · landscape",
+        chip: "ESP32-S3",
+        pwr_button: true,
+        buttons: &[(Button::Pwr, "BOOT")],
     },
     BoardInfo {
         env: "waveshare_lcd_147_c6",
@@ -112,10 +153,227 @@ pub const BOARDS: [BoardInfo; 8] = [
         product: "Waveshare ESP32-C6-Touch-LCD-1.47",
         width: 320,
         height: 172,
-        buy_url: "https://www.waveshare.com/esp32-c6-touch-lcd-1.47.htm?&aff_id=149786",
+        buy_url: "https://www.waveshare.com/esp32-c6-touch-lcd-1.47.htm?aff_id=149786",
         summary: "320×172 · ESP32-C6",
         chip: "ESP32-C6",
         pwr_button: true,
+        buttons: &[(Button::Pwr, "BOOT")],
+    },
+    BoardInfo {
+        env: "lilygo_t4s3",
+        name: "T4-S3",
+        product: "LILYGO T4-S3",
+        width: 450,
+        height: 600,
+        buy_url: "https://lilygo.cc/products/t4-s3",
+        summary: "450×600 · AMOLED",
+        chip: "ESP32-S3",
+        pwr_button: false,
+        buttons: &[(Button::Primary, "BOOT")],
+    },
+    BoardInfo {
+        env: "waveshare_lcd_183",
+        name: "LCD 1.83",
+        product: "Waveshare ESP32-S3-Touch-LCD-1.83",
+        width: 240,
+        height: 284,
+        buy_url: "https://www.waveshare.com/esp32-s3-touch-lcd-1.83.htm?&aff_id=149786",
+        summary: "240×284 · SPI TFT",
+        chip: "ESP32-S3",
+        pwr_button: true,
+        buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "PWR")],
+    },
+    BoardInfo {
+        env: "esp32_s3_4848s040",
+        name: "4848S040",
+        product: "Guition ESP32-S3-4848S040 (4-inch 480×480)",
+        width: 480,
+        height: 480,
+        buy_url: "https://www.aliexpress.com/item/3256806115962222.html",
+        summary: "480×480 · RGB panel",
+        chip: "ESP32-S3",
+        pwr_button: false,
+        buttons: &[],
+    },
+    BoardInfo {
+        env: "spotpear_s3_154",
+        name: "SpotPear 1.54 MUMA",
+        product: "SpotPear ESP32-S3-LCD-1.54 MUMA (touch)",
+        width: 240,
+        height: 240,
+        buy_url: "https://spotpear.com/shop/ESP32-S3-AI-1.54-inch-LCD-Display-TouchScreen-N16R8-muma-DeepSeek.html",
+        summary: "240×240 · SPI LCD",
+        chip: "ESP32-S3",
+        pwr_button: false,
+        buttons: &[(Button::Primary, "BOOT")],
+    },
+    BoardInfo {
+        env: "sensecap_indicator_d1l",
+        name: "SenseCAP Indicator D1L",
+        product: "Seeed Studio SenseCAP Indicator D1L",
+        width: 480,
+        height: 480,
+        buy_url: "https://www.seeedstudio.com/SenseCAP-Indicator-D1L-p-5646.html",
+        summary: "480×480 · RGB TFT",
+        chip: "ESP32-S3",
+        pwr_button: true,
+        buttons: &[(Button::Pwr, "Button")],
+    },
+    BoardInfo {
+        env: "freenove_s3_display_nontouch",
+        name: "S3 Display (no touch)",
+        product: "Freenove ESP32-S3 Display 2.8 inch (non-touch, FNK0104A)",
+        width: 240,
+        height: 320,
+        buy_url: "https://store.freenove.com/products/fnk0104",
+        summary: "240×320 · SPI TFT",
+        chip: "ESP32-S3",
+        pwr_button: true,
+        buttons: &[(Button::Pwr, "BOOT")],
+    },
+    BoardInfo {
+        env: "xingzhi_cube_183",
+        name: "Xingzhi Cube 1.83",
+        product: "Xingzhi Cube 1.83 inch TFT WiFi (2-mic)",
+        width: 284,
+        height: 240,
+        buy_url: "https://www.aliexpress.com/item/1005010442374066.html",
+        summary: "284×240 · SPI TFT",
+        chip: "ESP32-S3",
+        pwr_button: true,
+        buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "MID"), (Button::Secondary, "VOL")],
+    },
+    BoardInfo {
+        env: "waveshare_epaper_154",
+        name: "ePaper 1.54",
+        product: "Waveshare ESP32-S3-ePaper-1.54",
+        width: 200,
+        height: 200,
+        buy_url: "https://www.waveshare.com/esp32-s3-epaper-1.54.htm?&aff_id=149786",
+        summary: "200×200 · e-paper",
+        chip: "ESP32-S3",
+        pwr_button: true,
+        buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "PWR")],
+    },
+    BoardInfo {
+        env: "lilygo_t_display_s3",
+        name: "T-Display S3",
+        product: "LILYGO T-Display S3",
+        width: 170,
+        height: 320,
+        buy_url: "https://lilygo.cc/products/t-display-s3",
+        summary: "170×320 · 2 buttons",
+        chip: "ESP32-S3",
+        pwr_button: true,
+        buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "Button 2")],
+    },
+    BoardInfo {
+        env: "waveshare_lcd_2",
+        name: "LCD 2",
+        product: "Waveshare ESP32-S3-Touch-LCD-2",
+        width: 240,
+        height: 320,
+        buy_url: "https://www.waveshare.com/esp32-s3-touch-lcd-2.htm?&aff_id=149786",
+        summary: "240×320 · touch only",
+        chip: "ESP32-S3",
+        pwr_button: false,
+        buttons: &[],
+    },
+    BoardInfo {
+        env: "m5stack_fire",
+        name: "M5Stack FIRE",
+        product: "M5Stack FIRE IoT Development Kit (PSRAM) V2.7",
+        width: 320,
+        height: 240,
+        buy_url: "https://shop.m5stack.com/products/m5stack-fire-iot-development-kit-psram-v2-7",
+        summary: "320×240 · 3 buttons · no touch",
+        chip: "ESP32",
+        pwr_button: true,
+        buttons: &[(Button::Primary, "A"), (Button::Pwr, "B"), (Button::Secondary, "C")],
+    },
+    BoardInfo {
+        env: "m5sticks3",
+        name: "M5StickS3",
+        product: "M5Stack M5StickS3",
+        width: 135,
+        height: 240,
+        buy_url: "https://shop.m5stack.com/products/m5sticks3-esp32s3-mini-iot-dev-kit",
+        summary: "135×240 · no touch",
+        chip: "ESP32-S3",
+        pwr_button: true,
+        buttons: &[(Button::Primary, "A"), (Button::Pwr, "B")],
+    },
+    BoardInfo {
+        env: "esp32_2432s028r",
+        name: "CYD 2.8",
+        product: "ESP32-2432S028R Cheap Yellow Display (portrait)",
+        width: 240,
+        height: 320,
+        buy_url: "https://www.amazon.com/dp/B0BVFXR313",
+        summary: "240×320 · resistive touch · 1 button",
+        chip: "ESP32",
+        pwr_button: true,
+        buttons: &[(Button::Pwr, "BOOT")],
+    },
+    BoardInfo {
+        env: "esp32_2432s028r_landscape",
+        name: "CYD 2.8 landscape",
+        product: "ESP32-2432S028R Cheap Yellow Display (landscape)",
+        width: 320,
+        height: 240,
+        buy_url: "https://www.amazon.com/dp/B0BVFXR313",
+        summary: "320×240 · resistive touch · 1 button",
+        chip: "ESP32",
+        pwr_button: true,
+        buttons: &[(Button::Pwr, "BOOT")],
+    },
+    BoardInfo {
+        env: "esp32_2432s024c",
+        name: "CYD 2.4",
+        product: "ESP32-2432S024C Cheap Yellow Display (portrait)",
+        width: 240,
+        height: 320,
+        buy_url: "https://www.amazon.com/dp/B0CLGD2DG6",
+        summary: "240×320 · capacitive touch · 1 button",
+        chip: "ESP32",
+        pwr_button: true,
+        buttons: &[(Button::Pwr, "BOOT")],
+    },
+    BoardInfo {
+        env: "esp32_2432s024c_landscape",
+        name: "CYD 2.4 landscape",
+        product: "ESP32-2432S024C Cheap Yellow Display (landscape)",
+        width: 320,
+        height: 240,
+        buy_url: "https://www.amazon.com/dp/B0CLGD2DG6",
+        summary: "320×240 · capacitive touch · 1 button",
+        chip: "ESP32",
+        pwr_button: true,
+        buttons: &[(Button::Pwr, "BOOT")],
+    },
+    BoardInfo {
+        env: "waveshare_amoled_132",
+        name: "AMOLED 1.32",
+        product: "Waveshare ESP32-S3-Touch-AMOLED-1.32",
+        width: 466,
+        height: 466,
+        buy_url: "https://www.waveshare.com/esp32-s3-touch-amoled-1.32.htm?&aff_id=149786",
+        summary: "466×466 · round",
+        chip: "ESP32-S3",
+        pwr_button: true,
+        buttons: &[(Button::Pwr, "PWR")],
+    },
+    BoardInfo {
+        env: "waveshare_amoled_143",
+        name: "AMOLED 1.43",
+        product: "Waveshare ESP32-S3-Touch-AMOLED-1.43",
+        width: 466,
+        height: 466,
+        buy_url: "https://www.waveshare.com/esp32-s3-touch-amoled-1.43.htm?&aff_id=149786",
+        summary: "466×466 · round",
+        chip: "ESP32-S3",
+        pwr_button: false,
+        buttons: &[(Button::Primary, "BOOT")],
     },
 ];
 
@@ -145,6 +403,72 @@ mod tests {
                 }
                 assert!(board(env).is_some(), "{env} missing from BOARDS");
             }
+        }
+    }
+
+    /// The primary and secondary buttons in `buttons` match the board's
+    /// `button_count` in its `caps.cpp` (`1 + BOARD_HAS_SECONDARY_BUTTON`
+    /// read from its `board.h`).
+    #[test]
+    fn button_counts_match_the_firmware() {
+        let boards = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../firmware/src/boards");
+        let define = |text: &str, name: &str| -> Option<u8> {
+            text.lines().find_map(|l| {
+                l.trim().strip_prefix("#define ")?.strip_prefix(name)?.split_whitespace().next()?.parse().ok()
+            })
+        };
+        for b in BOARDS {
+            let dir = boards.join(b.env.trim_end_matches("_landscape"));
+            let caps = std::fs::read_to_string(dir.join("caps.cpp")).unwrap();
+            let value = caps.split(".button_count").nth(1).and_then(|r| r.split(',').next()).unwrap();
+            let firmware = if value.contains("BOARD_HAS_SECONDARY_BUTTON") {
+                let board_h = std::fs::read_to_string(dir.join("board.h")).unwrap();
+                1 + define(&board_h, "BOARD_HAS_SECONDARY_BUTTON").unwrap()
+            } else {
+                value.trim_start_matches([' ', '=']).trim().parse().unwrap()
+            };
+            let remappable = b.buttons.iter().filter(|(k, _)| *k != Button::Pwr).count();
+            assert_eq!(remappable, usize::from(firmware), "{}", b.env);
+            // A board whose input HAL never reports a button held has none to remap.
+            let input = std::fs::read_to_string(dir.join("input.cpp")).unwrap();
+            let squashed: String = input.split_whitespace().collect();
+            if squashed.contains("input_hal_is_held(InputButtonbtn){(void)btn;returnfalse;}") {
+                assert_eq!(firmware, 0, "{}: button_count counts a button input_hal never reports", b.env);
+            }
+        }
+    }
+
+    /// `pwr_button` matches `has_pwr_button` in the board's `caps.cpp`: the
+    /// Device page offers a PWR field (`k3`) only where the firmware reads one.
+    #[test]
+    fn pwr_buttons_match_the_firmware() {
+        let boards = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../firmware/src/boards");
+        for b in BOARDS {
+            let caps =
+                std::fs::read_to_string(boards.join(b.env.trim_end_matches("_landscape")).join("caps.cpp")).unwrap();
+            let value = caps.split(".has_pwr_button").nth(1).and_then(|r| r.split(',').next()).unwrap();
+            let firmware = match value.trim_start_matches([' ', '=']).trim() {
+                "true" => true,
+                "false" => false,
+                other => panic!("{}: has_pwr_button = {other:?}", b.env),
+            };
+            assert_eq!(b.pwr_button, firmware, "{}", b.env);
+        }
+    }
+
+    /// Each button once, named, PWR listed exactly where the firmware reads
+    /// one, and a secondary only beside a primary (`k2` is the second of
+    /// `button_count`).
+    #[test]
+    fn button_layouts_are_consistent() {
+        for b in BOARDS {
+            let has = |k: Button| b.buttons.iter().filter(|(x, _)| *x == k).count();
+            for k in Button::ALL {
+                assert!(has(k) <= 1, "{}: {k:?} listed twice", b.env);
+            }
+            assert_eq!(has(Button::Pwr) == 1, b.pwr_button, "{}", b.env);
+            assert!(has(Button::Secondary) <= has(Button::Primary), "{}", b.env);
+            assert!(b.buttons.iter().all(|(_, name)| !name.is_empty()), "{}", b.env);
         }
     }
 

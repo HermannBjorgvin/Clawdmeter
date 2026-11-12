@@ -28,8 +28,9 @@ static bool     pending = false;      // a state is queued for main's next poll
 static uint32_t delivered_ms = 0;
 
 // Keyboard-injected payloads (sim_inject_*): the current state's payload with
-// a few fast-clock keys overlaid, delivered ahead of the scenario.
-#define MAX_INJECT 4
+// a few fast-clock keys overlaid, delivered ahead of the scenario. Under a
+// controller every payload comes this way (sim_ble_push), with no scenario.
+#define MAX_INJECT 8
 static char     inject_q[MAX_INJECT][MAX_LINE];
 static int      inject_n = 0;
 static bool     es_delivered = false;   // some payload carried `es` (signals has a baseline)
@@ -96,10 +97,19 @@ static void refresh_title(void) {
 }
 
 void ble_init(void) {
+    if (sim_ctrl_active()) return;   // payloads arrive through sim_ble_push()
     load_scenario();
     pending = true;
     refresh_title();
 }
+
+void sim_ble_push(const char* json) {
+    if (inject_n >= MAX_INJECT) return;
+    snprintf(inject_q[inject_n], MAX_LINE, "%s", json);
+    inject_n++;
+}
+
+void sim_ble_set_link(bool c) { connected = c; }
 
 void ble_tick(void) {
     if (!connected || pending || !playing || n_states == 0) return;
@@ -141,10 +151,11 @@ void ble_request_refresh(void) {}
 void ble_send_dismiss(void) { printf("[sim] TX {\"dismiss\":true}\n"); }
 void ble_set_battery_level(int pct) { (void)pct; }
 
-void ble_keyboard_press(uint8_t key, uint8_t modifier) {
-    printf("[sim] HID press key=0x%02X mod=0x%02X\n", key, modifier);
+void ble_keyboard_report(const uint8_t r[8]) {
+    printf("[sim] HID report mod=0x%02X keys=%02X %02X %02X\n", r[0], r[2], r[3], r[4]);
 }
-void ble_keyboard_release(void) { printf("[sim] HID release\n"); }
+void ble_consumer_press(uint16_t usage) { printf("[sim] HID consumer 0x%03X\n", usage); }
+void ble_consumer_release(void) { printf("[sim] HID consumer release\n"); }
 
 // ---- Playback controls (called from the sim_platform event pump) ----
 void sim_playback_toggle(void) {

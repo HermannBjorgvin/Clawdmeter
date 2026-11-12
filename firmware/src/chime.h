@@ -9,7 +9,8 @@
 // the ES8311 table has works; 16-bit stereo out.
 //
 // amp_enable is the only part that differs structurally between boards: the
-// 2.16 toggles a GPIO, the 1.8 drives an XCA9554 expander line. May be null.
+// 2.16 toggles a GPIO, the 1.8 drives an XCA9554 expander line. May be null
+// (an amp with no enable line): the codec's DAC is then muted between dings.
 
 typedef void (*amp_enable_fn)(bool on);
 
@@ -33,5 +34,6 @@ void chime_play(void);
 void chime_tick(void);
 
 // Speaker tuning: set the ding's gain (0..1 of its own level) and, when volume >= 0, the
-// codec volume (0..100) until reboot, then play it.
+// codec volume (0..100) until reboot, then play it (after a background
+// re-render when the gain changed).
 void chime_tune(float gain, int volume);

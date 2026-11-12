@@ -4,25 +4,36 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "sim_platform.h"
+
 static uint64_t now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
 }
 
+// Under a controller (SIM_CTRL_FD, sim_ctrl.cpp) time is virtual: it starts
+// at 0 and moves only through delay(), so a run is the same every time.
+static uint64_t virtual_ms = 0;
+
 unsigned long millis(void) {
+    if (sim_ctrl_active()) return (unsigned long)virtual_ms;
     static uint64_t t0 = now_ms();
     return (unsigned long)(now_ms() - t0);
 }
 
 unsigned long micros(void) {
+    if (sim_ctrl_active()) return (unsigned long)(virtual_ms * 1000ull);
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     static uint64_t t0 = (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
     return (unsigned long)((uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull - t0);
 }
 
-void delay(unsigned long ms) { usleep(ms * 1000); }
+void delay(unsigned long ms) {
+    if (sim_ctrl_active()) virtual_ms += ms;
+    else usleep(ms * 1000);
+}
 
 size_t SimSerial::write(const uint8_t* buf, size_t len) {
     return fwrite(buf, 1, len, stdout);
@@ -73,4 +84,45 @@ size_t Preferences::putUChar(const char* key, uint8_t value) {
             return 1;
         }
     return 0;
+}
+
+#define PREF_BLOB_SLOTS 8
+static struct { char key[16]; uint8_t val[96]; size_t len; bool used; } blobs[PREF_BLOB_SLOTS];
+
+bool Preferences::isKey(const char* key) {
+    for (auto& s : store)
+        if (s.used && strcmp(s.key, key) == 0) return true;
+    for (auto& b : blobs)
+        if (b.used && strcmp(b.key, key) == 0) return true;
+    return false;
+}
+size_t Preferences::getBytes(const char* key, void* buf, size_t max_len) {
+    for (auto& b : blobs)
+        if (b.used && strcmp(b.key, key) == 0) {
+            if (b.len > max_len) return 0;
+            memcpy(buf, b.val, b.len);
+            return b.len;
+        }
+    return 0;
+}
+size_t Preferences::putBytes(const char* key, const void* value, size_t len) {
+    if (len > sizeof(blobs[0].val)) return 0;
+    for (auto& b : blobs)
+        if (b.used && strcmp(b.key, key) == 0) { memcpy(b.val, value, len); b.len = len; return len; }
+    for (auto& b : blobs)
+        if (!b.used) {
+            b.used = true;
+            strncpy(b.key, key, sizeof(b.key) - 1);
+            memcpy(b.val, value, len);
+            b.len = len;
+            return len;
+        }
+    return 0;
+}
+int32_t Preferences::getInt(const char* key, int32_t def) {
+    int32_t v;
+    return getBytes(key, &v, sizeof(v)) == sizeof(v) ? v : def;
+}
+size_t Preferences::putInt(const char* key, int32_t value) {
+    return putBytes(key, &value, sizeof(value));
 }

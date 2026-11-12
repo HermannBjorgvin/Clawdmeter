@@ -3,6 +3,7 @@
 //   pio test -d firmware -e native -f test_payload
 #include <unity.h>
 #include <string.h>
+#include <stdio.h>
 #include "payload.h"
 
 void setUp(void) {}
@@ -64,6 +65,25 @@ static void test_legacy_fields(void) {
     TEST_ASSERT_TRUE(d.ok);
 }
 
+static void test_account_kinds(void) {
+    UsageData d;
+    // No 5-hour limit: s/sr come as "not started"; the week becomes the main meter.
+    TEST_ASSERT_TRUE(payload_parse(
+        "{\"s\":0,\"sr\":-1,\"w\":48,\"wr\":7900,\"acct\":\"week\",\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_TRUE(d.weekly_only);
+    TEST_ASSERT_FALSE(d.enterprise);
+    TEST_ASSERT_EQUAL_FLOAT(48, d.session_pct);
+    TEST_ASSERT_EQUAL_INT(7900, d.session_reset_mins);
+    TEST_ASSERT_EQUAL_FLOAT(48, d.weekly_pct);
+    TEST_ASSERT_TRUE(payload_parse("{\"acct\":\"pro\"}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.weekly_only);
+    TEST_ASSERT_TRUE(payload_parse("{\"acct\":\"ent\"}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.weekly_only);
+    TEST_ASSERT_TRUE(d.enterprise);
+    TEST_ASSERT_TRUE(payload_parse("{}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.weekly_only);
+}
+
 static void test_fast_clock_fields(void) {
     UsageData d;
     TEST_ASSERT_TRUE(payload_parse("{\"a\":2,\"e\":\"b\",\"es\":4000000000,\"n\":3,\"rp\":1}", &d, nullptr));
@@ -85,6 +105,98 @@ static void test_fast_clock_clamps(void) {
     TEST_ASSERT_EQUAL_INT(0, d.activity);
 }
 
+static void test_attention_animation(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{\"s\":1}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.attn_anim_s);      // absent: keep the saved setting
+    TEST_ASSERT_TRUE(payload_parse("{\"aa\":0}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(0, d.attn_anim_s);       // off
+    TEST_ASSERT_TRUE(payload_parse("{\"aa\":30}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(30, d.attn_anim_s);
+    TEST_ASSERT_TRUE(payload_parse("{\"aa\":999}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(120, d.attn_anim_s);
+}
+
+static void test_liveliness(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.liveliness);       // absent: keep the saved level
+    TEST_ASSERT_TRUE(payload_parse("{\"lv\":1}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(1, d.liveliness);
+    TEST_ASSERT_TRUE(payload_parse("{\"lv\":9}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(5, d.liveliness);
+    TEST_ASSERT_TRUE(payload_parse("{\"lv\":0}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(1, d.liveliness);
+}
+
+static void test_pace_marker(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.pace_marker);      // absent: keep the saved setting
+    TEST_ASSERT_TRUE(payload_parse("{\"pm\":1}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(1, d.pace_marker);
+    TEST_ASSERT_TRUE(payload_parse("{\"pm\":0}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(0, d.pace_marker);
+    TEST_ASSERT_TRUE(payload_parse("{\"pm\":7}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(1, d.pace_marker);
+}
+
+static void test_button_actions(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_primary);      // absent: keep the saved action
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_secondary);
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_pwr);
+    TEST_ASSERT_TRUE(payload_parse("{\"k1\":4,\"k2\":0,\"k3\":1}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(4, d.btn_primary);
+    TEST_ASSERT_EQUAL_INT(0, d.btn_secondary);
+    TEST_ASSERT_EQUAL_INT(1, d.btn_pwr);
+    // A Ctrl+Shift+M chord, a held Ctrl+Space, play/pause.
+    TEST_ASSERT_TRUE(payload_parse("{\"k1\":66320,\"k2\":69932,\"k3\":131277}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(0x10310, d.btn_primary);
+    TEST_ASSERT_EQUAL_INT(0x1112C, d.btn_secondary);
+    TEST_ASSERT_EQUAL_INT(0x200CD, d.btn_pwr);
+    // Unknown (a newer app) or not an integer: as if absent, so the saved
+    // action stays.
+    TEST_ASSERT_TRUE(payload_parse("{\"k1\":99,\"k2\":-3,\"k3\":65536}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_primary);
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_secondary);
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_pwr);
+    TEST_ASSERT_TRUE(payload_parse("{\"k1\":\"x\",\"k2\":1.5,\"k3\":1e12}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_primary);
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_secondary);
+    TEST_ASSERT_EQUAL_INT(-1, d.btn_pwr);
+}
+
+static void test_theme(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.has_theme);                // absent: keep the saved palette
+    char hex[THEME_HEX_LEN + 1];
+    uint32_t want[TH_COUNT];
+    memcpy(want, THEME_DEFAULTS, sizeof(want));
+    want[TH_ACCENT] = 0x647d99;
+    theme_format_hex(want, hex);
+    char json[128];
+    snprintf(json, sizeof(json), "{\"th\":\"%s\"}", hex);
+    TEST_ASSERT_TRUE(payload_parse(json, &d, nullptr));
+    TEST_ASSERT_TRUE(d.has_theme);
+    TEST_ASSERT_EQUAL_HEX32_ARRAY(want, d.theme, TH_COUNT);
+    // Upper case parses too; the round trip formats lower case.
+    for (char* c = hex; *c; c++) if (*c >= 'a' && *c <= 'f') *c -= 32;
+    uint32_t got[TH_COUNT];
+    TEST_ASSERT_TRUE(theme_parse_hex(hex, got));
+    TEST_ASSERT_EQUAL_HEX32_ARRAY(want, got, TH_COUNT);
+    // Too short, too long or not hex: ignored, never a half-applied palette.
+    TEST_ASSERT_TRUE(payload_parse("{\"th\":\"647d99\"}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.has_theme);
+    hex[5] = 'g';
+    TEST_ASSERT_FALSE(theme_parse_hex(hex, got));
+    TEST_ASSERT_EQUAL_HEX32_ARRAY(want, got, TH_COUNT);   // untouched
+    TEST_ASSERT_TRUE(payload_parse("{\"th\":5}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.has_theme);
+}
+
 static void test_long_strings_truncate(void) {
     UsageData d;
     TEST_ASSERT_TRUE(payload_parse("{\"st\":\"abcdefghijklmnopqrstuvwxyz\"}", &d, nullptr));
@@ -96,8 +208,14 @@ int main(void) {
     RUN_TEST(test_rejects_malformed_json);
     RUN_TEST(test_empty_object_gives_legacy_defaults);
     RUN_TEST(test_legacy_fields);
+    RUN_TEST(test_account_kinds);
     RUN_TEST(test_fast_clock_fields);
     RUN_TEST(test_fast_clock_clamps);
+    RUN_TEST(test_liveliness);
+    RUN_TEST(test_attention_animation);
+    RUN_TEST(test_pace_marker);
+    RUN_TEST(test_button_actions);
+    RUN_TEST(test_theme);
     RUN_TEST(test_long_strings_truncate);
     return UNITY_END();
 }

@@ -6,6 +6,7 @@
 # ~20 s  quiet: the screensaver (face, then a calm dip)
 # 34 s   attention interrupts it; nobody comes, so after the 20 s (fast) timeout
 #        the big Clawd leaves, the small one stays out and the face comes back up
-# 67.5 s PWR during a calm dip steps to the other calm scene, never a lively one
-# 80 s   a prompt wakes it (and would light a dimmed panel)
+# 67.5 s PWR during a calm dip: you're here, so he runs off and the corner
+#        Clawd walks home (PWR also steps the brightness)
+# 80 s   a prompt: he notices you and points (from the screensaver it would wake it)
 {"name":"quiet desk (hooks on)","hold_ms":120000,"s":3.0,"sr":295,"w":12.0,"wr":9000,"st":"allowed","ok":true,"t":1785474000,"tf":24,"a":0,"e":"s","es":1,"n":1}

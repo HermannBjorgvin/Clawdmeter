@@ -11,7 +11,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+pub use crate::buttons::{Button, ButtonAction};
 use crate::paths::Paths;
+use crate::platform::Appearance;
+use crate::themes::{self, FollowTheme, ThemePreset};
 
 /// Default seconds between `/usage` polls while a session is working
 /// (`cadence::Cadence::default().working`).
@@ -22,6 +25,12 @@ pub const DEFAULT_HEARTBEAT_INTERVAL: u64 = 60;
 pub const MIN_INTERVAL: u64 = 10;
 /// GitHub repo the flasher reads releases from.
 pub const DEFAULT_RELEASE_REPO: &str = "HermannBjorgvin/Clawdmeter";
+/// How lively Clawd is on the device, 1 (No-nonsense) to 5 (All-nonsense).
+pub const LIVELINESS_MIN: u8 = 1;
+/// See [`LIVELINESS_MIN`].
+pub const LIVELINESS_MAX: u8 = 5;
+/// Some-nonsense: the director's own timings.
+pub const DEFAULT_LIVELINESS: u8 = 3;
 
 /// A config file held as its original lines.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -173,6 +182,241 @@ impl ClockMode {
     }
 }
 
+/// `attention_anim`: how long Clawd points and waves on the device when
+/// Claude needs you. Only his animation: the alert itself is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AttentionAnim {
+    /// The whole alert, 2 minutes (default).
+    #[default]
+    Min2,
+    /// 30 seconds.
+    S30,
+    /// 10 seconds.
+    S10,
+    /// No animation.
+    Off,
+}
+
+impl AttentionAnim {
+    /// Every option, in the order the Device page shows them.
+    pub const ALL: [AttentionAnim; 4] =
+        [AttentionAnim::Off, AttentionAnim::S10, AttentionAnim::S30, AttentionAnim::Min2];
+
+    /// Parse a config value; anything unknown is the default.
+    pub fn parse(v: &str) -> Self {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "30s" => AttentionAnim::S30,
+            "10s" => AttentionAnim::S10,
+            "off" => AttentionAnim::Off,
+            _ => AttentionAnim::Min2,
+        }
+    }
+
+    /// The config-file spelling, also the Device page's label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AttentionAnim::Min2 => "2m",
+            AttentionAnim::S30 => "30s",
+            AttentionAnim::S10 => "10s",
+            AttentionAnim::Off => "off",
+        }
+    }
+
+    /// The payload's `aa`: seconds, 0 = off.
+    pub fn seconds(self) -> u16 {
+        match self {
+            AttentionAnim::Min2 => 120,
+            AttentionAnim::S30 => 30,
+            AttentionAnim::S10 => 10,
+            AttentionAnim::Off => 0,
+        }
+    }
+}
+
+/// One of the device's UI colours, in the order the payload's `th` carries
+/// them (`firmware/src/theme_palette.h`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorToken {
+    /// Screen background.
+    Bg,
+    /// Card fill.
+    Panel,
+    /// Primary text.
+    Text,
+    /// Secondary text.
+    Dim,
+    /// Status line and pairing notes.
+    Accent,
+    /// Bars under 50 % (or on pace).
+    Green,
+    /// Bars at 50-80 % (or ahead of pace).
+    Amber,
+    /// Bars at 80 %+ (or at the limit).
+    Red,
+    /// Unfilled bar track and the pills.
+    BarBg,
+    /// Clawd: the sprite's body and the screensaver face.
+    Clawd,
+    /// The screensaver face's eyes.
+    Eye,
+}
+
+impl ColorToken {
+    /// Every token, in `th` order (also the Device page's order).
+    pub const ALL: [ColorToken; 11] = [
+        ColorToken::Bg,
+        ColorToken::Panel,
+        ColorToken::Text,
+        ColorToken::Dim,
+        ColorToken::Accent,
+        ColorToken::Green,
+        ColorToken::Amber,
+        ColorToken::Red,
+        ColorToken::BarBg,
+        ColorToken::Clawd,
+        ColorToken::Eye,
+    ];
+
+    /// The config key, `color_<name>`.
+    pub fn key(self) -> &'static str {
+        match self {
+            ColorToken::Bg => "color_bg",
+            ColorToken::Panel => "color_panel",
+            ColorToken::Text => "color_text",
+            ColorToken::Dim => "color_dim",
+            ColorToken::Accent => "color_accent",
+            ColorToken::Green => "color_green",
+            ColorToken::Amber => "color_amber",
+            ColorToken::Red => "color_red",
+            ColorToken::BarBg => "color_bar_bg",
+            ColorToken::Clawd => "color_clawd",
+            ColorToken::Eye => "color_eye",
+        }
+    }
+
+    /// The Device page's name for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            ColorToken::Bg => "Background",
+            ColorToken::Panel => "Cards",
+            ColorToken::Text => "Text",
+            ColorToken::Dim => "Secondary text",
+            ColorToken::Accent => "Accent",
+            ColorToken::Green => "Low usage",
+            ColorToken::Amber => "Medium usage",
+            ColorToken::Red => "High usage",
+            ColorToken::BarBg => "Bar track",
+            ColorToken::Clawd => "Clawd",
+            ColorToken::Eye => "Face eyes",
+        }
+    }
+
+    /// The firmware's default, 0xRRGGBB.
+    pub fn default_rgb(self) -> u32 {
+        Palette::default().get(self)
+    }
+
+    /// Its place in `th`: the variants are declared in [`Self::ALL`]'s order.
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// The device's colours (`color_*` keys, sent as `th`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette([u32; 11]);
+
+impl Default for Palette {
+    fn default() -> Self {
+        themes::default_preset().colors
+    }
+}
+
+impl Palette {
+    /// From eleven 0xRRGGBB colours in [`ColorToken::ALL`] order.
+    pub const fn new(colors: [u32; 11]) -> Self {
+        Palette(colors)
+    }
+
+    /// 0xRRGGBB for `t`.
+    pub fn get(&self, t: ColorToken) -> u32 {
+        self.0[t.index()]
+    }
+
+    /// Set `t` to 0xRRGGBB (masked to 24 bits).
+    pub fn set(&mut self, t: ColorToken, rgb: u32) {
+        self.0[t.index()] = rgb & 0xff_ffff;
+    }
+
+    /// The payload's `th`: every colour as 6 lower-case hex digits, run together.
+    pub fn to_hex(&self) -> String {
+        self.0.iter().map(|c| format!("{c:06x}")).collect()
+    }
+}
+
+impl serde::Serialize for Palette {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_hex())
+    }
+}
+
+/// A `color_*` value: six hex digits, `rrggbb`, no `#` (that starts a
+/// comment in the config file).
+pub fn parse_rgb(v: &str) -> Option<u32> {
+    let h = v.trim();
+    if h.len() == 6 && h.bytes().all(|b| b.is_ascii_hexdigit()) {
+        u32::from_str_radix(h, 16).ok()
+    } else {
+        None
+    }
+}
+
+/// The device's colours: `theme = system` (the default) or another theme
+/// that follows the OS, a preset (`theme = <id>`) or `theme = custom`, which
+/// uses the `color_*` keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceTheme {
+    /// One of [`crate::themes::FOLLOWING`]: two presets, picked by the OS's
+    /// appearance.
+    Follow(&'static FollowTheme),
+    /// One of [`crate::themes::PRESETS`].
+    Preset(&'static ThemePreset),
+    /// [`Settings::custom_colors`].
+    Custom,
+}
+
+/// System.
+impl Default for DeviceTheme {
+    fn default() -> Self {
+        DeviceTheme::Follow(&themes::SYSTEM)
+    }
+}
+
+impl DeviceTheme {
+    /// `theme`: `system`, `solarized`, a preset id or `custom`. `clawd`, the
+    /// default before there was a System theme, and anything unknown are
+    /// System.
+    pub fn parse(v: &str) -> Self {
+        let v = v.trim();
+        if v.eq_ignore_ascii_case("custom") {
+            DeviceTheme::Custom
+        } else if let Some(f) = themes::find_following(v) {
+            DeviceTheme::Follow(f)
+        } else {
+            themes::find(v).map(DeviceTheme::Preset).unwrap_or_default()
+        }
+    }
+
+    /// The `theme` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeviceTheme::Follow(f) => f.id,
+            DeviceTheme::Preset(p) => p.id,
+            DeviceTheme::Custom => "custom",
+        }
+    }
+}
+
 /// Typed view of the config, with the old daemons' defaults and clamps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -201,8 +445,30 @@ pub struct Settings {
     pub claude_path: Option<PathBuf>,
     /// Daily firmware update check (default on).
     pub update_check: bool,
+    /// The app release the user chose not to be told about (`skipped_update`,
+    /// a tag like `v2.5.0`); a later release is announced again.
+    pub skipped_update: Option<String>,
+    /// The firmware release the user chose not to be nudged about on the
+    /// Overview (`skipped_firmware`, a tag); a later release nudges again.
+    pub skipped_firmware: Option<String>,
     /// Which kinds of "Claude needs you" alert reach the device and tray.
     pub alert_on: AlertOn,
+    /// How lively Clawd is on the device (`lv`, 1-5, default 3).
+    pub liveliness: u8,
+    /// How long Clawd points and waves for an alert (`aa`, default 2m).
+    pub attention_anim: AttentionAnim,
+    /// Pace marker on the device's usage bars (`pm`, default off).
+    pub pace_marker: bool,
+    /// What the device's primary, secondary and PWR buttons do, by
+    /// [`Button::index`] (`button_primary`, `button_secondary`, `button_pwr`;
+    /// sent as `k1`, `k2`, `k3`).
+    pub buttons: [ButtonAction; 3],
+    /// Which colours the device uses (`theme`); [`Settings::colors`] is
+    /// the palette it gets as `th`, given the OS's appearance.
+    pub theme: DeviceTheme,
+    /// The custom theme's colours (`color_*`), kept while a preset is chosen;
+    /// `None` until it has any.
+    pub custom_colors: Option<Palette>,
 }
 
 /// `alert_on`: the alert kinds that show, as a comma list of `permission`,
@@ -272,6 +538,15 @@ impl AlertOn {
     }
 }
 
+/// Parse `liveliness`: a whole number, clamped to 1-5; anything else is the
+/// default.
+pub fn parse_liveliness(v: &str) -> u8 {
+    match v.trim().parse::<i64>() {
+        Ok(n) => n.clamp(LIVELINESS_MIN as i64, LIVELINESS_MAX as i64) as u8,
+        Err(_) => DEFAULT_LIVELINESS,
+    }
+}
+
 /// Parse an interval like the bash daemon: digits only, clamped to >= 10.
 pub fn parse_interval(v: &str) -> Option<u64> {
     let v = v.trim();
@@ -292,6 +567,27 @@ fn on_off(v: Option<&str>, default: bool) -> bool {
 }
 
 impl Settings {
+    /// The palette the device gets (`th`): for System (Dark or Light) and
+    /// Solarized (its Dark or Light), the one the OS's `appearance` picks;
+    /// the chosen preset's; or the custom colours.
+    pub fn colors(&self, appearance: Appearance) -> Palette {
+        match self.theme {
+            DeviceTheme::Follow(f) => f.preset(appearance).colors,
+            DeviceTheme::Preset(p) => p.colors,
+            DeviceTheme::Custom => self.custom_colors.unwrap_or_default(),
+        }
+    }
+
+    /// Switch to the custom theme. The first time, it starts from the colours
+    /// on screen (a following theme's as `appearance` has it); after that it
+    /// keeps its own, even if they equal a preset's.
+    pub fn choose_custom(&mut self, appearance: Appearance) {
+        if self.custom_colors.is_none() {
+            self.custom_colors = Some(self.colors(appearance));
+        }
+        self.theme = DeviceTheme::Custom;
+    }
+
     /// Build from a parsed file. `env_poll` is the `POLL_INTERVAL` env var,
     /// which seeds the default the file overrides (bash daemon behaviour).
     pub fn from_config(cfg: &ConfigFile, paths: &Paths, env_poll: Option<&str>) -> Self {
@@ -318,7 +614,25 @@ impl Settings {
                 .to_owned(),
             claude_path: cfg.get("claude_path").filter(|s| !s.is_empty()).map(|s| paths.expand_tilde(s)),
             update_check: on_off(cfg.get("update_check"), true),
+            skipped_update: cfg.get("skipped_update").filter(|s| !s.is_empty()).map(str::to_owned),
+            skipped_firmware: cfg.get("skipped_firmware").filter(|s| !s.is_empty()).map(str::to_owned),
             alert_on: cfg.get("alert_on").map(AlertOn::parse).unwrap_or_default(),
+            liveliness: cfg.get("liveliness").map(parse_liveliness).unwrap_or(DEFAULT_LIVELINESS),
+            attention_anim: cfg.get("attention_anim").map(AttentionAnim::parse).unwrap_or_default(),
+            pace_marker: on_off(cfg.get("pace_marker"), false),
+            buttons: Button::ALL.map(|b| {
+                cfg.get(b.config_key()).map_or(b.default_action(), |v| ButtonAction::parse(v, b.default_action()))
+            }),
+            theme: cfg.get("theme").map(DeviceTheme::parse).unwrap_or_default(),
+            custom_colors: {
+                let mut p: Option<Palette> = None;
+                for t in ColorToken::ALL {
+                    if let Some(rgb) = cfg.get(t.key()).and_then(parse_rgb) {
+                        p.get_or_insert_default().set(t, rgb);
+                    }
+                }
+                p
+            },
         }
     }
 
@@ -372,10 +686,12 @@ impl Settings {
         }
         let oo = |b: bool| if b { "on" } else { "off" };
         // A changed chime is written under its new name; the old one goes.
+        // The pace marker rides along (it has no old name).
         for (key, old, now, was) in [
             ("reset_chime", "chime", self.reset_chime, current.reset_chime),
             ("alert_chime", "beep", self.alert_chime, current.alert_chime),
             ("desktop_chime", "", self.desktop_chime, current.desktop_chime),
+            ("pace_marker", "", self.pace_marker, current.pace_marker),
         ] {
             if now != was {
                 cfg.set(key, oo(now));
@@ -399,8 +715,49 @@ impl Settings {
         if current.update_check != self.update_check {
             cfg.set("update_check", oo(self.update_check));
         }
+        if current.skipped_update != self.skipped_update {
+            match &self.skipped_update {
+                Some(tag) => cfg.set("skipped_update", tag),
+                None => cfg.remove("skipped_update"),
+            }
+        }
+        if current.skipped_firmware != self.skipped_firmware {
+            match &self.skipped_firmware {
+                Some(tag) => cfg.set("skipped_firmware", tag),
+                None => cfg.remove("skipped_firmware"),
+            }
+        }
         if current.alert_on != self.alert_on {
             cfg.set("alert_on", &self.alert_on.as_config());
+        }
+        if current.liveliness != self.liveliness {
+            cfg.set("liveliness", &self.liveliness.to_string());
+        }
+        if current.attention_anim != self.attention_anim {
+            cfg.set("attention_anim", self.attention_anim.as_str());
+        }
+        for b in Button::ALL {
+            let a = self.buttons[b.index()];
+            if current.buttons[b.index()] != a {
+                cfg.set(b.config_key(), &a.as_str());
+            }
+        }
+        if current.theme != self.theme {
+            if self.theme == DeviceTheme::default() {
+                cfg.remove("theme");
+            } else {
+                cfg.set("theme", self.theme.as_str());
+            }
+        }
+        // All eleven, default or not: their presence is how a later run knows
+        // Custom has colours of its own (`choose_custom`).
+        if current.custom_colors != self.custom_colors {
+            for t in ColorToken::ALL {
+                match self.custom_colors {
+                    Some(p) => cfg.set(t.key(), &format!("{:06x}", p.get(t))),
+                    None => cfg.remove(t.key()),
+                }
+            }
         }
     }
 }
@@ -419,6 +776,8 @@ pub fn parse_config_dirs(raw: Option<&str>, paths: &Paths) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const DARK: Appearance = Appearance::Dark;
+    const LIGHT: Appearance = Appearance::Light;
 
     fn paths() -> Paths {
         Paths::under(Path::new("/home/u"))
@@ -526,9 +885,250 @@ mod tests {
         assert!(s.alert_chime && s.desktop_chime);
         assert_eq!(settings("clock = weird").clock, ClockMode::Off);
         assert!(settings("").update_check);
+        assert_eq!(settings("").skipped_update, None);
+        assert_eq!(settings("skipped_update = v2.5.0").skipped_update.as_deref(), Some("v2.5.0"));
+        assert_eq!(settings("").skipped_firmware, None);
+        assert_eq!(settings("skipped_firmware = v2.5.0").skipped_firmware.as_deref(), Some("v2.5.0"));
         assert_eq!(settings("").release_repo, DEFAULT_RELEASE_REPO);
         assert_eq!(settings("release_repo = me/fork").release_repo, "me/fork");
         assert_eq!(settings("release_repo = nonsense").release_repo, DEFAULT_RELEASE_REPO);
+    }
+
+    #[test]
+    fn liveliness() {
+        assert_eq!(settings("").liveliness, DEFAULT_LIVELINESS);
+        assert_eq!(settings("liveliness = 5\n").liveliness, 5);
+        assert_eq!(settings("liveliness = 0\n").liveliness, 1, "clamped");
+        assert_eq!(settings("liveliness = 9\n").liveliness, 5, "clamped");
+        assert_eq!(settings("liveliness = lots\n").liveliness, DEFAULT_LIVELINESS);
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("liveliness").is_none(), "the default stays out of the file");
+        s.liveliness = 1;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("liveliness"), Some("1"));
+        assert_eq!(Settings::from_config(&cfg, &paths(), None).liveliness, 1);
+    }
+
+    #[test]
+    fn button_actions() {
+        use crate::buttons::{KeyChord, MediaKey, MOD_CTRL, MOD_SHIFT};
+        let s = settings("");
+        assert_eq!(s.buttons, [ButtonAction::Space, ButtonAction::ShiftTab, ButtonAction::Brightness]);
+        let s = settings("button_primary = Enter\nbutton_secondary = none\nbutton_pwr = ctrl+shift+m hold\n");
+        let teams = KeyChord { mods: MOD_CTRL | MOD_SHIFT, usage: 0x10, hold: true };
+        assert_eq!(s.buttons, [ButtonAction::Enter, ButtonAction::None, ButtonAction::Chord(teams)]);
+        let s = settings("button_primary = bogus\nbutton_secondary = ctrl+\nbutton_pwr = shift+hyper\n");
+        assert_eq!(s.buttons, Button::ALL.map(Button::default_action), "unknown values read as the default");
+        let mut cfg = ConfigFile::default();
+        let mut s = settings("");
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("button_primary").is_none(), "the default stays out of the file");
+        s.buttons = [ButtonAction::Escape, ButtonAction::Media(MediaKey::VolumeUp), ButtonAction::Chord(teams)];
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("button_primary"), Some("escape"));
+        assert_eq!(cfg.get("button_secondary"), Some("volume-up"));
+        assert_eq!(cfg.get("button_pwr"), Some("ctrl+shift+m hold"));
+        assert_eq!(Settings::from_config(&cfg, &paths(), None).buttons, s.buttons);
+    }
+
+    #[test]
+    fn attention_anim() {
+        assert_eq!(settings("").attention_anim, AttentionAnim::Min2);
+        assert_eq!(settings("attention_anim = 30s\n").attention_anim, AttentionAnim::S30);
+        assert_eq!(settings("attention_anim = 10S\n").attention_anim, AttentionAnim::S10);
+        assert_eq!(settings("attention_anim = off\n").attention_anim, AttentionAnim::Off);
+        assert_eq!(settings("attention_anim = forever\n").attention_anim, AttentionAnim::Min2);
+        let secs: Vec<u16> = AttentionAnim::ALL.iter().map(|a| a.seconds()).collect();
+        assert_eq!(secs, [0, 10, 30, 120]);
+        for a in AttentionAnim::ALL {
+            assert_eq!(AttentionAnim::parse(a.as_str()), a, "round trip");
+        }
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("attention_anim").is_none(), "the default stays out of the file");
+        s.attention_anim = AttentionAnim::Off;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("attention_anim"), Some("off"));
+        assert_eq!(Settings::from_config(&cfg, &paths(), None).attention_anim, AttentionAnim::Off);
+    }
+
+    #[test]
+    fn colors_round_trip() {
+        let d = settings("");
+        assert_eq!((d.theme, d.colors(DARK)), (DeviceTheme::default(), Palette::default()));
+        assert_eq!(d.theme.as_str(), "system");
+        assert_eq!(&d.colors(DARK).to_hex()[24..30], "d97757", "accent defaults to terra-cotta");
+        assert_eq!(d.colors(DARK).to_hex().len(), 66);
+        let s = settings("theme = custom\ncolor_accent = 647D99\ncolor_clawd = 112233  # mine\ncolor_red = nope\n");
+        assert_eq!(s.theme, DeviceTheme::Custom);
+        assert_eq!(s.colors(DARK).get(ColorToken::Accent), 0x647d99);
+        assert_eq!(s.colors(LIGHT).get(ColorToken::Clawd), 0x112233, "Custom ignores the OS");
+        assert_eq!(s.colors(DARK).get(ColorToken::Red), ColorToken::Red.default_rgb(), "bad values keep the default");
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = settings("");
+        s.theme = DeviceTheme::Custom;
+        s.custom_colors.get_or_insert_default().set(ColorToken::Accent, 0x647d99);
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!((cfg.get("theme"), cfg.get("color_accent")), (Some("custom"), Some("647d99")));
+        assert_eq!(cfg.get("color_bg"), Some("000000"), "all eleven are written");
+        s.custom_colors.get_or_insert_default().set(ColorToken::Accent, ColorToken::Accent.default_rgb());
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("color_accent"), Some("d97757"), "a default stays, as Custom's own");
+        assert_eq!(Settings::from_config(&cfg, &paths(), None).custom_colors, Some(Palette::default()));
+    }
+
+    #[test]
+    fn tokens_are_declared_in_th_order() {
+        for (i, t) in ColorToken::ALL.into_iter().enumerate() {
+            assert_eq!(t.index(), i, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn custom_starts_from_the_theme_on_screen_only_the_first_time() {
+        let dracula = crate::themes::find("dracula").unwrap();
+        let mut cfg = ConfigFile::parse("theme = dracula\n");
+        let reload = |cfg: &ConfigFile| Settings::from_config(cfg, &paths(), None);
+
+        let mut s = reload(&cfg);
+        assert_eq!(s.custom_colors, None, "never customised");
+        s.choose_custom(LIGHT);
+        assert_eq!((s.theme, s.custom_colors), (DeviceTheme::Custom, Some(dracula.colors)));
+        s.apply_to(&mut cfg, &paths());
+
+        // Reset all colors, on to a preset, and back: the reset is what's kept.
+        let mut s = reload(&cfg);
+        s.custom_colors = Some(Palette::default());
+        s.apply_to(&mut cfg, &paths());
+        let mut s = reload(&cfg);
+        s.theme = DeviceTheme::Preset(dracula);
+        s.apply_to(&mut cfg, &paths());
+        let mut s = reload(&cfg);
+        s.choose_custom(DARK);
+        assert_eq!(s.custom_colors, Some(Palette::default()));
+
+        // The same from Dark, whose colours are the defaults.
+        let mut cfg = ConfigFile::parse(
+            "theme = dark
+",
+        );
+        let mut s = reload(&cfg);
+        s.choose_custom(LIGHT);
+        s.apply_to(&mut cfg, &paths());
+        let mut s = reload(&cfg);
+        s.theme = DeviceTheme::Preset(dracula);
+        s.apply_to(&mut cfg, &paths());
+        let mut s = reload(&cfg);
+        s.choose_custom(DARK);
+        assert_eq!(s.custom_colors, Some(Palette::default()), "not Dracula's");
+
+        // From System: whichever of Dark and Light is on screen.
+        let mut s = reload(&ConfigFile::parse(""));
+        s.choose_custom(LIGHT);
+        assert_eq!(s.custom_colors, Some(crate::themes::light().colors));
+
+        // From Solarized: whichever of its Dark and Light is on screen.
+        let mut s = reload(&ConfigFile::parse("theme = solarized\n"));
+        s.choose_custom(LIGHT);
+        assert_eq!(s.custom_colors, Some(crate::themes::find("solarized_light").unwrap().colors));
+        let mut s = reload(&ConfigFile::parse("theme = solarized\n"));
+        s.choose_custom(DARK);
+        assert_eq!(s.custom_colors, Some(crate::themes::find("solarized_dark").unwrap().colors));
+    }
+
+    #[test]
+    fn a_preset_keeps_the_custom_colours_for_later() {
+        let s = settings("theme = Nord\ncolor_accent = 647d99\n");
+        let nord = crate::themes::find("nord").unwrap();
+        assert_eq!(s.theme, DeviceTheme::Preset(nord));
+        assert_eq!(s.colors(LIGHT), nord.colors, "a preset's own colours, not the custom ones");
+        assert_eq!(s.custom_colors.unwrap().get(ColorToken::Accent), 0x647d99, "kept for Custom");
+        assert_eq!(settings("theme = nope\n").theme, DeviceTheme::default(), "unknown: the default");
+
+        let mut cfg = ConfigFile::parse("theme = nord\ncolor_accent = 647d99\n");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.theme = DeviceTheme::default();
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("theme").is_none(), "back to the default leaves the file");
+        assert_eq!(cfg.get("color_accent"), Some("647d99"));
+        s.theme = DeviceTheme::Custom;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("theme"), Some("custom"));
+    }
+
+    #[test]
+    fn system_is_the_default_and_follows_the_os() {
+        let dark = crate::themes::find("dark").unwrap();
+        let light = crate::themes::light();
+        for text in ["", "theme = system\n", "theme = clawd\n", "theme = Clawd\n", "theme = nope\n"] {
+            let s = settings(text);
+            assert_eq!(s.theme, DeviceTheme::default(), "{text:?}");
+            assert_eq!((s.colors(DARK), s.colors(LIGHT)), (dark.colors, light.colors), "{text:?}");
+        }
+        let s = settings("theme = dark\n");
+        assert_eq!((s.theme, s.colors(LIGHT)), (DeviceTheme::Preset(dark), dark.colors), "Dark stays dark");
+        let s = settings("theme = light\n");
+        assert_eq!((s.theme, s.colors(DARK)), (DeviceTheme::Preset(light), light.colors), "Light stays light");
+
+        // An old `theme = clawd` is System already, so it isn't rewritten;
+        // choosing System leaves the key out, Dark writes its own id.
+        let mut cfg = ConfigFile::parse("theme = clawd\n");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("theme"), Some("clawd"));
+        s.theme = DeviceTheme::Preset(dark);
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("theme"), Some("dark"));
+        s.theme = DeviceTheme::default();
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("theme").is_none());
+    }
+
+    #[test]
+    fn solarized_follows_the_os_and_the_fixed_ones_stay() {
+        let sol_dark = crate::themes::find("solarized_dark").unwrap();
+        let sol_light = crate::themes::find("solarized_light").unwrap();
+        for text in ["theme = solarized\n", "theme = Solarized  # both\n"] {
+            let s = settings(text);
+            assert_eq!(s.theme, DeviceTheme::Follow(&crate::themes::SOLARIZED), "{text:?}");
+            assert_eq!((s.colors(DARK), s.colors(LIGHT)), (sol_dark.colors, sol_light.colors), "{text:?}");
+        }
+        let s = settings("theme = solarized_dark\n");
+        assert_eq!((s.theme, s.colors(LIGHT)), (DeviceTheme::Preset(sol_dark), sol_dark.colors));
+        let s = settings("theme = solarized_light\n");
+        assert_eq!((s.theme, s.colors(DARK)), (DeviceTheme::Preset(sol_light), sol_light.colors));
+
+        // Written as `solarized`, read back the same; System still leaves the key out.
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.theme = DeviceTheme::parse("solarized");
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("theme"), Some("solarized"));
+        assert_eq!(Settings::from_config(&cfg, &paths(), None).theme, s.theme);
+        assert_eq!(s.theme.as_str(), "solarized");
+        s.theme = DeviceTheme::default();
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("theme").is_none());
+    }
+
+    #[test]
+    fn pace_marker() {
+        assert!(!settings("").pace_marker, "off by default");
+        assert!(settings("pace_marker = on\n").pace_marker);
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("pace_marker").is_none(), "the default stays out of the file");
+        s.pace_marker = true;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("pace_marker"), Some("on"));
     }
 
     #[test]
