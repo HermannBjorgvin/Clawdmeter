@@ -15,6 +15,7 @@ static const BoardCaps caps = {
     .has_imu      = (bool)BOARD_HAS_IMU,
     .minimal_ui   = false,   // full animated UI
     .has_pwr_button = true,  // BOOT (GPIO 9) carries the PWR role, see power.cpp
+    .has_touch = true,
 };
 
 const BoardCaps& board_caps(void) { return caps; }

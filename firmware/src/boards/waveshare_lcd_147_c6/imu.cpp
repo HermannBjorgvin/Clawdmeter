@@ -2,18 +2,19 @@
 #include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
-#include <SensorQMI8658.hpp>
+#include <ImuDrv.hpp>
 
-// QMI8658 confirmed present (I2C scan ACKed 0x6B, the library's default
-// QMI8658_L_SLAVE_ADDRESS) but rotation is disabled — same reasoning as the
-// other C6 ports: no PSRAM headroom for the rotation strip, and this kit's
-// panel is only run at one fixed orientation anyway. Still initialized to
-// keep the shared I2C bus healthy. Always reports quadrant 0.
+// QMI8658 is populated but rotation is disabled (BOARD_HAS_ROTATION=0): the
+// panel runs at one fixed orientation, and the C6 has no PSRAM headroom for
+// the rotation strip. We still initialize it to keep the shared I2C bus
+// healthy. Always reports quadrant 0.
 
 static SensorQMI8658 imu;
 
 void imu_hal_init(void) {
-    if (!imu.begin(Wire, QMI8658_L_SLAVE_ADDRESS, IIC_SDA, IIC_SCL)) {
+    // No pins: board_init() already started Wire, and SensorLib would
+    // call Wire.setPins() on the running bus (an [E] log line).
+    if (!imu.begin(Wire, QMI8658_ADDR)) {
         Serial.println("QMI8658 init failed");
         return;
     }
