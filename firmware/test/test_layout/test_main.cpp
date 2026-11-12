@@ -21,6 +21,9 @@ static const Panel PANELS[] = {
     { "LilyGO T4-S3",         450, 600, false },
     { "T4-S3 landscape",      600, 450, false },
     { "T-Display S3",         170, 320, false },
+    { "LCD-1.47",             320, 172, false },
+    { "T-Display S3 landscape", 320, 170, false },
+    { "320x200 strip",        320, 200, false },
     { "M5StickS3",            135, 240, false },
     { "AMOLED-1.32 / 1.43",   466, 466, true  },
     { "LCD-2.1",              480, 480, true  },
@@ -133,13 +136,22 @@ static void check_panel(const Panel& p) {
     }
     check_apart("cards", card(0), card(1));
 
-    // The first card alone (acct "week"): centred on the space both take, so
-    // it keeps clear of everything the two cards keep clear of.
-    const Box lone = { L.card[0].x, layout_lone_card_y(L), L.card[0].w, L.card[0].h };
+    // The first card alone (acct "week"), where ui.cpp draws it: centred on
+    // the space both take, clear of the header.
+    const Box lone = { layout_lone_card_x(L), layout_lone_card_y(L), L.card[0].w, L.card[0].h };
     check_on_glass("lone card", lone, 8);
+    check_apart("lone card vs corner Clawd", lone, logo_art());
+    check_apart("lone card vs battery", lone, battery());
+    for (title_fmt = 0; title_fmt < 2; title_fmt++) {
+        const lv_font_t* f = L.title_font[title_fmt];
+        if (f) check_apart("lone card vs title", lone, { 0, L.title_y[title_fmt], p.w, ink_h(f) });
+    }
     const int above = lone.y - L.card[0].y;
     const int below = L.card[1].y + L.card[1].h - (lone.y + lone.h);
     if (above < 0 || below < 0 || abs(above - below) > 1) fail("lone card not centred on the cards", lone);
+    const int left = lone.x - L.card[0].x;
+    const int right = L.card[1].x + L.card[1].w - (lone.x + lone.w);
+    if (left < 0 || right < 0 || abs(left - right) > 1) fail("lone card not centred across the cards", lone);
 
     // Inside a card.
     const int inner_w = L.card[0].w - 2 * L.pad_x, inner_h = L.card[0].h - 2 * L.pad_y;
@@ -154,7 +166,7 @@ static void check_panel(const Panel& p) {
         if (text_w(L.reset_font, s) > inner_w) fail(s, card(0));
     if (text_w(L.period_font, L.period_short ? PERIOD_TEXT_SHORT_WIDEST : PERIOD_TEXT_WIDEST) > inner_w)
         fail("period line", card(1));
-    if (p.w >= 240 && L.period_short) fail("period line without its pace word", card(1));
+    if (L.card[0].w >= 224 && L.period_short) fail("period line without its pace word", card(1));
     if (1 + 2 * L.pill_pad_y + ink_h(L.pill_font) > L.bar_y) fail("pill vs bar", card(0));
     if (ink_h(L.pct_font) > L.bar_y) fail("percentage vs bar", card(0));
     if (L.bar_y + L.bar_h > L.reset_y) fail("bar vs reset line", card(0));
@@ -206,6 +218,7 @@ static void test_large_480x480(void) {
     TEST_ASSERT_EQUAL_INT16(100, L.card[0].y);  TEST_ASSERT_EQUAL_INT16(150, L.card[0].h);
     TEST_ASSERT_EQUAL_INT16(266, L.card[1].y);
     TEST_ASSERT_EQUAL_INT16(183, layout_lone_card_y(L));   // (100 + 416 - 150) / 2
+    TEST_ASSERT_EQUAL_INT16(20, layout_lone_card_x(L));
     TEST_ASSERT_EQUAL_INT16(56, L.bar_y);       TEST_ASSERT_EQUAL_INT16(24, L.bar_h);
     TEST_ASSERT_EQUAL_INT16(94, L.reset_y);
     TEST_ASSERT_EQUAL_PTR(&font_styrene_48, L.pct_font);
@@ -264,6 +277,25 @@ static void test_small_240x240(void) {
     TEST_ASSERT_EQUAL_PTR(&font_styrene_14, L.period_font);
 }
 
+// Too short to stack: the cards sit side by side, and a lone card centres
+// on the space both take.
+static void test_row_320x172(void) {
+    L = layout_compute({ 320, 172, false });
+    TEST_ASSERT_EQUAL_INT16(L.card[0].y, L.card[1].y);
+    TEST_ASSERT_EQUAL_INT16(L.card[0].w, L.card[1].w);
+    TEST_ASSERT_GREATER_THAN_INT16(L.card[0].x + L.card[0].w, L.card[1].x);
+    TEST_ASSERT_EQUAL_INT16((320 - L.card[0].w) / 2, layout_lone_card_x(L));
+    TEST_ASSERT_EQUAL_INT16(L.card[0].y, layout_lone_card_y(L));
+    TEST_ASSERT_EQUAL_PTR(&font_styrene_24, L.pct_font);
+    TEST_ASSERT_EQUAL_PTR(&font_tiempos_34, L.ent_pct_font);   // the serif, as on SMALL
+    TEST_ASSERT_EQUAL_PTR(PILL_TEXT, L.pills);
+    // A half-width card has no room for the pace word, even in the smallest
+    // type: the period line is "Resets May 30" and the bar's colour shows
+    // the pace.
+    TEST_ASSERT_TRUE(L.period_short);
+    TEST_ASSERT_EQUAL_PTR(&font_styrene_12, L.period_font);
+}
+
 // Kerned, per-glyph-rounded widths, as lv_font_get_glyph_width sums them.
 static void test_text_width(void) {
     TEST_ASSERT_EQUAL_INT32(371, layout_text_width(&font_styrene_28, "for 3 seconds, then release"));
@@ -288,6 +320,7 @@ int main(int, char**) {
     RUN_TEST(test_compact_368x448);
     RUN_TEST(test_large_410x502);
     RUN_TEST(test_small_240x240);
+    RUN_TEST(test_row_320x172);
     RUN_TEST(test_text_width);
     RUN_TEST(print_layouts);
     return UNITY_END();

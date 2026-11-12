@@ -3,10 +3,12 @@
 //! second launches do it through `window-commands` ([`crate::ipc`]).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clawdmeter_core::Paths;
 use gpui::{div, prelude::*, px, Context, Entity, SharedString, Window};
 
+use super::decorations::{self, ButtonLayout};
 use super::flasher::FlasherView;
 use super::overview::OverviewView;
 use super::settings::SettingsView;
@@ -22,6 +24,8 @@ pub struct AppView {
     page: Page,
     /// Dark appearance as last drawn.
     dark: Option<bool>,
+    /// Header bar buttons as last drawn.
+    layout: Arc<ButtonLayout>,
     /// The setup wizard fills the window.
     setup: bool,
     overview: Entity<OverviewView>,
@@ -78,7 +82,22 @@ impl AppView {
             let r = this.update_in(cx, |v, window, cx| {
                 if let Some(page) = pages.last() {
                     v.go(*page, cx);
+                    if !window.is_window_active() {
+                        log::debug!(
+                            "asked to show {}: raising the window (a Wayland compositor may refuse, \
+                             and then a minimized window stays minimized)",
+                            page.as_str()
+                        );
+                    }
                     window.activate_window();
+                }
+                // The desktop's button layout can change while we're open
+                // (GNOME Tweaks).
+                let layout = decorations::button_layout();
+                if v.layout != layout {
+                    log::debug!("header bar buttons now {layout:?}");
+                    v.layout = layout;
+                    cx.notify();
                 }
                 // Light/dark can change after the first frame (on X11 it
                 // arrives from the settings portal). Polled rather than
@@ -95,8 +114,17 @@ impl AppView {
             }
         })
         .detach();
-        let mut v =
-            AppView { dark: None, page: Page::Overview, setup: false, overview, settings, flasher, update, wizard };
+        let mut v = AppView {
+            dark: None,
+            layout: decorations::button_layout(),
+            page: Page::Overview,
+            setup: false,
+            overview,
+            settings,
+            flasher,
+            update,
+            wizard,
+        };
         v.go(page, cx);
         v
     }
@@ -359,7 +387,7 @@ impl Render for AppView {
                     ),
             )
         };
-        chrome(&t, window, body)
+        chrome(&t, window, cx, body)
     }
 }
 

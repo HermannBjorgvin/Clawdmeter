@@ -62,7 +62,7 @@ is faked behind `FlashHardware`.
   [--manifest PATH]`; `--ports`; `--info PORT`; `hook MODE [event]`.
 - Env: `CLAWDMETER_LOG`, `CLAWDMETER_NO_TRAY`, `POLL_INTERVAL`,
   `CLAUDE_CONFIG_DIR` (default account), `CLAWDMETER_BLE_ADDRESS`,
-  `CLAWDMETER_DECORATIONS`.
+  `CLAWDMETER_DECORATIONS`, `CLAWDMETER_BUTTON_LAYOUT`.
 - State lives in one dir, `~/.config/clawdmeter/` (Windows:
   `%LOCALAPPDATA%\Clawdmeter\`): `config`, `events.log`, `attention`,
   `clear-<sid>`, `ble-address`, `daemon.log`, `usage-blocks.json`, app
@@ -270,7 +270,17 @@ Per account (`probe.rs`, `oauth.rs`):
   decorations and `ui::chrome` draws an Adwaita-style header bar. gpui 0.2.2
   reports "server" even with no decoration manager, so
   `decorations::wanted()` probes the Wayland registry itself.
-  `CLAWDMETER_DECORATIONS=client|server` overrides.
+  `CLAWDMETER_DECORATIONS=client|server` overrides. The bar's minimize,
+  maximize/restore and close buttons follow GNOME's `button-layout` (sides
+  and order), live: `platform::SettingWatch` follows it on a background
+  thread (one read, then `SettingChanged`, misses retried like the
+  appearance watch's), started before GPUI for client decorations or any
+  Wayland compositor (one offering server decorations may still answer
+  client-side); a window asking for client decorations waits up to 250 ms
+  for the first answer, else opens with GTK's default,
+  `menu:minimize,maximize,close`, and the root's 500 ms poll redraws when
+  it changes. `CLAWDMETER_BUTTON_LAYOUT=<layout>` overrides it (reference
+  screenshots; empty = unset, `:` = no buttons).
 - Board art is bundled by `ui::Assets` and drawn with
   `img(board.illustration())`. Use `img()`, not `svg()`: `svg()` renders a
   monochrome mask, `img()` renders the SVG through resvg in full colour.
