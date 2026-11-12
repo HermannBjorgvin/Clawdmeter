@@ -662,9 +662,10 @@ void ui_update(const UsageData* data) {
     int s_pct = (int)(data->session_pct + 0.5f);
 
     // No 5-hour limit: the one card left sits in the middle of the space the
-    // two cards take. LVGL skips the set when y hasn't changed.
+    // two cards take. LVGL skips the set when the position hasn't changed.
     if (panel_session)
-        lv_obj_set_y(panel_session, data->weekly_only ? layout_lone_card_y(L) : L.card[0].y);
+        lv_obj_set_pos(panel_session, data->weekly_only ? layout_lone_card_x(L) : L.card[0].x,
+                       data->weekly_only ? layout_lone_card_y(L) : L.card[0].y);
 
     if (data->enterprise) {
         // Spending box: big number-only label + small "%" symbol + desc + pace

@@ -9,8 +9,8 @@
 // Three tuned designs (large 480x480, compact 368x448, small 240x240) set
 // the type and spacing. A panel takes the largest design that fits it, then
 // a few rules adapt it: narrow panels shorten labels and tighten spacing,
-// tall ones share out their spare height, a short one squeezes, and a round
-// one keeps inside its circle. See docs/porting/adding-a-board.md.
+// tall ones share out their spare height, a short one squeezes, a landscape
+// strip puts the cards side by side, and a round one keeps inside its circle. See docs/porting/adding-a-board.md.
 
 // The panel: its pixel size, and whether the glass is a circle inscribed in
 // that rectangle (BoardCaps.round_panel).
@@ -37,7 +37,7 @@ struct Layout {
     const lv_font_t* title_font[2];
     int16_t title_y[2];
 
-    // The two usage cards, stacked.
+    // The two usage cards, stacked (side by side on a landscape strip).
     LayoutRect card[2];
     int16_t pad_x, pad_y;            // card padding
     int16_t bar_y, bar_h;            // bar top, inside the padding
@@ -68,8 +68,9 @@ struct Layout {
 
 Layout layout_compute(const LayoutShape& shape);
 
-// The first card's y when it's shown alone (an account with no 5-hour limit,
-// acct "week"): centred on the space the two cards take.
+// The first card's position when it's shown alone (an account with no 5-hour
+// limit, acct "week"): centred on the space the two cards take.
+int16_t layout_lone_card_x(const Layout& L);
 int16_t layout_lone_card_y(const Layout& L);
 
 // Corner icon sizes the layout plans with (ui.cpp checks them against the art).
