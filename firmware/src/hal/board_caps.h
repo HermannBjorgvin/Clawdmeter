@@ -35,10 +35,13 @@ struct BoardCaps {
                              // button when button_count is 0) dismisses an
                              // active alert before it does anything else
                              // (director_button).
-    bool    mono_panel;      // a 1-bit panel (e-paper) printing luminance >= 64
-                             // as ink: it keeps the default palette and
-                             // ignores `th` (clawd_prefs.cpp); outlined bars,
-                             // inverted pills, no stale fade
+    bool    mono_panel;      // a 1-bit panel (e-paper) that prints by the
+                             // hal/mono_panel.h rule (luminance >= 64 is ink).
+                             // It keeps the default palette and ignores `th`
+                             // (clawd_prefs.cpp); the meters outline the bars,
+                             // invert the pills and don't dim stale data,
+                             // leaving "Stale" in the status line (ui.cpp).
+                             // Set with minimal_ui.
 };
 
 const BoardCaps& board_caps(void);

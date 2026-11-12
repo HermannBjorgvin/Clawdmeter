@@ -180,7 +180,8 @@ reading, and **Stale** when the retained reading is old. The verbs are a
 healthy-status indicator, not a report of an active model request. While
 connected but waiting for fresh data, the status alternates with **Listening**. Minimal display uses fixed status text.
 
-If updates stop, the meters dim. The last reading is retained rather than
+If updates stop, the meters dim (on the e-paper board they stay black and
+the status line says **Stale**). The last reading is retained rather than
 replaced with zero. See [Clawd's director](clawd-director.md) for timing
 and character rules.
 
