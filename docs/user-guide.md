@@ -263,7 +263,9 @@ seconds and preserves comments and unknown keys when saving.
 | `poll_interval` | automatic | Override working and no-hooks polling intervals, in seconds. The scheduler enforces at least 120 seconds per account. Quiet and other-account schedules still apply. |
 | `heartbeat_interval` | `60` | Resend cached readings between usage checks. This does not fetch usage. Keep the default unless diagnosing the connection. |
 | `claude_path` | found on `PATH` | Full path to the Claude Code executable, if detection fails. |
-| `update_check` | `on` | Check for firmware releases daily. |
+| `update_check` | `on` | Check for firmware and app releases daily. |
+| `skipped_update` | unset | The app release you chose to skip, such as `v2.5.0`. The sidebar stops mentioning it; a later release is announced again. |
+| `skipped_firmware` | unset | The firmware release you skipped on the Overview, such as `v2.5.0`. The Overview and the Flash item stop mentioning it; the Device page and the tray menu still offer it, and a later release is announced again. |
 | `alert_on` | `permission, question, elicitation` | Which waits alert on the device and tray: `permission`, `question`, `idle`, `elicitation` (MCP input), or `none`. Set on the Hooks page. Other notification types follow `permission`. |
 | `release_repo` | `HermannBjorgvin/Clawdmeter` | GitHub repository used for firmware releases. |
 | `onboarding_done` | unset | `true` after setup is finished or skipped. |
@@ -326,7 +328,7 @@ the selected reading is stale, allowing the device to show the loss of fresh dat
 clawdmeter                      Run the tray app
 clawdmeter --daemon             Run without a tray or window
 clawdmeter --once               Read usage once and print the payload; no Bluetooth
-clawdmeter --window [PAGE]       Open overview, device, flash, accounts, hooks, settings, or setup
+clawdmeter --window [PAGE]       Open overview, device, flash, accounts, hooks, settings, update, or setup
 clawdmeter --ports              List attached Espressif USB ports
 clawdmeter --info PORT          Read the board and firmware version over USB
 clawdmeter hook MODE [event]    Handle a Claude Code hook: alert, clear, or event

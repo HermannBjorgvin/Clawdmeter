@@ -9,6 +9,7 @@ pub mod overview;
 pub mod settings;
 pub mod setup;
 pub mod theme;
+pub mod update;
 pub mod widgets;
 
 use std::borrow::Cow;
@@ -85,6 +86,7 @@ const ASSETS: &[(&str, &[u8])] = bundled![
         "spotpear_s3_154",
     ],
     "icons": [
+        "arrow-down-to-line",
         "gauge",
         "tablet",
         "zap",
@@ -112,6 +114,7 @@ const ASSETS: &[(&str, &[u8])] = bundled![
         "volume-x",
         "sun",
         "ban",
+        "linux",
     ],
 ];
 

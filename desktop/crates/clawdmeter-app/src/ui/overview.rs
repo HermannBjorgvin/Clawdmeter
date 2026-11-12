@@ -2,6 +2,7 @@
 //! meters, a refresh button, and a nudge when new firmware is out.
 
 use clawdmeter_core::{Paths, Settings};
+use clawdmeter_flash::release::release_tag;
 use gpui::{div, prelude::*, px, relative, rgb, Context, EventEmitter, Rgba, SharedString, Window};
 
 use super::theme::{Theme, FONT_BODY, FONT_DISPLAY, R_M, R_PILL};
@@ -21,6 +22,11 @@ pub struct OverviewView {
     refreshing: Option<i64>,
     /// `desktop_chime` in the config.
     desktop_chime: bool,
+    /// `skipped_firmware` in the config: the release the firmware nudge
+    /// stays quiet about.
+    skipped_firmware: Option<String>,
+    /// "Skip this update" couldn't be saved.
+    skip_failed: bool,
 }
 
 impl EventEmitter<Navigate> for OverviewView {}
@@ -35,7 +41,14 @@ impl OverviewView {
             }
         })
         .detach();
-        let mut v = OverviewView { paths, snap: None, refreshing: None, desktop_chime: false };
+        let mut v = OverviewView {
+            paths,
+            snap: None,
+            refreshing: None,
+            desktop_chime: false,
+            skipped_firmware: None,
+            skip_failed: false,
+        };
         v.reload(clawdmeter_core::unix_now());
         v
     }
@@ -44,6 +57,7 @@ impl OverviewView {
         self.snap = live_status(&self.paths);
         if let Ok(s) = Settings::load(&self.paths) {
             self.desktop_chime = s.desktop_chime;
+            self.skipped_firmware = s.skipped_firmware;
         }
         if let Some(at) = self.refreshing {
             let done = match &self.snap {
@@ -70,9 +84,37 @@ impl OverviewView {
         }
     }
 
-    /// New firmware is out for the connected device.
+    /// New firmware is out for the connected device, and not skipped: the
+    /// Overview nudges about it and the Flash item carries a badge. (The
+    /// Device page offers it either way.)
     pub fn update_available(&self) -> bool {
-        self.snap.as_ref().is_some_and(|s| s.update_available().is_some())
+        self.firmware_nudge().is_some()
+    }
+
+    /// The firmware release to nudge about, as a plain tag (`v2.5.0`),
+    /// unless it was skipped. The version comes from the release's manifest,
+    /// and a skip writes it to the config, so anything but a plain version
+    /// is no release to nudge about.
+    fn firmware_nudge(&self) -> Option<String> {
+        let latest = release_tag(self.snap.as_ref()?.update_available()?)?;
+        let skipped = self.skipped_firmware.as_deref().and_then(release_tag);
+        (skipped.as_ref() != Some(&latest)).then_some(latest)
+    }
+
+    /// Stop nudging about firmware release `tag`; a later one nudges again.
+    fn skip_firmware(&mut self, tag: String, cx: &mut Context<Self>) {
+        let saved = tag.clone();
+        match super::settings::write_settings(&self.paths, move |s, _| s.skipped_firmware = Some(saved)) {
+            Ok(()) => {
+                self.skipped_firmware = Some(tag);
+                self.skip_failed = false;
+            }
+            Err(e) => {
+                log::warn!("couldn't save skipped_firmware: {e}");
+                self.skip_failed = true;
+            }
+        }
+        cx.notify();
     }
 }
 
@@ -293,20 +335,35 @@ impl Render for OverviewView {
             .then(|| meter(&t, "Session", s.session_pct, reset_text(s.session_resets_at, now, "Not started")));
         let weekly = meter(&t, "Weekly", s.week_pct, reset_text(s.week_resets_at, now, "---"));
         page = page.child(div().flex().flex_col().gap(px(12.)).children(session).child(weekly));
-        if let Some(v) = s.update_available() {
-            let v = v.trim_start_matches('v').to_owned();
+        if let Some(tag) = self.firmware_nudge() {
+            let v = tag.trim_start_matches('v').to_owned();
             page = page.child(
                 notice(&t, Tone::Accent, format!("Firmware v{v} is available. Connect USB to update.")).child(
-                    div().flex().pl(px(18.)).child(button(
-                        &t,
-                        "go-update",
-                        "Update firmware",
-                        ButtonKind::Primary,
-                        true,
-                        cx.listener(|_, _, _, cx| cx.emit(Navigate(Page::Flash))),
-                    )),
+                    div()
+                        .flex()
+                        .gap(px(10.))
+                        .pl(px(18.))
+                        .child(button(
+                            &t,
+                            "go-update",
+                            "Update firmware",
+                            ButtonKind::Primary,
+                            true,
+                            cx.listener(|_, _, _, cx| cx.emit(Navigate(Page::Flash))),
+                        ))
+                        .child(button(
+                            &t,
+                            "skip-firmware",
+                            "Skip this update",
+                            ButtonKind::Normal,
+                            true,
+                            cx.listener(move |v, _, _, cx| v.skip_firmware(tag.clone(), cx)),
+                        )),
                 ),
             );
+            if self.skip_failed {
+                page = page.child(notice(&t, Tone::Bad, "Couldn't save that to the config file."));
+            }
         }
         page.child(chime).child(setup)
     }

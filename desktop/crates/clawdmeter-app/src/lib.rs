@@ -22,6 +22,16 @@ pub mod onboarding;
 pub mod tray;
 pub mod ui;
 
+/// Built as a release: `CLAWDMETER_VERSION` was set, so [`version`] is a
+/// release's and can be compared with newer ones.
+pub fn is_release_build() -> bool {
+    // As `version` reads it: a value that leaves no version doesn't count.
+    option_env!("CLAWDMETER_VERSION").is_some_and(|v| {
+        let v = v.trim();
+        !v.strip_prefix('v').unwrap_or(v).is_empty()
+    })
+}
+
 /// The app's version: `CLAWDMETER_VERSION` at build time (CI sets it from
 /// the release tag; a leading `v` is dropped), else the crate version.
 pub fn version() -> &'static str {
@@ -54,12 +64,15 @@ pub enum Page {
     Hooks,
     /// Start at login, polling, files, quit.
     Settings,
+    /// A newer app release: its notes, the download, skip.
+    Update,
     /// The first-run setup wizard.
     Setup,
 }
 
 impl Page {
-    /// Pages in sidebar order (setup is reached from the sidebar footer).
+    /// Pages in sidebar order (setup and update are reached from the sidebar
+    /// footer, update from Settings too).
     pub const SIDEBAR: [Page; 6] =
         [Page::Overview, Page::Device, Page::Flash, Page::Accounts, Page::Hooks, Page::Settings];
 
@@ -74,6 +87,7 @@ impl Page {
             "accounts" => Page::Accounts,
             "hooks" => Page::Hooks,
             "settings" | "background" => Page::Settings,
+            "update" => Page::Update,
             "setup" => Page::Setup,
             _ => return None,
         })
@@ -88,6 +102,7 @@ impl Page {
             Page::Accounts => "accounts",
             Page::Hooks => "hooks",
             Page::Settings => "settings",
+            Page::Update => "update",
             Page::Setup => "setup",
         }
     }
@@ -101,6 +116,7 @@ impl Page {
             Page::Accounts => "Accounts",
             Page::Hooks => "Hooks",
             Page::Settings => "Settings",
+            Page::Update => "Update",
             Page::Setup => "Setup",
         }
     }
@@ -165,7 +181,7 @@ mod tests {
         assert_eq!(ago(12), "12 s ago");
         assert_eq!(ago(200), "3 min ago");
         assert_eq!(ago(7300), "2 h ago");
-        for p in Page::SIDEBAR.into_iter().chain([Page::Setup]) {
+        for p in Page::SIDEBAR.into_iter().chain([Page::Update, Page::Setup]) {
             assert_eq!(Page::parse(p.as_str()), Some(p));
         }
         assert_eq!(Page::parse("background"), Some(Page::Settings));

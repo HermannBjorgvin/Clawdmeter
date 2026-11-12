@@ -229,6 +229,13 @@ impl StatusSnapshot {
             None => None,
         }
     }
+
+    /// The tag of a release newer than this app at `app_version`. The update
+    /// check stores one tag for the firmware and the app: they ship together.
+    pub fn app_update(&self, app_version: &str) -> Option<String> {
+        let latest = clawdmeter_flash::release::release_tag(self.latest_firmware.as_deref()?)?;
+        clawdmeter_flash::manifest::is_newer(&latest, app_version).then_some(latest)
+    }
 }
 
 /// Attention wins, then auth, then the link, then freshness.
@@ -590,5 +597,20 @@ mod tests {
         assert_eq!(s.update_available(), None);
         s.device_firmware = Some("dev".into());
         assert_eq!(s.update_available(), None, "a local build is not offered a release");
+    }
+
+    #[test]
+    fn app_update_is_a_newer_release_than_the_app() {
+        let mut s = StatusSnapshot::default();
+        assert_eq!(s.app_update("2.4.0"), None, "nothing checked yet");
+        s.latest_firmware = Some("v2.5.0".into());
+        assert_eq!(s.app_update("2.4.0").as_deref(), Some("v2.5.0"));
+        assert_eq!(s.app_update("v2.5.0"), None);
+        assert_eq!(s.app_update("2.6.0"), None);
+        assert_eq!(s.app_update("2.5.0-rc.2").as_deref(), Some("v2.5.0"), "a release is newer than its candidates");
+        s.latest_firmware = Some("2.5.0".into());
+        assert_eq!(s.app_update("2.4.0").as_deref(), Some("v2.5.0"));
+        s.latest_firmware = Some("9.0.0/../x".into());
+        assert_eq!(s.app_update("2.4.0"), None, "not a version");
     }
 }
