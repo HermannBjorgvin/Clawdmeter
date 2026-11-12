@@ -106,7 +106,9 @@ is faked behind `FlashHardware`.
   daemon hands changes to `Engine::set_appearance`, which sends them like any
   device setting), `claude_path`,
   `release_repo`, `update_check`, `skipped_update` (the app release tag the
-  Update page was told to skip), `onboarding_done`, `alert_on` (alert kinds
+  Update page was told to skip), `skipped_firmware` (the firmware release
+  the Overview's "Skip this update" quiets: no nudge there and no Flash
+  badge; the Device page still offers it), `onboarding_done`, `alert_on` (alert kinds
   the daemon lets through: the hook records `k` from `hook_event_name` /
   `notification_type` and `engine.on_attention` drops the rest; default all
   but `idle`).
@@ -210,7 +212,9 @@ Per account (`probe.rs`, `oauth.rs`):
   window is a `clawdmeter --window [PAGE]` child process.
 - `ui/app.rs` is the root: a sidebar (Overview, Device, Flash, Accounts,
   Hooks, Settings) or the setup wizard (`ui/setup.rs`) filling the window.
-  `Page::Update` has no sidebar item: the footer notice and Settings open it.
+  `Page::Update` has no sidebar item: the "Update available" pill
+  (`widgets::update_pill`) in the footer and beside the Settings heading
+  opens it.
   Pages are `crate::Page`; `Page::parse` also accepts the old
   `background`/`flasher`/`status`/`alerts` names.
 - The window saves settings through `ui::settings::write_settings`, which
@@ -232,7 +236,8 @@ Per account (`probe.rs`, `oauth.rs`):
   (`StatusSnapshot::app_update`, or the check's cache file with no tray) is
   newer than a release build's version, the sidebar footer shows "Update
   available" until that release is skipped (`skipped_update`; a later one
-  is announced again). It opens the Update page, which Settings opens too:
+  is announced again). It opens the Update page, which the same pill
+  beside the Settings heading opens too, a skipped release included:
   the notes of every release up to the new one (`release::release_notes`,
   Markdown drawn as headings, bullets and text), the download, "Skip this
   update" and a link to the release page. The download takes this install's

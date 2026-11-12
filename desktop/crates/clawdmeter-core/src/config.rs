@@ -448,6 +448,9 @@ pub struct Settings {
     /// The app release the user chose not to be told about (`skipped_update`,
     /// a tag like `v2.5.0`); a later release is announced again.
     pub skipped_update: Option<String>,
+    /// The firmware release the user chose not to be nudged about on the
+    /// Overview (`skipped_firmware`, a tag); a later release nudges again.
+    pub skipped_firmware: Option<String>,
     /// Which kinds of "Claude needs you" alert reach the device and tray.
     pub alert_on: AlertOn,
     /// How lively Clawd is on the device (`lv`, 1-5, default 3).
@@ -612,6 +615,7 @@ impl Settings {
             claude_path: cfg.get("claude_path").filter(|s| !s.is_empty()).map(|s| paths.expand_tilde(s)),
             update_check: on_off(cfg.get("update_check"), true),
             skipped_update: cfg.get("skipped_update").filter(|s| !s.is_empty()).map(str::to_owned),
+            skipped_firmware: cfg.get("skipped_firmware").filter(|s| !s.is_empty()).map(str::to_owned),
             alert_on: cfg.get("alert_on").map(AlertOn::parse).unwrap_or_default(),
             liveliness: cfg.get("liveliness").map(parse_liveliness).unwrap_or(DEFAULT_LIVELINESS),
             attention_anim: cfg.get("attention_anim").map(AttentionAnim::parse).unwrap_or_default(),
@@ -715,6 +719,12 @@ impl Settings {
             match &self.skipped_update {
                 Some(tag) => cfg.set("skipped_update", tag),
                 None => cfg.remove("skipped_update"),
+            }
+        }
+        if current.skipped_firmware != self.skipped_firmware {
+            match &self.skipped_firmware {
+                Some(tag) => cfg.set("skipped_firmware", tag),
+                None => cfg.remove("skipped_firmware"),
             }
         }
         if current.alert_on != self.alert_on {
@@ -877,6 +887,8 @@ mod tests {
         assert!(settings("").update_check);
         assert_eq!(settings("").skipped_update, None);
         assert_eq!(settings("skipped_update = v2.5.0").skipped_update.as_deref(), Some("v2.5.0"));
+        assert_eq!(settings("").skipped_firmware, None);
+        assert_eq!(settings("skipped_firmware = v2.5.0").skipped_firmware.as_deref(), Some("v2.5.0"));
         assert_eq!(settings("").release_repo, DEFAULT_RELEASE_REPO);
         assert_eq!(settings("release_repo = me/fork").release_repo, "me/fork");
         assert_eq!(settings("release_repo = nonsense").release_repo, DEFAULT_RELEASE_REPO);

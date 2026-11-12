@@ -265,6 +265,7 @@ seconds and preserves comments and unknown keys when saving.
 | `claude_path` | found on `PATH` | Full path to the Claude Code executable, if detection fails. |
 | `update_check` | `on` | Check for firmware and app releases daily. |
 | `skipped_update` | unset | The app release you chose to skip, such as `v2.5.0`. The sidebar stops mentioning it; a later release is announced again. |
+| `skipped_firmware` | unset | The firmware release you skipped on the Overview, such as `v2.5.0`. The Overview and the Flash item stop mentioning it; the Device page still offers it, and a later release is announced again. |
 | `alert_on` | `permission, question, elicitation` | Which waits alert on the device and tray: `permission`, `question`, `idle`, `elicitation` (MCP input), or `none`. Set on the Hooks page. Other notification types follow `permission`. |
 | `release_repo` | `HermannBjorgvin/Clawdmeter` | GitHub repository used for firmware releases. |
 | `onboarding_done` | unset | `true` after setup is finished or skipped. |

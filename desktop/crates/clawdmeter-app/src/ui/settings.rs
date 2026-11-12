@@ -23,14 +23,15 @@ use clawdmeter_core::themes::{FollowTheme, FOLLOWING, PRESETS};
 use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::device::{self, FirmwareInfo};
 use gpui::{
-    canvas, div, img, point, prelude::*, px, relative, rgb, Bounds, Context, EventEmitter, FocusHandle, KeyDownEvent,
-    Modifiers, ModifiersChangedEvent, PathBuilder, PathPromptOptions, Pixels, SharedString, Window,
+    canvas, div, img, point, prelude::*, px, relative, rgb, Bounds, Context, Entity, EventEmitter, FocusHandle,
+    KeyDownEvent, Modifiers, ModifiersChangedEvent, PathBuilder, PathPromptOptions, Pixels, SharedString, Window,
 };
 
 use super::theme::{Theme, FONT_DISPLAY, FONT_MONO, R_ITEM, R_M, R_S};
+use super::update::UpdateView;
 use super::widgets::{
     button, caption, card, checkbox, field, field_stacked, heading, icon, notice, para, pill, segmented,
-    stepped_slider, subheading, toggle, ButtonKind, Tone,
+    stepped_slider, subheading, toggle, update_pill, ButtonKind, Tone,
 };
 use super::{command, live_status, not_running_text, run_blocking, Navigate, REFRESH};
 use crate::boards::{self, BoardInfo};
@@ -139,11 +140,21 @@ pub struct SettingsView {
     appearance_watch: Option<AppearanceWatch>,
     follow_os: bool,
     ticks: u32,
+    /// The Update page's view: a newer app release shows as a pill beside
+    /// the Settings heading.
+    update: Option<Entity<UpdateView>>,
 }
 
 impl EventEmitter<Navigate> for SettingsView {}
 
 impl SettingsView {
+    /// Follow the Update page's view, for the pill beside the Settings
+    /// heading.
+    pub fn follow_update(&mut self, update: Entity<UpdateView>, cx: &mut Context<Self>) {
+        cx.observe(&update, |_, _, cx| cx.notify()).detach();
+        self.update = Some(update);
+    }
+
     /// Build and load the config. USB is probed while the Device page is up.
     pub fn new(paths: Paths, page: Page, cx: &mut Context<Self>) -> Self {
         let mut v = Self::with_usb(paths, page, true, cx);
@@ -198,6 +209,7 @@ impl SettingsView {
             appearance_watch: None,
             follow_os: false,
             ticks: 0,
+            update: None,
         };
         v.reload();
         v.show(page, false, cx);
@@ -1774,7 +1786,16 @@ impl SettingsView {
         let me = cx.entity().downgrade();
         let on = self.autostart_on;
         let home = self.paths.home.clone();
-        let mut pane = div().flex().flex_col().gap(px(6.)).child(heading(t, "Settings")).child(field(
+        // A newer app release, a skipped one included, opens the Update page.
+        let release = self.update.as_ref().and_then(|u| u.read(cx).available().map(str::to_owned));
+        let title =
+            div().flex().items_center().justify_between().child(heading(t, "Settings")).when_some(release, |d, tag| {
+                d.child(
+                    update_pill(t, "settings-app-update", &tag, false, true)
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(Navigate(Page::Update)))),
+                )
+            });
+        let mut pane = div().flex().flex_col().gap(px(6.)).child(title).child(field(
             t,
             "Start at login",
             "Opens Clawdmeter when you sign in.",
@@ -1898,19 +1919,6 @@ impl SettingsView {
                 ),
             );
         }
-        pane = pane.child(field(
-            t,
-            "App update",
-            "Release notes and the download for a newer version, a skipped one included.",
-            button(
-                t,
-                "open-update",
-                "Open",
-                ButtonKind::Small,
-                true,
-                cx.listener(|_, _, _, cx| cx.emit(Navigate(Page::Update))),
-            ),
-        ));
         let p = self.paths.clone();
         pane = pane.child(field(
             t,
