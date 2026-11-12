@@ -13,6 +13,8 @@ public:
     void end(void) {}
     uint8_t getUChar(const char* key, uint8_t def = 0);
     size_t  putUChar(const char* key, uint8_t value);
+    int32_t getInt(const char* key, int32_t def = 0);
+    size_t  putInt(const char* key, int32_t value);
     bool    isKey(const char* key);
     size_t  getBytes(const char* key, void* buf, size_t max_len);
     size_t  putBytes(const char* key, const void* value, size_t len);

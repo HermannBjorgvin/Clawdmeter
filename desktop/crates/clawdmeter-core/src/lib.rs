@@ -12,7 +12,7 @@
 //! * [`cadence`]: when to poll, when to heartbeat.
 //! * [`backoff`]: how long an account waits after a failed poll.
 //! * [`selector`]: which account to show.
-//! * [`payload`]: the JSON the firmware parses.
+//! * [`payload`]: the JSON the firmware parses; [`buttons`]: what its buttons do.
 //! * [`themes`]: the device's colour presets.
 //! * [`rate`]: the slow-clock mood.
 //! * [`engine`]: all of the above as one I/O-free state machine.
@@ -24,6 +24,7 @@
 pub mod attention;
 pub mod autostart;
 pub mod backoff;
+pub mod buttons;
 pub mod cadence;
 pub mod config;
 pub mod engine;

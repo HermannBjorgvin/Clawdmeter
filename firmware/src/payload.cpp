@@ -1,4 +1,5 @@
 #include "payload.h"
+#include "button_action.h"
 #include <ArduinoJson.h>
 #include <string.h>
 
@@ -9,6 +10,14 @@ static void copy_str(char* dst, size_t cap, const char* src) {
     if (n >= cap) n = cap - 1;
     if (n) memcpy(dst, src, n);
     dst[n] = '\0';
+}
+
+// A button action (`k1`..`k3`): -1 when absent, not an integer, or a code
+// this firmware doesn't know (a newer app), so the stored action stays
+// rather than the default being saved over it.
+static int32_t button_field(JsonVariant v) {
+    if (!v.is<int32_t>()) return -1;
+    return button_action_clamp(v.as<int32_t>(), -1);
 }
 
 bool payload_parse(const char* json, UsageData* out, const char** err) {
@@ -83,6 +92,9 @@ bool payload_parse(const char* json, UsageData* out, const char** err) {
 
     JsonVariant pm = doc["pm"];
     d.pace_marker = pm.isNull() ? -1 : (int8_t)((pm | 0) ? 1 : 0);
+    d.btn_primary   = button_field(doc["k1"]);
+    d.btn_secondary = button_field(doc["k2"]);
+    d.btn_pwr       = button_field(doc["k3"]);
     d.has_theme = theme_parse_hex(doc["th"] | "", d.theme);
 
     d.ok = doc["ok"] | false;

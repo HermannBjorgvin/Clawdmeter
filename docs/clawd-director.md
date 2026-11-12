@@ -356,10 +356,12 @@ a board capability, with no NVS override, desktop setting, or serial toggle.
 
 ## Buttons
 
-- BOOT (Space) and SECONDARY (Shift+Tab): unchanged. They also count as
+- BOOT (default Space) and SECONDARY (default Shift+Tab; the app can remap
+  both, `k1`/`k2`): the director side is unchanged. They also count as
   engagement and wake the screensaver.
-- PWR short press: cycles brightness and counts as engagement (waking the
-  screensaver, face or calm dip). Hold to pair is unchanged.
+- PWR short press: runs its action (`k3`, default cycle brightness) and
+  counts as engagement (waking the screensaver, face or calm dip). Hold to
+  pair is unchanged.
 - Shows are earned rather than opened by a button or a tap.
 
 ## Tunables

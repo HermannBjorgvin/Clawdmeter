@@ -96,6 +96,18 @@ const ASSETS: &[(&str, &[u8])] = bundled![
         "chevron-right",
         "chevron-down",
         "check",
+        "mic",
+        "keyboard",
+        "arrow-right-to-line",
+        "corner-down-left",
+        "play",
+        "skip-back",
+        "skip-forward",
+        "volume-1",
+        "volume-2",
+        "volume-x",
+        "sun",
+        "ban",
     ],
 ];
 

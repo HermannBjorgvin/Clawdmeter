@@ -86,7 +86,7 @@ size_t Preferences::putUChar(const char* key, uint8_t value) {
     return 0;
 }
 
-#define PREF_BLOB_SLOTS 4
+#define PREF_BLOB_SLOTS 8
 static struct { char key[16]; uint8_t val[96]; size_t len; bool used; } blobs[PREF_BLOB_SLOTS];
 
 bool Preferences::isKey(const char* key) {
@@ -118,4 +118,11 @@ size_t Preferences::putBytes(const char* key, const void* value, size_t len) {
             return len;
         }
     return 0;
+}
+int32_t Preferences::getInt(const char* key, int32_t def) {
+    int32_t v;
+    return getBytes(key, &v, sizeof(v)) == sizeof(v) ? v : def;
+}
+size_t Preferences::putInt(const char* key, int32_t value) {
+    return putBytes(key, &value, sizeof(value));
 }

@@ -2,7 +2,7 @@
 //!
 //! Keys match `payload_parse()` in `firmware/src/payload.cpp`, in the order
 //! the old daemons wrote them, plus the additive fast-clock fields `a`, `e`,
-//! `es`, `n`, `rp` and the device settings `lv`, `aa`, `pm` and `th`
+//! `es`, `n`, `rp` and the device settings `lv`, `aa`, `pm`, `k1`–`k3` and `th`
 //! (old firmware ignores unknown keys).
 
 use chrono::{DateTime, Datelike, Months, TimeZone, Utc};
@@ -94,6 +94,16 @@ pub struct Payload {
     /// value it got.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm: Option<u8>,
+    /// What the primary button does ([`crate::buttons::ButtonAction::code`]).
+    /// The device keeps the last value it got.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub k1: Option<u32>,
+    /// What the secondary button does, like `k1`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub k2: Option<u32>,
+    /// What a PWR short press does, like `k1`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub k3: Option<u32>,
     /// The device's colours: 11 six-digit hex colours run together
     /// ([`crate::config::Palette::to_hex`]). The device keeps the last value
     /// it got.
@@ -104,7 +114,7 @@ pub struct Payload {
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
     "s", "sr", "w", "wr", "st", "acct", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x", "a", "e", "es", "n",
-    "rp", "lv", "aa", "pm", "th",
+    "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th",
 ];
 /// The fast-clock keys added in v0.4 (old firmware ignores them).
 pub const ADDITIVE_KEYS: &[&str] = &["a", "e", "es", "n", "rp"];
@@ -492,6 +502,46 @@ mod tests {
         assert!(v.get("m").is_none());
     }
 
+    /// Every field at its widest, the longest alert line and three
+    /// shortcuts still fit the app's 500-byte write without trimming `m`.
+    #[test]
+    fn widest_payload_fits() {
+        let chord = 0x1_1F73; // hold, all four modifiers, F24
+        let pl = Payload {
+            s: Some(100),
+            sr: Some(300),
+            w: Some(100),
+            wr: Some(10_080),
+            st: Some("overage".into()),
+            acct: Some("week".into()),
+            tp: Some(100),
+            pd: Some(31),
+            rd: Some("Sep 30".into()),
+            t: Some(9_999_999_999),
+            tf: Some(24),
+            c: Some(1),
+            ok: true,
+            b: Some(1),
+            m: Some("Clawdmeter test alert".into()),
+            x: Some(1),
+            a: Some(3),
+            e: Some("p".into()),
+            es: Some(u32::MAX),
+            n: Some(99),
+            rp: Some(1),
+            lv: Some(5),
+            aa: Some(120),
+            pm: Some(1),
+            k1: Some(chord),
+            k2: Some(chord),
+            k3: Some(chord),
+            th: Some(Palette::default()),
+        };
+        let json = pl.to_json();
+        assert!(json.len() < 500, "{} bytes: {json}", json.len());
+        assert_eq!(pl.encode(500), json.into_bytes());
+    }
+
     #[test]
     fn full_payload_key_order() {
         let pl = Payload {
@@ -519,6 +569,9 @@ mod tests {
             lv: Some(3),
             aa: Some(120),
             pm: Some(1),
+            k1: Some(1),
+            k2: Some(2),
+            k3: Some(6),
             th: Some(Palette::default()),
         };
         let v: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&pl.to_json()).unwrap();
