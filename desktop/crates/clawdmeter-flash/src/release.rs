@@ -151,12 +151,23 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a small text answer (the API's JSON, a manifest, `SHA256SUMS`)
 /// may take to arrive.
 const TEXT_TIMEOUT: Duration = Duration::from_secs(30);
+/// The same for the releases list, which runs to megabytes.
+const LIST_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a download may take when the server sends it whole.
+const WHOLE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// One agent for every request, so a download's chunks share connections.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(ureq::Agent::new_with_defaults)
+}
 
 /// A GET that can't wait for good: connecting and the answer's headers get
 /// [`ANSWER_TIMEOUT`] each, the body `body` in all. With `from`, only the
 /// bytes from that offset on, at most [`CHUNK`] of them, are asked for.
 fn get(url: &str, body: Duration, from: Option<u64>) -> Result<ureq::http::Response<ureq::Body>, ReleaseError> {
-    let mut req = ureq::get(url)
+    let mut req = agent()
+        .get(url)
         .config()
         .timeout_connect(Some(ANSWER_TIMEOUT))
         .timeout_recv_response(Some(ANSWER_TIMEOUT))
@@ -171,15 +182,19 @@ fn get(url: &str, body: Duration, from: Option<u64>) -> Result<ureq::http::Respo
 }
 
 fn get_string(url: &str) -> Result<String, ReleaseError> {
-    get(url, TEXT_TIMEOUT, None)?.body_mut().read_to_string().map_err(|e| ReleaseError::Offline(format!("{url}: {e}")))
+    get_text(url, TEXT_TIMEOUT)
+}
+
+fn get_text(url: &str, within: Duration) -> Result<String, ReleaseError> {
+    get(url, within, None)?.body_mut().read_to_string().map_err(|e| ReleaseError::Offline(format!("{url}: {e}")))
 }
 
 /// Bytes of a download asked for per request.
 const CHUNK: u64 = 2 * 1024 * 1024;
 /// How long one chunk may take. ureq has no timeout for a connection that
 /// went quiet, only this cap on a whole body, so a download is fetched in
-/// chunks: a stalled one ends within this, and a slow one isn't cut off as
-/// long as it keeps above about 17 kB/s.
+/// chunks: a stalled one ends within this and is asked for again from the
+/// byte reached, so a slow link still gets there.
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(120);
 /// Failed requests in a row, with nothing read between them, that end a
 /// download.
@@ -261,7 +276,10 @@ impl<F: FnMut(u64) -> Result<Chunk, ReleaseError>> Read for Chunked<F> {
                 continue;
             };
             match body.read(buf) {
-                Ok(0) if self.total.is_none() && self.chunk_end == u64::MAX => return Ok(0),
+                // With no length to go by, a part that ends short of a full
+                // chunk is the last one (a connection cut short is an error
+                // in ureq, not an end), and the hash has the final say.
+                Ok(0) if self.total.is_none() && self.offset < self.chunk_end => return Ok(0),
                 // The chunk is done; one that ended early is asked for again
                 // from here.
                 Ok(0) => {
@@ -291,7 +309,11 @@ fn content_range_total(value: &str) -> Option<u64> {
 fn open_download(url: &str) -> Result<(Box<dyn Read>, u64), ReleaseError> {
     let owned = url.to_owned();
     let chunked = Chunked::open(move |from| {
-        let resp = get(&owned, CHUNK_TIMEOUT, Some(from))?;
+        let mut resp = get(&owned, CHUNK_TIMEOUT, Some(from))?;
+        if from == 0 && resp.status().as_u16() != 206 {
+            // The server sends it whole: take it so, with the time that needs.
+            resp = get(&owned, WHOLE_TIMEOUT, None)?;
+        }
         let header = |name: &str| resp.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
         let whole = resp.status().as_u16() != 206;
         let total = if whole {
@@ -451,7 +473,7 @@ pub fn releases_url(repo: &str) -> String {
 /// updating to `latest`, newest first: `latest` itself and the releases
 /// between the two. Prereleases other than `latest` are left out.
 pub fn release_notes(repo: &str, app_version: &str, latest: &str) -> Result<Vec<ReleaseNotes>, ReleaseError> {
-    let api = get_string(&releases_url(repo))?;
+    let api = get_text(&releases_url(repo), LIST_TIMEOUT)?;
     release_notes_from_api(&api, app_version, latest)
 }
 
@@ -1068,6 +1090,17 @@ mod tests {
         .read_to_end(&mut out)
         .unwrap();
         assert!(out == DATA && asked == 1);
+
+        // Parts with no length given: the short one is the last.
+        let mut out = Vec::new();
+        Chunked::open(|from| {
+            let rest = &DATA[from as usize..];
+            Ok(Chunk { body: Box::new(&rest[..rest.len().min(CHUNK as usize)]), total: None, whole: false })
+        })
+        .unwrap()
+        .read_to_end(&mut out)
+        .unwrap();
+        assert!(out == DATA);
 
         assert_eq!(content_range_total("bytes 0-2097151/8784055"), Some(8_784_055));
         assert_eq!(content_range_total("bytes 0-9/*"), None);
