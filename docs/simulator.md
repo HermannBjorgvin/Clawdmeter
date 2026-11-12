@@ -118,6 +118,7 @@ SDL_VIDEODRIVER=dummy SIM_FAST=1 SIM_SCENARIO=sim/director.jsonl \
 | `SIM_TAPS` | `ms@x,y;ms@x,y`; a 120 ms press at each time. |
 | `SIM_CMDS` | `ms:command;ms:command`; serial commands, including `clawd peek <x>`, `liveliness <1-5>`, `attention_anim <seconds>` and `pace_marker <0|1>`. `pwr`, `prompt`, `stop`, `alert`, and `link` inject their corresponding input. |
 | `SIM_MINIMAL=1` | Set the simulator's `BoardCaps.minimal_ui` at startup to preview a minimal-display board. |
+| `SIM_MONO=1` | Set `BoardCaps.mono_panel` to preview a 1-bit panel (the e-paper): the window and screenshots show each pixel as the panel prints it (`hal/mono_panel.h`), black ink on white paper, and brightness doesn't dim it. Pair it with `SIM_MINIMAL=1` and a 200×200 build for the ePaper-1.54. |
 | `SIM_BUTTONS=1` | Play a board with BOOT only (`BoardCaps.button_count = 1`); `N` does nothing. |
 | `SIM_CIRCLE=1` | Set `BoardCaps.round_panel` to preview a round panel; the corners outside the circle are drawn as a grey bezel. |
 | `SIM_TRACE=1` | Log director transitions and steps. |

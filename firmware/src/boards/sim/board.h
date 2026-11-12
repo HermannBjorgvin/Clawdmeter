@@ -32,6 +32,7 @@
 // `hold` ms); SIM_NO_PWR=1 plays a board without a PWR button; SIM_FAST=1
 // compresses the director's minutes into seconds (sim/director.jsonl);
 // SIM_MINIMAL=1 plays a minimal-mode board, SIM_CIRCLE=1 a round panel,
+// SIM_MONO=1 a 1-bit panel (printed as black on white, like the e-paper),
 // SIM_BUTTONS=1 a board with BOOT only. SIM_CTRL_FD hands the sim to a
 // controller (sim_ctrl.cpp, tools/simgrid). SIM_CMDS="ms:cmd;ms:cmd" types
 // serial commands at those times (`pwr`, `prompt`, `stop`, `alert` are the

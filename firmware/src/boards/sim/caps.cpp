@@ -8,7 +8,8 @@
 // plays a minimal-mode board. SIM_NO_TOUCH=1 plays a board without a
 // touchscreen (BOOT dismisses an alert). SIM_CIRCLE=1 plays a round panel (the
 // corners outside the circle are drawn as a grey bezel). SIM_BUTTONS=0|1|2 plays
-// a board with no buttons / BOOT only / BOOT + secondary.
+// a board with no buttons / BOOT only / BOOT + secondary. SIM_MONO=1 plays a
+// 1-bit panel (the window shows what it prints: black ink on white paper).
 static BoardCaps make_caps(void) {
     BoardCaps caps = {
     .name = BOARD_NAME,
@@ -22,6 +23,7 @@ static BoardCaps make_caps(void) {
     .minimal_ui   = false,   // full animated UI; true for e-ink / slow panels
     .has_pwr_button = true,  // the p key
     .has_touch = true,       // the mouse
+    .mono_panel = false,     // SIM_MONO=1 below
     };
     const char* no_pwr = getenv("SIM_NO_PWR");
     if (no_pwr && *no_pwr && *no_pwr != '0') caps.has_pwr_button = false;
@@ -33,6 +35,8 @@ static BoardCaps make_caps(void) {
     if (buttons && (*buttons >= '0' && *buttons <= '2')) caps.button_count = (uint8_t)(*buttons - '0');
     const char* circle = getenv("SIM_CIRCLE");
     if (circle && *circle && *circle != '0') caps.round_panel = true;
+    const char* mono = getenv("SIM_MONO");
+    if (mono && *mono && *mono != '0') caps.mono_panel = true;
     return caps;
 }
 
