@@ -105,7 +105,8 @@ static bool init_ch32(void) {
     bool ok = iox_write(CH32_REG_DIRECTION, dir) &&
               iox_write(CH32_REG_OUTPUT, 1u << CH32_PIN_SYS_EN);
     delay(200);
-    ok = ok && iox_write(CH32_REG_DIRECTION, dir) && iox_commit_output();
+    // Release the resets even if the pulse failed: a dark panel is worse.
+    ok = iox_write(CH32_REG_DIRECTION, dir) && iox_commit_output() && ok;
     delay(200);
     return ok;
 }
