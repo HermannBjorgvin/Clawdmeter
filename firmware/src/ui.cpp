@@ -195,7 +195,9 @@ static lv_color_t pct_color(float pct) {
 // pct_color(). On: each Pro/Max bar gets a thin ivory line at the elapsed
 // share of its window and the fill follows pace_level(). A bar with no reset
 // time hides its line and keeps pct_color(). Spend-capped accounts are
-// untouched: their Period bar already is the elapsed share.
+// untouched: their Period bar already is the elapsed share. On a mono panel
+// every fill prints as ink, so the line is paper where it crosses the fill
+// and ink over the track.
 static bool pace_marker = false;
 static lv_obj_t* tick_session = nullptr;
 static lv_obj_t* tick_weekly  = nullptr;
@@ -214,11 +216,13 @@ static lv_color_t bar_color(float used_pct, int reset_mins, int window_mins) {
     return pct_color(used_pct);
 }
 
-// A line inside the bar, exactly its height, drawn over the fill.
+// A line inside the bar, its full height inside any outline (mono_panel),
+// drawn over the fill.
 static lv_obj_t* make_pace_tick(lv_obj_t* bar) {
+    const int border = lv_obj_get_style_border_width(bar, LV_PART_MAIN);
     lv_obj_t* tick = lv_obj_create(bar);
     lv_obj_remove_style_all(tick);
-    lv_obj_set_size(tick, L.bar_h >= 20 ? 3 : 2, L.bar_h);
+    lv_obj_set_size(tick, L.bar_h >= 20 ? 3 : 2, L.bar_h - 2 * border);
     themed_bg(tick, TH_TEXT);
     lv_obj_set_style_bg_opa(tick, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(tick, 1, 0);
@@ -227,9 +231,10 @@ static lv_obj_t* make_pace_tick(lv_obj_t* bar) {
     return tick;
 }
 
-// Centre the line on elapsed_pct, kept clear of the bar's rounded ends;
-// hidden while the setting is off or the elapsed share is unknown.
-static void place_pace_tick(lv_obj_t* tick, float elapsed_pct) {
+// Centre the line on elapsed_pct, kept clear of the bar's rounded ends and
+// inside its outline; hidden while the setting is off or the elapsed share
+// is unknown. `used_pct` is the bar's fill.
+static void place_pace_tick(lv_obj_t* tick, float elapsed_pct, float used_pct) {
     if (!pace_marker || elapsed_pct < 0) {
         lv_obj_add_flag(tick, LV_OBJ_FLAG_HIDDEN);
         return;
@@ -237,11 +242,17 @@ static void place_pace_tick(lv_obj_t* tick, float elapsed_pct) {
     lv_obj_t* bar = lv_obj_get_parent(tick);
     const int bar_w = lv_obj_get_width(bar);
     const int w = lv_obj_get_width(tick);
-    const int inset = lv_obj_get_style_radius(bar, LV_PART_MAIN) / 2;
+    // The fill spans the whole bar, outline included, but children sit
+    // inside the outline: x is worked out on the bar and shifted after.
+    const int border = lv_obj_get_style_border_width(bar, LV_PART_MAIN);
+    int inset = lv_obj_get_style_radius(bar, LV_PART_MAIN) / 2;
+    if (inset < border) inset = border;
     int x = (int)(elapsed_pct * bar_w / 100.0f + 0.5f) - w / 2;
     if (x < inset) x = inset;
     if (x > bar_w - inset - w) x = bar_w - inset - w;
-    lv_obj_set_x(tick, x);
+    lv_obj_set_x(tick, x - border);
+    if (board_caps().mono_panel)
+        lv_obj_set_style_bg_color(tick, elapsed_pct < used_pct ? COL_BG : COL_TEXT, 0);
     lv_obj_clear_flag(tick, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -596,24 +607,27 @@ static void apply_bar_colors(const UsageData* data) {
         // Spending has no 5-hour window, and the Period bar (coloured in
         // ui_update) already is the elapsed share: no markers.
         lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
-        place_pace_tick(tick_session, -1.0f);
-        place_pace_tick(tick_weekly, -1.0f);
+        place_pace_tick(tick_session, -1.0f, 0.0f);
+        place_pace_tick(tick_weekly, -1.0f, 0.0f);
         return;
     }
     if (data->weekly_only) {
         // No 5-hour limit: the first card is the week, the second is hidden.
         lv_obj_set_style_bg_color(bar_session,
             bar_color(data->session_pct, data->session_reset_mins, PACE_WEEK_MINS), LV_PART_INDICATOR);
-        place_pace_tick(tick_session, pace_elapsed_pct(data->session_reset_mins, PACE_WEEK_MINS));
-        place_pace_tick(tick_weekly, -1.0f);
+        place_pace_tick(tick_session, pace_elapsed_pct(data->session_reset_mins, PACE_WEEK_MINS),
+                        data->session_pct);
+        place_pace_tick(tick_weekly, -1.0f, 0.0f);
         return;
     }
     lv_obj_set_style_bg_color(bar_session,
         bar_color(data->session_pct, data->session_reset_mins, PACE_SESSION_MINS), LV_PART_INDICATOR);
-    place_pace_tick(tick_session, pace_elapsed_pct(data->session_reset_mins, PACE_SESSION_MINS));
+    place_pace_tick(tick_session, pace_elapsed_pct(data->session_reset_mins, PACE_SESSION_MINS),
+                    data->session_pct);
     lv_obj_set_style_bg_color(bar_weekly,
         bar_color(data->weekly_pct, data->weekly_reset_mins, PACE_WEEK_MINS), LV_PART_INDICATOR);
-    place_pace_tick(tick_weekly, pace_elapsed_pct(data->weekly_reset_mins, PACE_WEEK_MINS));
+    place_pace_tick(tick_weekly, pace_elapsed_pct(data->weekly_reset_mins, PACE_WEEK_MINS),
+                    data->weekly_pct);
 }
 
 // Enterprise Period box: the bar's fill and the recoloured pace + reset text.
