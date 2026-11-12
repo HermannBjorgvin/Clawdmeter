@@ -9,10 +9,14 @@
 // the expander keeps whatever state it had, buzzer included. That's the
 // "continuous tone after flashing, fixed by a power cycle" failure. So, as
 // Waveshare's own WS_CH32_IO library does: clock the bus free before
-// Wire.begin(), retry every write, and read the result back.
+// Wire.begin() and retry every write.
 //
-// Every pin is driven explicitly: nothing is left as a floating input, and
-// the buzzer enable is always LOW.
+// CH32V003 (0x24): every pin is driven explicitly, nothing is left as a
+// floating input, and the buzzer enable is LOW except while beeping.
+//
+// TCA9554 (0x20): untested since this port first shipped, so it gets exactly
+// the register writes it always has (init_tca) and nothing new: no buzzer,
+// no PWM, no battery.
 
 static uint8_t expander_addr = 0;
 static bool    is_ch32       = false;
@@ -77,13 +81,12 @@ static bool iox_read_bytes(uint8_t reg, uint8_t* out, uint8_t len) {
     return false;
 }
 
-static int iox_read(uint8_t reg) {
-    uint8_t v;
-    return iox_read_bytes(reg, &v, 1) ? v : -1;
-}
-
 static bool iox_commit_output(void) {
-    return iox_write(is_ch32 ? CH32_REG_OUTPUT : TCA_REG_OUTPUT, output_latch);
+    if (is_ch32) return iox_write(CH32_REG_OUTPUT, output_latch);
+    // TCA: the latch goes to 0x01 (output) and 0x02 (polarity, which only
+    // affects input reads), as this port has always written it.
+    bool ok = iox_write(TCA_REG_OUTPUT, output_latch);
+    return iox_write(TCA_REG_POLARITY, output_latch) && ok;
 }
 
 static bool init_ch32(void) {
@@ -108,20 +111,12 @@ static bool init_ch32(void) {
 }
 
 static bool init_tca(void) {
-    // Latch first so pins come up in a known state, then make all but
-    // RTC_INT outputs. Resets released, backlight on, SD deselected, buzzer off.
-    output_latch = (1u << TCA_PIN_TP_RST) | (1u << TCA_PIN_BACKLIGHT) |
-                   (1u << TCA_PIN_LCD_RST) | (1u << TCA_PIN_SD_CS) |
-                   (1u << TCA_PIN_BLC);
-    bool ok = iox_commit_output() &&
-              iox_write(TCA_REG_CONFIG, 1u << TCA_PIN_RTC_INT);
-    if (ok) {   // a real TCA9554 reads back exactly what we wrote
-        int out = iox_read(TCA_REG_OUTPUT), cfg = iox_read(TCA_REG_CONFIG);
-        if (out != output_latch || cfg != (1 << TCA_PIN_RTC_INT)) {
-            Serial.printf("LCD-4 IO expander: TCA readback mismatch out=0x%02X cfg=0x%02X\n", out, cfg);
-        }
-    }
-    return ok;
+    // The port's original sequence, unchanged: output latch 0xFF, then config
+    // 0x3A (bits 0/2/6/7 outputs, 1/3/4/5 inputs). See board.h for how that
+    // lines up with the wiki's pin table.
+    output_latch = TCA_OUTPUT_ON;
+    bool ok = iox_commit_output();
+    return iox_write(TCA_REG_CONFIG, TCA_CONFIG) && ok;
 }
 
 void io_expander_init(void) {
@@ -141,7 +136,7 @@ void io_expander_init(void) {
         return;
     }
     bool ok = is_ch32 ? init_ch32() : init_tca();
-    Serial.printf("LCD-4 IO expander %s @ 0x%02X: %s (out=0x%02X, buzzer off)\n",
+    Serial.printf("LCD-4 IO expander %s @ 0x%02X: %s (out=0x%02X)\n",
                   is_ch32 ? "CH32V003" : "TCA9554", expander_addr,
                   ok ? "OK" : "WRITE FAILED", output_latch);
 }
@@ -157,16 +152,17 @@ void io_expander_set_brightness(uint8_t level) {
         if (iox_write(CH32_REG_PWM, 255 - level)) last = level;
         return;
     }
-    // TCA revision: BL_EN is on/off only.
-    uint8_t before = output_latch;
+    // TCA revision: on/off only, on the latch bit this port has always used.
     if (level > 0) output_latch |= (1u << TCA_PIN_BACKLIGHT);
     else           output_latch &= ~(1u << TCA_PIN_BACKLIGHT);
-    if (output_latch != before) iox_commit_output();
+    iox_commit_output();
 }
 
 bool io_expander_set_buzzer(bool on) {
-    if (!expander_addr) return false;
-    uint8_t bit = 1u << (is_ch32 ? CH32_PIN_BUZZER : TCA_PIN_BUZZER);
+    // Nothing to drive: no expander, or a TCA board (its buzzer pin is left
+    // an input by init_tca, so the latch bit would do nothing anyway).
+    if (!expander_addr || !is_ch32) return true;
+    uint8_t bit = 1u << CH32_PIN_BUZZER;
     if (on) output_latch |= bit;
     else    output_latch &= ~bit;
     return iox_commit_output();

@@ -9,8 +9,9 @@
 void io_expander_recover_bus(void);
 void io_expander_init(void);
 void io_expander_set_backlight(bool on);
-// Buzzer enable (active buzzer: HIGH = tone). Returns false if the write
-// failed — callers must retry an "off", or the tone latches on.
+// Buzzer enable (active buzzer: HIGH = tone; CH32 boards only, a no-op that
+// returns true elsewhere). Returns false if the write failed — callers must
+// retry an "off", or the tone latches on.
 bool io_expander_set_buzzer(bool on);
 // Backlight brightness 0..255 (CH32 PWM register; on/off only on TCA boards).
 void io_expander_set_brightness(uint8_t level);

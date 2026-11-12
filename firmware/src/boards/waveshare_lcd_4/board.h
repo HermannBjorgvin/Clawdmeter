@@ -1,8 +1,9 @@
 #pragma once
 
 // Waveshare ESP32-S3-Touch-LCD-4 — 4" square RGB TFT kit.
-// 480x480 ST7701 (RGB parallel + SW SPI init) + GT911 touch + TCA9554-style
-// IO expander at 0x24 (display power / backlight). No AXP2101, no IMU.
+// 480x480 ST7701 (RGB parallel + SW SPI init) + GT911 touch + an IO expander
+// for display power / backlight: CH32V003 at 0x24 (V4.0) or TCA9554 at 0x20
+// (earlier revisions). No AXP2101, no IMU.
 // Module is ESP32-S3R8 (8 MB OPI PSRAM, 16 MB flash).
 //
 // Pin map matches the hardware-tested lcd4 fork and Waveshare's wiki
@@ -77,30 +78,20 @@
 #define CH32_PIN_BUZZER      6     // BEE_EN — keep LOW
 #define CH32_PIN_RTC_INT     7
 //
-// TCA9554 @ 0x20 (earlier boards). Pin map from the Waveshare wiki table
-// (0-based EXIO0..7). Untested here — no TCA board on hand.
+// TCA9554 @ 0x20 (V1–V3 boards). Not tested on hardware since the port first
+// shipped, so io_expander.cpp writes exactly what it always has: output 0xFF
+// (to 0x01 and 0x02), then config 0x3A, and the backlight as latch bit 2.
+// The wiki's table (P0 TP_RST, P1 BL_EN, P2 LCD_RST, P3 SD_CS, P5 BEE_EN,
+// P6 RTC_INT) suggests that leaves BL_EN and BEE_EN as inputs, weakly pulled
+// up by the TCA9554's internal resistors, and that bit 2 is LCD_RST, not the
+// backlight. Change it only with a TCA board to test on.
 #define IO_EXPANDER_ADDR_ALT 0x20
 #define TCA_REG_OUTPUT       0x01
+#define TCA_REG_POLARITY     0x02
 #define TCA_REG_CONFIG       0x03  // 1 = input
-#define TCA_PIN_TP_RST       0
-#define TCA_PIN_BACKLIGHT    1     // BL_EN
-#define TCA_PIN_LCD_RST      2
-#define TCA_PIN_SD_CS        3
-#define TCA_PIN_BLC          4
-#define TCA_PIN_BUZZER       5     // BEE_EN — keep LOW
-#define TCA_PIN_RTC_INT      6
-
-// ---- Battery charger (SW6106) ----
-// Power-bank chip with "light load detection": if the board's draw looks too
-// small it cuts battery output — i.e. the board dies the moment USB is pulled.
-// Waveshare FAQ fix: write 0x0A to reg 0x38 at every power-on, and/or 0x01 to
-// reg 0x03 every ~1 s. We do both.
-#define SW6106_ADDR          0x3C
-#define SW6106_REG_LIGHTLOAD 0x38
-#define SW6106_LIGHTLOAD_OFF 0x0A
-#define SW6106_REG_KEEPALIVE 0x03
-#define SW6106_KEEPALIVE     0x01
-#define SW6106_KEEPALIVE_MS  1000
+#define TCA_OUTPUT_ON        0xFF
+#define TCA_CONFIG           0x3A
+#define TCA_PIN_BACKLIGHT    2
 
 // ---- Buttons ----
 #define BTN_BACK_GPIO        0     // BOOT — primary, Space (PTT)

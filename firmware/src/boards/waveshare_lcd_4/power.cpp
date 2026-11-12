@@ -4,7 +4,6 @@
 #include "power_state.h"
 #include <Arduino.h>
 #include <math.h>
-#include <Wire.h>
 #include <Preferences.h>
 
 // No PMU and no GPIO-wired PWR button — KEY/PWR is EN/RST (hardware reset).
@@ -18,6 +17,9 @@
 //   - the battery voltage is clearly rising (a data-less wall charger).
 // Charging = on USB power and not yet full. With no battery connected the
 // board can only run from USB, so it reports "no battery" + USB power.
+//
+// On the TCA9554 revision (no ADC) none of this runs: it reports USB power
+// and no battery, and never touches NVS.
 
 #define BATTERY_POLL_MS    2000
 #define TREND_WINDOW_MS    120000UL   // compare against the reading 2 min ago
@@ -30,16 +32,6 @@
 // only moves in the direction the power source allows: up while on USB, down
 // on battery. Both reset when the source changes.
 #define EMA_ALPHA          0.07f
-
-static bool     sw6106_ok   = false;
-static uint32_t sw6106_ms   = 0;
-
-static bool sw6106_write(uint8_t reg, uint8_t val) {
-    Wire.beginTransmission(SW6106_ADDR);
-    Wire.write(reg);
-    Wire.write(val);
-    return Wire.endTransmission() == 0;
-}
 
 static int      cached_mv   = -1;     // smoothed
 static float    ema_mv      = -1.0f;
@@ -186,26 +178,18 @@ bool lcd4_on_battery(void) {
 }
 
 void power_hal_init(void) {
+    if (!io_expander_has_battery()) return;
     Preferences prefs;
-    prefs.begin("lcd4bat", true);
-    saved_pct = prefs.getChar("pct", -1);
-    prefs.end();
-    // Stop the charger cutting battery power under light load (see board.h).
-    sw6106_ok = sw6106_write(SW6106_REG_LIGHTLOAD, SW6106_LIGHTLOAD_OFF);
-    // Not every revision has it on I2C (CH32V003 boards don't) — then the
-    // battery boost is started by the PWR key and held by SYS_EN instead.
-    Serial.printf("SW6106 @ 0x%02X: %s\n", SW6106_ADDR,
-                  sw6106_ok ? "light-load shutdown disabled" : "not on I2C (PWR key starts battery power)");
-    sw6106_ms = millis();
+    if (prefs.begin("lcd4bat", true)) {   // absent until the first save
+        saved_pct = prefs.getChar("pct", -1);
+        prefs.end();
+    }
     sample();
     last_poll_ms = millis();
 }
 
 void power_hal_tick(void) {
-    if (sw6106_ok && millis() - sw6106_ms >= SW6106_KEEPALIVE_MS) {
-        sw6106_ms = millis();
-        sw6106_write(SW6106_REG_KEEPALIVE, SW6106_KEEPALIVE);
-    }
+    if (!io_expander_has_battery()) return;
     if (millis() - last_poll_ms >= BATTERY_POLL_MS) {
         last_poll_ms = millis();
         sample();
