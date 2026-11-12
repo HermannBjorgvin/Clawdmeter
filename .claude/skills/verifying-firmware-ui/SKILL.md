@@ -66,7 +66,7 @@ Write captures outside the repo (a scratch dir), convert BMP → PNG if needed
 | `SIM_TRACE=1` | Director transitions with timestamps (find when a beat actually happens) |
 | `SIM_NO_PWR=1` / `SIM_NO_TOUCH=1` / `SIM_MINIMAL=1` | A board without a PWR button / without a touchscreen / `BoardCaps.minimal_ui` |
 | `SIM_CIRCLE=1` | A round panel (`BoardCaps.round_panel`); the corners are drawn as a bezel |
-| `SIM_MONO=1` | A 1-bit panel (`BoardCaps.mono_panel`), shown as it prints: black on white. The ePaper-1.54 is `SIM_MINIMAL=1 SIM_MONO=1` at 200×200 |
+| `SIM_MONO=1` | A 1-bit panel (`BoardCaps.mono_panel`), shown as it prints: black on white. The ePaper-1.54 is `SIM_MINIMAL=1 SIM_MONO=1 SIM_NO_TOUCH=1 SIM_BUTTONS=1` at 200×200 |
 | `SIM_AUTOSHOT_MS`, `SIM_AUTOSHOT_PATH` | One headless shot (what CI captures) |
 
 Full key map, scenario format and the rest of the variables:

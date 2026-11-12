@@ -9,26 +9,23 @@
 // 200x200 / 8 = 5000-byte 1bpp framebuffer (MSB-first, row-major).
 #define FB_BYTES  ((LCD_WIDTH * LCD_HEIGHT) / 8)
 
-// Coalesce multi-region LVGL flushes from the same animation tick.
-// Must be SHORTER than the e-paper UI cadences (1s spinner, 5s message)
-// so settle reliably fires between ticks.
+// Coalesce the regions LVGL flushes for one change (several labels after a
+// payload) into one panel refresh: commit once no flush has landed for this
+// long. Keep it short; changes on this board come seconds apart.
 #define SETTLE_MS  100
 
-// Full refresh cadence — purely time-based. Every on-screen value update
-// (progress bar, usage %, rotating message, spinner) renders via a fast
-// partial refresh at its native frequency; the only full refresh — the
-// visible inversion flicker — fires on this timer solely to clear any
-// accumulated ghosting. Set to 10 min to spare the panel: full refreshes
-// stress the e-paper film far more than partials, so doing fewer of them
-// is gentler on display lifetime. (A 250-partial count previously forced
-// a full every ~4 min on the usage screen; removed — the timer alone
-// governs the cadence now.)
+// Full refresh cadence — purely time-based. Every on-screen change (bars,
+// usage %, the reset countdowns, the minute clock, the status word in minimal
+// mode) renders via a fast partial refresh when it happens; the only full
+// refresh — the visible inversion flicker — fires on this timer solely to
+// clear any accumulated ghosting. Set to 10 min to spare the panel: full
+// refreshes stress the e-paper film far more than partials, so doing fewer
+// of them is gentler on display lifetime.
 #define FULL_REFRESH_INTERVAL_MS  600000  // 10 min — time-based ghost clearance
 
-// Board-local partial-refresh rate limit. Replaces the epaper branch's shared
-// slow_refresh cadence: LVGL animates into RAM at full speed, but the SSD1681
-// (which blocks loop() on wait_busy ~300ms) commits at most one partial per
-// second, preventing panel thrash and loop() stalls.
+// Partial-refresh rate limit: LVGL renders into RAM at full speed, but the
+// SSD1681 (which blocks loop() on wait_busy ~300ms) commits at most one
+// partial per second, preventing panel thrash and loop() stalls.
 #define MIN_PARTIAL_MS  1000
 
 static uint8_t* framebuf = nullptr;
