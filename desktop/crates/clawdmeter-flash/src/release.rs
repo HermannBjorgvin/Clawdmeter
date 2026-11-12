@@ -146,31 +146,163 @@ pub fn latest_url(repo: &str) -> String {
     format!("https://api.github.com/repos/{repo}/releases/latest")
 }
 
-fn get(url: &str) -> Result<ureq::http::Response<ureq::Body>, ReleaseError> {
-    ureq::get(url)
-        .header("User-Agent", USER_AGENT)
-        .header("Accept", "application/vnd.github+json, application/octet-stream, */*")
-        .call()
-        .map_err(|e| ReleaseError::from_ureq(url, e))
-}
+/// How long a request may take to connect, and then to answer.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a small text answer (the API's JSON, a manifest, `SHA256SUMS`)
+/// may take to arrive.
+const TEXT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// [`get`] for a large download: nothing is left waiting for good on a
-/// connection that went quiet (sleep, a network change).
-fn get_download(url: &str) -> Result<ureq::http::Response<ureq::Body>, ReleaseError> {
-    ureq::get(url)
+/// A GET that can't wait for good: connecting and the answer's headers get
+/// [`ANSWER_TIMEOUT`] each, the body `body` in all. With `from`, only the
+/// bytes from that offset on, at most [`CHUNK`] of them, are asked for.
+fn get(url: &str, body: Duration, from: Option<u64>) -> Result<ureq::http::Response<ureq::Body>, ReleaseError> {
+    let mut req = ureq::get(url)
         .config()
-        .timeout_connect(Some(Duration::from_secs(30)))
-        .timeout_recv_response(Some(Duration::from_secs(30)))
-        .timeout_recv_body(Some(Duration::from_secs(20 * 60)))
+        .timeout_connect(Some(ANSWER_TIMEOUT))
+        .timeout_recv_response(Some(ANSWER_TIMEOUT))
+        .timeout_recv_body(Some(body))
         .build()
         .header("User-Agent", USER_AGENT)
-        .header("Accept", "application/octet-stream, */*")
-        .call()
-        .map_err(|e| ReleaseError::from_ureq(url, e))
+        .header("Accept", "application/vnd.github+json, application/octet-stream, */*");
+    if let Some(from) = from {
+        req = req.header("Range", format!("bytes={from}-{}", from + CHUNK - 1));
+    }
+    req.call().map_err(|e| ReleaseError::from_ureq(url, e))
 }
 
 fn get_string(url: &str) -> Result<String, ReleaseError> {
-    get(url)?.body_mut().read_to_string().map_err(|e| ReleaseError::Offline(format!("{url}: {e}")))
+    get(url, TEXT_TIMEOUT, None)?.body_mut().read_to_string().map_err(|e| ReleaseError::Offline(format!("{url}: {e}")))
+}
+
+/// Bytes of a download asked for per request.
+const CHUNK: u64 = 2 * 1024 * 1024;
+/// How long one chunk may take. ureq has no timeout for a connection that
+/// went quiet, only this cap on a whole body, so a download is fetched in
+/// chunks: a stalled one ends within this, and a slow one isn't cut off as
+/// long as it keeps above about 17 kB/s.
+const CHUNK_TIMEOUT: Duration = Duration::from_secs(120);
+/// Failed requests in a row, with nothing read between them, that end a
+/// download.
+const CHUNK_TRIES: u32 = 3;
+
+/// One answer to a request for a download's bytes from an offset on.
+struct Chunk {
+    body: Box<dyn Read>,
+    /// The whole download's length, when the answer says.
+    total: Option<u64>,
+    /// The answer is the whole download, not the part asked for.
+    whole: bool,
+}
+
+/// A download read chunk by chunk ([`CHUNK`]). A chunk that fails or stalls
+/// is asked for again from the byte reached, so a dropped connection doesn't
+/// start a large download over.
+struct Chunked<F> {
+    request: F,
+    body: Option<Box<dyn Read>>,
+    /// Bytes handed out so far.
+    offset: u64,
+    /// Where the chunk being read ends.
+    chunk_end: u64,
+    total: Option<u64>,
+    failures: u32,
+}
+
+impl<F: FnMut(u64) -> Result<Chunk, ReleaseError>> Chunked<F> {
+    /// Ask for the first chunk, which also tells the download's length.
+    fn open(request: F) -> Result<Self, ReleaseError> {
+        let mut c = Chunked { request, body: None, offset: 0, chunk_end: 0, total: None, failures: 0 };
+        c.next_chunk()?;
+        Ok(c)
+    }
+
+    fn next_chunk(&mut self) -> Result<(), ReleaseError> {
+        let chunk = (self.request)(self.offset)?;
+        if chunk.whole && self.offset > 0 {
+            return Err(ReleaseError::Offline("the server stopped answering with parts of the file".into()));
+        }
+        self.total = chunk.total.or(self.total);
+        self.chunk_end = if chunk.whole { u64::MAX } else { self.offset + CHUNK };
+        self.body = Some(chunk.body);
+        Ok(())
+    }
+
+    /// The download is all read (as far as its length is known).
+    fn finished(&self) -> bool {
+        self.total.is_some_and(|t| self.offset >= t)
+    }
+
+    /// Count a failure; the error once there were too many in a row.
+    fn failed(&mut self, why: String) -> io::Result<()> {
+        self.body = None;
+        self.failures += 1;
+        if self.failures >= CHUNK_TRIES {
+            return Err(io::Error::other(why));
+        }
+        log::info!("download: {why}; asking again from byte {}", self.offset);
+        // Give a network that just changed a moment to settle.
+        if !cfg!(test) {
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        Ok(())
+    }
+}
+
+impl<F: FnMut(u64) -> Result<Chunk, ReleaseError>> Read for Chunked<F> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if buf.is_empty() || self.finished() {
+                return Ok(0);
+            }
+            let Some(body) = self.body.as_mut() else {
+                if let Err(e) = self.next_chunk() {
+                    self.failed(format!("{e} ({})", e.detail().unwrap_or_default()))?;
+                }
+                continue;
+            };
+            match body.read(buf) {
+                Ok(0) if self.total.is_none() && self.chunk_end == u64::MAX => return Ok(0),
+                // The chunk is done; one that ended early is asked for again
+                // from here.
+                Ok(0) => {
+                    if self.offset < self.chunk_end.min(self.total.unwrap_or(u64::MAX)) {
+                        self.failed("the connection closed early".into())?;
+                    }
+                    self.body = None;
+                }
+                Ok(n) => {
+                    self.offset += n as u64;
+                    self.failures = 0;
+                    return Ok(n);
+                }
+                Err(e) => self.failed(e.to_string())?,
+            }
+        }
+    }
+}
+
+/// The whole length in a `Content-Range: bytes 0-99/1234` header.
+fn content_range_total(value: &str) -> Option<u64> {
+    value.rsplit_once('/')?.1.trim().parse().ok()
+}
+
+/// Start downloading `url`: a reader over its bytes, and its length (0 when
+/// unknown).
+fn open_download(url: &str) -> Result<(Box<dyn Read>, u64), ReleaseError> {
+    let owned = url.to_owned();
+    let chunked = Chunked::open(move |from| {
+        let resp = get(&owned, CHUNK_TIMEOUT, Some(from))?;
+        let header = |name: &str| resp.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
+        let whole = resp.status().as_u16() != 206;
+        let total = if whole {
+            header("content-length").and_then(|v| v.parse().ok())
+        } else {
+            header("content-range").as_deref().and_then(content_range_total)
+        };
+        Ok(Chunk { body: Box::new(resp.into_body().into_reader()), total, whole })
+    })?;
+    let total = chunked.total.unwrap_or(0);
+    Ok((Box::new(chunked), total))
 }
 
 /// Turn a GitHub "latest release" API response into a [`Release`], given a
@@ -228,8 +360,11 @@ fn release_for_app_with(
 
 /// Hex SHA-256 of a byte slice.
 pub fn sha256_hex(data: &[u8]) -> String {
-    let d = Sha256::digest(data);
-    d.iter().map(|b| format!("{b:02x}")).collect()
+    hex(&Sha256::digest(data))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Check `data` against a manifest entry.
@@ -264,10 +399,7 @@ pub fn fetch_image(
         }
     }
     let url = release.assets.get(&board.file).ok_or_else(|| ReleaseError::MissingAsset(board.file.clone()))?;
-    let resp = get(url)?;
-    let total =
-        resp.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok()).unwrap_or(0);
-    let mut reader = resp.into_body().into_reader();
+    let (mut reader, total) = open_download(url)?;
     let mut data = Vec::with_capacity(total as usize);
     let mut buf = [0u8; 16 * 1024];
     loop {
@@ -319,19 +451,7 @@ pub fn releases_url(repo: &str) -> String {
 /// updating to `latest`, newest first: `latest` itself and the releases
 /// between the two. Prereleases other than `latest` are left out.
 pub fn release_notes(repo: &str, app_version: &str, latest: &str) -> Result<Vec<ReleaseNotes>, ReleaseError> {
-    // Timed: the page waits on this, and nothing retries a hung request.
-    let url = releases_url(repo);
-    let api = ureq::get(&url)
-        .config()
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .header("User-Agent", USER_AGENT)
-        .header("Accept", "application/vnd.github+json")
-        .call()
-        .map_err(|e| ReleaseError::from_ureq(&url, e))?
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| ReleaseError::Offline(format!("{url}: {e}")))?;
+    let api = get_string(&releases_url(repo))?;
     release_notes_from_api(&api, app_version, latest)
 }
 
@@ -358,6 +478,19 @@ fn release_notes_from_api(api_json: &str, app_version: &str, latest: &str) -> Re
     Ok(notes)
 }
 
+/// Where the `.deb` puts the app (`[package.metadata.deb]`).
+const DEB_BINARY: &str = "/usr/bin/clawdmeter";
+
+/// dpkg's records in `info_dir` (`/var/lib/dpkg/info`) say the `clawdmeter`
+/// package installed [`DEB_BINARY`]. Another distribution's package puts a
+/// binary at the same path, and a `.deb` is no use there.
+fn dpkg_installed(info_dir: &Path) -> bool {
+    ["clawdmeter.list", "clawdmeter:amd64.list"]
+        .iter()
+        .filter_map(|name| fs::read_to_string(info_dir.join(name)).ok())
+        .any(|list| list.lines().any(|line| line.trim() == DEB_BINARY))
+}
+
 /// Asset name of the release's checksum list (`sha256sum` output).
 pub const SUMS_ASSET: &str = "SHA256SUMS";
 
@@ -375,22 +508,34 @@ pub enum AppPackage {
 }
 
 impl AppPackage {
-    /// The package that updates this install, if the release has one: the
-    /// `.dmg` on macOS, the `.msi` on x86_64 Windows when running from where
-    /// it installs (`…\Programs\Clawdmeter`), and on x86_64 Linux the AppImage
-    /// when running from one or the `.deb` when the binary is the packaged
-    /// `/usr/bin/clawdmeter`. Anything else (Nix, a zip or tarball, a local
-    /// build, other architectures) has none: a package would install a
-    /// second copy beside the one that keeps running.
-    pub fn for_install(os: &str, arch: &str, appimage: bool, exe: &Path) -> Option<Self> {
+    /// The package that updates this install, if the release has one, and
+    /// only where installing it replaces the copy that is running:
+    ///
+    /// - macOS: the `.dmg`, when running from `/Applications/Clawdmeter.app`,
+    ///   where its window says to drag the app.
+    /// - x86_64 Windows: the `.msi`, when running from where it installs
+    ///   (`…\Programs\Clawdmeter`).
+    /// - x86_64 Linux: the AppImage when running from one (`appimage`), or
+    ///   the `.deb` when the binary is `/usr/bin/clawdmeter` and dpkg says
+    ///   its package put it there (`deb`).
+    ///
+    /// Anything else (Nix, a zip or tarball, another distribution's package,
+    /// a local build, other architectures) has none: a package would install
+    /// a second copy beside the one that keeps running, or couldn't be
+    /// installed at all.
+    pub fn for_install(os: &str, arch: &str, appimage: bool, deb: bool, exe: &Path) -> Option<Self> {
         match (os, arch) {
-            ("macos", _) => Some(AppPackage::Dmg),
+            ("macos", _) => {
+                // The default volume doesn't tell case apart.
+                let exe = exe.to_string_lossy().to_ascii_lowercase();
+                (exe == "/applications/clawdmeter.app/contents/macos/clawdmeter").then_some(AppPackage::Dmg)
+            }
             ("windows", "x86_64") => {
                 let exe = exe.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
                 exe.ends_with("/programs/clawdmeter/clawdmeter.exe").then_some(AppPackage::Msi)
             }
             ("linux", "x86_64") if appimage => Some(AppPackage::AppImage),
-            ("linux", "x86_64") if exe == Path::new("/usr/bin/clawdmeter") => Some(AppPackage::Deb),
+            ("linux", "x86_64") if deb && exe == Path::new(DEB_BINARY) => Some(AppPackage::Deb),
             _ => None,
         }
     }
@@ -399,7 +544,8 @@ impl AppPackage {
     pub fn for_this_install() -> Option<Self> {
         let exe = std::env::current_exe().unwrap_or_default();
         let appimage = std::env::var_os("APPIMAGE").is_some_and(|v| !v.is_empty());
-        Self::for_install(std::env::consts::OS, std::env::consts::ARCH, appimage, &exe)
+        let deb = cfg!(target_os = "linux") && dpkg_installed(Path::new("/var/lib/dpkg/info"));
+        Self::for_install(std::env::consts::OS, std::env::consts::ARCH, appimage, deb, &exe)
     }
 
     /// The asset's file name in the release tagged `tag` (`v2.5.0`).
@@ -452,7 +598,7 @@ fn file_sha256(path: &Path) -> io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     io::copy(&mut file, &mut hasher)?;
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hex(&hasher.finalize()))
 }
 
 /// Mark `path` as downloaded from the internet, as a browser would, so the
@@ -496,16 +642,7 @@ pub fn fetch_app_package(
     dir: &Path,
     progress: impl FnMut(u64, u64),
 ) -> Result<PathBuf, ReleaseError> {
-    fetch_app_package_with(repo, tag, package, dir, progress, get_string, |url| {
-        let resp = get_download(url)?;
-        let total = resp
-            .headers()
-            .get("content-length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        Ok((Box::new(resp.into_body().into_reader()) as Box<dyn Read>, total))
-    })
+    fetch_app_package_with(repo, tag, package, dir, progress, get_string, open_download)
 }
 
 /// [`fetch_app_package`] with the HTTP side injected (tests): `fetch` reads
@@ -549,7 +686,7 @@ fn fetch_app_package_with(
             progress(done, total);
         }
         file.flush()?;
-        let actual: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let actual = hex(&hasher.finalize());
         if !actual.eq_ignore_ascii_case(&expected) {
             return Err(ReleaseError::HashMismatch { file: name.clone(), expected: expected.clone(), actual });
         }
@@ -731,15 +868,31 @@ mod tests {
     fn app_package_per_install() {
         let exe = Path::new("/usr/bin/clawdmeter");
         let home = Path::new("/home/me/.cargo/bin/clawdmeter");
-        assert_eq!(AppPackage::for_install("macos", "aarch64", false, home), Some(AppPackage::Dmg));
+        let app = Path::new("/Applications/Clawdmeter.app/Contents/MacOS/clawdmeter");
+        assert_eq!(AppPackage::for_install("macos", "aarch64", false, false, app), Some(AppPackage::Dmg));
+        let tarball = Path::new("/Users/me/Downloads/Clawdmeter.app/Contents/MacOS/clawdmeter");
+        assert_eq!(AppPackage::for_install("macos", "aarch64", false, false, tarball), None, "the tarball's bundle");
+        let own = Path::new("/Users/me/Applications/Clawdmeter.app/Contents/MacOS/clawdmeter");
+        assert_eq!(AppPackage::for_install("macos", "x86_64", false, false, own), None, "not where the dmg installs");
         let msi = Path::new(r"C:\Users\me\AppData\Local\Programs\Clawdmeter\clawdmeter.exe");
-        assert_eq!(AppPackage::for_install("windows", "x86_64", false, msi), Some(AppPackage::Msi));
+        assert_eq!(AppPackage::for_install("windows", "x86_64", false, false, msi), Some(AppPackage::Msi));
         let zip = Path::new(r"C:\Tools\clawdmeter.exe");
-        assert_eq!(AppPackage::for_install("windows", "x86_64", false, zip), None, "an unzipped copy");
-        assert_eq!(AppPackage::for_install("linux", "x86_64", true, home), Some(AppPackage::AppImage));
-        assert_eq!(AppPackage::for_install("linux", "x86_64", false, exe), Some(AppPackage::Deb));
-        assert_eq!(AppPackage::for_install("linux", "x86_64", false, home), None, "tarball, Nix or local build");
-        assert_eq!(AppPackage::for_install("linux", "aarch64", true, exe), None);
+        assert_eq!(AppPackage::for_install("windows", "x86_64", false, false, zip), None, "an unzipped copy");
+        assert_eq!(AppPackage::for_install("linux", "x86_64", true, false, home), Some(AppPackage::AppImage));
+        assert_eq!(AppPackage::for_install("linux", "x86_64", false, true, exe), Some(AppPackage::Deb));
+        assert_eq!(AppPackage::for_install("linux", "x86_64", false, false, exe), None, "an rpm or AUR package");
+        assert_eq!(AppPackage::for_install("linux", "x86_64", false, true, home), None, "a local build beside the deb");
+        assert_eq!(AppPackage::for_install("linux", "x86_64", false, false, home), None, "tarball, Nix or local build");
+        assert_eq!(AppPackage::for_install("linux", "aarch64", true, true, exe), None);
+
+        let dir = std::env::temp_dir().join(format!("clawdmeter-dpkg-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        assert!(!dpkg_installed(&dir));
+        fs::write(dir.join("clawdmeter.list"), "/usr\n/usr/bin\n/usr/bin/clawdmeter-extra\n").unwrap();
+        assert!(!dpkg_installed(&dir), "another file of that package");
+        fs::write(dir.join("clawdmeter:amd64.list"), "/usr/bin\n/usr/bin/clawdmeter\n").unwrap();
+        assert!(dpkg_installed(&dir));
+        let _ = fs::remove_dir_all(&dir);
         // The names release.yml publishes.
         assert_eq!(AppPackage::Dmg.asset("v2.5.0"), "clawdmeter-v2.5.0-macos-universal.dmg");
         assert_eq!(AppPackage::Msi.asset("v2.5.0"), "clawdmeter-v2.5.0-windows-x86_64.msi");
@@ -850,5 +1003,73 @@ mod tests {
         assert!(u.due(1000 + CHECK_INTERVAL_SECS));
         assert!(u.due(10), "clock went backwards");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A download of `data` that fails as `script` says: each entry is one
+    /// request, answering with that many bytes before the connection drops
+    /// (`None`: the request itself fails). Requests past the script succeed.
+    fn flaky(data: &'static [u8], script: Vec<Option<usize>>) -> impl FnMut(u64) -> Result<Chunk, ReleaseError> {
+        let mut script = script.into_iter();
+        move |from| {
+            let rest = &data[from as usize..];
+            let rest = &rest[..rest.len().min(CHUNK as usize)];
+            let body: Box<dyn Read> = match script.next() {
+                Some(None) => return Err(ReleaseError::Offline("down".into())),
+                Some(Some(n)) => Box::new(rest[..n.min(rest.len())].chain(Broken)),
+                None => Box::new(rest),
+            };
+            Ok(Chunk { body, total: Some(data.len() as u64), whole: false })
+        }
+    }
+
+    struct Broken;
+    impl Read for Broken {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("reset"))
+        }
+    }
+
+    #[test]
+    fn a_download_resumes_where_a_chunk_failed() {
+        static DATA: [u8; 5_000_000] = {
+            let mut d = [0u8; 5_000_000];
+            let mut i = 0;
+            while i < d.len() {
+                d[i] = (i % 251) as u8;
+                i += 4099;
+            }
+            d
+        };
+        let read = |script| {
+            let mut out = Vec::new();
+            Chunked::open(flaky(&DATA, script))?
+                .read_to_end(&mut out)
+                .map(|_| out)
+                .map_err(|e| ReleaseError::Offline(e.to_string()))
+        };
+        assert!(read(vec![]).unwrap() == DATA, "three chunks");
+        // The first chunk drops twice part way, then requests fail around
+        // one that gets five bytes through.
+        let rough = vec![Some(10), Some(700_000), None, Some(5), None];
+        assert!(read(rough).unwrap() == DATA, "picked up at the byte reached");
+        assert!(read(vec![None]).is_err(), "the first request failing ends it");
+        let dead = vec![Some(10), None, Some(0)];
+        assert!(read(dead).is_err(), "three failures in a row with nothing read");
+
+        // A server that ignores Range answers with everything, once.
+        let mut asked = 0;
+        let mut out = Vec::new();
+        Chunked::open(|from| {
+            asked += 1;
+            assert_eq!(from, 0);
+            Ok(Chunk { body: Box::new(&DATA[..]), total: None, whole: true })
+        })
+        .unwrap()
+        .read_to_end(&mut out)
+        .unwrap();
+        assert!(out == DATA && asked == 1);
+
+        assert_eq!(content_range_total("bytes 0-2097151/8784055"), Some(8_784_055));
+        assert_eq!(content_range_total("bytes 0-9/*"), None);
     }
 }

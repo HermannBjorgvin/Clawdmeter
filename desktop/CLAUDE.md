@@ -236,9 +236,14 @@ Per account (`probe.rs`, `oauth.rs`):
   the notes of every release up to the new one (`release::release_notes`,
   Markdown drawn as headings, bullets and text), the download, "Skip this
   update" and a link to the release page. The download takes this install's
-  package to `~/Downloads` (`release::fetch_app_package`: `.dmg`, `.msi`
-  from its install folder, `.deb` for `/usr/bin/clawdmeter`, AppImage under
-  `$APPIMAGE`), checks it against the release's `SHA256SUMS`, marks it as
+  package to `~/Downloads` (`release::fetch_app_package`; the package only
+  where installing it replaces the running copy, `AppPackage::for_install`:
+  `.dmg` from `/Applications/Clawdmeter.app`, `.msi` from its install
+  folder, `.deb` for a `/usr/bin/clawdmeter` that dpkg lists as its
+  package's, AppImage under `$APPIMAGE`), fetched in 2 MB range requests
+  that are asked for again from the byte reached when one fails or stalls
+  (ureq has no idle timeout, only a cap per body), checks it against the
+  release's `SHA256SUMS`, marks it as
   downloaded (macOS quarantine, Windows `Zone.Identifier`) and opens the
   installer (a `.deb` or AppImage is shown in the file manager). The mark
   makes Gatekeeper and SmartScreen treat it like a browser download: the
@@ -246,7 +251,9 @@ Per account (`probe.rs`, `oauth.rs`):
   Anyway / Run anyway). A verified copy already in the folder is reused as
   it is. Other installs get a button to the release page. Builds without
   `CLAWDMETER_VERSION` are never offered one, nor is a prerelease whose own
-  tag is published (the check stores that tag). The demo's `--app-update`
+  tag is published (the check stores that tag), and with `update_check` off
+  nothing is announced. Off screen the page re-reads the status and config
+  every 5 s, not every tick. The demo's `--app-update`
   shows each download state with made-up notes; clicking Download there
   fetches for real.
 - The wizard reuses the flasher (`FlashMode::Setup`: no step header,

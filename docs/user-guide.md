@@ -327,7 +327,7 @@ the selected reading is stale, allowing the device to show the loss of fresh dat
 clawdmeter                      Run the tray app
 clawdmeter --daemon             Run without a tray or window
 clawdmeter --once               Read usage once and print the payload; no Bluetooth
-clawdmeter --window [PAGE]       Open overview, device, flash, accounts, hooks, settings, or setup
+clawdmeter --window [PAGE]       Open overview, device, flash, accounts, hooks, settings, update, or setup
 clawdmeter --ports              List attached Espressif USB ports
 clawdmeter --info PORT          Read the board and firmware version over USB
 clawdmeter hook MODE [event]    Handle a Claude Code hook: alert, clear, or event

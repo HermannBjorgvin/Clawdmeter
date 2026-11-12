@@ -448,8 +448,9 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("app-update").is_none(), "this version is the latest");
 
+        // Off screen, the page looks every few seconds.
         status("v999.0.0");
-        cx.executor().advance_clock(REFRESH * 2);
+        cx.executor().advance_clock(REFRESH * 12);
         cx.run_until_parked();
         click(cx, "app-update");
         view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Update));
@@ -469,9 +470,15 @@ mod tests {
         // The release after the skipped one is announced again.
         status("v999.1.0");
         update.update(cx, |u, _| u.show_notes("v999.1.0", notes("v999.1.0")));
-        cx.executor().advance_clock(REFRESH * 2);
+        cx.executor().advance_clock(REFRESH * 12);
         cx.run_until_parked();
         update.read_with(cx, |u, _| assert_eq!(u.announced(), Some("v999.1.0")));
+
+        // With "Check for updates" off, a release found before isn't offered.
+        crate::ui::settings::write_settings(&paths, |s, _| s.update_check = false).unwrap();
+        cx.executor().advance_clock(REFRESH * 12);
+        cx.run_until_parked();
+        update.read_with(cx, |u, _| assert_eq!((u.available(), u.announced()), (None, None)));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

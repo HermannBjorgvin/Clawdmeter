@@ -239,7 +239,11 @@ fn main() {
                 u.show_notes(&tag, demo_notes());
                 match state.as_str() {
                     "none" => u.set_package(None),
-                    state => u.show_download_state(&tag, state),
+                    state => {
+                        // Whatever this build would update from.
+                        u.set_package(Some(clawdmeter_flash::release::AppPackage::Dmg));
+                        u.show_download_state(&tag, state);
+                    }
                 }
             });
         }

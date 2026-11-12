@@ -66,6 +66,9 @@ pub struct UpdateView {
     /// release version to compare (the firmware check skips `dev` boards
     /// likewise).
     offer: bool,
+    /// "Check for updates" (`update_check`), as last read. Off, nothing is
+    /// announced: the cache may still hold a release found before.
+    checks: bool,
     /// `release_repo`, as last read.
     repo: String,
     /// The tag of a release newer than this app.
@@ -82,7 +85,14 @@ pub struct UpdateView {
     active: bool,
     /// "Skip this update" couldn't be saved.
     skip_failed: bool,
+    /// Refresh ticks since the files were last read.
+    ticks: u32,
 }
+
+/// With the page off screen and no download running, the status and config
+/// are re-read on every this many refresh ticks (5 s): the answer changes
+/// once a day, and the overview already reads both files twice a second.
+const IDLE_TICKS: u32 = 10;
 
 impl EventEmitter<Navigate> for UpdateView {}
 
@@ -100,6 +110,7 @@ impl UpdateView {
             paths,
             package: AppPackage::for_this_install(),
             offer: crate::is_release_build(),
+            checks: true,
             repo: clawdmeter_flash::DEFAULT_RELEASE_REPO.into(),
             latest: None,
             skipped: None,
@@ -109,6 +120,7 @@ impl UpdateView {
             notes_tag: None,
             active: false,
             skip_failed: false,
+            ticks: 0,
         };
         v.reload();
         v
@@ -116,13 +128,14 @@ impl UpdateView {
 
     /// Re-read the update check's answer and the config; true on a change.
     fn reload(&mut self) -> bool {
-        let latest = if self.offer { newer_release(&self.paths) } else { None };
-        let (repo, skipped) = match Settings::load(&self.paths) {
+        let (checks, repo, skipped) = match Settings::load(&self.paths) {
             // A hand-written `2.5.0` skips `v2.5.0` too.
-            Ok(s) => (s.release_repo, s.skipped_update.as_deref().and_then(release::release_tag)),
-            Err(_) => (self.repo.clone(), self.skipped.clone()),
+            Ok(s) => (s.update_check, s.release_repo, s.skipped_update.as_deref().and_then(release::release_tag)),
+            Err(_) => (self.checks, self.repo.clone(), self.skipped.clone()),
         };
-        let changed = latest != self.latest || skipped != self.skipped || repo != self.repo;
+        let latest = if self.offer && checks { newer_release(&self.paths) } else { None };
+        let changed = latest != self.latest || skipped != self.skipped || repo != self.repo || checks != self.checks;
+        self.checks = checks;
         if repo != self.repo {
             // Another repo's release of the same name is another release.
             self.notes = Notes::Unloaded;
@@ -139,11 +152,16 @@ impl UpdateView {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let changed = self.reload();
+        let running = matches!(self.download, Download::Running(_));
+        self.ticks += 1;
+        let changed = (self.active || running || self.ticks >= IDLE_TICKS) && {
+            self.ticks = 0;
+            self.reload()
+        };
         if self.active {
             self.load_notes(cx);
         }
-        if changed || matches!(self.download, Download::Running(_)) {
+        if changed || running {
             cx.notify();
         }
     }
@@ -301,7 +319,11 @@ impl UpdateView {
             move |v, r, cx| match r {
                 Ok(path) => {
                     log::info!("app update downloaded to {}", path.display());
-                    open_package(package, &path, cx);
+                    // Not when a newer release turned up meanwhile: the page
+                    // now offers that one, and this file stays in Downloads.
+                    if v.latest == v.download_tag {
+                        open_package(package, &path, cx);
+                    }
                     v.download = Download::Ready(path);
                 }
                 Err(e) => {
@@ -322,12 +344,16 @@ impl UpdateView {
         let same = self.download_tag.as_deref() == Some(tag);
         let state =
             if same || matches!(self.download, Download::Running(_)) { self.download.clone() } else { Download::Idle };
+        // The version on its way, which an earlier release's download makes
+        // an older one than the page offers.
+        let coming = self.download_tag.as_deref().unwrap_or(tag).trim_start_matches('v').to_owned();
         let package = self.package;
         let label: SharedString = match (&state, package) {
             (_, None) => format!("Get {version} on GitHub").into(),
             (Download::Ready(_), Some(p)) if p.opens_installer() => "Open installer".into(),
             (Download::Ready(_), _) => "Show download".into(),
             (Download::Failed, _) => "Try again".into(),
+            (Download::Running(_), _) => format!("Download {coming}").into(),
             _ => format!("Download {version}").into(),
         };
         let running = match &state {
@@ -391,7 +417,11 @@ impl UpdateView {
         let mut block = div().flex().flex_col().gap(px(12.)).child(row);
         if let Some((done, total)) = running {
             let frac = if total == 0 { 0. } else { (done as f32 / total as f32).clamp(0., 1.) };
-            let text = if total == 0 { "Downloading".to_owned() } else { format!("Downloading {:.0}%", frac * 100.) };
+            let text = if total == 0 {
+                format!("Downloading {coming}")
+            } else {
+                format!("Downloading {coming}, {:.0}%", frac * 100.)
+            };
             block = block.child(
                 div()
                     .flex()
@@ -428,13 +458,11 @@ impl UpdateView {
 /// The release newer than this app that the update check last saw: from the
 /// tray's status while it runs, else from the check's cache file.
 fn newer_release(paths: &Paths) -> Option<String> {
-    match live_status(paths) {
-        Some(s) => s.app_update(crate::version()),
-        None => {
-            let tag = release::release_tag(&ipc::load_latest_release(paths)?)?;
-            clawdmeter_flash::manifest::is_newer(&tag, crate::version()).then_some(tag)
-        }
-    }
+    let status = live_status(paths).unwrap_or_else(|| ipc::StatusSnapshot {
+        latest_firmware: ipc::load_latest_release(paths),
+        ..Default::default()
+    });
+    status.app_update(crate::version())
 }
 
 /// Hand a downloaded package to the OS: mount the disk image or start the
@@ -503,7 +531,12 @@ fn plain(s: &str) -> String {
     let mut rest = s.trim();
     // Each `](` closes a link whose text starts at the nearest `[` before it.
     while let Some(mid) = rest.find("](") {
-        let (Some(open), Some(end)) = (rest[..mid].rfind('['), rest[mid..].find(')')) else { break };
+        let (Some(open), Some(end)) = (rest[..mid].rfind('['), rest[mid..].find(')')) else {
+            // Not a link: keep it and look at what follows.
+            out.push_str(&rest[..mid + 2]);
+            rest = &rest[mid + 2..];
+            continue;
+        };
         // `![alt](image)` keeps its alt text.
         out.push_str(rest[..open].strip_suffix('!').unwrap_or(&rest[..open]));
         out.push_str(&rest[open + 1..mid]);
@@ -549,17 +582,22 @@ impl Render for UpdateView {
         let t = Theme::for_appearance(window.appearance());
         let page = div().flex_1().flex().flex_col().gap(px(20.));
         let Some(tag) = self.latest.clone() else {
-            let detail = if self.offer {
-                format!("The daily check has found no release newer than {}.", crate::version())
-            } else {
+            let detail = if !self.offer {
                 format!("Version {} is a local build, so it isn't offered releases.", crate::version())
+            } else if !self.checks {
+                "\"Check for updates\" is off in Settings, so the app doesn't look for releases.".to_owned()
+            } else {
+                format!("The daily check has found no release newer than {}.", crate::version())
             };
             return page.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(6.))
-                    .child(heading(&t, if self.offer { "No update available" } else { "Updates are off" }))
+                    .child(heading(
+                        &t,
+                        if self.offer && self.checks { "No update available" } else { "Updates are off" },
+                    ))
                     .child(para(&t, detail)),
             );
         };
@@ -606,6 +644,8 @@ mod tests {
             [NoteLine::Text("#262 fixed".into()), NoteLine::Text("quoted".into()), NoteLine::Text("let a = 1;".into()),]
         );
         assert_eq!(plain("an [open bracket"), "an [open bracket");
+        assert_eq!(plain("see ](x) and [#12](u)"), "see ](x) and #12", "a stray `](` doesn't end it");
+        assert_eq!(plain("a ]( b [c](d) ]("), "a ]( b c ](");
         assert!(note_lines("\n\n").is_empty());
     }
 }
