@@ -1,7 +1,6 @@
 #include "../../hal/power_hal.h"
 #include "board.h"
 #include "io_expander.h"
-#include "power_state.h"
 #include <Arduino.h>
 #include <math.h>
 #include <Preferences.h>
@@ -11,12 +10,18 @@
 //
 // Battery: the optional LiPo's voltage comes from the CH32 expander's ADC
 // (see io_expander_battery_mv). The charger exposes no readable status to the
-// ESP32, so "on USB power" is inferred:
+// ESP32, so "on USB power" is a guess:
 //   - a USB host is attached (the ESP32-S3's USB-Serial-JTAG sees SOF frames)
 //     — covers the usual desk case, plugged into the computer; or
 //   - the battery voltage is clearly rising (a data-less wall charger).
-// Charging = on USB power and not yet full. With no battery connected the
-// board can only run from USB, so it reports "no battery" + USB power.
+// A wall adapter, a host-less hub or a suspended host can still look like
+// "on battery", so the guess only picks the battery glyph and which way the
+// % may move. power_hal_is_vbus_in() always reports USB power, as before the
+// battery support: the screen never idle-sleeps on this board.
+//
+// Presence is debounced (PRESENCE_SAMPLES readings in a row), and nothing
+// is written to NVS until it has settled. The first time a battery is seen,
+// the backlight PWM is switched on (io_expander_enable_pwm).
 //
 // On the TCA9554 revision (no ADC) none of this runs: it reports USB power
 // and no battery, and never touches NVS.
@@ -26,6 +31,12 @@
 #define TREND_RISE_MV      25         // rise that counts as "being charged"
 #define NO_BATTERY_BELOW_MV 2800      // divider reads ~0 with nothing attached
 #define NO_BATTERY_ABOVE_MV 4450      // charger output with no cell present
+#define PRESENCE_SAMPLES   3          // readings that must agree to flip presence
+#define PRESENCE_MASK      ((1u << PRESENCE_SAMPLES) - 1)
+// A charging cell never falls, so a fall this far below the highest reading
+// since the source last changed means it's discharging: its % is a resting
+// one, worth saving.
+#define RESTING_DROP_MV    20
 
 // Readings are noisy (ADC jitter plus charger ripple), so the voltage is
 // smoothed (EMA, ~30 s time constant at a 2 s poll) and the shown percentage
@@ -33,7 +44,7 @@
 // on battery. Both reset when the source changes.
 #define EMA_ALPHA          0.07f
 
-static int      cached_mv   = -1;     // smoothed
+static int      cached_mv   = -1;     // smoothed while present, else the raw reading
 static float    ema_mv      = -1.0f;
 static int      shown_pct   = -1;
 static int      cached_pct  = -1;
@@ -46,6 +57,31 @@ static int      chg_stat    = -1;
 static uint32_t last_poll_ms = 0;
 static int      trend_mv    = -1;
 static uint32_t trend_ms    = 0;
+static int      peak_mv     = -1;     // highest reading on battery since the source changed
+
+static bool     present          = false;   // debounced
+static bool     presence_settled = false;   // the last PRESENCE_SAMPLES agreed
+static uint8_t  presence_hist    = 0;       // newest reading in bit 0
+static uint8_t  presence_n       = 0;
+
+static void note_presence(bool raw) {
+    presence_hist = (uint8_t)(((presence_hist << 1) | (raw ? 1 : 0)) & PRESENCE_MASK);
+    if (presence_n < PRESENCE_SAMPLES) presence_n++;
+    const bool full    = presence_n == PRESENCE_SAMPLES;
+    const bool all_on  = full && presence_hist == PRESENCE_MASK;
+    const bool all_off = full && presence_hist == 0;
+    if (all_on)  present = true;
+    if (all_off) present = false;
+    presence_settled = all_on || all_off;
+}
+
+static bool in_range(int mv) {
+    return mv >= NO_BATTERY_BELOW_MV && mv <= NO_BATTERY_ABOVE_MV;
+}
+
+static bool on_battery(void) {
+    return present && !usb_host && !rising;
+}
 
 // LiPo open-circuit curve (mV → %), linear between points.
 static int pct_from_mv(int mv) {
@@ -70,7 +106,7 @@ static int pct_from_mv(int mv) {
 // this board: 93% plugged vs 87% unplugged), and in the constant-voltage
 // phase (~4.15 V+) the charger pins it near 4.2 V whatever the real level.
 // So on USB:
-//   - start from the last on-battery percentage (saved to flash, since this
+//   - start from the last resting percentage (saved to flash, since this
 //     board resets when USB is plugged in),
 //   - raise it only from constant-current readings, less the 70 mV rise,
 //   - in the constant-voltage phase the cell is past ~90%: start there and
@@ -82,14 +118,16 @@ static int pct_from_mv(int mv) {
 #define CV_FLOOR_PCT       90
 #define CV_STEP_MS         (2UL * 60UL * 1000UL)
 
-static int      saved_pct   = -1;     // last known %, persisted
+static int      saved_pct   = -1;     // last known %, the charging estimate's floor
+static int      stored_pct  = -1;     // what NVS holds
 static uint32_t cv_step_ms  = 0;      // 0 = not in the constant-voltage phase
 
 static void save_pct(int pct) {
-    if (pct == saved_pct) return;
     saved_pct = pct;
+    if (!presence_settled || pct == stored_pct) return;
+    stored_pct = pct;
     Preferences prefs;
-    prefs.begin("lcd4bat", false);
+    if (!prefs.begin("lcd4bat", false)) return;
     prefs.putChar("pct", (int8_t)pct);
     prefs.end();
 }
@@ -110,85 +148,89 @@ static int charging_pct(int mv, uint32_t now) {
     return pct;
 }
 
-static bool battery_present(void) {
-    return cached_mv >= NO_BATTERY_BELOW_MV && cached_mv <= NO_BATTERY_ABOVE_MV;
-}
-
 static void sample(void) {
-    uint32_t now = millis();
-    bool was_on_battery = lcd4_on_battery();
-
     int raw_mv = io_expander_battery_mv();
-    usb_host   = HWCDC::isPlugged();
-    chg_stat   = io_expander_charging();
-    if (raw_mv < 0) return;   // read failed — keep the last values
-    // Seed on the first reading or after a big jump (battery plugged/unplugged).
-    if (ema_mv < 0 || fabsf(raw_mv - ema_mv) > 400.0f) ema_mv = raw_mv;
-    else                                                ema_mv += EMA_ALPHA * (raw_mv - ema_mv);
-    cached_mv = (int)(ema_mv + 0.5f);
+    if (raw_mv < 0) return;   // read failed: keep every state for the next poll
 
-    if (!battery_present()) {
+    uint32_t now = millis();
+    bool was_on_battery = on_battery();
+    bool was_present    = present;
+    usb_host = HWCDC::isPlugged();
+    chg_stat = io_expander_charging();
+    note_presence(in_range(raw_mv));
+
+    if (!present) {
+        ema_mv = -1.0f;
+        cached_mv = raw_mv;
         cached_pct = shown_pct = -1;
+        trend_mv = peak_mv = -1;
+        rising = false;
     } else {
-        bool on_usb = usb_host || rising;
+        // Out-of-range glitches while present don't move the average.
+        if (in_range(raw_mv)) {
+            // Seed on the first reading or after a big jump (cell swapped).
+            if (ema_mv < 0 || fabsf(raw_mv - ema_mv) > 400.0f) ema_mv = raw_mv;
+            else                                                ema_mv += EMA_ALPHA * (raw_mv - ema_mv);
+        }
+        cached_mv = (int)(ema_mv + 0.5f);
+
+        bool on_usb = !on_battery();
         int pct = on_usb ? charging_pct(cached_mv, now) : pct_from_mv(cached_mv);
         if (shown_pct < 0)          shown_pct = pct;
         else if (on_usb  && pct > shown_pct) shown_pct = pct;   // charging: only up
         else if (!on_usb && pct < shown_pct) shown_pct = pct;   // battery: only down
         cached_pct = shown_pct;
-        if (!on_usb) save_pct(shown_pct);   // resting reading — the one to trust
-    }
+        if (!on_usb) {
+            if (cached_mv > peak_mv) peak_mv = cached_mv;
+            if (cached_mv <= peak_mv - RESTING_DROP_MV) save_pct(shown_pct);
+        }
 
-    // Voltage trend for data-less chargers.
-    if (battery_present()) {
+        // Voltage trend for data-less chargers.
         if (trend_mv < 0) { trend_mv = cached_mv; trend_ms = now; }
         if (now - trend_ms >= TREND_WINDOW_MS) {
             rising = cached_mv - trend_mv >= TREND_RISE_MV;
             trend_mv = cached_mv;
             trend_ms = now;
         }
-    } else {
-        trend_mv = -1;
-        rising = false;
     }
 
     static uint32_t last_log_ms = 0;
     static bool first = true;
-    bool changed = lcd4_on_battery() != was_on_battery;
+    bool changed = on_battery() != was_on_battery;
     // New power source: re-settle (on battery the voltage relaxes over ~30 s;
     // the only-down rule then walks the number down to it).
-    if (changed && battery_present()) {
+    if (changed && present) {
         cv_step_ms = 0;
-        cached_pct = shown_pct = lcd4_on_battery() ? pct_from_mv(cached_mv)
-                                                   : charging_pct(cached_mv, now);
+        peak_mv = -1;
+        cached_pct = shown_pct = on_battery() ? pct_from_mv(cached_mv)
+                                              : charging_pct(cached_mv, now);
     }
-    if (first || changed || now - last_log_ms >= 60000) {
+    if (first || changed || present != was_present || now - last_log_ms >= 60000) {
         first = false;
         last_log_ms = now;
-        Serial.printf("Battery: %d mV (%d%%) usb_host=%d rising=%d stat=%d -> %s%s\n",
-                      cached_mv, cached_pct, usb_host, rising, chg_stat,
-                      lcd4_on_battery() ? "on battery" : "USB power",
+        Serial.printf("Battery: %d mV (%d%%) %s usb_host=%d rising=%d stat=%d -> %s%s\n",
+                      cached_mv, cached_pct, present ? "present" : "absent",
+                      usb_host, rising, chg_stat,
+                      on_battery() ? "on battery" : "USB power",
                       power_hal_is_charging() ? ", charging" : "");
     }
-    if (changed) lcd4_reapply_brightness();
-}
-
-bool lcd4_on_battery(void) {
-    return battery_present() && !usb_host && !rising;
+    if (present && !was_present) io_expander_enable_pwm();
 }
 
 void power_hal_init(void) {
     if (!io_expander_has_battery()) return;
     Preferences prefs;
     if (prefs.begin("lcd4bat", true)) {   // absent until the first save
-        saved_pct = prefs.getChar("pct", -1);
+        saved_pct = stored_pct = prefs.getChar("pct", -1);
         prefs.end();
     }
-    sample();
+    // Enough readings to settle presence before the UI first asks.
+    for (int i = 0; i < PRESENCE_SAMPLES; i++) sample();
     last_poll_ms = millis();
 }
 
 void power_hal_tick(void) {
+    io_expander_tick();
     if (!io_expander_has_battery()) return;
     if (millis() - last_poll_ms >= BATTERY_POLL_MS) {
         last_poll_ms = millis();
@@ -197,9 +239,9 @@ void power_hal_tick(void) {
 }
 
 int  power_hal_battery_pct(void) { return cached_pct; }
-bool power_hal_is_vbus_in(void)  { return !lcd4_on_battery(); }
+bool power_hal_is_vbus_in(void)  { return true; }   // see the top of this file
 bool power_hal_is_charging(void) {
-    if (!battery_present() || lcd4_on_battery()) return false;
+    if (!present || on_battery()) return false;
     if (chg_stat >= 0) return chg_stat == 1;   // on USB: the charger knows charging vs full
     // On USB: charging until full. Voltage alone can't say (the constant-voltage
     // phase sits near 4.2 V while still charging), so "full" is the same call the

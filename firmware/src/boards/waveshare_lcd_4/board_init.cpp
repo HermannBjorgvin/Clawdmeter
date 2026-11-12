@@ -14,15 +14,20 @@ extern "C" void board_init(void) {
     Serial.printf("Reset reason: %s (%d)\n",
                   r < (int)(sizeof(reasons) / sizeof(reasons[0])) ? reasons[r] : "?", r);
     // The expander survives ESP32 resets and may be stuck mid-transaction.
-    io_expander_recover_bus();
+    bool bus_idle = io_expander_recover_bus();
     Wire.begin(IIC_SDA, IIC_SCL);
     delay(20);
     // One-line bus inventory — board revisions differ in which chips exist.
-    Serial.print("I2C:");
-    for (uint8_t a = 0x08; a < 0x78; a++) {
-        Wire.beginTransmission(a);
-        if (Wire.endTransmission() == 0) Serial.printf(" 0x%02X", a);
+    // Skipped when a line is still held low: every probe would time out.
+    if (bus_idle) {
+        Serial.print("I2C:");
+        for (uint8_t a = 0x08; a < 0x78; a++) {
+            Wire.beginTransmission(a);
+            if (Wire.endTransmission() == 0) Serial.printf(" 0x%02X", a);
+        }
+        Serial.println();
+    } else {
+        Serial.println("I2C: SDA/SCL held low after recovery, scan skipped");
     }
-    Serial.println();
     io_expander_init();
 }

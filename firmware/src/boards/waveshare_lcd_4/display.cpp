@@ -1,7 +1,6 @@
 #include "../../hal/display_hal.h"
 #include "board.h"
 #include "io_expander.h"
-#include "power_state.h"
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
 #include <esp_heap_caps.h>
@@ -67,22 +66,10 @@ void display_hal_begin(void) {
 }
 
 // ST7701 has no panel brightness command; the backlight is the expander's
-// PWM (CH32 boards) or an on/off pin (TCA boards). On battery the requested
-// level is scaled down to save power.
-#define ON_BATTERY_BRIGHTNESS_PCT 35   // 60 was too subtle to notice
-
-static uint8_t requested_level = 255;
-
+// PWM (CH32 boards, only once a battery is detected) or an on/off latch bit
+// (TCA boards). See io_expander_set_brightness().
 void display_hal_set_brightness(uint8_t level) {
-    requested_level = level;
-    uint8_t out = level;
-    if (lcd4_on_battery()) out = (uint8_t)((level * ON_BATTERY_BRIGHTNESS_PCT + 50) / 100);
-    if (level > 0 && out == 0) out = 1;   // a dimmed non-zero level stays on
-    io_expander_set_brightness(out);
-}
-
-void lcd4_reapply_brightness(void) {
-    display_hal_set_brightness(requested_level);
+    io_expander_set_brightness(level);
 }
 
 // Logical (LVGL) pixel (x, y) lands on panel pixel:
