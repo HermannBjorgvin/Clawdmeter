@@ -5,9 +5,10 @@
 //!
 //! The download takes this install's package ([`AppPackage`]) to the
 //! Downloads folder, checked against the release's `SHA256SUMS`, and hands it
-//! to the OS. On Linux the button opens a menu of the release's packages
-//! (`.deb`, AppImage) to pick from. Installs the release has no package for
-//! get a link to the release page instead.
+//! to the OS. On x86_64 Linux the button opens a menu of the release's
+//! packages (`.deb`, AppImage) to pick from, whatever the install. Elsewhere,
+//! installs the release has no package for get a link to the release page
+//! instead.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,7 +18,7 @@ use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::release::{self, AppPackage, ReleaseNotes};
 use gpui::{
     anchored, deferred, div, point, prelude::*, px, AnyElement, Context, Corner, EventEmitter, FocusHandle,
-    KeyDownEvent, MouseButton, SharedString, Window,
+    KeyDownEvent, SharedString, Window,
 };
 
 use super::settings::write_settings;
@@ -65,7 +66,7 @@ pub struct UpdateView {
     paths: Paths,
     /// The package that updates this install (on Linux, the one picked);
     /// `None` where the release has none, and the page then links to the
-    /// release page.
+    /// release page unless there is a menu to pick from.
     package: Option<AppPackage>,
     /// Linux: the packages the download button offers in its menu.
     choices: &'static [AppPackage],
@@ -163,6 +164,10 @@ impl UpdateView {
                 self.download = Download::Idle;
                 self.download_tag = None;
             }
+        }
+        if latest != self.latest {
+            // The menu belongs to the release it was opened for.
+            self.menu_open = false;
         }
         self.latest = latest;
         self.skipped = skipped;
@@ -403,9 +408,11 @@ impl UpdateView {
         let coming = self.download_tag.as_deref().unwrap_or(tag).trim_start_matches('v').to_owned();
         let package = self.package;
         // Linux picks a package from the button's menu; once one is on its
-        // way or downloaded, the button follows that one.
-        let menu = !self.choices.is_empty() && matches!(state, Download::Idle);
+        // way or downloaded, the button follows that one. After a failure
+        // the menu is back, so another package can be tried.
+        let menu = !self.choices.is_empty() && matches!(state, Download::Idle | Download::Failed);
         let label: SharedString = match (&state, package) {
+            (Download::Failed, _) if menu => "Try again".into(),
             _ if menu => format!("Download {version}").into(),
             (_, None) => format!("Get {version} on GitHub").into(),
             (Download::Ready(_), Some(p)) if p.opens_installer() => "Open installer".into(),
@@ -517,7 +524,7 @@ impl UpdateView {
                     .w(viewport.width)
                     .h(viewport.height)
                     .occlude()
-                    .on_mouse_down(MouseButton::Left, cx.listener(|v, _, _, cx| v.close_menu(cx))),
+                    .on_any_mouse_down(cx.listener(|v, _, _, cx| v.close_menu(cx))),
             ),
         )
         .with_priority(1);

@@ -470,10 +470,6 @@ mod tests {
         });
         let saved = clawdmeter_core::Settings::load(&paths).unwrap().skipped_update;
         assert_eq!(saved.as_deref(), Some("v999.0.0"));
-        // The pill beside the Settings heading still opens it.
-        view.update(cx, |v, cx| v.go(Page::Settings, cx));
-        click(cx, "settings-app-update");
-        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Update));
 
         // The release after the skipped one is announced again.
         status("v999.1.0");
@@ -487,6 +483,19 @@ mod tests {
         cx.executor().advance_clock(REFRESH * 12);
         cx.run_until_parked();
         update.read_with(cx, |u, _| assert_eq!((u.available(), u.announced()), (None, None)));
+
+        // A skipped release is still there beside the Settings heading.
+        crate::ui::settings::write_settings(&paths, |s, _| {
+            s.update_check = true;
+            s.skipped_update = Some("v999.1.0".into());
+        })
+        .unwrap();
+        cx.executor().advance_clock(REFRESH * 12);
+        cx.run_until_parked();
+        update.read_with(cx, |u, _| assert_eq!((u.available(), u.announced()), (Some("v999.1.0"), None)));
+        view.update(cx, |v, cx| v.go(Page::Settings, cx));
+        click(cx, "settings-app-update");
+        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Update));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -520,6 +529,12 @@ mod tests {
         overview.read_with(cx, |o, _| assert!(!o.update_available(), "no nudge and no Flash badge"));
         let saved = clawdmeter_core::Settings::load(&paths).unwrap().skipped_firmware;
         assert_eq!(saved.as_deref(), Some("v999.0.0"));
+
+        // The same release written without its `v` is still skipped.
+        status("999.0.0");
+        cx.executor().advance_clock(REFRESH * 2);
+        cx.run_until_parked();
+        overview.read_with(cx, |o, _| assert!(!o.update_available()));
 
         // A later release nudges again.
         status("v999.1.0");
@@ -564,8 +579,9 @@ mod tests {
         update.read_with(cx, |u, _| assert!(u.menu_open()));
         assert!(cx.debug_bounds("update-menu-deb").is_some());
         assert!(cx.debug_bounds("update-menu-appimage").is_some());
-        // A click anywhere else closes it, and goes no further.
-        click(cx, "update-menu-backdrop");
+        // A click anywhere else closes it, and goes no further: not to the
+        // sidebar item under it.
+        click(cx, "nav-overview");
         update.read_with(cx, |u, _| assert!(!u.menu_open()));
         view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Update));
 
@@ -573,6 +589,11 @@ mod tests {
         update.read_with(cx, |u, _| assert!(u.menu_open()));
         cx.simulate_keystrokes("escape");
         update.read_with(cx, |u, _| assert!(!u.menu_open(), "Escape closes it"));
+
+        // After a failed download the menu is back, to try another package.
+        update.update(cx, |u, _| u.show_download_state("v999.0.0", "failed"));
+        click(cx, "update-download");
+        update.read_with(cx, |u, _| assert!(u.menu_open()));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

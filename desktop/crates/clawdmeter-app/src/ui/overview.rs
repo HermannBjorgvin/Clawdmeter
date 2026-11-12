@@ -2,6 +2,7 @@
 //! meters, a refresh button, and a nudge when new firmware is out.
 
 use clawdmeter_core::{Paths, Settings};
+use clawdmeter_flash::release::release_tag;
 use gpui::{div, prelude::*, px, relative, rgb, Context, EventEmitter, Rgba, SharedString, Window};
 
 use super::theme::{Theme, FONT_BODY, FONT_DISPLAY, R_M, R_PILL};
@@ -24,6 +25,8 @@ pub struct OverviewView {
     /// `skipped_firmware` in the config: the release the firmware nudge
     /// stays quiet about.
     skipped_firmware: Option<String>,
+    /// "Skip this update" couldn't be saved.
+    skip_failed: bool,
 }
 
 impl EventEmitter<Navigate> for OverviewView {}
@@ -38,7 +41,14 @@ impl OverviewView {
             }
         })
         .detach();
-        let mut v = OverviewView { paths, snap: None, refreshing: None, desktop_chime: false, skipped_firmware: None };
+        let mut v = OverviewView {
+            paths,
+            snap: None,
+            refreshing: None,
+            desktop_chime: false,
+            skipped_firmware: None,
+            skip_failed: false,
+        };
         v.reload(clawdmeter_core::unix_now());
         v
     }
@@ -81,19 +91,28 @@ impl OverviewView {
         self.firmware_nudge().is_some()
     }
 
-    /// The firmware release to nudge about, unless it was skipped.
+    /// The firmware release to nudge about, as a plain tag (`v2.5.0`),
+    /// unless it was skipped. The version comes from the release's manifest,
+    /// and a skip writes it to the config, so anything but a plain version
+    /// is no release to nudge about.
     fn firmware_nudge(&self) -> Option<String> {
-        let latest = self.snap.as_ref()?.update_available()?;
-        let skipped = self.skipped_firmware.as_deref().map(|t| t.trim_start_matches('v'));
-        (skipped != Some(latest.trim_start_matches('v'))).then(|| latest.to_owned())
+        let latest = release_tag(self.snap.as_ref()?.update_available()?)?;
+        let skipped = self.skipped_firmware.as_deref().and_then(release_tag);
+        (skipped.as_ref() != Some(&latest)).then_some(latest)
     }
 
     /// Stop nudging about firmware release `tag`; a later one nudges again.
     fn skip_firmware(&mut self, tag: String, cx: &mut Context<Self>) {
         let saved = tag.clone();
         match super::settings::write_settings(&self.paths, move |s, _| s.skipped_firmware = Some(saved)) {
-            Ok(()) => self.skipped_firmware = Some(tag),
-            Err(e) => log::warn!("couldn't save skipped_firmware: {e}"),
+            Ok(()) => {
+                self.skipped_firmware = Some(tag);
+                self.skip_failed = false;
+            }
+            Err(e) => {
+                log::warn!("couldn't save skipped_firmware: {e}");
+                self.skip_failed = true;
+            }
         }
         cx.notify();
     }
@@ -342,6 +361,9 @@ impl Render for OverviewView {
                         )),
                 ),
             );
+            if self.skip_failed {
+                page = page.child(notice(&t, Tone::Bad, "Couldn't save that to the config file."));
+            }
         }
         page.child(chime).child(setup)
     }

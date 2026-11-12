@@ -108,7 +108,9 @@ is faked behind `FlashHardware`.
   `release_repo`, `update_check`, `skipped_update` (the app release tag the
   Update page was told to skip), `skipped_firmware` (the firmware release
   the Overview's "Skip this update" quiets: no nudge there and no Flash
-  badge; the Device page still offers it), `onboarding_done`, `alert_on` (alert kinds
+  badge; the Device page and the tray menu still offer it. Only a plain
+  version, `release_tag`, is nudged about or saved, since it comes from the
+  release's manifest), `onboarding_done`, `alert_on` (alert kinds
   the daemon lets through: the hook records `k` from `hook_event_name` /
   `notification_type` and `engine.on_attention` drops the rest; default all
   but `idle`).
