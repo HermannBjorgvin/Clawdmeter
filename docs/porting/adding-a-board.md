@@ -73,6 +73,9 @@ title and status line fit, measured with the real fonts. Then, by shape:
   cards, a wider gap and a lower start.
 - **Short** (under the small design's 240 px): the status line, cards and
   gaps squeeze.
+- **Landscape strip** (wider than tall, and stacking doesn't fit): the cards
+  sit side by side, taller or squeezed to the strip's height like the
+  stacked ones.
 - **Round** (`round_panel`): the cards are centred and as wide as the
   circle allows at their corners; the header sits right above them and the
   status line right under them, both inside the circle (the small header
@@ -94,8 +97,6 @@ stale data, attention and minimal mode.
 Add a rule to `layout.cpp` only when a whole class of panel looks wrong and
 the test can say why. Key it on shape (narrow, short, aspect, round), never
 on exact dimensions or a board name, and add a `PANELS` entry that needs it.
-A landscape strip with side-by-side cards would be such a rule: another
-arrangement of the cards, chosen when stacking them doesn't fit.
 
 ## Include the board in the app and docs
 

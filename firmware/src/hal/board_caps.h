@@ -35,8 +35,10 @@ struct BoardCaps {
                              // button when button_count is 0) dismisses an
                              // active alert before it does anything else
                              // (director_button).
-    bool    mono_panel;      // 1-bit panel printing luminance >= 64 as ink:
-                             // outlined bars, inverted pills, no stale fade
+    bool    mono_panel;      // a 1-bit panel (e-paper) printing luminance >= 64
+                             // as ink: it keeps the default palette and
+                             // ignores `th` (clawd_prefs.cpp); outlined bars,
+                             // inverted pills, no stale fade
     bool    minimal_verbs;   // minimal mode keeps the rotating status verbs
 };
 

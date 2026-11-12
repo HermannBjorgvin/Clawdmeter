@@ -94,7 +94,7 @@ passed. Beat changes always print; every step prints too after
 | `home` | default | Corner autonomy on: jittered idle gaps (±40 % of 10 / 7 / 5 / 3.5 s by mood), mood-picked acts, never the same act twice running, and lurk trips (PSRAM). Also checks the gates below. |
 | `corner` | notice, wave, joy, or after a transition | Waits for the commanded corner act or walk to finish, then `home`. |
 | `show` | `a == 3` held for 5 min; at most one per 15 min; hooks seen; meters live | Points at the bar (or, if he's out on a lurk trip, heads straight out), walks off left at 1.5×, walks back on full size at 1.5×, one scene (loop held 16 s, so about 20 s), waves, walks off left, and the corner Clawd walks back in to his seat. Without the performer (no PSRAM): points, then dances twice (jumps for joy twice when usage is Heavy) and waves, all in his seat. |
-| `screensaver` | 10 min with no engagement; needs hooks seen or a window that hasn't started; meters live | Walks off through the nearest edge (a lurk trip finishes its peek first), face rises and rests (blinks every 2–6 s, about one in five a double, glances where the far eye travels 1.5×). Every 3–5 min, a calm dip: the face drops onto the meters, he walks on, plays one calm scene (magnifier or walking, alternating) and walks off, then the face rises and he rests again. Without the performer the corner Clawd walks back to his seat, sits for the scene's length and walks off again. |
+| `screensaver` | 10 min with no engagement; needs hooks seen or a window that hasn't started (spend-capped and `week` accounts have no window, so they need hooks); meters live | Walks off through the nearest edge (a lurk trip finishes its peek first), face rises and rests (blinks every 2–6 s, about one in five a double, glances where the far eye travels 1.5×). Every 3–5 min, a calm dip: the face drops onto the meters, he walks on, plays one calm scene (magnifier or walking, alternating) and walks off, then the face rises and he rests again. Without the performer the corner Clawd walks back to his seat, sits for the scene's length and walks off again. |
 | `face-home` | tap, prompt, button or attention while the screensaver face is up; a tap, attention or the end of its curiosity while the peek face is up | If woken by a prompt or tapped during a peek, he blinks first (noticing), then the face drops into the meters, and the corner hurries home at 1.5×. |
 | `run-home` | tap or attention during a performance; a tap, prompt, button or usage moving during a calm dip | The scene releases to the idle pose on the spot, holds 200 ms, and he runs off left, ramping from 1.5× to 3× over 400 ms. Once he's gone, the corner walks home at 1.5×. |
 | `peek` | any tap on the meters (`home` or `corner`), live or stale (below) | Seated: a startled hop (`jumping` from its crouch, 2×), then he ducks out through the nearest edge at 4×; already moving or out: straight out at 4×. The face rises, eyes glance toward the tap's x and hold 1.6–2.4 s, a blink (30 % double), the look comes back to you, and the face stays up, curious, for 5 min: resting like the screensaver face (blinks every 2–6 s, some double), its glances going back toward the tap most of the time. Then it goes back on its own; a tap sends it back right away (with the acknowledging blink). Both go through `face-home`: the drop, and he walks back to his seat at 1.5×. (below: what else happens while it's up) |
@@ -135,7 +135,11 @@ Small reactions on the meters, from `home` or `corner`:
   then reacts. The reaction waits up to 15 s (`react_pending_ms`) for him. A
   reaction arriving while a commanded act plays queues behind it.
 - **Fresh window**: `session_reset` from signals (real samples only, so never
-  on a replay). He jumps happy twice, in the same loop iteration as the chime.
+  on a replay). For a `week` account (no 5-hour limit) the main meter is
+  the week, so this is the weekly reset. A change in what the meter
+  measures (session, week or spend: `usage_meter_kind`) restarts the slow
+  clock and is never a reset or a rise. He jumps happy twice, in the same
+  loop iteration as the chime.
   If he's out on a trip he hurries back for it; if he's in another room it
   waits up to 5 min for him to sit down. It outranks the wave.
 
@@ -352,10 +356,12 @@ a board capability, with no NVS override, desktop setting, or serial toggle.
 
 ## Buttons
 
-- BOOT (Space) and SECONDARY (Shift+Tab): unchanged. They also count as
+- BOOT (default Space) and SECONDARY (default Shift+Tab; the app can remap
+  both, `k1`/`k2`): the director side is unchanged. They also count as
   engagement and wake the screensaver.
-- PWR short press: cycles brightness and counts as engagement (waking the
-  screensaver, face or calm dip). Hold to pair is unchanged.
+- PWR short press: runs its action (`k3`, default cycle brightness) and
+  counts as engagement (waking the screensaver, face or calm dip). Hold to
+  pair is unchanged.
 - Shows are earned rather than opened by a button or a tap.
 
 ## Tunables

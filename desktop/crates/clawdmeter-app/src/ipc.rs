@@ -75,12 +75,15 @@ pub struct StatusSnapshot {
     pub link_detail: Option<String>,
     /// Account the device shows.
     pub account: Option<String>,
-    /// Session %.
+    /// Session % (`None` with no 5-hour limit).
     pub session_pct: Option<u32>,
     /// Weekly %.
     pub week_pct: Option<u32>,
     /// The session window has started.
     pub window_started: bool,
+    /// The account has no 5-hour limit (verified Ultra): no session meter.
+    #[serde(default)]
+    pub no_session_limit: bool,
     /// Unix seconds the numbers were read (age = now - this).
     pub read_at: Option<i64>,
     /// Shown account missed three polls.
@@ -150,9 +153,10 @@ impl StatusSnapshot {
             device_name,
             link_detail,
             account: e.active_account.as_ref().map(|p| p.display().to_string()),
-            session_pct: reading.map(|r| r.session_pct()),
+            session_pct: reading.filter(|r| !r.no_session_limit()).map(|r| r.session_pct()),
             week_pct: reading.and_then(|r| r.week.as_ref()).map(|w| w.pct),
             window_started: reading.is_some_and(|r| r.window_started()),
+            no_session_limit: reading.is_some_and(|r| r.no_session_limit()),
             read_at: e.age_secs.map(|a| now - a),
             stale: e.stale,
             logged_out: e.logged_out,
@@ -225,6 +229,13 @@ impl StatusSnapshot {
             None => None,
         }
     }
+
+    /// The tag of a release newer than this app at `app_version`. The update
+    /// check stores one tag for the firmware and the app: they ship together.
+    pub fn app_update(&self, app_version: &str) -> Option<String> {
+        let latest = clawdmeter_flash::release::release_tag(self.latest_firmware.as_deref()?)?;
+        clawdmeter_flash::manifest::is_newer(&latest, app_version).then_some(latest)
+    }
 }
 
 /// Attention wins, then auth, then the link, then freshness.
@@ -275,6 +286,9 @@ pub enum AppCommand {
     Open(String),
     /// Re-run the firmware update check now.
     CheckUpdate,
+    /// The config file changed: re-read it now, not at the next periodic
+    /// re-read, so a device setting reaches the device at once.
+    SettingsChanged,
     /// Stop the daemon and exit.
     Quit,
 }
@@ -289,6 +303,7 @@ impl AppCommand {
             AppCommand::Mute(on) => format!("mute {}", if *on { "on" } else { "off" }),
             AppCommand::Open(w) => format!("open {w}"),
             AppCommand::CheckUpdate => "check-update".into(),
+            AppCommand::SettingsChanged => "settings-changed".into(),
             AppCommand::Quit => "quit".into(),
         }
     }
@@ -304,6 +319,7 @@ impl AppCommand {
             ("mute", Some("off")) => AppCommand::Mute(false),
             ("open", Some(w)) if crate::Page::parse(w).is_some() => AppCommand::Open(w.to_owned()),
             ("check-update", None) => AppCommand::CheckUpdate,
+            ("settings-changed", None) => AppCommand::SettingsChanged,
             ("quit", None) => AppCommand::Quit,
             _ => return None,
         })
@@ -317,8 +333,11 @@ pub fn send_command(paths: &Paths, cmd: &AppCommand) -> io::Result<()> {
     writeln!(f, "{}", cmd.encode())
 }
 
-/// Take every pending command (the file is renamed first, so a window
-/// appending at the same moment lands in a fresh file, not a lost one).
+/// Take every pending command. The file is renamed first, so a window that
+/// opens it after the rename starts a fresh one; a window that opened it
+/// just before can still lose its line to the removal. For
+/// `settings-changed` that only means waiting for the daemon's periodic
+/// re-read.
 pub fn take_commands(paths: &Paths) -> Vec<AppCommand> {
     let path = commands_file(paths);
     let taking = path.with_extension("taking");
@@ -440,7 +459,7 @@ mod tests {
         assert!(!window_open_elsewhere(&paths));
         let _ = fs::remove_dir_all(dir);
     }
-    use clawdmeter_core::usage::{UsageReading, Window};
+    use clawdmeter_core::usage::{SessionLimit, UsageReading, Window};
     use clawdmeter_core::EngineStatus;
 
     fn status(link: LinkState, reading: bool, last_write: Option<i64>) -> Status {
@@ -505,6 +524,20 @@ mod tests {
     }
 
     #[test]
+    fn no_session_limit_has_no_session_meter() {
+        let mut s = status(connected(), true, Some(990));
+        let r = s.engine.reading.as_mut().unwrap();
+        (r.session, r.session_limit) = (None, SessionLimit::Absent);
+        let snap = StatusSnapshot::from_status(&s, 1_000);
+        assert!(snap.no_session_limit);
+        assert_eq!((snap.session_pct, snap.week_pct), (None, Some(12)));
+        // A snapshot from before the field: an ordinary account.
+        let mut old = serde_json::to_value(&snap).unwrap();
+        old.as_object_mut().unwrap().remove("no_session_limit");
+        assert!(!serde_json::from_value::<StatusSnapshot>(old).unwrap().no_session_limit);
+    }
+
+    #[test]
     fn commands_roundtrip_and_take() {
         let dir = std::env::temp_dir().join(format!("clawdmeter-cmd-{}", std::process::id()));
         let paths = Paths::under(&dir);
@@ -513,6 +546,7 @@ mod tests {
             AppCommand::Mute(true),
             AppCommand::Open("hooks".into()),
             AppCommand::Forget,
+            AppCommand::SettingsChanged,
             AppCommand::Quit,
         ];
         for c in &cmds {
@@ -563,5 +597,20 @@ mod tests {
         assert_eq!(s.update_available(), None);
         s.device_firmware = Some("dev".into());
         assert_eq!(s.update_available(), None, "a local build is not offered a release");
+    }
+
+    #[test]
+    fn app_update_is_a_newer_release_than_the_app() {
+        let mut s = StatusSnapshot::default();
+        assert_eq!(s.app_update("2.4.0"), None, "nothing checked yet");
+        s.latest_firmware = Some("v2.5.0".into());
+        assert_eq!(s.app_update("2.4.0").as_deref(), Some("v2.5.0"));
+        assert_eq!(s.app_update("v2.5.0"), None);
+        assert_eq!(s.app_update("2.6.0"), None);
+        assert_eq!(s.app_update("2.5.0-rc.2").as_deref(), Some("v2.5.0"), "a release is newer than its candidates");
+        s.latest_firmware = Some("2.5.0".into());
+        assert_eq!(s.app_update("2.4.0").as_deref(), Some("v2.5.0"));
+        s.latest_firmware = Some("9.0.0/../x".into());
+        assert_eq!(s.app_update("2.4.0"), None, "not a version");
     }
 }

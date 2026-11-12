@@ -9,6 +9,7 @@ pub mod overview;
 pub mod settings;
 pub mod setup;
 pub mod theme;
+pub mod update;
 pub mod widgets;
 
 use std::borrow::Cow;
@@ -23,6 +24,7 @@ use gpui::{
 
 use crate::ipc::{self, AppCommand, StatusSnapshot};
 use crate::Page;
+use decorations::Control;
 use theme::{Theme, FONT_BODY};
 
 /// The three faces the firmware fonts are generated from.
@@ -62,6 +64,8 @@ const ASSETS: &[(&str, &[u8])] = bundled![
         "waveshare_amoled_206",
         "waveshare_lcd_154",
         "waveshare_lcd_4",
+        "waveshare_lcd_147",
+        "waveshare_lcd_21",
         "lilygo_t4s3",
         "waveshare_lcd_183",
         "esp32_s3_4848s040",
@@ -82,6 +86,7 @@ const ASSETS: &[(&str, &[u8])] = bundled![
         "spotpear_s3_154",
     ],
     "icons": [
+        "arrow-down-to-line",
         "gauge",
         "tablet",
         "zap",
@@ -91,9 +96,25 @@ const ASSETS: &[(&str, &[u8])] = bundled![
         "rotate-ccw",
         "refresh-cw",
         "x",
+        "minus",
+        "square",
+        "copy",
         "chevron-right",
         "chevron-down",
         "check",
+        "mic",
+        "keyboard",
+        "arrow-right-to-line",
+        "corner-down-left",
+        "play",
+        "skip-back",
+        "skip-forward",
+        "volume-1",
+        "volume-2",
+        "volume-x",
+        "sun",
+        "ban",
+        "linux",
     ],
 ];
 
@@ -166,6 +187,8 @@ pub fn open_with_height(
     build: impl FnOnce(&mut Window, &mut gpui::Context<app::AppView>) -> app::AppView + 'static,
 ) {
     let height = height.unwrap_or(SIZE.1).max(MIN_SIZE.1);
+    let window_decorations = decorations::wanted();
+    decorations::follow_button_layout(window_decorations);
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
         if let Err(e) = cx.text_system().add_fonts(FONTS.iter().map(|f| Cow::Borrowed(*f)).collect()) {
             log::warn!("bundled fonts not registered ({e}); using system fonts");
@@ -177,13 +200,14 @@ pub fn open_with_height(
             }
         })
         .detach();
+        decorations::await_button_layout(window_decorations);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(SIZE.0), px(height)), cx))),
             titlebar: Some(TitlebarOptions { title: Some("Clawdmeter".into()), ..Default::default() }),
             app_id: Some("clawdmeter".into()),
             is_resizable: true,
             window_min_size: Some(size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
-            window_decorations: Some(decorations::wanted()),
+            window_decorations: Some(window_decorations),
             ..Default::default()
         };
         if let Err(e) = cx.open_window(options, move |w, cx| cx.new(|cx| build(w, cx))) {
@@ -226,19 +250,77 @@ fn resize_cursor(edge: ResizeEdge) -> CursorStyle {
 /// Height of our own header bar (Adwaita's).
 pub(crate) const HEADER_H: f32 = 46.;
 
-/// The window frame: nothing of ours when the platform draws a title bar,
-/// otherwise (GNOME on Wayland, see [`decorations`]) a header bar in the
-/// Adwaita style (centred title, round close button, double-click to
-/// maximize, right-click for the window menu) plus resize edges.
-pub fn chrome(t: &Theme, window: &Window, body: impl IntoElement) -> impl IntoElement {
-    let client = matches!(window.window_decorations(), Decorations::Client { .. });
+/// Gap between the header bar's round buttons (Adwaita's button padding and
+/// spacing).
+const BUTTON_GAP: f32 = 13.;
+
+/// One round header-bar button, or `None` when the compositor says it can't
+/// do what the button asks (gpui 0.2.2 always says it can). Maximize turns
+/// into Restore while the window is maximized.
+fn window_button(t: &Theme, window: &Window, control: Control) -> Option<impl IntoElement> {
+    let can = window.window_controls();
+    let (id, icon, size, tip) = match control {
+        Control::Minimize if can.minimize => ("minimize", "minus", 16., "Minimize window"),
+        Control::Maximize if can.maximize && window.is_maximized() => ("maximize", "copy", 13., "Restore window"),
+        Control::Maximize if can.maximize => ("maximize", "square", 12., "Maximize window"),
+        Control::Close => ("close", "x", 16., "Close window"),
+        _ => return None,
+    };
     let wash = |a: f32| {
         let mut c: gpui::Hsla = t.text.into();
         c.a = a;
         c
     };
+    Some(
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(24.))
+            .rounded(px(theme::R_PILL))
+            .bg(wash(0.1))
+            .cursor_pointer()
+            .hover(|s| s.bg(wash(0.15)))
+            .active(|s| s.bg(wash(0.3)))
+            .tooltip(widgets::tooltip(tip))
+            .child(widgets::icon(icon, size, t.text))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |_, window, _| match control {
+                Control::Minimize => window.minimize_window(),
+                Control::Maximize => window.zoom_window(),
+                Control::Close => window.remove_window(),
+            }),
+    )
+}
+
+/// The window frame: nothing of ours when the platform draws a title bar,
+/// otherwise (GNOME on Wayland, see [`decorations`]) a header bar in the
+/// Adwaita style (centred title, round buttons where the desktop's button
+/// layout puts them, double-click to maximize, right-click for the window
+/// menu) plus resize edges.
+pub fn chrome(t: &Theme, window: &mut Window, cx: &mut App, body: impl IntoElement) -> impl IntoElement {
+    let client = matches!(window.window_decorations(), Decorations::Client { .. });
+    // Set by a press on the bar itself, not on a button (they stop the
+    // press) or a resize edge: only that press may turn into a window move.
+    let move_armed = window.use_keyed_state("titlebar-move-armed", cx, |_, _| false);
+    let window: &Window = window;
+    let buttons = |side: &[Control]| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(BUTTON_GAP))
+            .children(side.iter().filter_map(|&c| window_button(t, window, c)))
+    };
     div()
         .id("frame")
+        // Every press clears the flag before the bar sees it (capture runs
+        // parent-first), so a press that ended off the bar, or whose release
+        // the compositor took, can't leave a later click armed.
+        .capture_any_mouse_down({
+            let armed = move_armed.clone();
+            move |_, _, cx| armed.update(cx, |a, _| *a = false)
+        })
         .relative()
         .size_full()
         .flex()
@@ -248,6 +330,7 @@ pub fn chrome(t: &Theme, window: &Window, body: impl IntoElement) -> impl IntoEl
         .font_family(FONT_BODY)
         .text_size(px(14.))
         .when(client, |d| {
+            let layout = decorations::button_layout();
             d.child(
                 div()
                     .id("titlebar")
@@ -255,7 +338,7 @@ pub fn chrome(t: &Theme, window: &Window, body: impl IntoElement) -> impl IntoEl
                     .flex()
                     .flex_shrink_0()
                     .items_center()
-                    .justify_end()
+                    .justify_between()
                     .h(px(HEADER_H))
                     .px(px(11.))
                     .border_b_1()
@@ -263,19 +346,28 @@ pub fn chrome(t: &Theme, window: &Window, body: impl IntoElement) -> impl IntoEl
                     .bg(t.bg)
                     // Start the move on the first drag motion, as Zed's title
                     // bar does: starting it from the press didn't move the
-                    // window on GNOME Wayland.
-                    .on_mouse_move(|e, window, _| {
-                        if e.pressed_button == Some(MouseButton::Left)
-                            && resize_edge(e.position, window.window_bounds().get_bounds().size).is_none()
-                        {
-                            window.start_window_move();
+                    // window on GNOME Wayland. A press on a button never
+                    // moves the window, so a click that wobbles still lands.
+                    .on_mouse_move({
+                        let armed = move_armed.clone();
+                        move |e, window, cx| {
+                            if *armed.read(cx) && e.pressed_button == Some(MouseButton::Left) {
+                                armed.update(cx, |a, _| *a = false);
+                                window.start_window_move();
+                            }
                         }
                     })
-                    .on_mouse_down(MouseButton::Left, |e, window, _| {
-                        if e.click_count == 2 {
-                            window.zoom_window();
+                    .on_mouse_down(MouseButton::Left, {
+                        let armed = move_armed.clone();
+                        move |e, window, cx| {
+                            if e.click_count == 2 {
+                                window.zoom_window();
+                            }
+                            let on_edge = resize_edge(e.position, window.window_bounds().get_bounds().size).is_some();
+                            armed.update(cx, |a, _| *a = e.click_count == 1 && !on_edge);
                         }
                     })
+                    .on_mouse_up(MouseButton::Left, move |_, _, cx| move_armed.update(cx, |a, _| *a = false))
                     .on_mouse_down(MouseButton::Right, |e, window, _| window.show_window_menu(e.position))
                     .child(
                         div()
@@ -288,23 +380,8 @@ pub fn chrome(t: &Theme, window: &Window, body: impl IntoElement) -> impl IntoEl
                             .text_size(px(14.))
                             .child("Clawdmeter"),
                     )
-                    .child(
-                        div()
-                            .id("close")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(24.))
-                            .rounded(px(theme::R_PILL))
-                            .bg(wash(0.1))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(wash(0.15)))
-                            .active(|s| s.bg(wash(0.3)))
-                            .tooltip(widgets::tooltip("Close window"))
-                            .child(widgets::icon("x", 16., t.text))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(|_, window, _| window.remove_window()),
-                    ),
+                    .child(buttons(&layout.left))
+                    .child(buttons(&layout.right)),
             )
         })
         .child(div().flex_1().min_h_0().child(body))

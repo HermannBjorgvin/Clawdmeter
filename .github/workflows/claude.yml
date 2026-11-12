@@ -1,3 +1,18 @@
+# `@claude` from the owner or a collaborator, on issues and on any PR, fork PRs
+# included. Claude has unrestricted tools and may build and run a fork's code,
+# with the Claude app's token (contents, issues, PRs: write) and the setup token
+# in reach. The guard rails: the "Protect tags" ruleset limits creating,
+# updating or deleting any tag to the Admin role, so the token can't cut a
+# release; the app has no `workflows` permission; `main` only changes through a
+# PR. Assets of existing releases stay replaceable unless immutable releases are
+# on. The owner accepts the rest: setup-token quota, pushes to unprotected
+# branches, junk claude/* branches, PRs and comments.
+#
+# The action checks a fork PR out as a local `pr-<number>` branch with this repo
+# as origin; it can't push to the fork. The appended prompt routes fork changes
+# to a suggestion review or a superseding claude/* PR instead. Inline comments
+# and reviews on a fork PR run without secrets, so there only a conversation
+# comment reaches Claude.
 name: Claude Code
 
 on:
@@ -14,7 +29,9 @@ jobs:
       contains(github.event.comment.body || github.event.review.body, '@claude') &&
       !startsWith(github.event.comment.body || github.event.review.body, '@claude review') &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
-               github.event.comment.author_association || github.event.review.author_association)
+               github.event.comment.author_association || github.event.review.author_association) &&
+      (github.event_name == 'issue_comment' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     concurrency:
@@ -27,28 +44,14 @@ jobs:
       id-token: write
       actions: read # Required for Claude to read CI results on PRs
     steps:
-      # The action checks out a PR's head branch and gets a token that can push,
-      # so it must never run on a fork PR. Fork PRs get `@claude review` instead.
-      - name: Skip fork PRs
-        id: fork
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || '' }}
-        run: |
-          if [ -n "$PR" ]; then
-            fork=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json isCrossRepository --jq .isCrossRepository)
-            echo "fork PR: $fork"
-            echo "skip=$fork" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Checkout repository
-        if: steps.fork.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          # Full history, so a fork PR's head can be compared or rebased
+          # against origin/main.
+          fetch-depth: 0
 
       - name: Run Claude Code
-        if: steps.fork.outputs.skip != 'true'
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
@@ -56,8 +59,8 @@ jobs:
           # A branch for a new PR gets CLAUDE.md's Agent review first.
           claude_args: |
             --max-turns 40
-            --allowedTools "Agent,Task"
-            --append-system-prompt "When this run was triggered from an issue, so you are pushing the issue's new claude/issue-* branch that a pull request will be opened from, first do CLAUDE.md's Agent review. Here, call the Agent tool with model opus and run_in_background false, and report the review in your tracking comment, not a PR template. Runs on an existing pull request don't need it."
+            --allowedTools "Agent,Task,Bash,Edit,Write"
+            --append-system-prompt "Before you push a branch that a new pull request will be opened from (an issue's claude/issue-* branch, or a claude/* branch you create as described below), first do CLAUDE.md's Agent review. Here, call the Agent tool with model opus and run_in_background false, and report the review in your tracking comment, not a PR template. Pushing more commits to an existing same-repo pull request's branch doesn't need it. Fork pull requests: check with gh pr view NUMBER --json isCrossRepository. On a fork PR you are on a local branch pr-NUMBER at the PR's head commit, origin is this repository, and the contributor's fork can't be pushed to, so never push HEAD, pr-NUMBER or the PR's head branch name, whatever the default instructions say about pushing to origin HEAD. To patch a fork PR, either post a review with GitHub suggestion blocks (gh api repos/OWNER/REPO/pulls/NUMBER/reviews --input FILE.json), or open a superseding PR: create claude/pr-NUMBER-SHORT-NAME from pr-NUMBER so the contributor's commits and authorship stay intact, commit the fix on top, push that branch, open it against main with gh pr create, and link it from your tracking comment on the original PR. If it needs main, rebase onto origin/main; never merge main into it. To open an unrelated or replacement PR, branch claude/SHORT-NAME from origin/main. The Claude app has no workflows permission, so GitHub rejects a push whose new commits change .github/workflows, including the contributor's own commits; in that case use a suggestion review. The action replaces CLAUDE.md, .claude/ and other config paths in the working tree with main's copies and snapshots the PR's versions into .claude-pr/, so check git status and stage only the files you changed by name, never with git add -A or commit -a, and never stage CLAUDE.md, .claude/ or .claude-pr/ unless that change is the task. Bash is unrestricted, so build and test what you change, following CLAUDE.md's Build and test but only for what the change touches (pio run -d firmware -e ENV for the affected boards, never every env): the desktop's apt packages are in .github/actions/linux-desktop-deps, run rustup toolchain install in desktop/, install PlatformIO with pip install platformio==6.1.19 (the version .github/actions/setup-pio pins), and the simulator needs libsdl2-dev."
 
           # This is an optional setting that allows Claude to read CI results on PRs
           additional_permissions: |
@@ -70,4 +73,3 @@ jobs:
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
           # claude_args: '--allowed-tools Bash(gh pr *)'
-

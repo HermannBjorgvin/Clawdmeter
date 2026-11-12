@@ -357,13 +357,15 @@ class Engine:
     def event(self, kind="p"):
         """A hook event: p (prompt), s (stop) or b."""
         with self.lock:
+            # Like the app: an event goes out ahead of the poll, so its usage
+            # numbers are the last poll's and the write is marked rp:1.
             if self.es is None:          # the first sequence is a baseline
                 self.es = 9000
                 self.state.update(e=kind, es=self.es)
-                self._send()
+                self._send({"rp": 1})
             self.es += 1
             self.state.update(e=kind, es=self.es)
-            self._send()
+            self._send({"rp": 1})
             return {"es": self.es}
 
     def sessions(self, n=1):

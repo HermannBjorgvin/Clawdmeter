@@ -41,6 +41,7 @@ Stable.
 
 |                                                                                                        | Board                                                                                                           |                                                                                               |
 | :----------------------------------------------------------------------------------------------------: | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| <img src="desktop/crates/clawdmeter-app/assets/boards/waveshare_lcd_147.svg" height="90" alt=""> | [Waveshare ESP32-S3-Touch-LCD-1.47](https://www.waveshare.com/esp32-s3-touch-lcd-1.47.htm?&aff_id=149786) | 172×320 SPI TFT run as a 320×172 landscape strip. BOOT is the only button (PWR role); no HID buttons. |
 | <img src="desktop/crates/clawdmeter-app/assets/boards/waveshare_lcd_183.svg" height="90" alt=""> | [Waveshare ESP32-S3-Touch-LCD-1.83](https://www.waveshare.com/esp32-s3-touch-lcd-1.83.htm?&aff_id=149786) | 240×284 IPS SPI TFT, BOOT + PWR buttons, rounded watch-style case. |
 | <img src="desktop/crates/clawdmeter-app/assets/boards/esp32_s3_4848s040.svg" height="90" alt=""> | [Guition ESP32-S3-4848S040 (4-inch 480×480)](https://www.aliexpress.com/item/3256806115962222.html) | 480×480 ST7701S RGB panel, GT911 touch, no buttons. Pair from the computer. |
 | <img src="desktop/crates/clawdmeter-app/assets/boards/waveshare_amoled_143.svg" height="90" alt=""> | [Waveshare ESP32-S3-Touch-AMOLED-1.43](https://www.waveshare.com/esp32-s3-touch-amoled-1.43.htm?&aff_id=149786) | 466×466 round AMOLED. BOOT is the only button (push-to-talk); pair by touch hold. |
@@ -56,6 +57,7 @@ Stable.
 | <img src="desktop/crates/clawdmeter-app/assets/boards/freenove_s3_display_nontouch.svg" height="90" alt=""> | [Freenove ESP32-S3 Display 2.8 inch (non-touch, FNK0104A)](https://store.freenove.com/products/fnk0104) | 240×320 IPS, no touch. Minimal UI: meters and a still Clawd; BOOT: brightness, hold to pair. |
 | <img src="desktop/crates/clawdmeter-app/assets/boards/sensecap_indicator_d1l.svg" height="90" alt=""> | [Seeed Studio SenseCAP Indicator D1L](https://www.seeedstudio.com/SenseCAP-Indicator-D1L-p-5646.html) | 480×480 RGB touch screen. Side button: brightness / hold to pair; no HID buttons or sound. |
 | <img src="desktop/crates/clawdmeter-app/assets/boards/spotpear_s3_154.svg" height="90" alt=""> | [SpotPear ESP32-S3-LCD-1.54 MUMA (touch)](https://spotpear.com/shop/ESP32-S3-AI-1.54-inch-LCD-Display-TouchScreen-N16R8-muma-DeepSeek.html) | 240×240 ST7789 SPI LCD, CST816 touch, no PMU. BOOT is the only button. |
+| <img src="desktop/crates/clawdmeter-app/assets/boards/waveshare_lcd_21.svg" height="90" alt=""> | [Waveshare ESP32-S3-Touch-LCD-2.1](https://www.waveshare.com/esp32-s3-touch-lcd-2.1.htm?&aff_id=149786) | 480×480 round ST7701S RGB panel (flat 2.1 or curved-glass 2.1B), CST820 touch, battery gauge. BOOT is the only button; pair by touch hold. |
 
 ## Install
 
