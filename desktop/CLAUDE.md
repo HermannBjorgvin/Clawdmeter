@@ -240,7 +240,9 @@ Per account (`probe.rs`, `oauth.rs`):
   where installing it replaces the running copy, `AppPackage::for_install`:
   `.dmg` from `/Applications/Clawdmeter.app`, `.msi` from its install
   folder, `.deb` for a `/usr/bin/clawdmeter` that dpkg lists as its
-  package's, AppImage under `$APPIMAGE`), fetched in 2 MB range requests
+  package's, AppImage under `$APPIMAGE`; on x86_64 Linux the button is a
+  menu of the `.deb` and AppImage instead, `AppPackage::for_linux`, with the
+  detected one marked "This install"), fetched in 2 MB range requests
   that are asked for again from the byte reached when one fails or stalls
   (ureq has no idle timeout, only a cap per body), checks it against the
   release's `SHA256SUMS`, marks it as
@@ -254,8 +256,8 @@ Per account (`probe.rs`, `oauth.rs`):
   tag is published (the check stores that tag), and with `update_check` off
   nothing is announced. Off screen the page re-reads the status and config
   every 5 s, not every tick. The demo's `--app-update`
-  shows each download state with made-up notes; clicking Download there
-  fetches for real.
+  shows each download state with made-up notes (`linux`, `linux-menu`: the
+  Linux menu closed or open); clicking Download there fetches for real.
 - The wizard reuses the flasher (`FlashMode::Setup`: no step header,
   up-to-date boards can skip) and the Hooks page
   (`SettingsView::show(Page::Hooks, embedded)`). First run = no

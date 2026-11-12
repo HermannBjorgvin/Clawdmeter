@@ -570,6 +570,24 @@ impl AppPackage {
         Self::for_install(std::env::consts::OS, std::env::consts::ARCH, appimage, deb, &exe)
     }
 
+    /// The Linux packages a release publishes for `arch`, for the user to
+    /// pick from: the `.deb` and the AppImage on x86_64, none elsewhere.
+    pub fn for_linux(arch: &str) -> &'static [Self] {
+        match arch {
+            "x86_64" => &[AppPackage::Deb, AppPackage::AppImage],
+            _ => &[],
+        }
+    }
+
+    /// [`AppPackage::for_linux`] for the running process: none off Linux.
+    pub fn linux_choices() -> &'static [Self] {
+        if cfg!(target_os = "linux") {
+            Self::for_linux(std::env::consts::ARCH)
+        } else {
+            &[]
+        }
+    }
+
     /// The asset's file name in the release tagged `tag` (`v2.5.0`).
     pub fn asset(self, tag: &str) -> String {
         match self {
@@ -906,6 +924,8 @@ mod tests {
         assert_eq!(AppPackage::for_install("linux", "x86_64", false, true, home), None, "a local build beside the deb");
         assert_eq!(AppPackage::for_install("linux", "x86_64", false, false, home), None, "tarball, Nix or local build");
         assert_eq!(AppPackage::for_install("linux", "aarch64", true, true, exe), None);
+        assert_eq!(AppPackage::for_linux("x86_64"), [AppPackage::Deb, AppPackage::AppImage]);
+        assert!(AppPackage::for_linux("aarch64").is_empty(), "no Linux packages for arm");
 
         let dir = std::env::temp_dir().join(format!("clawdmeter-dpkg-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();

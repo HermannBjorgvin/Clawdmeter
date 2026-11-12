@@ -509,4 +509,51 @@ mod tests {
         update.read_with(cx, |u, _| assert_eq!((u.available(), u.announced()), (None, None)));
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[gpui::test]
+    fn linux_picks_a_package_from_a_menu(cx: &mut TestAppContext) {
+        use clawdmeter_flash::release::{AppPackage, ReleaseNotes};
+        let root = std::env::temp_dir().join(format!("cm-app-linux-menu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths::under(&root);
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let snap = ipc::StatusSnapshot {
+            updated_at: clawdmeter_core::unix_now(),
+            latest_firmware: Some("v999.0.0".into()),
+            ..Default::default()
+        };
+        ipc::write_status(&paths, &snap).unwrap();
+        let p = paths.clone();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));
+            let settings = cx.new(|cx| SettingsView::with_usb(p.clone(), Page::Device, false, cx));
+            let flasher = cx.new(|cx| FlasherView::with_hardware(p.clone(), None, Arc::new(FakeBoard::default()), cx));
+            AppView::build(p, Page::Overview, overview, settings, flasher, window, cx)
+        });
+        let update = view.read_with(cx, |v, _| v.update_view().clone());
+        update.update(cx, |u, _| {
+            u.offer(true);
+            u.set_choices(AppPackage::for_linux("x86_64"), Some(AppPackage::Deb), false);
+            let notes = ReleaseNotes { tag: "v999.0.0".into(), published: String::new(), body: String::new() };
+            u.show_notes("v999.0.0", vec![notes]);
+        });
+        cx.executor().advance_clock(REFRESH * 2);
+        click(cx, "app-update");
+        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Update));
+
+        click(cx, "update-download");
+        update.read_with(cx, |u, _| assert!(u.menu_open()));
+        assert!(cx.debug_bounds("update-menu-deb").is_some());
+        assert!(cx.debug_bounds("update-menu-appimage").is_some());
+        // A click anywhere else closes it, and goes no further.
+        click(cx, "update-menu-backdrop");
+        update.read_with(cx, |u, _| assert!(!u.menu_open()));
+        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Update));
+
+        click(cx, "update-download");
+        update.read_with(cx, |u, _| assert!(u.menu_open()));
+        cx.simulate_keystrokes("escape");
+        update.read_with(cx, |u, _| assert!(!u.menu_open(), "Escape closes it"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -36,6 +36,33 @@ pub fn button(
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    button_with(t, id, None, label, kind, enabled, on_click)
+}
+
+/// A [`button`] that opens a menu: an icon before the label (`lead`, if
+/// any) and a chevron after it.
+pub fn menu_button(
+    t: &Theme,
+    id: impl Into<ElementId>,
+    lead: Option<&str>,
+    label: impl Into<SharedString>,
+    kind: ButtonKind,
+    enabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    button_with(t, id, Some(lead), label, kind, enabled, on_click)
+}
+
+/// [`button`], or with `menu` a [`menu_button`] with that leading icon.
+fn button_with(
+    t: &Theme,
+    id: impl Into<ElementId>,
+    menu: Option<Option<&str>>,
+    label: impl Into<SharedString>,
+    kind: ButtonKind,
+    enabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
     let (bg, fg, border) = match (kind, enabled) {
         (_, false) => (t.panel, t.mute, t.panel),
         (ButtonKind::Primary, true) => (t.accent, t.accent_ink, t.accent),
@@ -64,7 +91,9 @@ pub fn button(
         .text_color(fg)
         .text_size(px(size))
         .whitespace_nowrap()
-        .child(label.into());
+        .when_some(menu.flatten(), |el, lead| el.child(icon(lead, 18., fg).ml(px(-2.)).mr(px(7.))))
+        .child(label.into())
+        .when(menu.is_some(), |el| el.child(icon("chevron-down", 15., fg).ml(px(6.)).mr(px(-4.))));
     if enabled {
         let handler: Handler = Box::new(on_click);
         el.cursor_pointer().hover(move |s| s.bg(hover_bg)).on_click(move |e, w, cx| handler(e, w, cx))
