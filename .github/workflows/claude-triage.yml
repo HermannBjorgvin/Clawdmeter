@@ -70,9 +70,18 @@ jobs:
           cat > "$TOOLS/comment.sh" <<EOF
           #!/usr/bin/env bash
           # Posts the one triage comment on $KIND #$NUMBER, listing related items.
-          # Usage: comment.sh "#123 Title: why it's related" ...   (1 to 5 items)
+          # Usage: comment.sh [--duplicate "#123 comparison..."] "#123 Title: why it's related" ...
+          # 1 to 5 items. --duplicate (pull requests only) adds one paragraph comparing
+          # this PR with an open PR that does the same thing.
           set -euo pipefail
-          [ \$# -ge 1 ] && [ \$# -le 5 ] || { echo "usage: comment.sh ITEM... (1 to 5)" >&2; exit 2; }
+          dup=
+          if [ "\${1:-}" = --duplicate ]; then
+            [ "$KIND" = pr ] || { echo "--duplicate is only for pull requests" >&2; exit 2; }
+            dup=\${2:-}
+            [[ "\$dup" =~ ^#[0-9]+\ [^[:cntrl:]]{1,1500}\$ ]] || { echo "bad --duplicate text" >&2; exit 2; }
+            shift 2
+          fi
+          [ \$# -ge 1 ] && [ \$# -le 5 ] || { echo "usage: comment.sh [--duplicate TEXT] ITEM... (1 to 5)" >&2; exit 2; }
           for i in "\$@"; do
             [[ "\$i" =~ ^#[0-9]+\ [^[:cntrl:]]{1,200}\$ ]] || { echo "bad item: \$i" >&2; exit 2; }
           done
@@ -80,7 +89,11 @@ jobs:
                 --jq '[.[] | select(.user.login == "github-actions[bot]")] | length')
           [ "\$n" -eq 0 ] || { echo "already commented" >&2; exit 1; }
           body="Thanks for opening this $NOUN.
-
+          "
+          [ -z "\$dup" ] || body+="
+          **Possible duplicate:** \$dup
+          "
+          body+="
           Here are some possibly related discussions, issues, or pull requests:
           "
           for i in "\$@"; do body+="
@@ -117,10 +130,17 @@ jobs:
             first, each one line like "#204 Extra pages and features: where requests for new
             device pages are being discussed". The script writes the greeting and bullet list.
             Post no comment when nothing is clearly related.
-            Never close anything, never edit the author's text, never review code.
+            If this is a pull request and an open pull request makes the same fix or feature,
+            compare the two with `gh pr diff --name-only` and `gh pr diff`, and pass
+            `--duplicate "#N ..."` before the items: one paragraph naming which of the two to
+            keep and the concrete reason (scope, correctness, tests, completeness), and what,
+            if anything, is worth porting from the other. If a diff was too long to read in
+            full, say so in that paragraph. List that pull request among the items as well.
+            Never close anything, never edit the author's text, and outside that comparison
+            never review code.
           claude_args: |
             --model sonnet
             --effort medium
             --max-turns 20
-            --allowedTools "Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh label list:*),Bash(gh search:*),Bash(${{ runner.temp }}/triage/label.sh:*),Bash(${{ runner.temp }}/triage/comment.sh:*),Bash(${{ runner.temp }}/triage/discussions.sh)"
+            --allowedTools "Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(gh label list:*),Bash(gh search:*),Bash(${{ runner.temp }}/triage/label.sh:*),Bash(${{ runner.temp }}/triage/comment.sh:*),Bash(${{ runner.temp }}/triage/discussions.sh)"
             --disallowedTools "WebFetch,WebSearch,Write,Edit,MultiEdit,NotebookEdit"

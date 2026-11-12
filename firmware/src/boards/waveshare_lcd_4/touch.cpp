@@ -2,7 +2,7 @@
 #include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
-#include <TouchDrvGT911.hpp>
+#include <TouchDrvGoodix.hpp>
 
 // GT911 via SensorLib. Address is latched from INT at reset — probe 0x5D
 // then fall back to 0x14. Polled (no IRQ): Waveshare's INT pin is GPIO 16,
@@ -21,7 +21,9 @@ void touch_hal_init(void) {
     if (Wire.endTransmission() == 0) gt_addr = 0x5D;
 
     touch.setPins(-1, -1);
-    if (!touch.begin(Wire, gt_addr, IIC_SDA, IIC_SCL)) {
+    // No pins: board_init() already started Wire, and SensorLib would
+    // call Wire.setPins() on the running bus (an [E] log line).
+    if (!touch.begin(Wire, gt_addr)) {
         Serial.printf("Touch GT911 init failed (tried 0x%02X)\n", gt_addr);
         return;
     }
@@ -34,12 +36,11 @@ void touch_hal_init(void) {
 
 void touch_hal_read(uint16_t* x, uint16_t* y, bool* pressed) {
     if (touch_ok) {
-        int16_t tx[5], ty[5];
-        uint8_t n = touch.getPoint(tx, ty, touch.getSupportTouchPoint());
-        if (n > 0) {
+        const TouchPoints &pts = touch.getTouchPoints();
+        if (pts.hasPoints()) {
             touch_pressed = true;
             // Panel → logical: inverse of display.cpp's LCD_ROTATION remap.
-            const int16_t px = tx[0], py = ty[0];
+            const int16_t px = pts.getPoint(0).x, py = pts.getPoint(0).y;
             switch (LCD_ROTATION) {
             case 1:  touch_x = py;                  touch_y = LCD_WIDTH - 1 - px;  break;
             case 2:  touch_x = LCD_WIDTH - 1 - px;  touch_y = LCD_HEIGHT - 1 - py; break;

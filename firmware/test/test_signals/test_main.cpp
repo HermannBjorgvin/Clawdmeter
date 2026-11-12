@@ -46,16 +46,23 @@ static void test_first_seq_is_baseline_then_fires_once(void) {
     TEST_ASSERT_FALSE(signals_ingest_at(&d, 3000).event_fired);
 }
 
-static void test_replay_never_fires(void) {
-    UsageData d = parse("{\"s\":1,\"e\":\"p\",\"es\":1}");
+// The app sends a new hook event in an `rp:1` write (the usage numbers are
+// the last poll's) before the poll lands. That write must fire, and the poll
+// carrying the same `es` must not fire it again.
+static void test_event_in_replay_fires_once(void) {
+    UsageData d = parse("{\"s\":1,\"e\":\"s\",\"es\":1,\"ok\":true}");
     signals_ingest_at(&d, 1000);
-    d = parse("{\"s\":1,\"e\":\"b\",\"es\":2,\"rp\":1}");
+    d = parse("{\"s\":1,\"e\":\"p\",\"es\":2,\"rp\":1,\"ok\":true}");
     SignalsUpdate u = signals_ingest_at(&d, 2000);
     TEST_ASSERT_TRUE(u.replay);
-    TEST_ASSERT_FALSE(u.event_fired);
-    // ...and the replayed seq is consumed, so the live copy doesn't fire late.
-    d = parse("{\"s\":1,\"e\":\"b\",\"es\":2}");
+    TEST_ASSERT_TRUE(u.event_fired);
+    TEST_ASSERT_EQUAL_CHAR('p', u.event);
+    TEST_ASSERT_EQUAL_UINT32(2, u.event_seq);
+    d = parse("{\"s\":2,\"e\":\"p\",\"es\":2,\"ok\":true}");
     TEST_ASSERT_FALSE(signals_ingest_at(&d, 3000).event_fired);
+    // A heartbeat replaying the same event doesn't fire it again either.
+    d = parse("{\"s\":2,\"e\":\"p\",\"es\":2,\"rp\":1,\"ok\":true}");
+    TEST_ASSERT_FALSE(signals_ingest_at(&d, 4000).event_fired);
 }
 
 static void test_seq_restart_still_fires(void) {
@@ -105,6 +112,38 @@ static void test_no_data_beat_is_not_a_sample(void) {
     TEST_ASSERT_EQUAL_INT(RATE_IDLE, usage_rate_base_group_at(3000 + 15 * MIN));
 }
 
+// The main meter changing what it measures is not a reset: a weekly-only
+// account read once as "pro" (0 %, the app couldn't tell after a restart),
+// then as "week" again, then an account verified mid-session.
+static void test_meter_kind_change_is_not_a_reset(void) {
+    UsageData week = parse("{\"s\":0,\"sr\":-1,\"w\":48,\"wr\":7900,\"acct\":\"week\",\"ok\":true}");
+    UsageData pro0 = parse("{\"s\":0,\"sr\":-1,\"w\":48,\"wr\":7900,\"acct\":\"pro\",\"ok\":true}");
+    UsageData pro70 = parse("{\"s\":70,\"sr\":90,\"w\":48,\"wr\":7900,\"acct\":\"pro\",\"ok\":true}");
+    SignalsUpdate u = signals_ingest_at(&week, 1 * MIN);
+    TEST_ASSERT_FALSE(u.session_reset);
+    TEST_ASSERT_FALSE(u.meter_kind_changed);                                // first sight
+    u = signals_ingest_at(&pro0, 20 * MIN);                                 // 48 -> 0
+    TEST_ASSERT_FALSE(u.session_reset);
+    TEST_ASSERT_TRUE(u.meter_kind_changed);
+    TEST_ASSERT_FALSE(signals_ingest_at(&week, 40 * MIN).session_reset);    // back
+    TEST_ASSERT_FALSE(signals_ingest_at(&pro70, 60 * MIN).session_reset);
+    TEST_ASSERT_FALSE(signals_ingest_at(&week, 80 * MIN).session_reset);    // verified: 70 -> 48
+    // A real weekly reset of the same kind still fires.
+    UsageData fresh = parse("{\"s\":0,\"sr\":-1,\"w\":0,\"wr\":10080,\"acct\":\"week\",\"ok\":true}");
+    u = signals_ingest_at(&fresh, 100 * MIN);
+    TEST_ASSERT_TRUE(u.session_reset);
+    TEST_ASSERT_FALSE(u.meter_kind_changed);
+    // A replay of another kind doesn't count as a sample of that kind.
+    UsageData rp = parse("{\"s\":70,\"sr\":90,\"acct\":\"pro\",\"rp\":1,\"ok\":true}");
+    u = signals_ingest_at(&rp, 101 * MIN);
+    TEST_ASSERT_FALSE(u.session_reset);
+    TEST_ASSERT_FALSE(u.meter_kind_changed);
+    UsageData later = parse("{\"s\":0,\"sr\":-1,\"w\":1,\"wr\":10000,\"acct\":\"week\",\"ok\":true}");
+    u = signals_ingest_at(&later, 120 * MIN);
+    TEST_ASSERT_FALSE(u.session_reset);
+    TEST_ASSERT_FALSE(u.meter_kind_changed);
+}
+
 static void test_sessions_change(void) {
     UsageData d = parse("{\"n\":2}");
     TEST_ASSERT_TRUE(signals_ingest_at(&d, 1000).sessions_changed);
@@ -119,12 +158,13 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_old_daemon_payload_fires_nothing);
     RUN_TEST(test_first_seq_is_baseline_then_fires_once);
-    RUN_TEST(test_replay_never_fires);
+    RUN_TEST(test_event_in_replay_fires_once);
     RUN_TEST(test_seq_restart_still_fires);
     RUN_TEST(test_activity_lift_in_group);
     RUN_TEST(test_replay_skips_rate_but_keeps_activity);
     RUN_TEST(test_session_reset_through_signals);
     RUN_TEST(test_no_data_beat_is_not_a_sample);
     RUN_TEST(test_sessions_change);
+    RUN_TEST(test_meter_kind_change_is_not_a_reset);
     return UNITY_END();
 }

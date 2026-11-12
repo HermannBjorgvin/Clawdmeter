@@ -34,6 +34,11 @@ void usage_rate_clear(void) {
     act_ms = 0;
 }
 
+void usage_rate_restart(void) {
+    count = 0;
+    head  = 0;
+}
+
 bool usage_rate_sample_at(uint32_t now_ms, float session_pct, bool replay) {
     if (replay) return false;
 

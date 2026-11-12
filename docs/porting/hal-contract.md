@@ -115,4 +115,4 @@ Clawd's full-size performances use a 60×60-cell coordinate system, with cell si
 `min(width, height) / 60`. Corner Clawd has a separate seat and scale.
 Check meters, spend-only accounts, pairing, stale data, attention, the
 face, and minimal display on the new panel. Use `perf` to inspect redraw
-costs and [the simulator guide](../../SIM-USAGE.md) for scripted captures.
+costs and [the simulator guide](../simulator.md) for scripted captures.

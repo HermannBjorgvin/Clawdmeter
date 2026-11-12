@@ -78,7 +78,7 @@ python3 tools/simgrid/simgrid.py serve            # opens http://127.0.0.1:8765/
 ```
 
 The sidebar has every action: play/pause and step the clock, usage presets
-and sliders, stale data, the 12-hour clock, activity, hook events, alerts,
+and sliders, stale data, the 12-hour clock, the pace marker, activity, hook events, alerts,
 Clawd beats, liveliness, the BLE link, battery, serial commands, scenarios
 (`firmware/sim/*.jsonl`), screenshots and recordings of the grid or one
 board. Click a panel to touch it (hold for a long touch); right-click it for

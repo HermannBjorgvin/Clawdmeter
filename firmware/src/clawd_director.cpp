@@ -302,10 +302,13 @@ static void indev_cb(lv_event_t* e) {
 
 void director_on_payload(const UsageData* d, const SignalsUpdate* sig) {
     if (!d->valid || !d->ok) return;
-    window_not_started = !d->enterprise && d->session_reset_mins < 0;
+    // Spend-capped and no-5-hour-limit accounts have no window to start.
+    window_not_started = !d->enterprise && !d->weekly_only && d->session_reset_mins < 0;
 
-    // The slow clock moving counts as you being around.
+    // The slow clock moving counts as you being around. A change of what the
+    // meter measures (session, week, spend) is not a rise.
     if (!sig->replay) {
+        if (sig->meter_kind_changed) have_pct = false;
         if (have_pct && d->session_pct > last_pct + 0.01f) {
             engage();
             if (beat == B_SCREENSAVER) to_meters(true);

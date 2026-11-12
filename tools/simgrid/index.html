@@ -48,7 +48,7 @@
   <div class="row" id="presets"></div>
   <div class="row"><label>Session</label><input type="range" id="s" min="0" max="100" value="42"><span id="sv">42</span></div>
   <div class="row"><label>Weekly</label><input type="range" id="w" min="0" max="100" value="33"><span id="wv">33</span></div>
-  <div class="row"><button id="stale">Stop heartbeat (stale)</button><button id="clock12">12-hour clock</button></div>
+  <div class="row"><button id="stale">Stop heartbeat (stale)</button><button id="clock12">12-hour clock</button><button id="pm">Pace marker</button></div>
 
   <h2>Hooks and attention</h2>
   <div class="row"><label>Activity</label><button data-act="0">0</button><button data-act="1">1</button><button data-act="2">2</button><button data-act="3">3</button></div>
@@ -171,6 +171,7 @@ function refresh(st) {
   $('link').classList.toggle('on', st.link);
   $('stale').classList.toggle('on', !st.heartbeat);
   $('clock12').classList.toggle('on', st.payload.tf === 12);
+  $('pm').classList.toggle('on', st.payload.pm === 1);
   $('chg').classList.toggle('on', st.battery[1]);
   $('usb').classList.toggle('on', st.battery[2]);
   $('rec').textContent = st.recording ? 'Stop recording' : 'Record';
@@ -212,6 +213,7 @@ for (const id of ['s', 'w']) {
 }
 $('stale').onclick = () => api('stale', { on: status.heartbeat });
 $('clock12').onclick = () => api('clock', { fmt: status.payload.tf === 12 ? 24 : 12 });
+$('pm').onclick = () => api('pace_marker', { on: status.payload.pm !== 1 });
 for (const b of document.querySelectorAll('[data-act]')) b.onclick = () => api('activity', { level: +b.dataset.act });
 for (const b of document.querySelectorAll('[data-ev]')) b.onclick = () => api('event', { kind: b.dataset.ev });
 $('alert').onclick = () => api('alert', { message: $('msg').value });

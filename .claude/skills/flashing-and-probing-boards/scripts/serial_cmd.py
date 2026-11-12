@@ -11,8 +11,7 @@ Examples:
 The port defaults to the only /dev/ttyACM* (Linux) or /dev/cu.usbmodem*
 (macOS) present. Output is every line the board prints until it has been
 quiet for --quiet-ms (log lines from the firmware loop can be interleaved
-with the reply). Opens the port the same way screenshot.sh does, which does
-not reset the board. Needs pyserial: PlatformIO's Python has it
+with the reply). Opening the port doesn't reset the board. Needs pyserial: PlatformIO's Python has it
 (~/.platformio/penv/bin/python).
 """
 
@@ -53,7 +52,7 @@ def main():
     port_path = args.port or default_port()
     cmd = " ".join(args.command)
     if cmd == "screenshot":
-        sys.exit("use ./screenshot.sh for screenshots (binary framebuffer dump)")
+        sys.exit("screenshot is a binary framebuffer dump: use the capturing-device-screenshots skill")
 
     try:
         port = serial.Serial(port_path, BAUD, timeout=0.05)

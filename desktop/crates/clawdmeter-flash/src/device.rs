@@ -211,7 +211,8 @@ pub fn parse_info_output(text: &str) -> Option<FirmwareInfo> {
 
 /// Probe 1: send `info\n` to running firmware and wait for the JSON reply.
 /// Opening the port doesn't reset the S3/C6 USB-Serial-JTAG (DTR/RTS are
-/// left as the OS sets them, like `screenshot.sh`).
+/// left as the OS sets them, like the serial scripts in the
+/// `flashing-and-probing-boards` skill).
 pub fn probe_info(port: &str, timeout: Duration) -> Result<Option<FirmwareInfo>, DeviceError> {
     let mut sp = serialport::new(port, 115_200)
         .timeout(Duration::from_millis(100))

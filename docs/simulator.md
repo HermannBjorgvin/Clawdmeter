@@ -5,6 +5,16 @@ Bluetooth input and audio. It exercises the meters, Clawd's director,
 touch input, idle behavior, payload parsing, and usage-rate logic without
 a board. The default window is 480×480.
 
+## Contents
+
+- Build and run
+- Controls
+- Scenarios
+- Director walkthrough
+- Scripted input and screenshots
+- Every panel at once
+- Other display sizes
+
 ## Build and run
 
 Install SDL2 development files (`sudo apt install libsdl2-dev` on Debian
@@ -56,7 +66,7 @@ through the same parser and signal handling as hardware. `a` is activity
 the event sequence; `n` is the active-session count. The first `es` sets a
 baseline. Each later change fires an event, including a change when the
 scenario loops. `rp:1` marks a replay and excludes it from usage-rate math.
-See the [payload reference](docs/protocol.md) for usage fields.
+See the [payload reference](protocol.md) for usage fields.
 
 ## Director walkthrough
 
@@ -83,7 +93,7 @@ SIM_FAST=1 SIM_SCENARIO=sim/director-resume.jsonl \
 ```
 
 Character rules and expected transitions are in
-[clawd-director.md](docs/clawd-director.md).
+[clawd-director.md](clawd-director.md).
 
 ## Scripted input and screenshots
 
@@ -106,7 +116,7 @@ SDL_VIDEODRIVER=dummy SIM_FAST=1 SIM_SCENARIO=sim/director.jsonl \
 | --- | --- |
 | `SIM_SHOTS` | `ms:path,ms:path`; ascending times, exit after the last shot. |
 | `SIM_TAPS` | `ms@x,y;ms@x,y`; a 120 ms press at each time. |
-| `SIM_CMDS` | `ms:command;ms:command`; serial commands, including `clawd peek <x>`, `liveliness <1-5>` and `attention_anim <seconds>`. `pwr`, `prompt`, `stop`, `alert`, and `link` inject their corresponding input. |
+| `SIM_CMDS` | `ms:command;ms:command`; serial commands, including `clawd peek <x>`, `liveliness <1-5>`, `attention_anim <seconds>` and `pace_marker <0|1>`. `pwr`, `prompt`, `stop`, `alert`, and `link` inject their corresponding input. |
 | `SIM_MINIMAL=1` | Set the simulator's `BoardCaps.minimal_ui` at startup to preview a minimal-display board. |
 | `SIM_BUTTONS=1` | Play a board with BOOT only (`BoardCaps.button_count = 1`); `N` does nothing. |
 | `SIM_CIRCLE=1` | Set `BoardCaps.round_panel` to preview a round panel; the corners outside the circle are drawn as a grey bezel. |
@@ -125,7 +135,7 @@ pixels per frame are useful for comparing rendering work.
 
 `tools/simgrid/` runs one simulator per supported panel on a shared virtual
 clock, with a web GUI, a command line and a headless script runner: see
-[docs/sim-grid.md](docs/sim-grid.md). It drives each sim through controller
+[sim-grid.md](sim-grid.md). It drives each sim through controller
 mode (`SIM_CTRL_FD`, `firmware/src/boards/sim/sim_ctrl.cpp`), where time
 moves only on the host's `advance` and inputs come from the host.
 

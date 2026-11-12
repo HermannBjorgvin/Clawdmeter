@@ -16,6 +16,13 @@ Environments are listed in `firmware/platformio.ini`. macOS ports use
 `/dev/cu.usbmodem*`; Windows ports use `COMn`. A bare `pio run -d firmware`
 builds the default hardware environments and simulator.
 
+If a build fails on a framework header that exists, such as
+`SD.cpp: fatal error: ff.h`, an env with `lib_ignore` has left the shared
+framework package edited (a metadata scan, which the VS Code extension runs
+whenever it loads such an env, applies the edit without undoing it). Run
+`python3 tools/ci/restore_pio_build_scripts.py` before building the failing
+env; the next scan of a `lib_ignore` env edits it again.
+
 The desktop app uses Rust 1.90 or newer. Install the Linux packages listed
 in [the build dependency action](../.github/actions/linux-desktop-deps/action.yml), then:
 
@@ -31,7 +38,7 @@ the tray, GPUI window, and hook integration (`clawdmeter-app`).
 
 ## Simulator and releases
 
-Use the [firmware simulator](../SIM-USAGE.md) to review layouts and Clawd's
+Use the [firmware simulator](simulator.md) to review layouts and Clawd's
 behavior without hardware. See [font generation](fonts.md) for font builds.
 Desktop reference images are in
 [desktop/docs/screenshots](../desktop/docs/screenshots/).

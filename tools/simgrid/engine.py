@@ -314,7 +314,7 @@ class Engine:
         with self.lock:
             once = {k: fields.pop(k) for k in ONE_SHOT if k in fields}
             if replace:
-                self.state = {k: v for k, v in self.state.items() if k in ("lv", "tf")}
+                self.state = {k: v for k, v in self.state.items() if k in ("lv", "tf", "pm")}
             self.state.update(fields)
             self._send(once)
             return {"payload": self.state}
@@ -324,7 +324,7 @@ class Engine:
         if name not in PRESETS:
             raise ValueError(f"presets: {', '.join(PRESETS)}")
         with self.lock:
-            keep = {k: self.state[k] for k in ("lv", "tf", "a", "e", "es", "n") if k in self.state}
+            keep = {k: self.state[k] for k in ("lv", "tf", "pm", "a", "e", "es", "n") if k in self.state}
             self.state = dict(PRESETS[name], **keep)
             self._send({"c": True} if name == "fresh" else None)
             return {"payload": self.state}
@@ -357,13 +357,15 @@ class Engine:
     def event(self, kind="p"):
         """A hook event: p (prompt), s (stop) or b."""
         with self.lock:
+            # Like the app: an event goes out ahead of the poll, so its usage
+            # numbers are the last poll's and the write is marked rp:1.
             if self.es is None:          # the first sequence is a baseline
                 self.es = 9000
                 self.state.update(e=kind, es=self.es)
-                self._send()
+                self._send({"rp": 1})
             self.es += 1
             self.state.update(e=kind, es=self.es)
-            self._send()
+            self._send({"rp": 1})
             return {"es": self.es}
 
     def sessions(self, n=1):
@@ -373,6 +375,10 @@ class Engine:
     def liveliness(self, level=3):
         """Clawd's liveliness 1-5 (lv)."""
         return self.payload(lv=int(level))
+
+    def pace_marker(self, on=True):
+        """The pace marker on the usage bars (pm)."""
+        return self.payload(pm=int(bool(on)))
 
     def clock(self, fmt=24):
         """Clock format, 12 or 24 (tf)."""
@@ -425,7 +431,7 @@ class Engine:
         self.scene = i
         d = copy.deepcopy(d)
         once = {k: d.pop(k) for k in ONE_SHOT if k in d}
-        keep = {k: self.state[k] for k in ("lv", "tf", "a", "e", "es", "n") if k in self.state}
+        keep = {k: self.state[k] for k in ("lv", "tf", "pm", "a", "e", "es", "n") if k in self.state}
         self.state = dict(d, **{k: v for k, v in keep.items() if k not in d})
         self._send(once)
         if self.scene_playing:
@@ -631,7 +637,7 @@ class Engine:
 
 # Actions callable by name from the CLI, scripts and the web GUI.
 ACTIONS = ("step", "payload", "preset", "stale", "alert", "clear", "activity", "event",
-           "sessions", "liveliness", "clock", "link", "battery", "scenario", "scenario_play",
+           "sessions", "liveliness", "pace_marker", "clock", "link", "battery", "scenario", "scenario_play",
            "scenario_pause", "scenario_step", "beat", "serial", "touch", "tap", "button",
            "press", "shot", "record", "record_stop", "status")
 

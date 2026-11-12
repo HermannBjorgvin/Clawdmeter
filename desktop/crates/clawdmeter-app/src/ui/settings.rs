@@ -8,26 +8,39 @@
 //! re-reads the file every few seconds.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use clawdmeter_core::autostart::{self, LaunchMode};
-use clawdmeter_core::config::{AlertOn, AttentionAnim, ClockMode, ConfigFile, LIVELINESS_MAX};
+use clawdmeter_core::buttons::{KeyChord, LabelStyle, MediaKey, Unmappable, MOD_ALT, MOD_CTRL, MOD_GUI, MOD_SHIFT};
+use clawdmeter_core::config::{
+    parse_rgb, AlertOn, AttentionAnim, Button, ButtonAction, ClockMode, ColorToken, ConfigFile, DeviceTheme, Palette,
+    LIVELINESS_MAX,
+};
+use clawdmeter_core::platform::{Appearance, AppearanceWatch};
+use clawdmeter_core::themes::{FollowTheme, FOLLOWING, PRESETS};
 use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::device::{self, FirmwareInfo};
-use gpui::{div, img, prelude::*, px, Context, EventEmitter, PathPromptOptions, SharedString, Window};
+use gpui::{
+    canvas, div, img, point, prelude::*, px, relative, rgb, Bounds, Context, Entity, EventEmitter, FocusHandle,
+    KeyDownEvent, Modifiers, ModifiersChangedEvent, PathBuilder, PathPromptOptions, Pixels, SharedString, Window,
+};
 
-use super::theme::{Theme, FONT_DISPLAY, FONT_MONO, R_M, R_S};
+use super::theme::{Theme, FONT_DISPLAY, FONT_MONO, R_ITEM, R_M, R_S};
+use super::update::UpdateView;
 use super::widgets::{
     button, caption, card, checkbox, field, field_stacked, heading, icon, notice, para, pill, segmented,
-    stepped_slider, subheading, toggle, ButtonKind, Tone,
+    stepped_slider, subheading, toggle, update_pill, ButtonKind, Tone,
 };
 use super::{command, live_status, not_running_text, run_blocking, Navigate, REFRESH};
+use crate::boards::{self, BoardInfo};
 use crate::diff::{line_diff, with_context, DiffLine};
 use crate::errors;
 use crate::hooks::install::{self as hooks, HookPlan, HookStatus, HOOKS};
 use crate::ipc::{self, AppCommand, FirmwareRecord, StatusSnapshot};
 use crate::tilde;
-use crate::{boards, Page};
+use crate::Page;
 
 struct HookRow {
     dir: PathBuf,
@@ -103,15 +116,51 @@ pub struct SettingsView {
     notice: Option<(Tone, String)>,
     /// The Settings page's Advanced section is open.
     advanced: bool,
+    /// The Device page's colour being picked (its swatch grid is open).
+    color_pick: Option<ColorToken>,
+    /// The picked colour's hex field: focus, what has been typed so far, and
+    /// whether it had focus at the last render.
+    hex_focus: FocusHandle,
+    hex_draft: String,
+    hex_focused: bool,
+    /// The Device page's button whose editor is open under its keycap.
+    button_open: Option<Button>,
+    /// Its shortcut recorder: the button listening for a key, the focus it
+    /// listens with (and whether it had it at the last render), the
+    /// modifiers held meanwhile, and why the last key couldn't be used.
+    recording: Option<Button>,
+    record_focus: FocusHandle,
+    record_focused: bool,
+    record_mods: Modifiers,
+    record_error: Option<(Button, String)>,
+    /// The OS's light/dark mode, for the first Custom's preview and colours
+    /// while System or Solarized is chosen. Watched only while the Device page shows, and
+    /// never in tests (`follow_os`), where it stays Dark.
+    appearance: Appearance,
+    appearance_watch: Option<AppearanceWatch>,
+    follow_os: bool,
     ticks: u32,
+    /// The Update page's view: a newer app release shows as a pill beside
+    /// the Settings heading.
+    update: Option<Entity<UpdateView>>,
 }
 
 impl EventEmitter<Navigate> for SettingsView {}
 
 impl SettingsView {
+    /// Follow the Update page's view, for the pill beside the Settings
+    /// heading.
+    pub fn follow_update(&mut self, update: Entity<UpdateView>, cx: &mut Context<Self>) {
+        cx.observe(&update, |_, _, cx| cx.notify()).detach();
+        self.update = Some(update);
+    }
+
     /// Build and load the config. USB is probed while the Device page is up.
     pub fn new(paths: Paths, page: Page, cx: &mut Context<Self>) -> Self {
-        Self::with_usb(paths, page, true, cx)
+        let mut v = Self::with_usb(paths, page, true, cx);
+        v.follow_os = true;
+        v.sync_appearance();
+        v
     }
 
     /// [`SettingsView::new`]; `usb: false` never touches serial ports (tests).
@@ -146,7 +195,21 @@ impl SettingsView {
             legacy: None,
             notice: None,
             advanced: false,
+            color_pick: None,
+            hex_focus: cx.focus_handle(),
+            hex_draft: String::new(),
+            hex_focused: false,
+            button_open: None,
+            recording: None,
+            record_focus: cx.focus_handle(),
+            record_focused: false,
+            record_mods: Modifiers::default(),
+            record_error: None,
+            appearance: Appearance::default(),
+            appearance_watch: None,
+            follow_os: false,
             ticks: 0,
+            update: None,
         };
         v.reload();
         v.show(page, false, cx);
@@ -156,11 +219,15 @@ impl SettingsView {
     /// Put `page` on screen (`embedded`: inside the setup wizard). Other
     /// pages hide this view.
     pub fn show(&mut self, page: Page, embedded: bool, cx: &mut Context<Self>) {
+        self.stop_recording();
+        self.button_open = None;
         self.visible = matches!(page, Page::Device | Page::Accounts | Page::Hooks | Page::Settings);
         if !self.visible {
+            self.sync_appearance();
             return;
         }
         self.page = page;
+        self.sync_appearance();
         self.embedded = embedded;
         self.reload();
         if page == Page::Device && self.usb && !self.device.probing && self.device.port.is_none() {
@@ -185,6 +252,16 @@ impl SettingsView {
     /// Open or close the Settings page's Advanced section.
     pub fn show_advanced(&mut self, open: bool, cx: &mut Context<Self>) {
         self.advanced = open;
+        cx.notify();
+    }
+
+    /// Open a button's editor on the Device page (`record`: listening for a
+    /// shortcut).
+    pub fn edit_button(&mut self, b: Button, record: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.button_open = Some(b);
+        if record {
+            self.start_recording(b, window);
+        }
         cx.notify();
     }
 
@@ -238,9 +315,23 @@ impl SettingsView {
         self.snap = live_status(&self.paths);
     }
 
+    /// Watch the OS's appearance while the Device page (the theme picker)
+    /// shows; stop when it doesn't.
+    fn sync_appearance(&mut self) {
+        if self.follow_os && self.visible && self.page == Page::Device {
+            // A new watch has no answer yet: keep the last one until it does.
+            if let Some(a) = self.appearance_watch.get_or_insert_with(AppearanceWatch::spawn).known() {
+                self.appearance = a;
+            }
+        } else {
+            self.appearance_watch = None;
+        }
+    }
+
     fn tick(&mut self, cx: &mut Context<Self>) {
         self.ticks += 1;
         self.snap = live_status(&self.paths);
+        self.sync_appearance();
         // Pick up hand edits and other windows' changes every few seconds,
         // but never under an open diff preview.
         if self.ticks.is_multiple_of(6) && self.preview.is_none() {
@@ -261,6 +352,9 @@ impl SettingsView {
     /// Change settings: re-read the file, apply the change, write only the
     /// keys whose value differs.
     fn save(&mut self, change: impl FnOnce(&mut Settings, &mut ConfigFile)) {
+        // Any other control changed: the shortcut recorder stops listening,
+        // since clicking it doesn't take its focus.
+        self.stop_recording();
         let path = self.paths.config_file.clone();
         match write_settings(&self.paths, change) {
             Ok(()) => self.notice = None,
@@ -621,6 +715,23 @@ impl SettingsView {
                 },
             ),
         ));
+        let me = cx.entity().downgrade();
+        let pace = self.settings.pace_marker;
+        pane = pane.child(field(
+            t,
+            "Pace marker",
+            "Marks how far into the session and the week you are. Bars turn amber when usage is ahead of it.",
+            toggle(t, "pace-marker", pace, true, move |_, _, cx| {
+                let _ = me.update(cx, |v, cx| {
+                    v.save(|s, _| s.pace_marker = !pace);
+                    cx.notify();
+                });
+            }),
+        ));
+        if let Some(buttons) = self.buttons_field(t, board, cx) {
+            pane = pane.child(buttons);
+        }
+        pane = pane.child(self.colors_field(t, cx));
         let (me1, me2) = (cx.entity().downgrade(), cx.entity().downgrade());
         let (alert, reset) = (self.settings.alert_chime, self.settings.reset_chime);
         pane = pane
@@ -638,7 +749,8 @@ impl SettingsView {
             .child(field(
                 t,
                 "Session reset chime",
-                "Chimes when your session usage resets, on boards with a speaker.",
+                "Chimes when your session usage resets (weekly usage, on accounts with no 5-hour limit), \
+                 on boards with a speaker.",
                 toggle(t, "reset-chime", reset, true, move |_, _, cx| {
                     let _ = me2.update(cx, |v, cx| {
                         v.save(|s, _| s.reset_chime = !reset);
@@ -650,8 +762,8 @@ impl SettingsView {
         let on = self.settings.update_check;
         pane = pane.child(field(
             t,
-            "Check for firmware updates",
-            "Checks GitHub daily. Updates appear here and in the tray.",
+            "Check for updates",
+            "Checks GitHub daily. Firmware updates appear here and in the tray, app updates in the sidebar.",
             toggle(t, "update-check", on, true, move |_, _, cx| {
                 let _ = me.update(cx, |v, cx| {
                     v.save(|s, _| s.update_check = !on);
@@ -686,6 +798,629 @@ impl SettingsView {
         pane
     }
 
+    /// The board's colours: a card per preset, each a small preview in its
+    /// own colours, with each OS-following theme (System, Solarized) just
+    /// before its dark preset, half dark and half light; then Custom +, which
+    /// opens a chip per colour; the chosen chip opens a grid of swatches to
+    /// pick from.
+    fn colors_field(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.settings.theme;
+        let mut cards = div().w_full().flex().flex_wrap().items_start().gap(px(8.));
+        let choices = PRESETS.iter().flat_map(|p| {
+            let follow = FOLLOWING.iter().copied().filter(move |f| std::ptr::eq(f.dark, p));
+            follow.map(|f| (f.id, f.name, DeviceTheme::Follow(f), follow_board(t, f))).chain(std::iter::once((
+                p.id,
+                p.name,
+                DeviceTheme::Preset(p),
+                theme_board(t, &p.colors),
+            )))
+        });
+        for (id, name, choice, board) in choices {
+            let me = cx.entity().downgrade();
+            cards = cards.child(theme_card(t, id, name, board, theme == choice).on_click(move |_, window, cx| {
+                window.blur(); // the hex field shows the new colour
+                let _ = me.update(cx, |v, cx| {
+                    v.color_pick = None;
+                    v.save(|s, cfg| {
+                        s.theme = choice;
+                        // An old `theme = clawd` already reads as System; clear it too.
+                        if choice == DeviceTheme::default() {
+                            cfg.remove("theme");
+                        }
+                    });
+                    cx.notify();
+                });
+            }));
+        }
+        // Custom starts from the theme on screen until it has colours of its own.
+        let on = theme == DeviceTheme::Custom;
+        let me = cx.entity().downgrade();
+        let appearance = self.appearance;
+        let preview = self.settings.custom_colors.unwrap_or_else(|| self.settings.colors(appearance));
+        cards = cards.child(
+            theme_card(t, "custom", if on { "Custom" } else { "Custom +" }, theme_board(t, &preview), on).on_click(
+                move |_, window, cx| {
+                    window.blur(); // the hex field shows the new colour
+                    let _ = me.update(cx, |v, cx| {
+                        v.save(|s, _| s.choose_custom(appearance));
+                        cx.notify();
+                    });
+                },
+            ),
+        );
+        let mut body = div().w_full().flex().flex_col().gap(px(10.)).child(cards);
+        if on {
+            body = body.child(self.custom_colors(t, cx));
+        }
+        field_stacked(
+            t,
+            "Colors",
+            "The board's colors, Clawd's included. System theme switches between Dark and Light with this \
+             computer's light or dark mode, Solarized between Solarized Dark and Light. Pick a theme, or \
+             Custom + to choose each color yourself (the first time, it starts from the theme you're on). The \
+             board repaints with the app's next update, within seconds while usage is current.",
+            body,
+        )
+    }
+
+    /// Custom: a chip per colour; the chosen one opens a grid of swatches.
+    fn custom_colors(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.settings.custom_colors.unwrap_or_default();
+        let pick = self.color_pick;
+        let mut chips = div().w_full().flex().flex_wrap().gap(px(6.));
+        for tok in ColorToken::ALL {
+            let me = cx.entity().downgrade();
+            let on = pick == Some(tok);
+            chips = chips.child(
+                div()
+                    .id(tok.key())
+                    .debug_selector(move || tok.key().to_owned())
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(8.))
+                    .py(px(5.))
+                    .rounded(px(R_ITEM))
+                    .border_1()
+                    .border_color(if on { t.text } else { t.line })
+                    .when(on, |d| d.bg(t.selected))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.hover))
+                    .on_click(move |_, window, cx| {
+                        window.blur(); // the hex field shows the new colour
+                        let _ = me.update(cx, |v, cx| {
+                            v.color_pick = if on { None } else { Some(tok) };
+                            v.hex_draft.clear();
+                            cx.notify();
+                        });
+                    })
+                    .child(swatch(t, colors.get(tok), 16.))
+                    .child(div().text_size(px(13.)).text_color(t.text).child(tok.label()))
+                    .child(
+                        div()
+                            .font_family(FONT_MONO)
+                            .text_size(px(11.5))
+                            .text_color(t.mute)
+                            .child(format!("{:06x}", colors.get(tok))),
+                    ),
+            );
+        }
+        let me = cx.entity().downgrade();
+        let mut body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(caption(t, "Pick a color, then click a swatch or type a hex code such as 647d99."))
+            .child(chips);
+        if let Some(tok) = pick {
+            body = body.child(self.color_grid(t, tok, cx));
+        }
+        body.child(div().flex().child(button(
+            t,
+            "colors-reset-all",
+            "Reset all colors",
+            ButtonKind::Small,
+            colors != Palette::default(),
+            move |_, window, cx| {
+                window.blur(); // the hex field shows the new colour
+                let _ = me.update(cx, |v, cx| {
+                    v.save(|s, _| s.custom_colors = Some(Palette::default()));
+                    cx.notify();
+                });
+            },
+        )))
+    }
+
+    /// Swatches for `tok`, its current colour outlined.
+    fn color_grid(&self, t: &Theme, tok: ColorToken, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.settings.custom_colors.unwrap_or_default().get(tok);
+        let mut grid = div().flex().flex_col().gap(px(4.));
+        for (r, row) in SWATCH_ROWS.iter().enumerate() {
+            let mut line = div().flex().flex_wrap().gap(px(4.));
+            for (c, &color) in row.iter().enumerate() {
+                let me = cx.entity().downgrade();
+                let id = format!("swatch-{r}-{c}");
+                let sel = id.clone();
+                line = line.child(
+                    div()
+                        .id(SharedString::from(id))
+                        .debug_selector(move || sel)
+                        .size(px(22.))
+                        .rounded(px(5.))
+                        .bg(rgb(color))
+                        .map(|d| {
+                            if color == current {
+                                d.border_2().border_color(t.text)
+                            } else {
+                                d.border_1().border_color(t.line)
+                            }
+                        })
+                        .cursor_pointer()
+                        .on_click(move |_, window, cx| {
+                            window.blur(); // the hex field shows the new colour
+                            let _ = me.update(cx, |v, cx| {
+                                v.save(|s, _| s.custom_colors.get_or_insert_default().set(tok, color));
+                                cx.notify();
+                            });
+                        }),
+                );
+            }
+            grid = grid.child(line);
+        }
+        let me = cx.entity().downgrade();
+        card(t)
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(swatch(t, current, 22.))
+                    .child(div().flex_1().child(subheading(t, tok.label())))
+                    .child(self.hex_field(t, current, cx))
+                    .child(button(
+                        t,
+                        "color-default",
+                        "Default",
+                        ButtonKind::Small,
+                        current != tok.default_rgb(),
+                        move |_, window, cx| {
+                            window.blur(); // the hex field shows the new colour
+                            let _ = me.update(cx, |v, cx| {
+                                v.save(|s, _| s.custom_colors.get_or_insert_default().set(tok, tok.default_rgb()));
+                                cx.notify();
+                            });
+                        },
+                    )),
+            )
+            .child(grid)
+    }
+
+    /// A field for an exact colour: click it, then type or paste six hex
+    /// digits (a leading `#` is fine); the sixth one applies it.
+    fn hex_field(&self, t: &Theme, current: u32, cx: &mut Context<Self>) -> impl IntoElement {
+        let focused = self.hex_focused;
+        let (text, color) =
+            if focused { (format!("#{}", self.hex_draft), t.text) } else { (format!("#{current:06x}"), t.dim) };
+        div()
+            .id("color-hex")
+            .debug_selector(|| "color-hex".to_owned())
+            .track_focus(&self.hex_focus)
+            .flex()
+            .items_center()
+            .w(px(96.))
+            .h(px(28.))
+            .px(px(8.))
+            .rounded(px(R_ITEM))
+            .bg(t.surface)
+            .border_1()
+            .border_color(if focused { t.focus } else { t.line })
+            .cursor_text()
+            .font_family(FONT_MONO)
+            .text_size(px(13.))
+            .text_color(color)
+            .child(text)
+            .when(focused, |d| d.child(div().w(px(1.)).h(px(15.)).bg(t.text)))
+            .on_click(cx.listener(|v, _, window, cx| {
+                v.hex_draft.clear();
+                window.focus(&v.hex_focus);
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(|v, ev: &KeyDownEvent, window, cx| v.hex_key(ev, window, cx)))
+    }
+
+    /// A key in the hex field: hex digits, Backspace, Escape (leave), Enter
+    /// (leave), and paste.
+    fn hex_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tok) = self.color_pick else { return };
+        let k = &ev.keystroke;
+        let shortcut = k.modifiers.control || k.modifiers.platform || k.modifiers.alt;
+        if k.modifiers.secondary() && k.key == "v" {
+            if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                if let Some(hex) = pasted_hex(&text) {
+                    self.hex_draft = hex;
+                }
+            }
+        } else {
+            match k.key.as_str() {
+                "backspace" => {
+                    self.hex_draft.pop();
+                }
+                "escape" | "enter" | "tab" => {
+                    self.hex_draft.clear();
+                    window.blur();
+                }
+                _ if shortcut => {} // Ctrl+A and the like are not hex digits
+                key => {
+                    let typed = k.key_char.as_deref().unwrap_or(key);
+                    let mut chars = typed.chars();
+                    if let (Some(c), None) = (chars.next(), chars.next()) {
+                        if c.is_ascii_hexdigit() {
+                            if self.hex_draft.len() >= 6 {
+                                self.hex_draft.clear(); // a new colour after a full one
+                            }
+                            self.hex_draft.push(c);
+                        }
+                    }
+                }
+            }
+        }
+        self.hex_draft.make_ascii_lowercase();
+        if let Some(rgb) = parse_rgb(&self.hex_draft) {
+            if rgb != self.settings.custom_colors.unwrap_or_default().get(tok) {
+                self.save(|s, _| s.custom_colors.get_or_insert_default().set(tok, rgb));
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// The Controls field: a keycap per button the board has, in the order
+    /// they sit on it, showing what it does. Clicking one opens its editor
+    /// underneath. Until the board is known, all three show by their usual
+    /// names; a board without buttons the app can remap has no field.
+    fn buttons_field(
+        &mut self,
+        t: &Theme,
+        board: Option<&BoardInfo>,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        const UNKNOWN: &[(Button, &str)] =
+            &[(Button::Primary, "BOOT"), (Button::Secondary, "Button 2"), (Button::Pwr, "PWR")];
+        let layout = board.map_or(UNKNOWN, |b| b.buttons);
+        if layout.is_empty() {
+            return None;
+        }
+        let open = self.button_open.and_then(|b| layout.iter().find(|(x, _)| *x == b).copied());
+        let mut row = div().w_full().flex().gap(px(10.));
+        for &(b, name) in layout {
+            let on = open.is_some_and(|(x, _)| x == b);
+            row = row.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .max_w(px(220.))
+                    .child(self.keycap(t, b, name, on, cx))
+                    .when(open.is_some(), |d| d.child(notch(t, on))),
+            );
+        }
+        let mut body = div().w_full().flex().flex_col().child(row);
+        if let Some((b, _)) = open {
+            body = body.child(self.button_editor(t, b, cx));
+        }
+        Some(field_stacked(t, "Controls", "Remap the keybindings for the buttons", body))
+    }
+
+    /// A button drawn as a key: its name on the board, then what it does.
+    fn keycap(&self, t: &Theme, b: Button, name: &'static str, open: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = button_id(b);
+        let action = self.settings.buttons[b.index()];
+        let listening = self.recording == Some(b);
+        let (glyph, label, hint) = match listening {
+            true => ("keyboard", "Press keys…".to_owned(), "Recording a shortcut"),
+            false => (action_icon(action), action.label(LabelStyle::current()), action_hint(b, action)),
+        };
+        let label_color = match (listening, action) {
+            (true, _) => t.focus,
+            (false, ButtonAction::None) => t.dim,
+            _ => t.text,
+        };
+        let mono = !listening && matches!(action, ButtonAction::Chord(_));
+        div()
+            .id(id)
+            .debug_selector(move || id.to_owned())
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .px(px(12.))
+            .pt(px(10.))
+            .pb(px(9.))
+            .rounded(px(R_M))
+            .border_1()
+            .border_b_3()
+            .border_color(if open { t.focus } else { t.line })
+            .bg(if open { t.selected } else { t.panel })
+            .cursor_pointer()
+            .when(!open, |d| d.hover(|s| s.bg(t.hover)))
+            .on_click(cx.listener(move |v, _, window, cx| {
+                v.toggle_editor(b, window);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(6.))
+                    .child(div().min_w_0().truncate().text_size(px(11.5)).text_color(t.mute).child(name.to_uppercase()))
+                    .child(icon(
+                        if open { "chevron-down" } else { "chevron-right" },
+                        14.,
+                        if open { t.focus } else { t.mute },
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .min_w_0()
+                    .child(icon(glyph, 16., if listening { t.focus } else { t.dim }))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(15.))
+                            .text_color(label_color)
+                            .when(mono, |d| d.font_family(FONT_MONO).text_size(px(13.5)))
+                            .child(label),
+                    ),
+            )
+            .child(div().truncate().text_size(px(12.)).text_color(t.mute).child(hint))
+    }
+
+    /// A button's editor: keys, media keys, the board's own actions and a
+    /// recorded shortcut. Picking a choice closes it; a recorded shortcut
+    /// keeps it open for its modifiers and hold.
+    fn button_editor(&self, t: &Theme, b: Button, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = button_id(b);
+        let action = self.settings.buttons[b.index()];
+        let style = LabelStyle::current();
+        let me = cx.entity().downgrade();
+        let pick = Rc::new(move |a: ButtonAction, cx: &mut gpui::App| {
+            let _ = me.update(cx, |v, cx| {
+                v.button_open = None;
+                v.save(|s, _| s.buttons[b.index()] = a);
+                cx.notify();
+            });
+        });
+        let choice = |key: String, a: ButtonAction, label: String| {
+            let pick = pick.clone();
+            choice_chip(t, key, action_icon(a), label, action == a).on_click(move |_, _, cx| pick(a, cx))
+        };
+        let chips = || div().flex().flex_wrap().gap(px(6.));
+        let mut keys = chips();
+        for (i, a) in ButtonAction::KEYS.into_iter().enumerate() {
+            keys = keys.child(choice(format!("{id}-key-{i}"), a, a.label(style)));
+        }
+        let mut media = chips();
+        for (i, m) in MediaKey::ALL.into_iter().enumerate() {
+            media = media.child(choice(format!("{id}-media-{i}"), ButtonAction::Media(m), m.label().into()));
+        }
+        let other = chips()
+            .child(choice(format!("{id}-brightness"), ButtonAction::Brightness, "Brightness".into()))
+            .child(choice(format!("{id}-nothing"), ButtonAction::None, "Nothing".into()));
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .p(px(16.))
+            .rounded(px(R_M))
+            .bg(t.panel)
+            .child(editor_section(t, "Keys", keys))
+            .child(editor_section(t, "Media", media))
+            .child(editor_section(t, "Other", other))
+            .child(editor_section(t, "Shortcut", self.shortcut_editor(t, b, cx)))
+    }
+
+    /// The recorded shortcut (outlined while it's what the button does), a
+    /// Record/Cancel button, then the modifier and hold switches once there
+    /// is one, for combinations the OS keeps to itself while recording.
+    fn shortcut_editor(&self, t: &Theme, b: Button, cx: &mut Context<Self>) -> gpui::Div {
+        let id = button_id(b);
+        let style = LabelStyle::current();
+        let chord = match self.settings.buttons[b.index()] {
+            ButtonAction::Chord(c) => Some(c),
+            _ => None,
+        };
+        let recording = self.recording == Some(b);
+        let mods = &self.record_mods;
+        let (text, color, mono) = match (recording, chord) {
+            (true, _) => {
+                let mut held = 0;
+                for (on, bit) in
+                    [(mods.control, MOD_CTRL), (mods.shift, MOD_SHIFT), (mods.alt, MOD_ALT), (mods.platform, MOD_GUI)]
+                {
+                    if on {
+                        held |= bit;
+                    }
+                }
+                let prefix = style.prefix(held);
+                match prefix.is_empty() {
+                    true => ("Press a shortcut…".to_owned(), t.dim, false),
+                    false => (format!("{prefix}…"), t.text, true),
+                }
+            }
+            (false, Some(c)) => (c.label(style), t.text, true),
+            (false, None) => ("Record a shortcut".to_owned(), t.mute, false),
+        };
+        let chosen = chord.is_some() && !recording;
+        let mut shown = div()
+            .id(SharedString::from(format!("{id}-shortcut")))
+            .debug_selector(move || format!("{id}-shortcut"))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .min_w(px(200.))
+            .h(px(28.))
+            .px(px(10.))
+            .rounded(px(R_ITEM))
+            .bg(if chosen { t.selected } else { t.surface })
+            .border_1()
+            .border_color(if recording || chosen { t.focus } else { t.line })
+            .cursor_pointer()
+            .text_size(px(13.))
+            .text_color(color)
+            .child(icon("keyboard", 14., if recording { t.focus } else { t.dim }))
+            .child(div().when(mono, |d| d.font_family(FONT_MONO)).child(text))
+            .on_click(cx.listener(move |v, _, window, cx| {
+                v.start_recording(b, window);
+                cx.notify();
+            }));
+        if recording {
+            shown = shown
+                .track_focus(&self.record_focus)
+                .on_key_down(cx.listener(|v, ev: &KeyDownEvent, window, cx| v.record_key(ev, window, cx)))
+                .on_modifiers_changed(cx.listener(|v, ev: &ModifiersChangedEvent, _, cx| {
+                    v.record_mods = ev.modifiers;
+                    cx.notify();
+                }));
+        }
+        let me = cx.entity().downgrade();
+        let action = button(
+            t,
+            SharedString::from(format!("{id}-record")),
+            if recording { "Cancel" } else { "Record" },
+            ButtonKind::Small,
+            true,
+            move |_, window, cx| {
+                let _ = me.update(cx, |v, cx| {
+                    if recording {
+                        v.stop_recording();
+                        window.blur();
+                    } else {
+                        v.start_recording(b, window);
+                    }
+                    cx.notify();
+                });
+            },
+        );
+        let mut recorder = div().flex().items_center().gap(px(8.)).child(shown).child(action);
+        if recording {
+            // A click anywhere but here stops listening (a click on blank page
+            // takes no focus, so the focus check in render can't see it).
+            recorder = recorder.on_mouse_down_out(cx.listener(|v, _, window, cx| {
+                v.stop_recording();
+                window.blur();
+                cx.notify();
+            }));
+        }
+        let mut editor = div().flex().flex_col().gap(px(8.)).child(recorder);
+        if let Some((_, msg)) = self.record_error.as_ref().filter(|(eb, _)| *eb == b) {
+            editor = editor.child(
+                div()
+                    .debug_selector(move || format!("{id}-error"))
+                    .text_size(px(12.5))
+                    .text_color(t.bad)
+                    .child(msg.clone()),
+            );
+        }
+        let Some(c) = chord else { return editor };
+        let mut row = div().flex().flex_wrap().items_center().gap(px(6.));
+        for bit in [MOD_CTRL, MOD_SHIFT, MOD_ALT, MOD_GUI] {
+            let on = c.mods & bit != 0;
+            let me = cx.entity().downgrade();
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("{id}-mod-{bit}")))
+                    .debug_selector(move || format!("{id}-mod-{bit}"))
+                    .flex()
+                    .items_center()
+                    .h(px(28.))
+                    .px(px(10.))
+                    .rounded(px(R_ITEM))
+                    .border_1()
+                    .border_color(if on { t.focus } else { t.line })
+                    .bg(if on { t.selected } else { t.surface })
+                    .text_size(px(13.))
+                    .text_color(if on { t.text } else { t.dim })
+                    .cursor_pointer()
+                    .child(modifier_name(style, bit))
+                    .on_click(move |_, _, cx| {
+                        let _ = me.update(cx, |v, cx| {
+                            v.save(|s, _| {
+                                s.buttons[b.index()] = ButtonAction::Chord(KeyChord { mods: c.mods ^ bit, ..c })
+                            });
+                            cx.notify();
+                        });
+                    }),
+            );
+        }
+        if b.can_hold() {
+            let me = cx.entity().downgrade();
+            row = row.child(div().w(px(10.))).child(toggle(
+                t,
+                SharedString::from(format!("{id}-hold")),
+                c.hold,
+                true,
+                move |_, _, cx| {
+                    let _ = me.update(cx, |v, cx| {
+                        v.save(|s, _| s.buttons[b.index()] = ButtonAction::Chord(KeyChord { hold: !c.hold, ..c }));
+                        cx.notify();
+                    });
+                },
+            ));
+            row = row.child(div().text_size(px(13.)).text_color(t.dim).child("Hold while pressed"));
+        }
+        editor.child(row)
+    }
+
+    /// A keycap click: open its editor, or close it if it's open.
+    fn toggle_editor(&mut self, b: Button, window: &mut Window) {
+        if self.recording.is_some() {
+            self.stop_recording();
+            window.blur();
+        }
+        self.button_open = if self.button_open == Some(b) { None } else { Some(b) };
+    }
+
+    fn start_recording(&mut self, b: Button, window: &mut Window) {
+        self.recording = Some(b);
+        self.record_error = None;
+        self.record_mods = Modifiers::default();
+        self.record_focused = false;
+        window.focus(&self.record_focus);
+    }
+
+    fn stop_recording(&mut self) {
+        self.recording = None;
+        self.record_error = None;
+    }
+
+    /// A key while recording: the first one that maps to a HID key, with
+    /// the modifiers held, becomes the button's shortcut (keeping its hold
+    /// setting). Escape is recorded like any other key.
+    fn record_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(b) = self.recording else { return };
+        let m = &ev.keystroke.modifiers;
+        match KeyChord::from_keystroke(&ev.keystroke.key, m.control, m.alt, m.shift, m.platform) {
+            Ok(mut chord) => {
+                chord.hold = matches!(self.settings.buttons[b.index()], ButtonAction::Chord(c) if c.hold);
+                self.stop_recording();
+                window.blur();
+                self.save(|s, _| s.buttons[b.index()] = ButtonAction::Chord(chord));
+            }
+            Err(Unmappable(msg)) => self.record_error = Some((b, msg)),
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     fn accounts_pane(&mut self, t: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let me = cx.entity().downgrade();
         let mut pane = div()
@@ -705,7 +1440,8 @@ impl SettingsView {
             .child(para(
                 t,
                 "The default Claude Code folder is ~/.claude. Add a config folder for each other account you want \
-                 to monitor. The device follows the account whose session usage increased most recently.",
+                 to monitor. The device follows the account whose usage increased most recently (weekly usage, on \
+                 accounts with no 5-hour limit).",
             ))
             .when_some(self.snap.as_ref(), |d, snap| {
                 d.child(caption(
@@ -1050,7 +1786,16 @@ impl SettingsView {
         let me = cx.entity().downgrade();
         let on = self.autostart_on;
         let home = self.paths.home.clone();
-        let mut pane = div().flex().flex_col().gap(px(6.)).child(heading(t, "Settings")).child(field(
+        // A newer app release, a skipped one included, opens the Update page.
+        let release = self.update.as_ref().and_then(|u| u.read(cx).available().map(str::to_owned));
+        let title =
+            div().flex().items_center().justify_between().child(heading(t, "Settings")).when_some(release, |d, tag| {
+                d.child(
+                    update_pill(t, "settings-app-update", &tag, false, true)
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(Navigate(Page::Update)))),
+                )
+            });
+        let mut pane = div().flex().flex_col().gap(px(6.)).child(title).child(field(
             t,
             "Start at login",
             "Opens Clawdmeter when you sign in.",
@@ -1310,6 +2055,13 @@ fn with_alpha(c: gpui::Rgba, a: f32) -> gpui::Hsla {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.hex_focused = self.hex_focus.is_focused(window);
+        // The recorder stops when it loses focus (e.g. the hex field takes it).
+        let record_focused = self.record_focus.is_focused(window);
+        if self.recording.is_some() && self.record_focused && !record_focused {
+            self.stop_recording();
+        }
+        self.record_focused = record_focused;
         let t = Theme::for_appearance(window.appearance());
         let mut pane = match self.page {
             Page::Accounts => self.accounts_pane(&t, cx),
@@ -1324,8 +2076,128 @@ impl Render for SettingsView {
     }
 }
 
-/// Re-read the config file, apply `change`, and write only the keys whose
-/// value differs.
+/// A choice's icon in a button's editor, and on its keycap.
+fn action_icon(a: ButtonAction) -> &'static str {
+    match a {
+        ButtonAction::None => "ban",
+        ButtonAction::Space => "mic",
+        ButtonAction::Tab => "arrow-right-to-line",
+        ButtonAction::Enter => "corner-down-left",
+        ButtonAction::ShiftTab | ButtonAction::Escape | ButtonAction::Chord(_) => "keyboard",
+        ButtonAction::Brightness => "sun",
+        ButtonAction::Media(MediaKey::PlayPause) => "play",
+        ButtonAction::Media(MediaKey::Previous) => "skip-back",
+        ButtonAction::Media(MediaKey::Next) => "skip-forward",
+        ButtonAction::Media(MediaKey::VolumeDown) => "volume-1",
+        ButtonAction::Media(MediaKey::VolumeUp) => "volume-2",
+        ButtonAction::Media(MediaKey::Mute) => "volume-x",
+    }
+}
+
+/// The line under a keycap's action.
+fn action_hint(b: Button, a: ButtonAction) -> &'static str {
+    match a {
+        ButtonAction::None => "Unassigned",
+        ButtonAction::Space if b.can_hold() => "Push to talk",
+        ButtonAction::ShiftTab => "Claude Code mode",
+        ButtonAction::Space | ButtonAction::Tab | ButtonAction::Enter | ButtonAction::Escape => "Key",
+        ButtonAction::Brightness => "Cycles the brightness",
+        ButtonAction::Media(_) => "Media key",
+        ButtonAction::Chord(c) if c.hold && b.can_hold() => "Shortcut, held",
+        ButtonAction::Chord(_) => "Shortcut",
+    }
+}
+
+/// One choice in a button's editor: an icon and a label, outlined when it's
+/// what the button does.
+fn choice_chip(
+    t: &Theme,
+    id: String,
+    glyph: &'static str,
+    label: impl Into<SharedString>,
+    on: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let selector = id.clone();
+    let group = SharedString::from(id.clone());
+    let text = t.text;
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector)
+        .group(group.clone())
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .h(px(28.))
+        .px(px(10.))
+        .rounded(px(R_ITEM))
+        .border_1()
+        .border_color(if on { t.focus } else { t.line })
+        .bg(if on { t.selected } else { t.surface })
+        .text_size(px(13.))
+        .whitespace_nowrap()
+        .text_color(if on { t.text } else { t.dim })
+        .cursor_pointer()
+        .when(!on, |d| d.hover(|s| s.bg(t.hover).text_color(text)))
+        .child(icon(glyph, 14., if on { t.text } else { t.dim }).group_hover(group, move |s| s.text_color(text)))
+        .child(label.into())
+}
+
+/// A section of a button's editor: what kind of choice, then the choices.
+fn editor_section(t: &Theme, label: &'static str, content: impl IntoElement) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(div().text_size(px(11.5)).text_color(t.mute).child(label.to_uppercase()))
+        .child(content)
+}
+
+/// The pointer from an open keycap down to its editor.
+fn notch(t: &Theme, on: bool) -> impl IntoElement {
+    let color = t.panel;
+    div().w_full().h(px(10.)).when(on, |d| {
+        d.child(
+            canvas(
+                |_, _, _| (),
+                move |bounds: Bounds<Pixels>, _, window, _| {
+                    let x = bounds.center().x;
+                    let mut path = PathBuilder::fill();
+                    path.move_to(point(x - px(9.), bounds.bottom()));
+                    path.line_to(point(x, bounds.top() + px(1.)));
+                    path.line_to(point(x + px(9.), bounds.bottom()));
+                    path.close();
+                    if let Ok(path) = path.build() {
+                        window.paint_path(path, color);
+                    }
+                },
+            )
+            .size_full(),
+        )
+    })
+}
+
+/// The debug-selector prefix of a button's keycap and editor.
+fn button_id(b: Button) -> &'static str {
+    match b {
+        Button::Primary => "button-primary",
+        Button::Secondary => "button-secondary",
+        Button::Pwr => "button-pwr",
+    }
+}
+
+/// A modifier switch's label: macOS spells the name out beside its symbol.
+fn modifier_name(style: LabelStyle, bit: u8) -> String {
+    match (style, bit) {
+        (LabelStyle::Mac, MOD_CTRL) => "⌃ Control".into(),
+        (LabelStyle::Mac, MOD_SHIFT) => "⇧ Shift".into(),
+        (LabelStyle::Mac, MOD_ALT) => "⌥ Option".into(),
+        (LabelStyle::Mac, _) => "⌘ Command".into(),
+        _ => style.modifier(bit).into(),
+    }
+}
+
+/// Re-read the config file, apply `change`, write only the keys whose
+/// value differs, and tell the tray's daemon to re-read it.
 pub(crate) fn write_settings(
     paths: &Paths,
     change: impl FnOnce(&mut Settings, &mut ConfigFile),
@@ -1338,7 +2210,140 @@ pub(crate) fn write_settings(
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    cfg.save(path)
+    cfg.save(path)?;
+    // The daemon re-reads the file every few seconds anyway; this makes a
+    // device setting reach the device at once.
+    command(paths, AppCommand::SettingsChanged);
+    Ok(())
+}
+
+/// An OS-following theme's preview: its dark board on the left, its light
+/// one on the right.
+fn follow_board(t: &Theme, f: &FollowTheme) -> gpui::Div {
+    div().relative().w_full().child(theme_board(t, &f.dark.colors)).child(
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .w(relative(0.5))
+            .overflow_hidden()
+            .child(div().absolute().top_0().right_0().w(relative(2.)).child(theme_board(t, &f.light.colors))),
+    )
+}
+
+/// A small board in a palette's colours: background, a card with a bar, Clawd.
+fn theme_board(t: &Theme, c: &Palette) -> gpui::Div {
+    let col = |tok| rgb(c.get(tok));
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .p(px(6.))
+        .rounded(px(5.))
+        .bg(col(ColorToken::Bg))
+        .border_1()
+        .border_color(t.line)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(div().w(px(26.)).h(px(5.)).rounded(px(2.)).bg(col(ColorToken::Text)))
+                .child(div().size(px(10.)).rounded(px(2.)).bg(col(ColorToken::Clawd))),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .p(px(5.))
+                .rounded(px(3.))
+                .bg(col(ColorToken::Panel))
+                .child(div().w(px(18.)).h(px(4.)).rounded(px(1.)).bg(col(ColorToken::Dim)))
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(5.))
+                        .rounded(px(2.))
+                        .bg(col(ColorToken::BarBg))
+                        .child(div().w(relative(0.6)).h_full().rounded(px(2.)).bg(col(ColorToken::Green))),
+                ),
+        )
+}
+
+/// A theme to pick: its board over its name.
+fn theme_card(
+    t: &Theme,
+    id: &'static str,
+    name: &'static str,
+    board: impl IntoElement,
+    on: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let sel = format!("theme-{id}");
+    div()
+        .id(SharedString::from(sel.clone()))
+        .debug_selector(move || sel)
+        .w(px(140.))
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .p(px(5.))
+        .rounded(px(R_M))
+        .border_2()
+        .border_color(if on { t.text } else { gpui::transparent_black().into() })
+        .cursor_pointer()
+        .hover(|s| s.bg(t.hover))
+        .child(board)
+        .child(div().px(px(2.)).text_size(px(12.5)).text_color(t.text).child(name))
+}
+
+/// A colour sample with a hairline edge (black and the panel's grey still show).
+fn swatch(t: &Theme, color: u32, size: f32) -> impl IntoElement {
+    div().flex_shrink_0().size(px(size)).rounded(px(4.)).bg(rgb(color)).border_1().border_color(t.line)
+}
+
+/// The colour picker's swatches: the default palette, a grey ramp, then
+/// twelve hues (every 30°) from light to nearly black, with a greyish row.
+static SWATCH_ROWS: LazyLock<Vec<Vec<u32>>> = LazyLock::new(|| {
+    let mut defaults: Vec<u32> = Vec::new();
+    for c in ColorToken::ALL.map(ColorToken::default_rgb) {
+        if !defaults.contains(&c) {
+            defaults.push(c);
+        }
+    }
+    let mut rows = vec![defaults, (0..12).map(|i| (i * 255 / 11) * 0x010101).collect()];
+    for (s, l) in [(0.85, 0.80), (0.75, 0.64), (0.62, 0.50), (0.60, 0.36), (0.22, 0.50), (0.25, 0.22), (0.15, 0.10)] {
+        rows.push((0..12).map(|i| hsl_rgb(i as f32 * 30.0, s, l)).collect());
+    }
+    rows
+});
+
+/// A pasted colour: six hex digits, optionally after `#` or `0x`; anything
+/// else is ignored rather than half-read.
+fn pasted_hex(text: &str) -> Option<String> {
+    let t = text.trim();
+    let t = t.strip_prefix('#').or_else(|| t.strip_prefix("0x")).or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    (t.len() == 6 && t.bytes().all(|b| b.is_ascii_hexdigit())).then(|| t.to_owned())
+}
+
+/// HSL (hue in degrees, saturation and lightness 0-1) to 0xRRGGBB.
+fn hsl_rgb(h: f32, s: f32, l: f32) -> u32 {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = (h.rem_euclid(360.0)) / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    let to = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u32;
+    (to(r) << 16) | (to(g) << 8) | to(b)
 }
 
 /// What Clawd does at a liveliness level, under the slider.
@@ -1389,6 +2394,10 @@ mod tests {
         let paths = home("cfg");
         let p = paths.clone();
         let (view, cx) = cx.add_window_view(move |_, cx| SettingsView::with_usb(p, Page::Device, false, cx));
+        // Big enough for the whole Device page, Custom's editor included. On
+        // its own (no app column around it) the page doesn't wrap the theme
+        // cards, so it's wider than the app's.
+        cx.simulate_resize(gpui::size(px(2400.), px(1600.)));
         click(cx, "reset-chime");
         let text = std::fs::read_to_string(&paths.config_file).unwrap();
         assert!(text.starts_with("# mine\n"), "comments kept: {text}");
@@ -1403,6 +2412,96 @@ mod tests {
         assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("attention_anim = off"));
         click(cx, "attention-anim-2"); // 30 s
         assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("attention_anim = 30s"));
+        click(cx, "pace-marker");
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("pace_marker = on"));
+        // A keycap opens its editor; a choice saves and closes it.
+        click(cx, "button-primary");
+        click(cx, "button-primary-key-3"); // Enter
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("button_primary = enter"));
+        // (Test frames keep every debug bound ever drawn: check the state.)
+        let open = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.button_open);
+        assert_eq!(open(cx), None, "the editor closed");
+        click(cx, "button-secondary");
+        click(cx, "button-secondary-nothing");
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("button_secondary = none"));
+        click(cx, "button-pwr");
+        click(cx, "button-pwr-media-4"); // Vol +
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("button_pwr = volume-up"));
+        click(cx, "button-pwr");
+        click(cx, "button-pwr-brightness"); // its default
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("button_pwr = brightness"));
+        // An open keycap closes again, and one editor is open at a time.
+        click(cx, "button-pwr");
+        assert_eq!(open(cx), Some(Button::Pwr));
+        click(cx, "button-pwr");
+        assert_eq!(open(cx), None);
+        click(cx, "button-primary");
+        click(cx, "button-secondary");
+        assert_eq!(open(cx), Some(Button::Secondary));
+        click(cx, "button-secondary");
+        // A preset is one click; Custom opens the per-colour editor, starting
+        // from the theme on screen. System theme comes first; Solarized sits
+        // just before Solarized Dark and Light.
+        let config = || std::fs::read_to_string(&paths.config_file).unwrap();
+        let xs: Vec<_> = ["theme-system", "theme-dark", "theme-light"]
+            .map(|id| cx.debug_bounds(id).expect(id).origin.x)
+            .into_iter()
+            .collect();
+        assert!(xs[0] < xs[1] && xs[1] < xs[2], "{xs:?}");
+        let at = |id: &'static str| {
+            let o = cx.debug_bounds(id).expect(id).origin;
+            (o.y, o.x)
+        };
+        let order = ["theme-one_dark", "theme-solarized", "theme-solarized_dark", "theme-solarized_light"].map(at);
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
+        click(cx, "theme-solarized");
+        assert!(config().contains("theme = solarized\n"), "{}", config());
+        click(cx, "theme-dark");
+        assert!(config().contains("theme = dark"));
+        click(cx, "theme-dracula");
+        assert!(config().contains("theme = dracula"));
+        click(cx, "theme-custom");
+        let text = config();
+        assert!(text.contains("theme = custom") && text.contains("color_bg = 21222c"), "{text}");
+        click(cx, "theme-system");
+        assert!(!config().contains("theme ="), "the default leaves the file");
+        std::fs::write(&paths.config_file, config() + "theme = clawd\n").unwrap();
+        view.update(cx, |v, _| v.reload());
+        click(cx, "theme-system");
+        assert!(!config().contains("theme ="), "the old default goes too");
+        assert!(config().contains("color_bg = 21222c"), "Custom keeps its colours for later");
+        click(cx, "theme-custom");
+        assert!(config().contains("theme = custom"));
+        click(cx, "colors-reset-all");
+        assert!(config().contains("color_bg = 000000"), "reset: the defaults, now Custom's own");
+        assert_eq!(view.update(cx, |v, _| v.color_pick), None, "the grid opens on a pick");
+        click(cx, "color_accent");
+        assert_eq!(view.update(cx, |v, _| v.color_pick), Some(ColorToken::Accent));
+        click(cx, "swatch-1-0"); // black, from the grey ramp
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("color_accent = 000000"));
+        click(cx, "color-default");
+        assert!(config().contains("color_accent = d97757"));
+        click(cx, "color-hex");
+        cx.simulate_keystrokes("ctrl-a ctrl-c"); // shortcuts type nothing
+        cx.simulate_input("#647D9");
+        assert!(config().contains("color_accent = d97757"), "five digits: not yet");
+        cx.simulate_keystrokes("9");
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("color_accent = 647d99"));
+        cx.simulate_keystrokes("backspace 8");
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("color_accent = 647d98"));
+        cx.simulate_keystrokes("escape");
+        click(cx, "swatch-1-11"); // white
+        click(cx, "color_accent"); // closes the grid again
+        assert_eq!(view.update(cx, |v, _| v.color_pick), None);
+        click(cx, "colors-reset-all");
+        let text = config();
+        assert!(text.contains("color_accent = d97757"), "{text}");
+        // Only the first Custom starts from the theme on screen, even when
+        // Custom's colours are the defaults.
+        click(cx, "theme-dracula");
+        click(cx, "theme-custom");
+        let text = config();
+        assert!(text.contains("color_bg = 000000") && !text.contains("21222c"), "{text}");
 
         view.update(cx, |v, cx| v.show(Page::Settings, false, cx));
         click(cx, "poll-2"); // While working: 5 min
@@ -1411,6 +2510,24 @@ mod tests {
         click(cx, "poll-0"); // Automatic removes the key again.
         assert!(!std::fs::read_to_string(&paths.config_file).unwrap().contains("poll_interval"));
         let _ = std::fs::remove_dir_all(&paths.home);
+    }
+
+    #[test]
+    fn pasted_hex_takes_six_digits_or_nothing() {
+        assert_eq!(pasted_hex("647d99").as_deref(), Some("647d99"));
+        assert_eq!(pasted_hex(" #647D99\n").as_deref(), Some("647D99"));
+        assert_eq!(pasted_hex("0x647D99").as_deref(), Some("647D99"));
+        assert_eq!(pasted_hex("647d9"), None);
+        assert_eq!(pasted_hex("rgb(100, 125, 153)"), None);
+        assert_eq!(pasted_hex("#647d99ff"), None);
+    }
+
+    #[test]
+    fn hsl_hits_the_primaries() {
+        assert_eq!(hsl_rgb(0.0, 1.0, 0.5), 0xff0000);
+        assert_eq!(hsl_rgb(120.0, 1.0, 0.5), 0x00ff00);
+        assert_eq!(hsl_rgb(240.0, 1.0, 0.5), 0x0000ff);
+        assert_eq!(hsl_rgb(30.0, 0.0, 1.0), 0xffffff);
     }
 
     #[gpui::test]
@@ -1437,6 +2554,113 @@ mod tests {
             assert_eq!(v.hooks[0].status, HookStatus::Installed);
             assert!(v.preview.is_none());
         });
+        let _ = std::fs::remove_dir_all(&paths.home);
+    }
+
+    #[gpui::test]
+    fn keycaps_follow_the_board(cx: &mut TestAppContext) {
+        // Primary, secondary, PWR: BOOT + GPIO 18 + PWR; BOOT + PWR; none;
+        // BOOT is the PWR role (CYD, SenseCap); BOOT, PWR a hardware reset.
+        for (env, shown) in [
+            ("waveshare_amoled_216", [true, true, true]),
+            ("waveshare_amoled_18", [true, false, true]),
+            ("waveshare_lcd_2", [false, false, false]),
+            ("esp32_2432s028r", [false, false, true]),
+            ("sensecap_indicator_d1l", [false, false, true]),
+            ("waveshare_lcd_4", [true, false, false]),
+        ] {
+            let paths = home(env);
+            ipc::save_firmware_record(&paths, &FirmwareRecord { env: env.into(), ver: "2.3.3".into() }).unwrap();
+            let p = paths.clone();
+            let (_, cx) = cx.add_window_view(move |_, cx| SettingsView::with_usb(p, Page::Device, false, cx));
+            cx.simulate_resize(gpui::size(px(2400.), px(1600.)));
+            cx.run_until_parked();
+            for (b, shown) in Button::ALL.into_iter().zip(shown) {
+                assert_eq!(cx.debug_bounds(button_id(b)).is_some(), shown, "{env} {b:?}");
+            }
+            // The 2.16's keys sit as on the board: left, PWR, right.
+            if env == "waveshare_amoled_216" {
+                let [left, pwr, right] = [Button::Primary, Button::Pwr, Button::Secondary]
+                    .map(|b| cx.debug_bounds(button_id(b)).unwrap().left());
+                assert!(left < pwr && pwr < right);
+            }
+            let _ = std::fs::remove_dir_all(&paths.home);
+        }
+    }
+
+    #[gpui::test]
+    fn shortcuts_are_recorded_from_a_key_press(cx: &mut TestAppContext) {
+        let paths = home("record");
+        let p = paths.clone();
+        let (view, cx) = cx.add_window_view(move |_, cx| SettingsView::with_usb(p, Page::Device, false, cx));
+        cx.simulate_resize(gpui::size(px(2400.), px(1600.)));
+        let config = || std::fs::read_to_string(&paths.config_file).unwrap();
+        // Which editor is open and which button listens (test frames keep
+        // every debug bound ever drawn, so gone elements still have one).
+        let state = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| (v.button_open, v.recording));
+        // The shortcut field listens for the next key.
+        click(cx, "button-secondary");
+        click(cx, "button-secondary-shortcut");
+        assert_eq!(state(cx), (Some(Button::Secondary), Some(Button::Secondary)));
+        assert!(!config().contains("button_secondary"), "nothing saved before a key");
+        // A key the board can't type says so and keeps listening.
+        cx.simulate_keystrokes("ö");
+        assert!(config().lines().all(|l| !l.starts_with("button_secondary")));
+        assert!(cx.debug_bounds("button-secondary-error").is_some(), "the unmappable-key message");
+        assert_eq!(state(cx), (Some(Button::Secondary), Some(Button::Secondary)), "still listening");
+        cx.simulate_keystrokes("ctrl-shift-m");
+        cx.run_until_parked();
+        assert!(config().contains("button_secondary = ctrl+shift+m\n"), "{}", config());
+        // The editor stays open for its modifiers and hold.
+        assert_eq!(state(cx), (Some(Button::Secondary), None));
+        click(cx, "button-secondary-mod-4"); // Alt
+        assert!(config().contains("button_secondary = ctrl+shift+alt+m\n"), "{}", config());
+        click(cx, "button-secondary-hold");
+        assert!(config().contains("button_secondary = ctrl+shift+alt+m hold\n"), "{}", config());
+        // Re-recording keeps hold, and Escape is a key like any other.
+        click(cx, "button-secondary-record");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(config().contains("button_secondary = escape hold\n"), "{}", config());
+        // Cancel stops listening and leaves the shortcut.
+        click(cx, "button-secondary-record");
+        click(cx, "button-secondary-record");
+        cx.simulate_keystrokes("a");
+        assert!(config().contains("button_secondary = escape hold\n"), "{}", config());
+        // A shifted symbol is its key with Shift; PWR has no hold switch.
+        click(cx, "button-pwr");
+        click(cx, "button-pwr-record");
+        cx.simulate_keystrokes("ctrl-!");
+        cx.run_until_parked();
+        assert!(config().contains("button_pwr = ctrl+shift+1\n"), "{}", config());
+        assert!(cx.debug_bounds("button-pwr-hold").is_none());
+        // Picking a choice while listening drops the recording.
+        click(cx, "button-primary");
+        click(cx, "button-primary-record");
+        click(cx, "button-primary-media-0");
+        assert_eq!(state(cx), (None, None));
+        cx.simulate_keystrokes("b");
+        assert!(config().contains("button_primary = play-pause"), "{}", config());
+        // So does another setting, or another keycap.
+        click(cx, "button-primary");
+        click(cx, "button-primary-record");
+        click(cx, "pace-marker");
+        assert_eq!(state(cx), (Some(Button::Primary), None));
+        cx.simulate_keystrokes("b");
+        assert!(config().contains("button_primary = play-pause"), "{}", config());
+        click(cx, "button-primary-record");
+        click(cx, "liveliness-info-3"); // text: takes no focus, saves nothing
+        assert_eq!(state(cx), (Some(Button::Primary), None));
+        click(cx, "button-primary-record");
+        assert_eq!(state(cx), (Some(Button::Primary), Some(Button::Primary)));
+        click(cx, "button-secondary");
+        assert_eq!(state(cx), (Some(Button::Secondary), None));
+        cx.simulate_keystrokes("c");
+        assert!(config().contains("button_primary = play-pause"), "{}", config());
+        assert!(config().contains("button_secondary = escape hold\n"), "{}", config());
+        click(cx, "button-secondary-record");
+        cx.simulate_keystrokes("c");
+        assert!(config().contains("button_secondary = c hold\n"), "{}", config());
         let _ = std::fs::remove_dir_all(&paths.home);
     }
 

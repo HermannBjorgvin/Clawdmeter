@@ -100,3 +100,6 @@ Use `.github/pull_request_template.md` and fill its **New board** section:
 - **Hardware testing**: the exact board and revision and what was verified,
   or "not tested on hardware";
 - **Human involvement**: only what the human confirmed they did.
+
+Its **Agent review** section follows the rule in CLAUDE.md's Pull requests
+section.
