@@ -56,7 +56,7 @@ PROFILES = (
     Profile("206", 410, 502, ("AMOLED-2.06",)),
     Profile("154", 240, 240, ("LCD-1.54",), buttons=2),
     Profile("154s", 240, 240, ("SpotPear S3 LCD-1.54",), pwr=False),
-    Profile("round", 466, 466, ("AMOLED-1.32",), round=True),
+    Profile("round", 466, 466, ("AMOLED-1.32", "AMOLED-1.75C"), round=True),
     Profile("round143", 466, 466, ("AMOLED-1.43",), round=True, pwr=False),
     Profile("lcd21", 480, 480, ("LCD-2.1",), round=True, pwr=False),
     Profile("t4s3", 450, 600, ("LilyGO T4-S3",), pwr=False),

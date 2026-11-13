@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="128" viewBox="0 0 120 128">
+  <title>Waveshare ESP32-S3-Touch-AMOLED-1.75C</title>
+  <ellipse cx="60" cy="121" rx="46" ry="4" fill="#000" opacity=".14"/>
+  <path d="M25 25C40 6 76 4 95 25c15 17 20 46 7 68-10 18-27 26-46 25-23-1-42-13-48-34C1 61 10 39 25 25Z" fill="#45494c" stroke="#26282a"/>
+  <path d="M102 49l5 3 1 11-5-2zm-6-21 4 1 3 8-4-1z" fill="#8b9094" stroke="#383b3d"/>
+  <ellipse cx="57" cy="58" rx="49" ry="50" transform="rotate(-12 57 58)" fill="#9ea2a4" stroke="#54595c" stroke-width="2"/>
+  <ellipse cx="57" cy="58" rx="45" ry="46" transform="rotate(-12 57 58)" fill="#191b1c" stroke="#c4c6c6"/>
+  <ellipse cx="57" cy="58" rx="40" ry="41" transform="rotate(-12 57 58)" fill="#090909"/>
+  <path d="M30 50h53M30 66h53" stroke="#30302d" stroke-width="5" stroke-linecap="round"/>
+  <path d="M30 50h20" stroke="#788c5d" stroke-width="5" stroke-linecap="round"/>
+  <path d="M30 66h32" stroke="#d97757" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="55" cy="21" r="2" fill="#454a4d"/>
+</svg>

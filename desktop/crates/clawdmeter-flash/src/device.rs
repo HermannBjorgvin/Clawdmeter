@@ -23,9 +23,6 @@ use crate::manifest::{BoardImage, Manifest};
 pub const ESPRESSIF_VID: u16 = 0x303A;
 /// Native USB-Serial-JTAG product id.
 pub const USB_JTAG_PID: u16 = 0x1001;
-/// The 2.06 is the only 32 MB S3 board.
-pub const THIRTY_TWO_MB_S3_ENV: &str = "waveshare_amoled_206";
-
 /// Device-side errors. `Display` is written for people: what happened and
 /// what to do about it.
 #[derive(Debug)]
@@ -365,11 +362,8 @@ pub enum Identification {
 
 /// Narrow the manifest with a chip probe (see [`Manifest::candidates`]: an
 /// image fits when it needs no more flash than the board has, exact sizes
-/// first). A 32 MB S3 is the 2.06: no other supported board ships with 32 MB.
+/// first).
 pub fn identify_from_chip(manifest: &Manifest, chip: &ChipInfo) -> Identification {
-    if chip.chip == "esp32s3" && chip.flash_mb == Some(32) && manifest.board(THIRTY_TWO_MB_S3_ENV).is_some() {
-        return Identification::Unique(THIRTY_TWO_MB_S3_ENV.to_owned());
-    }
     let c: Vec<String> = manifest.candidates(&chip.chip, chip.flash_mb).into_iter().map(|b| b.env.clone()).collect();
     match c.len() {
         0 => Identification::Unsupported(chip.clone()),
@@ -744,7 +738,11 @@ mod tests {
         let chip = |c: &str, mb: Option<u32>| ChipInfo { chip: c.into(), flash_mb: mb, mac: None, features: vec![] };
         assert_eq!(
             identify_from_chip(&m, &chip("esp32s3", Some(32))),
-            Identification::Unique("waveshare_amoled_206".into())
+            Identification::Choose(vec![
+                "waveshare_amoled_206".into(),
+                "waveshare_amoled_216".into(),
+                "waveshare_amoled_18".into(),
+            ])
         );
         assert_eq!(
             identify_from_chip(&m, &chip("esp32s3", Some(16))),
@@ -756,6 +754,24 @@ mod tests {
         );
         assert!(matches!(identify_from_chip(&m, &chip("esp32c3", Some(4))), Identification::Unsupported(_)));
         assert!(matches!(identify_from_chip(&m, &chip("esp32s3", Some(4))), Identification::Unsupported(_)));
+    }
+
+    #[test]
+    fn thirty_two_mb_s3_boards_require_a_choice() {
+        let mut m = manifest();
+        let mut board = m.board("waveshare_amoled_206").unwrap().clone();
+        board.env = "waveshare_amoled_175c".into();
+        m.boards.push(board);
+        let chip = ChipInfo { chip: "esp32s3".into(), flash_mb: Some(32), mac: None, features: vec![] };
+        assert_eq!(
+            identify_from_chip(&m, &chip),
+            Identification::Choose(vec![
+                "waveshare_amoled_206".into(),
+                "waveshare_amoled_175c".into(),
+                "waveshare_amoled_216".into(),
+                "waveshare_amoled_18".into(),
+            ])
+        );
     }
 
     #[test]
