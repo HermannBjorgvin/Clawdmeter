@@ -60,15 +60,6 @@ lively Clawd is, what the buttons do and the board's colors.
   </tr>
 </table>
 
-## Themes
-
-The board takes its colors from the app, Clawd's included: Dark, Light,
-System (follows your computer between them), Catppuccin Mocha, Dracula,
-Gruvbox, Monokai, Nord, One Dark, Solarized and Tokyo Night, or a palette of
-your own. Pick one on the Device page and the board repaints within seconds.
-
-<img src="docs/images/themes.gif" width="360" alt="The board's usage screen cycling through the eleven theme presets (firmware simulator)">
-
 ---
 
 <a href="https://github.com/notaharness/n10">
@@ -123,6 +114,12 @@ Stable.
 | <img src="desktop/crates/clawdmeter-app/assets/boards/spotpear_s3_154.svg" height="90" alt=""> | [SpotPear ESP32-S3-LCD-1.54 MUMA (touch)](https://spotpear.com/shop/ESP32-S3-AI-1.54-inch-LCD-Display-TouchScreen-N16R8-muma-DeepSeek.html) | 240×240 ST7789 SPI LCD, CST816 touch, no PMU. BOOT is the only button. |
 | <img src="desktop/crates/clawdmeter-app/assets/boards/waveshare_lcd_21.svg" height="90" alt=""> | [Waveshare ESP32-S3-Touch-LCD-2.1](https://www.waveshare.com/esp32-s3-touch-lcd-2.1.htm?&aff_id=149786) | 480×480 round ST7701S RGB panel (flat 2.1 or curved-glass 2.1B), CST820 touch, battery gauge. BOOT is the only button; pair by touch hold. |
 | <img src="desktop/crates/clawdmeter-app/assets/boards/waveshare_lcd_4.svg" height="90" alt=""> | [Waveshare ESP32-S3-Touch-LCD-4](https://www.waveshare.com/esp32-s3-touch-lcd-4.htm?&aff_id=149786) | 480×480 IPS, 4 inches, one button. V4.0 boards (CH32V003 IO expander) add alert beeps; battery level and brightness steps need a build with `BOARD_HAS_BATTERY 1` and a cell fitted. With a cell, plugging or unplugging USB resets the board. |
+
+## Themes
+
+Match your Clawdmeter to your IDE's theme on the Device page.
+
+<img src="docs/images/themes.gif" width="360" alt="The board's usage screen cycling through the eleven theme presets (firmware simulator)">
 
 ## Docs
 
