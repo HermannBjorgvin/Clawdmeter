@@ -1,8 +1,9 @@
 #pragma once
 
 // Waveshare ESP32-S3-Touch-LCD-4 — 4" square RGB TFT kit.
-// 480x480 ST7701 (RGB parallel + SW SPI init) + GT911 touch + TCA9554-style
-// IO expander at 0x24 (display power / backlight). No AXP2101, no IMU.
+// 480x480 ST7701 (RGB parallel + SW SPI init) + GT911 touch + an IO expander
+// for display power / backlight: CH32V003 at 0x24 (V4.0) or TCA9554 at 0x20
+// (earlier revisions). No AXP2101, no IMU.
 // Module is ESP32-S3R8 (8 MB OPI PSRAM, 16 MB flash).
 //
 // Pin map matches the hardware-tested lcd4 fork and Waveshare's wiki
@@ -16,6 +17,11 @@
 // ---- Display geometry ----
 #define LCD_WIDTH            480
 #define LCD_HEIGHT           480
+// Fixed UI orientation, in quarter turns clockwise of the image on the panel:
+//   0 = native, 1 = 90° CW (USB port at the bottom), 2 = 180°, 3 = 270° CW.
+// Applied in display.cpp (per-strip pixel remap) and touch.cpp (inverse map);
+// the panel is square so LVGL's W×H is unchanged.
+#define LCD_ROTATION         0
 
 // ---- RGB panel pins (ST7701) ----
 #define LCD_DE               40
@@ -51,12 +57,41 @@
 // ---- Touch (GT911, polled — INT is GPIO 16 on the wiki but unused here) ----
 #define TP_INT               16
 
-// ---- IO expander (TCA9554 / CH32V003-as-expander) ----
-// Controls display power rails and backlight (EXIO2). Must be programmed
-// before gfx->begin() or the panel stays dark.
+// ---- IO expander ----
+// Two board revisions, same job (display power/reset, touch reset, buzzer).
+// Must be programmed before gfx->begin() or the panel stays dark.
+//
+// CH32V003 microcontroller-as-expander @ 0x24 (current boards). Register and
+// pin map from Waveshare's own WS_CH32_IO library for this board:
 #define IO_EXPANDER_ADDR     0x24
+#define CH32_REG_DIRECTION   0x02  // 1 = output
+#define CH32_REG_OUTPUT      0x03
+#define CH32_REG_PWM         0x05  // backlight PWM 0..255, inverted: higher = dimmer
+#define CH32_REG_ADC         0x06  // battery ADC, 2 bytes little-endian, 10-bit
+#define CH32_ADC_REF_V       3.3f
+#define CH32_BAT_DIVIDER     3.0f  // VBAT = ADC volts × 3 (Waveshare WS_CH32_IO)
+#define CH32_REG_INPUT       0x04
+#define CH32_PIN_CHG_STAT    0     // input: ETA6098 charger STAT (low = charging), V4.0 schematic
+#define CH32_PIN_TOUCH_RST   1
+#define CH32_PIN_LCD_RST     3
+#define CH32_PIN_SYS_EN      5
+#define CH32_PIN_BUZZER      6     // BEE_EN — keep LOW
+#define CH32_PIN_RTC_INT     7
+//
+// TCA9554 @ 0x20 (V1–V3 boards). Not tested on hardware since the port first
+// shipped, so io_expander.cpp writes exactly what it always has: output 0xFF
+// (to 0x01 and 0x02), then config 0x3A, and the backlight as latch bit 2.
+// The wiki's table (P0 TP_RST, P1 BL_EN, P2 LCD_RST, P3 SD_CS, P5 BEE_EN,
+// P6 RTC_INT) suggests that leaves BL_EN and BEE_EN as inputs, weakly pulled
+// up by the TCA9554's internal resistors, and that bit 2 is LCD_RST, not the
+// backlight. Change it only with a TCA board to test on.
 #define IO_EXPANDER_ADDR_ALT 0x20
-#define IOX_PIN_BACKLIGHT    2     // Waveshare wiki: expander pin 2 = backlight
+#define TCA_REG_OUTPUT       0x01
+#define TCA_REG_POLARITY     0x02
+#define TCA_REG_CONFIG       0x03  // 1 = input
+#define TCA_OUTPUT_ON        0xFF
+#define TCA_CONFIG           0x3A
+#define TCA_PIN_BACKLIGHT    2
 
 // ---- Buttons ----
 #define BTN_BACK_GPIO        0     // BOOT — primary, Space (PTT)
@@ -67,6 +102,11 @@
 #define BOARD_HAS_SECONDARY_BUTTON 0
 #define BOARD_HAS_ROTATION         0
 #define BOARD_HAS_IMU              0
+// Off by default: with no cell fitted the ETA6098 charger holds VBAT near
+// 4.2 V (the ADC divider sits on its output), so a missing battery reads as
+// a full one and presence can't be told from the voltage. Set to 1 with a
+// 3.7 V LiPo on the PH2.0 jack of a CH32V003 (V4.0) board: battery level,
+// and the backlight PWM for brightness steps (see io_expander.cpp).
 #define BOARD_HAS_BATTERY          0
 #define BOARD_HAS_IO_EXPANDER      1
 #define BOARD_HAS_SOUND            0

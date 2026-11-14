@@ -39,8 +39,14 @@ void touch_hal_read(uint16_t* x, uint16_t* y, bool* pressed) {
         const TouchPoints &pts = touch.getTouchPoints();
         if (pts.hasPoints()) {
             touch_pressed = true;
-            touch_x = pts.getPoint(0).x;
-            touch_y = pts.getPoint(0).y;
+            // Panel → logical: inverse of display.cpp's LCD_ROTATION remap.
+            const int16_t px = pts.getPoint(0).x, py = pts.getPoint(0).y;
+            switch (LCD_ROTATION) {
+            case 1:  touch_x = py;                  touch_y = LCD_WIDTH - 1 - px;  break;
+            case 2:  touch_x = LCD_WIDTH - 1 - px;  touch_y = LCD_HEIGHT - 1 - py; break;
+            case 3:  touch_x = LCD_HEIGHT - 1 - py; touch_y = px;                  break;
+            default: touch_x = px;                  touch_y = py;                  break;
+            }
         } else {
             touch_pressed = false;
         }

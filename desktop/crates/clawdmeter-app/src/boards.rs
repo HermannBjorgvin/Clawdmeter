@@ -93,7 +93,7 @@ pub const BOARDS: [BoardInfo; 28] = [
         product: "Waveshare ESP32-S3-Touch-LCD-4",
         width: 480,
         height: 480,
-        buy_url: "https://www.waveshare.com/esp32-s3-touch-lcd-4.htm",
+        buy_url: "https://www.waveshare.com/esp32-s3-touch-lcd-4.htm?&aff_id=149786",
         summary: "480×480 · RGB TFT",
         chip: "ESP32-S3",
         pwr_button: false,
