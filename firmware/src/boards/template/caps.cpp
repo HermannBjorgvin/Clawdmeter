@@ -13,6 +13,7 @@ static const BoardCaps caps = {
     .minimal_ui   = false,   // full animated UI; true for e-ink / slow panels
     .has_pwr_button = false,  // set true once power.cpp reports PWR presses
     .has_touch = true,
+    .mono_panel = false,     // true for a 1-bit panel (e-paper): docs/porting/capability-flags.md
 };
 
 const BoardCaps& board_caps(void) { return caps; }

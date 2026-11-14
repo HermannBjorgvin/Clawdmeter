@@ -32,7 +32,7 @@ Port progress:
 - [ ] pio run -d firmware -e <env> builds; pio test -d firmware -e native passes
 - [ ] desktop/crates/clawdmeter-app/assets/boards/<env>.svg (original art)
 - [ ] boards.rs entry + SVG registered in ui/mod.rs; cargo test -p clawdmeter-app boards passes
-- [ ] README "Supported boards" row
+- [ ] README "Experimental" row
 - [ ] DISPLAY_NAMES entry in tools/ci/make_manifest.py; python3 -m unittest discover -s tools/ci/tests passes
 - [ ] UI checked at the panel's native size (verifying-firmware-ui skill)
 - [ ] PR body: buy link, photo or "no photo", exact hardware tested
@@ -71,8 +71,8 @@ Port progress:
 - `desktop/crates/clawdmeter-app/src/boards.rs`: display name and buy link.
   Register the SVG in `desktop/crates/clawdmeter-app/src/ui/mod.rs`.
   `boards::tests` fails if an env, its art or its shop link is missing.
-- README **Supported boards** table: the same display name and buy link, in
-  the **Experimental** table. A board moves to Stable once someone reports it
+- README **Experimental** table, under **Other supported boards**: the same
+  display name and buy link. A board moves to Stable once someone reports it
   working in the "Board support reports" discussion (env name, firmware
   version, a photo).
 - `tools/ci/make_manifest.py` `DISPLAY_NAMES`: without it the release ships the

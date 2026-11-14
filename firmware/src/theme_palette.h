@@ -24,6 +24,15 @@ enum ThemeColor : uint8_t {
 
 extern const uint32_t THEME_DEFAULTS[TH_COUNT];
 
+// Not in the palette: a mono_panel board ignores `th` and draws each pill as
+// paper text (TH_BG) on this fixed grey (ui.cpp make_pill). Its luminance, 88,
+// prints as ink (hal/mono_panel.h: 64 or more) but stays close to that
+// threshold, so where a glyph's anti-aliased edge blends it toward the black
+// text the pixel drops to paper at about 27 % coverage. On the near-white
+// TH_TEXT (247) it would take 75 %, and the thin strokes of i, l and k would
+// print as ink and close up.
+#define THEME_MONO_PILL_HEX 0x585858
+
 // `s` must be exactly THEME_HEX_LEN hex digits (either case); anything else
 // returns false and leaves `out` untouched.
 bool theme_parse_hex(const char* s, uint32_t out[TH_COUNT]);

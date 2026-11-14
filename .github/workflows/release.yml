@@ -182,19 +182,10 @@ jobs:
               codesign --force --sign - "$app"
               codesign --verify --verbose "$app"
               tar -C stage -czf "dist/clawdmeter-$tag-${{ matrix.name }}.tar.gz" .
-              # Drag-to-Applications disk image of the same signed bundle.
-              mkdir dmgroot
-              ditto "$app" dmgroot/Clawdmeter.app
-              ln -s /Applications dmgroot/Applications
-              dmg="dist/clawdmeter-$tag-${{ matrix.name }}.dmg"
-              # hdiutil sometimes reports "Resource busy" on hosted runners.
-              for i in 1 2 3; do
-                hdiutil create -volname Clawdmeter -srcfolder dmgroot -fs HFS+ \
-                  -format UDZO -ov "$dmg" && break
-                [ "$i" = 3 ] && exit 1
-                sleep 5
-              done
-              hdiutil verify "$dmg"
+              # Drag-to-Applications disk image of the same signed bundle,
+              # its window laid out by tools/packaging/macos/.
+              tools/packaging/dmg.sh "$app" "dist/clawdmeter-$tag-${{ matrix.name }}.dmg" \
+                "$RUNNER_TEMP/dmg"
               ;;
             windows-*)
               cp desktop/target/x86_64-pc-windows-msvc/release/clawdmeter.exe stage/
@@ -210,6 +201,8 @@ jobs:
           bin=desktop/target/x86_64-unknown-linux-gnu/release/clawdmeter
           # The committed icons must match the firmware's art.
           python3 tools/packaging/make_icons.py --check
+          # And the disk image's picture and layout what its script says.
+          python3 tools/packaging/make_dmg_background.py --check
           cargo install --locked cargo-deb@3.8.0
           # Debian sorts 1.2.0~rc.1 before 1.2.0; the file keeps the tag's spelling.
           debver=$(printf '%s' "$ver" | sed 's/-/~/')

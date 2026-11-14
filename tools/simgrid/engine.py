@@ -626,6 +626,7 @@ class Engine:
                 "boards": [{"id": s.profile.id, "label": s.profile.label, "w": s.profile.w,
                             "h": s.profile.h, "round": s.profile.round, "pwr": s.profile.pwr,
                             "buttons": s.profile.buttons, "minimal": s.profile.minimal,
+                            "mono": s.profile.mono,
                             "on_main": s.profile.on_main, "version": s.version}
                            for s in self.sims],
             }

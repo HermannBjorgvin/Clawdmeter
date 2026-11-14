@@ -78,8 +78,10 @@ Continuity rules, as the code enforces them:
   the meters stay where they are at 40 % opacity (LVGL `opa`, which scales the
   draws and needs no layer buffer, so it's free on the C6) and the status line
   alternates "Stale…" (or "No data…" before the first payload) with
-  "Listening…". The corner Clawd stays in his seat. Shows and the screensaver
-  need live meters, so they wait.
+  "Listening…". On a 1-bit panel (`BoardCaps.mono_panel`, the e-paper) faded
+  text prints broken, so the meters keep full strength and the status line
+  holds "Stale" / "No data" without alternating. The corner Clawd stays in his
+  seat. Shows and the screensaver need live meters, so they wait.
 
 ## Beats
 
@@ -339,8 +341,10 @@ a board capability, with no NVS override, desktop setting, or serial toggle.
 - Attention: a held pointing frame (pointing frame 16) in the seat, and the
   message in the status line, truncated rather than scrolled. A tap dismisses
   it, as do `x` and the 2 min timeout.
-- The status line shows a fixed glyph and one word ("Connected", "No data",
-  "Waiting") and redraws only when the state changes.
+- The status line shows a fixed glyph and one word ("Connected", "Stale",
+  "No data", "Waiting") and redraws only when the state changes. On an e-paper
+  board each redraw is a partial refresh that blocks the loop, so the line
+  never changes on a timer.
 
 ## Boards without PSRAM (C6)
 

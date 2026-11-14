@@ -110,8 +110,8 @@ A new port must include:
   `desktop/crates/clawdmeter-app/src/boards.rs`, plus the SVG registration
   in `desktop/crates/clawdmeter-app/src/ui/mod.rs`.
 - An entry with the display name and buy link in the README's
-  **Supported boards** table (new ports start under **Experimental**; a
-  report in the "Board support reports" discussion moves them to Stable).
+  **Experimental** table, under **Other supported boards** (a report in the
+  "Board support reports" discussion moves it to Stable).
   Waveshare product links must include
   `?aff_id=149786` (or `&aff_id=149786` when a query already exists).
   Other vendors use a plain product link to the maker's own store. When
