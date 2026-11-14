@@ -52,6 +52,7 @@ portable archives, and Nix setup.
     <td width="50%"><img src="docs/images/app-device.png" alt="Clawdmeter desktop app: the Device page with the board, a firmware update and its settings"></td>
   </tr>
 </table>
+<p align="center"><sub>Clawdmeter desktop app for flashing and configuring your board</sub></p>
 
 ---
 
