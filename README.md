@@ -46,7 +46,28 @@ portable archives, and Nix setup.
 4. Enable **Settings → Start at login** if you want the app to launch when
    you sign in.
 
-![Clawdmeter desktop app showing device status and usage](desktop/docs/screenshots/overview.png)
+## Desktop app
+
+The app reads your usage, follows Claude Code through its hooks and sends both
+to the board over Bluetooth. It flashes firmware over USB and tells you when
+a new app or firmware release is out. The Device page sets the clock, how
+lively Clawd is, what the buttons do and the board's colors.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/app-overview.png" alt="Clawdmeter desktop app: the Overview page with session and weekly usage, and an app update offered in the sidebar"></td>
+    <td width="50%"><img src="docs/images/app-device.png" alt="Clawdmeter desktop app: the Device page with the board, a firmware update and its settings"></td>
+  </tr>
+</table>
+
+## Themes
+
+The board takes its colors from the app, Clawd's included: Dark, Light,
+System (follows your computer between them), Catppuccin Mocha, Dracula,
+Gruvbox, Monokai, Nord, One Dark, Solarized and Tokyo Night, or a palette of
+your own. Pick one on the Device page and the board repaints within seconds.
+
+<img src="docs/images/themes.gif" width="360" alt="The board's usage screen cycling through the eleven theme presets (firmware simulator)">
 
 ---
 
