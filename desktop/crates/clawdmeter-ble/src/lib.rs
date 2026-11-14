@@ -108,6 +108,14 @@ impl std::fmt::Display for LinkError {
 
 impl std::error::Error for LinkError {}
 
+impl LinkError {
+    /// The [`DeviceLink::open`] that failed with this got as far as
+    /// connecting to a device (or found one connected).
+    pub fn reached_device(&self) -> bool {
+        !matches!(self, LinkError::NoAdapter(_) | LinkError::NotFound)
+    }
+}
+
 impl From<btleplug::Error> for LinkError {
     fn from(e: btleplug::Error) -> Self {
         LinkError::Ble(e)
@@ -492,10 +500,17 @@ impl DeviceLink {
                 Err(_) => Err(LinkError::Timeout("connect")),
             };
             if let Err(e) = r {
-                // Cancel BlueZ's pending Connect, or the next attempt fails
-                // with "Operation already in progress".
-                let _ = p.disconnect().await;
-                return Err(e);
+                if cfg!(target_os = "linux") && p.is_connected().await.unwrap_or(false) {
+                    // BlueZ's own reconnect got there first. (WinRT can read
+                    // connected after a failed connect without a usable
+                    // device, so only BlueZ is trusted here.)
+                    log::debug!("connect failed ({e}), but the device is connected; carrying on");
+                } else {
+                    // Cancel BlueZ's pending Connect, or the next attempt
+                    // fails with "Operation already in progress".
+                    let _ = p.disconnect().await;
+                    return Err(e);
+                }
             }
         }
         tokio::time::timeout(opts.discover_timeout, p.discover_services())

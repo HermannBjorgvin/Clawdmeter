@@ -343,7 +343,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                         LinkError::NoAdapter(s) => LinkState::NoAdapter(s.clone()),
                         _ => LinkState::Searching,
                     };
-                    let wait = reconnect.failed(now);
+                    let wait = reconnect.failed(now, e.reached_device());
                     if !matches!(e, LinkError::NotFound) || wait == 1 {
                         log::info!("{e}; retrying in {wait}s");
                     }
@@ -357,14 +357,13 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             if link.is_some() || !should_wake(&w, cache.load().as_deref()) {
                 continue;
             }
-            if connecting.is_none() && !reconnect.due(now) {
+            if reconnect.wake(now, connecting.is_some(), w.sighting) {
                 let how = match w.sighting {
                     Sighting::Connected => "connected at the OS level",
                     Sighting::Advertising => "advertising",
                 };
                 log::info!("device {} {how}; reconnecting now", w.key);
             }
-            reconnect.wake(now, connecting.is_some());
         }
         if link.is_none() && connecting.is_none() && reconnect.due(now) {
             if link_state == LinkState::Starting {
