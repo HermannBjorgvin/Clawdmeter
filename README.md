@@ -4,7 +4,37 @@
 
 ![Two Clawdmeter devices: Clawd's face on the left, session and weekly usage on the right](docs/images/clawdmeter-hero.jpg)
 
-Clawdmeter shows your Claude Code usage limits on an ESP32 development board on your desk. Clawd lives on the device. He reacts to prompts, cheers you on, and alerts you when a session needs your attention.
+Clawdmeter shows your Claude Code usage limits on an [ESP32 development board](#supported-boards) on your desk. Clawd lives on the device. He reacts to prompts, cheers you on, and alerts you when a session needs your attention.
+
+## Install
+
+Download the app from the [latest release](https://github.com/HermannBjorgvin/Clawdmeter/releases/latest).
+
+| OS             | Package     | Install                                                                                                                          |
+| -------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| macOS          | `.dmg`      | Drag Clawdmeter to Applications. If blocked, use **System Settings → Privacy & Security → Open Anyway**. Allow Bluetooth access. |
+| Windows        | `.msi`      | Run the installer. If SmartScreen blocks it, choose **More info → Run anyway**.                                                  |
+| Debian, Ubuntu | `.deb`      | `sudo apt install ./clawdmeter_<version>_amd64.deb`                                                                              |
+| Other Linux    | `.AppImage` | `chmod +x clawdmeter-*.AppImage`, then run it.                                                                                   |
+| NixOS, Nix     | Flake       | `nix run github:HermannBjorgvin/Clawdmeter`                                                                                      |
+
+The macOS and Windows packages aren't signed with a publisher certificate.
+See the [user guide](docs/user-guide.md#installation) for Linux requirements,
+portable archives, and Nix setup.
+
+## Quick start
+
+1. Launch Clawdmeter and follow setup. Connect the board with a USB data
+   cable, check the selected board, and install firmware.
+2. Pair **Clawdmeter** in your computer's Bluetooth settings. It appears as
+   a keyboard because its buttons send key presses.
+3. Open **Hooks** to let Clawd react to Claude Code activity and alert when
+   a session needs an answer. Review the changes before saving.
+   Usage meters work without hooks.
+4. Enable **Settings → Start at login** if you want the app to launch when
+   you sign in.
+
+![Clawdmeter desktop app showing device status and usage](desktop/docs/screenshots/overview.png)
 
 ## Supported boards
 
@@ -60,36 +90,6 @@ Stable.
 | <img src="desktop/crates/clawdmeter-app/assets/boards/waveshare_lcd_21.svg" height="90" alt=""> | [Waveshare ESP32-S3-Touch-LCD-2.1](https://www.waveshare.com/esp32-s3-touch-lcd-2.1.htm?&aff_id=149786) | 480×480 round ST7701S RGB panel (flat 2.1 or curved-glass 2.1B), CST820 touch, battery gauge. BOOT is the only button; pair by touch hold. |
 | <img src="desktop/crates/clawdmeter-app/assets/boards/waveshare_lcd_4.svg" height="90" alt=""> | [Waveshare ESP32-S3-Touch-LCD-4](https://www.waveshare.com/esp32-s3-touch-lcd-4.htm?&aff_id=149786) | 480×480 IPS, 4 inches, one button. V4.0 boards (CH32V003 IO expander) add alert beeps; battery level and brightness steps need a build with `BOARD_HAS_BATTERY 1` and a cell fitted. With a cell, plugging or unplugging USB resets the board. |
 
-## Install
-
-Download the app from the [latest release](https://github.com/HermannBjorgvin/Clawdmeter/releases/latest).
-
-| OS             | Package     | Install                                                                                                                          |
-| -------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| macOS          | `.dmg`      | Drag Clawdmeter to Applications. If blocked, use **System Settings → Privacy & Security → Open Anyway**. Allow Bluetooth access. |
-| Windows        | `.msi`      | Run the installer. If SmartScreen blocks it, choose **More info → Run anyway**.                                                  |
-| Debian, Ubuntu | `.deb`      | `sudo apt install ./clawdmeter_<version>_amd64.deb`                                                                              |
-| Other Linux    | `.AppImage` | `chmod +x clawdmeter-*.AppImage`, then run it.                                                                                   |
-| NixOS, Nix     | Flake       | `nix run github:HermannBjorgvin/Clawdmeter`                                                                                      |
-
-The macOS and Windows packages aren't signed with a publisher certificate.
-See the [user guide](docs/user-guide.md#installation) for Linux requirements,
-portable archives, and Nix setup.
-
-## Quick start
-
-1. Launch Clawdmeter and follow setup. Connect the board with a USB data
-   cable, check the selected board, and install firmware.
-2. Pair **Clawdmeter** in your computer's Bluetooth settings. It appears as
-   a keyboard because its buttons send key presses.
-3. Open **Hooks** to let Clawd react to Claude Code activity and alert when
-   a session needs an answer. Review the changes before saving.
-   Usage meters work without hooks.
-4. Enable **Settings → Start at login** if you want the app to launch when
-   you sign in.
-
-![Clawdmeter desktop app showing device status and usage](desktop/docs/screenshots/overview.png)
-
 ## Docs
 
 - [User guide](docs/user-guide.md): setup, device controls, settings, and connection help.
@@ -98,6 +98,15 @@ portable archives, and Nix setup.
 - [BLE protocol](docs/protocol.md): payload fields and notifications.
 - [Clawd's director](docs/clawd-director.md): behavior and character rules.
 - [Legacy daemon parity](docs/daemon-parity.md): upgrade steps and implementation differences.
+
+---
+
+<a href="https://github.com/notaharness/n10">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/n10-ad-dark.png">
+    <img alt="n10: come vibe code an agent manager with us" src="docs/images/n10-ad-light.png" width="600">
+  </picture>
+</a>
 
 ## Licensing gray area warning
 
