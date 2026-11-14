@@ -5,6 +5,7 @@ on:
     paths:
       - "firmware/**"
       - "tools/ci/**"
+      - "tools/packaging/**"
       - ".github/workflows/firmware.yml"
       - ".github/actions/setup-pio/**"
   push:
@@ -12,6 +13,7 @@ on:
     paths:
       - "firmware/**"
       - "tools/ci/**"
+      - "tools/packaging/**"
       - ".github/workflows/firmware.yml"
       - ".github/actions/setup-pio/**"
   workflow_dispatch:
@@ -119,3 +121,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m unittest discover -s tools/ci/tests -v
+      # What the release would otherwise find first: committed packaging
+      # art that no longer matches its script.
+      - run: python tools/packaging/make_icons.py --check
+      - run: python tools/packaging/make_dmg_background.py --check

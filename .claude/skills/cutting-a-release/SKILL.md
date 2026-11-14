@@ -22,6 +22,7 @@ Release checks:
 - [ ] main is green: firmware.yml and desktop.yml passed on the commit
 - [ ] Every hardware env has a DISPLAY_NAMES entry in tools/ci/make_manifest.py
 - [ ] python3 tools/packaging/make_icons.py --check   (icons match the firmware art)
+- [ ] python3 tools/packaging/make_dmg_background.py --check   (the disk image's picture and layout match its script)
 - [ ] python3 -m unittest discover -s tools/ci/tests
 - [ ] Packaging changed? Run the local checks below
 - [ ] .github/ changed? actionlint (+ shellcheck) passes
@@ -49,7 +50,8 @@ short:
 - Desktop archives built with `CLAWDMETER_VERSION=${tag#v}`: Linux binary,
   macOS universal `Clawdmeter.app` (ad-hoc signed, `NSBluetoothAlwaysUsageDescription`
   + `LSUIElement`), Windows exe.
-- Installers: `.dmg` (hdiutil), per-user `.msi` from
+- Installers: `.dmg` (`tools/packaging/dmg.sh`: hdiutil, with the window
+  layout and picture from `tools/packaging/macos/`), per-user `.msi` from
   `tools/packaging/wix/clawdmeter.wxs` (WiX 5), `.deb` from
   `[package.metadata.deb]` in `desktop/crates/clawdmeter-app/Cargo.toml`,
   `.AppImage` from `tools/packaging/appimage.sh` on ubuntu-22.04 (host
@@ -63,6 +65,22 @@ Packaging assets live in `tools/packaging/`: icons (PNG/ICO/ICNS rendered
 from the official idle Clawd by `make_icons.py`, committed; the release fails
 if they drift from the firmware art) and `linux/clawdmeter.desktop`
 (app_id `clawdmeter`).
+
+The disk image's window (`tools/packaging/macos/`): `dmg-background.png` and
+`@2x`, drawn by `make_dmg_background.py`, and `dmg-DS_Store`, Finder's layout
+(window size, icon positions, the picture's path), which `dmg.sh` copies in as
+`.DS_Store`. The layout names the volume (`Clawdmeter`), `Clawdmeter.app` and
+`.background/background.tiff`, so those can't change without it. After
+changing a size or position in the script, rerun it and then
+`tools/packaging/make_dmg_layout.sh` on a Mac (it has Finder lay out a scratch
+volume), commit all three files, then build an image and open it:
+
+```bash
+tools/packaging/dmg.sh <signed Clawdmeter.app> /tmp/clawdmeter.dmg && open /tmp/clawdmeter.dmg
+```
+
+`release.yml` runs only on tags, so that local build is the only test of the
+image before a release.
 
 ## Nix
 
