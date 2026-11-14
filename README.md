@@ -46,13 +46,6 @@ portable archives, and Nix setup.
 4. Enable **Settings → Start at login** if you want the app to launch when
    you sign in.
 
-## Desktop app
-
-The app reads your usage, follows Claude Code through its hooks and sends both
-to the board over Bluetooth. It flashes firmware over USB and tells you when
-a new app or firmware release is out. The Device page sets the clock, how
-lively Clawd is, what the buttons do and the board's colors.
-
 <table>
   <tr>
     <td width="50%"><img src="docs/images/app-overview.png" alt="Clawdmeter desktop app: the Overview page with session and weekly usage, and an app update offered in the sidebar"></td>
