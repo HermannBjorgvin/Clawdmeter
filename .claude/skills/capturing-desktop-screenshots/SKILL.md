@@ -66,13 +66,6 @@ demo's fake one, v2.6.0), then:
 - `docs/images/app-overview.png`: `--page overview --app-update download --firmware-skipped`
 - `docs/images/app-device.png`: `--page device --app-update download --firmware-skipped`
 
-`docs/images/themes.gif` is the firmware simulator, not the app: one
-`SIM_SCENARIO` per preset in `clawdmeter-core`'s `themes::PRESETS` (a single
-usage payload with that preset's colours as `th`, `s` 34, `w` 62), captured
-with `SIM_AUTOSHOT_MS=5000` and joined in preset order with ImageMagick
-(`convert -delay 50 -loop 0 … -layers Optimize`). The
-`verifying-firmware-ui` skill covers the simulator.
-
 Don't add `observe_window_appearance` while working on the UI: on X11, GPUI
 0.2.2 redraws inside the portal callback and panics. The root polls the
 appearance instead.
