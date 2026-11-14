@@ -48,15 +48,6 @@ portable archives, and Nix setup.
 
 ![Clawdmeter desktop app showing device status and usage](desktop/docs/screenshots/overview.png)
 
-## Docs
-
-- [User guide](docs/user-guide.md): setup, device controls, settings, and connection help.
-- [Development](docs/development.md): builds, simulator, and releases.
-- [Add a board](docs/porting/adding-a-board.md): hardware ports and app integration.
-- [BLE protocol](docs/protocol.md): payload fields and notifications.
-- [Clawd's director](docs/clawd-director.md): behavior and character rules.
-- [Legacy daemon parity](docs/daemon-parity.md): upgrade steps and implementation differences.
-
 ---
 
 <a href="https://github.com/notaharness/n10">
@@ -111,6 +102,15 @@ Stable.
 | <img src="desktop/crates/clawdmeter-app/assets/boards/spotpear_s3_154.svg" height="90" alt=""> | [SpotPear ESP32-S3-LCD-1.54 MUMA (touch)](https://spotpear.com/shop/ESP32-S3-AI-1.54-inch-LCD-Display-TouchScreen-N16R8-muma-DeepSeek.html) | 240×240 ST7789 SPI LCD, CST816 touch, no PMU. BOOT is the only button. |
 | <img src="desktop/crates/clawdmeter-app/assets/boards/waveshare_lcd_21.svg" height="90" alt=""> | [Waveshare ESP32-S3-Touch-LCD-2.1](https://www.waveshare.com/esp32-s3-touch-lcd-2.1.htm?&aff_id=149786) | 480×480 round ST7701S RGB panel (flat 2.1 or curved-glass 2.1B), CST820 touch, battery gauge. BOOT is the only button; pair by touch hold. |
 | <img src="desktop/crates/clawdmeter-app/assets/boards/waveshare_lcd_4.svg" height="90" alt=""> | [Waveshare ESP32-S3-Touch-LCD-4](https://www.waveshare.com/esp32-s3-touch-lcd-4.htm?&aff_id=149786) | 480×480 IPS, 4 inches, one button. V4.0 boards (CH32V003 IO expander) add alert beeps; battery level and brightness steps need a build with `BOARD_HAS_BATTERY 1` and a cell fitted. With a cell, plugging or unplugging USB resets the board. |
+
+## Docs
+
+- [User guide](docs/user-guide.md): setup, device controls, settings, and connection help.
+- [Development](docs/development.md): builds, simulator, and releases.
+- [Add a board](docs/porting/adding-a-board.md): hardware ports and app integration.
+- [BLE protocol](docs/protocol.md): payload fields and notifications.
+- [Clawd's director](docs/clawd-director.md): behavior and character rules.
+- [Legacy daemon parity](docs/daemon-parity.md): upgrade steps and implementation differences.
 
 ## Licensing gray area warning
 
