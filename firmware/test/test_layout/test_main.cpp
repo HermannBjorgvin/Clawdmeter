@@ -25,7 +25,7 @@ static const Panel PANELS[] = {
     { "T-Display S3 landscape", 320, 170, false },
     { "320x200 strip",        320, 200, false },
     { "M5StickS3",            135, 240, false },
-    { "AMOLED-1.32 / 1.43",   466, 466, true  },
+    { "AMOLED-1.32 / 1.43 / 1.75C", 466, 466, true },
     { "LCD-2.1",              480, 480, true  },
     { "ePaper 1.54",          200, 200, false },
     { "LCD-1.83",             240, 284, false },
