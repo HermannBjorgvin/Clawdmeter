@@ -38,7 +38,7 @@ pub struct BoardInfo {
 }
 
 /// Every hardware env in `firmware/platformio.ini` (not `sim` / `native`).
-pub const BOARDS: [BoardInfo; 27] = [
+pub const BOARDS: [BoardInfo; 28] = [
     BoardInfo {
         env: "waveshare_amoled_216",
         name: "AMOLED 2.16",
@@ -144,6 +144,18 @@ pub const BOARDS: [BoardInfo; 27] = [
         buy_url: "https://www.waveshare.com/esp32-s3-touch-lcd-1.47.htm?&aff_id=149786",
         summary: "320×172 · landscape",
         chip: "ESP32-S3",
+        pwr_button: true,
+        buttons: &[(Button::Pwr, "BOOT")],
+    },
+    BoardInfo {
+        env: "waveshare_lcd_147_c6",
+        name: "LCD 1.47 (C6)",
+        product: "Waveshare ESP32-C6-Touch-LCD-1.47",
+        width: 320,
+        height: 172,
+        buy_url: "https://www.waveshare.com/esp32-c6-touch-lcd-1.47.htm?&aff_id=149786",
+        summary: "320×172 · ESP32-C6",
+        chip: "ESP32-C6",
         pwr_button: true,
         buttons: &[(Button::Pwr, "BOOT")],
     },

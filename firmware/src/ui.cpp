@@ -195,7 +195,8 @@ static lv_color_t pct_color(float pct) {
 // pct_color(). On: each Pro/Max bar gets a thin ivory line at the elapsed
 // share of its window and the fill follows pace_level(). A bar with no reset
 // time hides its line and keeps pct_color(). Spend-capped accounts are
-// untouched: their Period bar already is the elapsed share.
+// untouched: their Period bar already is the elapsed share. On a mono panel
+// every fill prints as ink, so the line gets a paper edge (make_pace_tick).
 static bool pace_marker = false;
 static lv_obj_t* tick_session = nullptr;
 static lv_obj_t* tick_weekly  = nullptr;
@@ -214,21 +215,34 @@ static lv_color_t bar_color(float used_pct, int reset_mins, int window_mins) {
     return pct_color(used_pct);
 }
 
-// A line inside the bar, exactly its height, drawn over the fill.
+// A line inside the bar, its full height inside any outline (mono_panel),
+// drawn over the fill. On a mono panel the fill and the line both print as
+// ink, so the line gets a 1 px paper edge on each side: it reads the same
+// over the fill, over the track and at the fill's end.
 static lv_obj_t* make_pace_tick(lv_obj_t* bar) {
+    const int border = lv_obj_get_style_border_width(bar, LV_PART_MAIN);
+    const bool mono = board_caps().mono_panel;
+    const int w = L.bar_h >= 20 ? 3 : 2;
     lv_obj_t* tick = lv_obj_create(bar);
     lv_obj_remove_style_all(tick);
-    lv_obj_set_size(tick, L.bar_h >= 20 ? 3 : 2, L.bar_h);
+    lv_obj_set_size(tick, mono ? w + 2 : w, L.bar_h - 2 * border);
     themed_bg(tick, TH_TEXT);
     lv_obj_set_style_bg_opa(tick, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(tick, 1, 0);
+    lv_obj_set_style_radius(tick, mono ? 0 : 1, 0);
+    if (mono) {
+        lv_obj_set_style_border_color(tick, COL_BG, 0);
+        lv_obj_set_style_border_opa(tick, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(tick, 1, 0);
+        lv_obj_set_style_border_side(tick, (lv_border_side_t)(LV_BORDER_SIDE_LEFT | LV_BORDER_SIDE_RIGHT), 0);
+    }
     lv_obj_clear_flag(tick, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(tick, LV_OBJ_FLAG_HIDDEN);
     return tick;
 }
 
-// Centre the line on elapsed_pct, kept clear of the bar's rounded ends;
-// hidden while the setting is off or the elapsed share is unknown.
+// Centre the line on elapsed_pct, kept clear of the bar's rounded ends and
+// inside its outline; hidden while the setting is off or the elapsed share
+// is unknown.
 static void place_pace_tick(lv_obj_t* tick, float elapsed_pct) {
     if (!pace_marker || elapsed_pct < 0) {
         lv_obj_add_flag(tick, LV_OBJ_FLAG_HIDDEN);
@@ -237,11 +251,17 @@ static void place_pace_tick(lv_obj_t* tick, float elapsed_pct) {
     lv_obj_t* bar = lv_obj_get_parent(tick);
     const int bar_w = lv_obj_get_width(bar);
     const int w = lv_obj_get_width(tick);
-    const int inset = lv_obj_get_style_radius(bar, LV_PART_MAIN) / 2;
+    // The fill spans the whole bar, outline included, but children sit
+    // inside the outline: x is worked out on the bar and shifted after.
+    const int border = lv_obj_get_style_border_width(bar, LV_PART_MAIN);
+    const int radius = lv_obj_get_style_radius(bar, LV_PART_MAIN);
+    int inset = radius / 2;
+    // An outline draws the rounded ends: keep clear of the whole curve.
+    if (border) inset = LV_MIN(radius, lv_obj_get_height(bar) / 2);
     int x = (int)(elapsed_pct * bar_w / 100.0f + 0.5f) - w / 2;
     if (x < inset) x = inset;
     if (x > bar_w - inset - w) x = bar_w - inset - w;
-    lv_obj_set_x(tick, x);
+    lv_obj_set_x(tick, x - border);
     lv_obj_clear_flag(tick, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -288,6 +308,10 @@ static lv_obj_t* make_bar(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_set_style_bg_color(bar, COL_GREEN, LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_INDICATOR);
     lv_obj_set_style_radius(bar, 6, LV_PART_INDICATOR);
+    if (board_caps().mono_panel) {   // the dark track prints as paper: outline it
+        lv_obj_set_style_border_color(bar, COL_TEXT, LV_PART_MAIN);
+        lv_obj_set_style_border_width(bar, 2, LV_PART_MAIN);
+    }
     return bar;
 }
 
@@ -304,8 +328,16 @@ static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
     lv_obj_set_style_text_font(lbl, L.pill_font, 0);
-    themed_text(lbl, TH_TEXT);
-    themed_bg(lbl, TH_BAR_BG);
+    // mono_panel: the dark fill would print as paper, leaving bare text, so
+    // the pill inverts to paper text on a fixed ink grey (THEME_MONO_PILL
+    // says why that grey; a mono panel never takes a new palette).
+    if (board_caps().mono_panel) {
+        themed_text(lbl, TH_BG);
+        lv_obj_set_style_bg_color(lbl, THEME_MONO_PILL, 0);
+    } else {
+        themed_text(lbl, TH_TEXT);
+        themed_bg(lbl, TH_BAR_BG);
+    }
     lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(lbl, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_pad_left(lbl, L.pill_pad_x, 0);
@@ -748,7 +780,9 @@ static void update_view_state(void) {
         lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
         // `opa` (not `opa_layered`) scales every draw of the group and its
         // children: no layer buffer, so it costs nothing on the C6.
-        lv_obj_set_style_opa(usage_group, v == 1 ? STALE_OPA : LV_OPA_COVER, 0);
+        // mono_panel: faded text prints broken in 1 bit, so it never fades
+        const bool dim = v == 1 && !board_caps().mono_panel;
+        lv_obj_set_style_opa(usage_group, dim ? STALE_OPA : LV_OPA_COVER, 0);
     }
 }
 
@@ -824,7 +858,9 @@ void ui_tick_anim(void) {
     if (!s_ble_connected) {
         text = "Waiting";              // advertising / waiting for a host connection
     } else if (view_state == 1) {      // stale — alternate so it reads as alive AND not live
-        text = (anim_msg_idx & 1) ? (data_received ? "Stale" : "No data") : "Listening";
+        // A mono panel doesn't dim stale meters, so the word is the only cue: hold it.
+        const char* stale = data_received ? "Stale" : "No data";
+        text = (board_caps().mono_panel || (anim_msg_idx & 1)) ? stale : "Listening";
     } else if (now - connected_at_ms < 5000) {
         text = "Connected";
     } else {
