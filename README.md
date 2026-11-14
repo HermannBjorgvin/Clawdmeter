@@ -2,7 +2,10 @@
 
 [![As featured on TechCrunch](https://img.shields.io/badge/As%20featured%20on-TechCrunch-0A9E01?style=for-the-badge&logo=techcrunch&logoColor=white)](https://techcrunch.com/2026/05/14/clawdmeter-turns-your-claude-code-usage-stats-into-a-tiny-desktop-dashboard/)
 
-![Two Clawdmeter devices: Clawd's face on the left, session and weekly usage on the right](docs/images/clawdmeter-hero.jpg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/clawdmeter-hero-dark.jpg">
+  <img alt="Two Clawdmeter devices: Clawd's face on the left, session and weekly usage on the right" src="docs/images/clawdmeter-hero.jpg">
+</picture>
 
 Clawdmeter shows your Claude Code usage limits on an [ESP32 development board](#supported-boards) on your desk. Clawd lives on the device. He reacts to prompts, cheers you on, and alerts you when a session needs your attention.
 
