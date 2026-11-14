@@ -41,6 +41,7 @@ Nested `CLAUDE.md` files load when you read or edit a file in their folder.
 | `esp32_s3_4848s040` | Guition-style ESP32-S3 4848S040 | ST7701S RGB 480×480, GT911 touch, no buttons readable |
 | `waveshare_amoled_143` | Waveshare ESP32-S3-Touch-AMOLED-1.43 | CO5300/SH8601 466×466 round, two revisions detected at boot, no PWR button |
 | `waveshare_amoled_132` | Waveshare ESP32-S3-Touch-AMOLED-1.32 | CO5300 466×466 round, CST820 touch, BOOT rotates the UI |
+| `waveshare_amoled_175c` | Waveshare ESP32-S3-Touch-AMOLED-1.75C | CO5300 466×466 round, CST9217 touch, AXP2101 |
 | `esp32_2432s024c`, `esp32_2432s024c_landscape` | Sunton ESP32-2432S024C | classic ESP32, no PSRAM, ST7789 SPI 240×320 / 320×240, CST820 touch |
 | `esp32_2432s028r`, `esp32_2432s028r_landscape` | Sunton ESP32-2432S028R (CYD) | classic ESP32, no PSRAM, ILI9341 SPI 240×320 / 320×240, resistive XPT2046 touch |
 | `m5sticks3` | M5Stack M5StickS3 | ST7789P3 SPI 135×240, no touch, M5PM1 PMIC, ES8311 chime |
