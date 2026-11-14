@@ -104,7 +104,7 @@ Stable.
 <a href="https://github.com/notaharness/n10">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/n10-ad-dark.png">
-    <img alt="n10: come vibe code an agent manager with us" src="docs/images/n10-ad-light.png" width="600">
+    <img alt="n10: come vibe code an agent manager with us" src="docs/images/n10-ad-light.png" width="100%">
   </picture>
 </a>
 
