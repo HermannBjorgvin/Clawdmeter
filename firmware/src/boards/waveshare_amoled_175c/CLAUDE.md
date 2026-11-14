@@ -8,5 +8,6 @@ shared rules.
   GPIO 2, I2C SDA 15 / SCL 14 and touch address 0x5A. Touch mirrors both axes.
 - BOOT is the primary button; AXP2101 PKEY is PWR. The ES8311 uses MCLK 16,
   BCLK 9, LRCK 45, DOUT 8 and amplifier enable 46.
-- The QMI8658 is fitted but unused; orientation is fixed. Speaker volume,
-  touch alignment and the display offset require hardware verification.
+- The QMI8658 is fitted but unused; orientation is fixed. Sound is disabled
+  until the amplifier path is verified on hardware. Touch alignment and the
+  display offset also require hardware verification.

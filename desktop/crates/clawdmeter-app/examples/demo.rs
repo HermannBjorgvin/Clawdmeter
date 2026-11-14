@@ -101,7 +101,7 @@ fn release(paths: &Paths) -> std::path::PathBuf {
         .iter()
         .map(|b| {
             let chip = if b.chip.contains("C6") { "esp32c6" } else { "esp32s3" };
-            let flash = if b.env == "waveshare_amoled_206" { "32MB" } else { "16MB" };
+            let flash = if matches!(b.env, "waveshare_amoled_206" | "waveshare_amoled_175c") { "32MB" } else { "16MB" };
             let (f, s) = if b.env == ENV { (file.clone(), sha.clone()) } else { (format!("{}.bin", b.env), "00".into()) };
             format!(
                 r#"{{"env":"{}","chip":"{chip}","flash_size":"{flash}","display_name":"{}","file":"{f}","sha256":"{s}"}}"#,
