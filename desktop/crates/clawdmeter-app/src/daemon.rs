@@ -371,17 +371,14 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                 link_state = LinkState::Connecting;
             }
             let (bt, cache, opts) = (bt.clone(), cache.clone(), link_opts.clone());
-            connecting = Some(tokio::spawn(async move {
-                let adapter = bt.adapter().await?;
-                DeviceLink::open(&adapter, &cache, &opts).await
-            }));
+            connecting = Some(tokio::spawn(async move { DeviceLink::open(&bt, &cache, &opts).await }));
         }
         if let Some(l) = &link {
             if now - last_link_check >= LINK_CHECK_EVERY {
                 last_link_check = now;
                 if !l.is_connected().await {
                     log::info!("device disconnected, reconnecting...");
-                    link = None;
+                    drop_link(&mut link).await;
                     device_events = None;
                     link_state = LinkState::Searching;
                     reconnect.retry_in(now, 2);
@@ -411,7 +408,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     Err(e) => {
                         log::warn!("write failed: {e}");
                         if !l.is_connected().await {
-                            link = None;
+                            drop_link(&mut link).await;
                             device_events = None;
                             link_state = LinkState::Searching;
                             reconnect.retry_in(now, 2);
@@ -427,6 +424,15 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             last_write_at,
             claude: claude.clone(),
         });
+    }
+}
+
+/// Drop a link that stopped working. BlueZ still reports a zombie
+/// connected, so it is disconnected first (bounded at 5 s), or the next
+/// attempt would find it connected and reuse it.
+async fn drop_link(link: &mut Option<DeviceLink>) {
+    if let Some(l) = link.take().filter(DeviceLink::is_zombie) {
+        l.close().await;
     }
 }
 
