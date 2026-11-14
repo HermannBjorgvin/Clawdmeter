@@ -23,7 +23,7 @@ the panels' framebuffers into PNGs, GIFs and MP4s. The same script of
 actions gives the same pixels on every run.
 
 `tools/simgrid/profiles.py` lists the cells: one per distinct panel size and
-set of capabilities (round, PWR button, button count, minimal mode),
+set of capabilities (round, PWR button, button count, minimal mode, 1-bit panel),
 labelled with the boards each stands for. Add a board there when a port
 brings a new size or capability.
 

@@ -8,6 +8,7 @@
 #include <Arduino.h>
 #include "../../clawd_director.h"
 #include "../../hal/board_caps.h"
+#include "../../hal/mono_panel.h"
 
 static SDL_Window*   win = NULL;
 static SDL_Renderer* ren = NULL;
@@ -17,8 +18,11 @@ static uint8_t       brightness = 200;
 static bool          dirty = false;
 static uint32_t      frame_version = 0;   // moves with every flush and brightness change
 
+// A 1-bit panel (SIM_MONO=1) is e-paper: no backlight, so no dimming.
+static uint8_t shown_brightness(void) { return board_caps().mono_panel ? 255 : brightness; }
+
 const uint16_t* sim_display_pixels(uint8_t* bright, uint32_t* version) {
-    *bright = brightness;
+    *bright = shown_brightness();
     *version = frame_version;
     return shadow;
 }
@@ -56,7 +60,8 @@ static void present(void) {
     edge_watch();
     SDL_UpdateTexture(tex, NULL, shadow, LCD_WIDTH * 2);
     // AMOLED brightness → linear dim of the whole frame.
-    SDL_SetTextureColorMod(tex, brightness, brightness, brightness);
+    const uint8_t b = shown_brightness();
+    SDL_SetTextureColorMod(tex, b, b, b);
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
     SDL_RenderClear(ren);
     SDL_RenderCopy(ren, tex, NULL, NULL);
@@ -106,8 +111,14 @@ static bool off_glass(int32_t px, int32_t py) {
     return dx * dx + dy * dy > d * d;
 }
 
+// A 1-bit panel (SIM_MONO=1) shows what the e-paper prints: each pixel
+// thresholded by the mono_panel rule (hal/mono_panel.h), ink black and
+// paper white.
+static uint16_t printed(uint16_t p) { return mono_ink565(p) ? 0x0000 : 0xFFFF; }
+
 void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
                              const uint16_t* pixels) {
+    const bool mono = board_caps().mono_panel;
     for (int32_t row = 0; row < h; row++) {
         int32_t dy = y + row;
         if (dy < 0 || dy >= LCD_HEIGHT) continue;
@@ -117,8 +128,11 @@ void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
         if (cw <= 0) continue;
         memcpy(&shadow[dy * LCD_WIDTH + x + sx], &pixels[(size_t)row * w + sx],
                (size_t)cw * 2);
-        for (int32_t px = x + sx; px < x + sx + cw; px++)
-            if (off_glass(px, dy)) shadow[dy * LCD_WIDTH + px] = BEZEL;
+        for (int32_t px = x + sx; px < x + sx + cw; px++) {
+            uint16_t* out = &shadow[dy * LCD_WIDTH + px];
+            if (mono) *out = printed(*out);
+            if (off_glass(px, dy)) *out = BEZEL;
+        }
     }
     dirty = true;
     frame_version++;
