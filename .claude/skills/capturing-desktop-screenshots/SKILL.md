@@ -40,6 +40,7 @@ frames.
 | `--session idle\|week` | Session not started / no 5-hour limit (weekly meter only) |
 | `--hooks-preview`, `--shop`, `--advanced` | Hooks file preview, board shop links, advanced settings |
 | `--buttons custom`, `--edit primary\|secondary\|pwr`, `--record` | A held shortcut on the secondary button and a media key on PWR; a button's editor open; it listening for a shortcut |
+| `--firmware-skipped` | The fake firmware release skipped, as the Overview's "Skip this update" does: no Overview nudge or Flash badge, the Device page still offers it |
 | `--height PX` | A taller window (default 640) so a long page fits one capture |
 
 `demo.rs`'s header comment is the source of truth if these drift.
@@ -54,6 +55,16 @@ with `--height 1300` so the settings down to Colors show.
 `CLAWDMETER_DECORATIONS=client CLAWDMETER_BUTTON_LAYOUT=:minimize,maximize,close`
 in the environment. Without the second variable the buttons follow the
 capturing desktop's GNOME `button-layout`.
+
+## README images
+
+The README's app screenshots show a release build: build the demo with
+`CLAWDMETER_VERSION` set to the latest tag (the footer shows it, and the
+sidebar's "Update available" pill only appears for a release older than the
+demo's fake one, v2.6.0), then:
+
+- `docs/images/app-overview.png`: `--page overview --app-update download --firmware-skipped`
+- `docs/images/app-device.png`: `--page device --app-update download --firmware-skipped`
 
 Don't add `observe_window_appearance` while working on the UI: on X11, GPUI
 0.2.2 redraws inside the portal callback and panics. The root polls the

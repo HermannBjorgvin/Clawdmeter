@@ -41,6 +41,6 @@ ESP32-S3-Touch-AMOLED-2.16." Or: "not reviewed by a human". -->
 <!-- Include an original 3/4-view SVG in
  desktop/crates/clawdmeter-app/assets/boards/<env>.svg, drawn from the real
  product rather than copied photos. Register it in ui/mod.rs and add the
- display name and buy link to the app's boards.rs and README Supported boards.
+ display name and buy link to the app's boards.rs and the README's Experimental table.
  Waveshare links need ?aff_id=149786 (&aff_id=149786 with an existing query).
  Other vendors use a plain product link. -->

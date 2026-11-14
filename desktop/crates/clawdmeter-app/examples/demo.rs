@@ -10,12 +10,16 @@
 //!   [--flash-to identify|firmware|flash|done] [--shop] [--accounts retrying] [--refresh wait|checking]
 //!   [--app-update download|downloading|ready|failed|none|linux|linux-menu]
 //!   [--advanced] [--session idle|week] [--buttons custom] [--edit primary|secondary|pwr] [--record]
-//!   [--height PX]
+//!   [--firmware-skipped] [--height PX]
 //! ```
 //!
 //! `--buttons custom` gives the secondary button a held shortcut and PWR a
 //! media key; `--edit` opens a button's editor on the Device page, and
 //! `--record` has it listening for a shortcut.
+//!
+//! `--firmware-skipped` skips the fake firmware release, as the Overview's
+//! "Skip this update" does: no nudge on the Overview and no Flash badge,
+//! while the Device page still offers it.
 //!
 //! `--accounts retrying` adds a second account that is being rate-limited;
 //! `--refresh` shows the Overview's refresh button waiting out the
@@ -37,7 +41,9 @@ use clawdmeter_flash::release::sha256_hex;
 use clawdmeter_flash::BoardImage;
 use gpui::AppContext as _;
 
-const VERSION: &str = "1.9.0";
+const VERSION: &str = "2.6.0";
+/// The firmware the fake board runs, one release behind.
+const OLD_VERSION: &str = "2.5.0";
 const ENV: &str = "waveshare_amoled_216";
 
 /// A board on a fake port that takes its time.
@@ -57,7 +63,7 @@ impl FlashHardware for FakeBoard {
         std::thread::sleep(Duration::from_millis(600));
         let ver = match self.kind.as_str() {
             "current" => VERSION,
-            "old" => "1.8.2",
+            "old" => OLD_VERSION,
             _ => return None,
         };
         Some(FirmwareInfo { env: ENV.into(), ver: ver.into(), rev: String::new(), link: String::new() })
@@ -153,7 +159,7 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, session: 
             hooks: true,
             last_write_at: Some(now - 5),
             latest_firmware: Some(VERSION.into()),
-            device_firmware: Some("1.8.2".into()),
+            device_firmware: Some(OLD_VERSION.into()),
             tray: "Connected".into(),
             errors,
             refresh_at: (refresh.as_deref() == Some("wait")).then_some(started + 100),
@@ -173,11 +179,11 @@ fn demo_notes() -> Vec<clawdmeter_flash::release::ReleaseNotes> {
     };
     vec![
         note(
-            "v1.9.0",
+            "v2.6.0",
             "2026-11-10",
             "## New\n- App updates: release notes, download and skip, from the sidebar\n- Remap the board's buttons from the Device page\n## Fixed\n- The weekly meter no longer jumps after a reset",
         ),
-        note("v1.8.3", "2026-10-28", "## Fixed\n- Pairing on macOS after a firmware update\n- Start at login under an AppImage"),
+        note("v2.5.1", "2026-10-28", "## Fixed\n- Pairing on macOS after a firmware update\n- Start at login under an AppImage"),
     ]
 }
 
@@ -193,7 +199,7 @@ fn main() {
             arg(&args, "--refresh"),
             arg(&args, "--session"),
         );
-        let _ = ipc::save_firmware_record(&paths, &FirmwareRecord { env: ENV.into(), ver: "1.8.2".into() });
+        let _ = ipc::save_firmware_record(&paths, &FirmwareRecord { env: ENV.into(), ver: OLD_VERSION.into() });
     } else {
         let _ = std::fs::remove_file(ipc::status_file(&paths));
     }
@@ -217,6 +223,12 @@ fn main() {
         std::fs::create_dir_all(paths.config_file.parent().unwrap()).unwrap();
         let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&paths.config_file).unwrap();
         writeln!(f, "button_secondary = ctrl+shift+m hold\nbutton_pwr = volume-up").unwrap();
+    }
+    if args.iter().any(|a| a == "--firmware-skipped") {
+        use std::io::Write as _;
+        std::fs::create_dir_all(paths.config_file.parent().unwrap()).unwrap();
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&paths.config_file).unwrap();
+        writeln!(f, "skipped_firmware = {VERSION}").unwrap();
     }
     // A taller window, so a long page fits one screenshot.
     let app_update = arg(&args, "--app-update");
