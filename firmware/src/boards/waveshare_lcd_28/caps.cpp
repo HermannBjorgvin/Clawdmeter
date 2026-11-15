@@ -11,7 +11,7 @@ static const BoardCaps caps = {
     .has_battery  = (bool)BOARD_HAS_BATTERY,
     .has_imu      = (bool)BOARD_HAS_IMU,
     .minimal_ui   = false,   // full animated UI; true for e-ink / slow panels
-    .has_pwr_button = false,  // SW1 is a battery switch, RESET is EN
+    .has_pwr_button = false,  // the other key is battery power, RESET is EN
     .has_touch = true,
 };
 

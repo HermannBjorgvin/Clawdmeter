@@ -3,14 +3,16 @@
 #include <Arduino.h>
 
 // No PMU: the charger is a standalone part and exposes nothing over I2C.
-// Battery percentage comes from the 200k/100k divider on BAT_ADC_PIN;
-// charging state is unknowable. SW1 is a battery slide switch and RESET is
-// EN, so there is no PWR-role button and the hold-to-pair gesture is the
-// 5 s touch hold on the pairing hint (has_pwr_button = false).
+// Battery percentage comes from the x3 divider on BAT_ADC_PIN (the demo's
+// factor); charging state is unknowable. The other key is the battery power
+// control and RESET is EN, so there is no PWR-role button and the
+// hold-to-pair gesture is the 5 s touch hold on the pairing hint
+// (has_pwr_button = false).
 //
 // VBUS isn't wired to a GPIO either, and the ADC can't stand in for it: with
-// no cell fitted the charger holds BAT near 4.2 V, which reads as a full
-// battery. Like the LCD-4, report VBUS present so USB-powered desk use never
+// no cell fitted the charger holds BAT near 4.2 V (Waveshare's factory
+// firmware shows 4.2 V on this board too), which reads as a full battery.
+// Like the LCD-4, report VBUS present so USB-powered desk use never
 // idle-sleeps (IDLE_SLEEP_WHEN_CHARGING is false). On battery the display
 // therefore never idle-sleeps either.
 

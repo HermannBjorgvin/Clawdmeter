@@ -20,6 +20,6 @@ Waveshare ESP32-S3-Touch-LCD-2.8C (ST7701S RGB parallel, 480×480 **round**, GT9
 
 ## Hardware status
 
-Seen on one ESP32-S3-Touch-LCD-2.8C: boot in ~0.9 s, the expander, GT911 answering at 0x5D, BLE advertising, the meters and pairing hint drawn inside the circle (framebuffer screenshot). Touch checked by tapping centre and all four edges: centre ≈ (240, 260), top (314, 25), right (416, 242), left (45, 257), so no swap or mirror. No phantom touches over 25 s untouched.
+Seen on one ESP32-S3-Touch-LCD-2.8C: boot in ~0.9 s, the expander, GT911 answering at 0x5D, BLE advertising, the meters and pairing hint drawn inside the circle (framebuffer screenshot). Touch checked by tapping centre and all four edges: centre ≈ (240, 260), top (314, 25), right (416, 242), left (45, 257), so no swap or mirror. No phantom touches over 25 s untouched. The 5 s hold on the pairing hint clears the bond (re-pairing works). BLE pairing with the desktop app and live usage verified. With no cell fitted BAT reads about 4.2 V (also in Waveshare's factory firmware), so the icon shows nearly full.
 
-That unit's panel has a hardware defect (a grid of wrongly lit tracks and repeating dark patches, worst on dark screens) that also shows under Waveshare's factory firmware, so the image quality, colours and the 12 MHz PCLK choice are not verified on good glass. Battery not tested.
+That unit's panel has a hardware defect (a grid of wrongly lit tracks and repeating dark patches, worst on dark screens) that also shows under Waveshare's factory firmware, so the image quality, colours and the 12 MHz PCLK choice are not verified on good glass. Battery not tested with a cell fitted.

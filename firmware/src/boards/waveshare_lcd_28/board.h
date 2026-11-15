@@ -4,11 +4,10 @@
 // 480x480 ST7701S (RGB parallel + 9-bit SW SPI init) + GT911 touch +
 // TCA9554 IO expander at 0x20 (LCD/touch resets, LCD SPI CS, buzzer).
 // QMI8658 IMU and PCF85063 RTC are populated but unused here.
-// Module is ESP32-S3R8 (8 MB OPI PSRAM; IO33-37 "internal occupancy" on the
-// schematic) with a 16 MB W25Q128 flash.
+// Module is ESP32-S3R8 (8 MB OPI PSRAM) with 16 MB flash.
 //
 // Pins are from Waveshare's wiki and ESP-IDF demo; they match the LCD-2.1.
-// The schematic labels the RGB lines R1..R5 / B1..B5 (R0/B0 are NC); here they are 0-based.
+// The wiki labels the RGB lines R1..R5 / B1..B5 (R0/B0 are NC); here they are 0-based.
 
 #define BOARD_NAME           "Waveshare LCD 2.8C"
 
@@ -42,7 +41,7 @@
 #define LCD_SPI_SCK           2
 #define LCD_SPI_MOSI          1
 
-// ---- Backlight: N-MOSFET low side, GPIO high = on, LEDC PWM ----
+// ---- Backlight: GPIO high = on, LEDC PWM (as on the LCD-2.1) ----
 #define LCD_BL                6
 
 // ---- I2C bus (GT911, TCA9554, QMI8658, PCF85063) ----
@@ -67,14 +66,14 @@
 // EXIO5/6 = QMI8658 INT2/INT1, EXIO7 = RTC INT: left as inputs.
 #define IOX_BIT_BUZZER       7     // EXIO8, active buzzer, high = on
 
-// ---- Battery (ETA6098 charger, no I2C; 200k/100k divider on BAT_ADC) ----
+// ---- Battery (standalone charger, no I2C; x3 divider on BAT_ADC per the demo) ----
 #define BAT_ADC_PIN           4
 #define BAT_VOLT_DIVIDER     3.0f
 
 // ---- Buttons ----
 #define BTN_BACK_GPIO        0     // BOOT — primary, Space (PTT)
-// RESET is wired to EN, and SW1 is the battery power slide switch: neither
-// reaches the firmware, so there is no secondary or PWR-role button.
+// RESET is wired to EN, and the other key is the battery power control:
+// neither reaches the firmware, so there is no secondary or PWR-role button.
 
 // ---- Capability flags ----
 #define BOARD_HAS_SECONDARY_BUTTON 0
