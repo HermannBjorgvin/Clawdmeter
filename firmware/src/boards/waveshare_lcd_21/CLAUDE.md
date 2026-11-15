@@ -1,6 +1,8 @@
-# LCD-2.1 — `waveshare_lcd_21`
+# LCD-2.1 — `waveshare_lcd_21` (and the LCD-2.8C variant, `waveshare_lcd_28c`)
 
 Hardware notes for this board. Shared firmware rules are in `firmware/CLAUDE.md`.
+
+This folder also builds the Waveshare ESP32-S3-Touch-LCD-2.8C: env `waveshare_lcd_28c` `extends` `waveshare_lcd_21` and adds `-DBOARD_LCD28C` (the `esp32_2432s024c_landscape` pattern). Its differences are under `#ifdef BOARD_LCD28C`; see "LCD-2.8C variant" below. With the flag off the image is the 2.1's (checked: byte-identical apart from the build timestamp and image hashes).
 
 Waveshare ESP32-S3-Touch-LCD-2.1 (ST7701S RGB parallel, 480×480 **round**, CST820 touch). The 2.1B is the same board with 2.5D curved cover glass; one env serves both. Build env: `waveshare_lcd_21`. **RGB-panel port** on the LCD-4 scheme: Arduino_ESP32RGBPanel + bounce buffers, PSRAM frame buffer. Module is ESP32-S3R8 (8 MB OPI PSRAM) with 16 MB flash. Pins are from Waveshare's schematic and ESP-IDF demo; they agree.
 
@@ -23,3 +25,17 @@ Waveshare ESP32-S3-Touch-LCD-2.1 (ST7701S RGB parallel, 480×480 **round**, CST8
 Seen working on an ESP32-S3-Touch-LCD-2.1: boot, BLE, the panel, the meters drawn inside the circle, touch (CST820, no swap or mirror needed) including hold-to-pair, buzzer silent at boot. Battery not tested with a cell. With none fitted the icon reads nearly full: the charger holds BAT near 4.2 V, so the ADC can't tell "no battery" from "full" (the host gets ~100 % too).
 
 The CST820 didn't ACK its ID read when touch init ran ~6 s after reset (a debug delay); at the normal ~1 s it answers (ID 0xB7). It likely sleeps when idle.
+
+## LCD-2.8C variant (`BOARD_LCD28C`, env `waveshare_lcd_28c`)
+
+Waveshare ESP32-S3-Touch-LCD-2.8C: the same wiring as above (pins, TCA9554 and its EXIO map, backlight, battery ADC, BOOT-only input, 480×480 round, the bit-banged init SPI). Pins are from Waveshare's wiki and ESP-IDF demo (`ESP32-S3-Touch-LCD-2.8C-Demo.zip`); they agree. Only the touch 2.8C is supported: the plain 2.8 has no touch. The 2.8B is a rectangular panel, so it would be its own env (`waveshare_lcd_28b`), not a variant here. Folding the 2.1 and 2.8C into one boot-detected image, with the app still listing two boards, is specified in `AGENT-SPEC-lcd21-28c-one-image.md` (repo root).
+
+What the flag changes:
+
+- Name and logs: `BOARD_NAME` "Waveshare LCD 2.8C", log tag `LCD-2.8C` (`BOARD_LOG_TAG`).
+- Init table: `st7701_init_28c.h` (`st7701_lcd28_init_operations`), the demo's "2.8inch" `ST7701S_screen_init`, checked step for step (commands, data, delays) against the demo. Different power, gamma and GIP values; starts with the bank-0x13 `EF 08` write and ends Sleep Out → 120 ms → COLMOD 0x66 → MADCTL 0x00 → TE On → Display On, with no Inversion Off.
+- Porches: vsync 8/2/18 (`LCD_VSYNC_PULSE` / `LCD_VSYNC_BACK`); hsync 50/8/10 and the 12 MHz PCLK as on the 2.1.
+- Touch: **GT911** via SensorLib (`TouchDrvGT911`), reset on EXIO2, INT on GPIO 16, polled, no swap or mirror (the demo's settings). It latches its I2C address from INT on the rising edge of reset, so `board_init()` asserts both resets, then drives INT low (datasheet order; the demo drives INT first, contending with the running controller), releases both resets together, holds INT low 10 ms for 0x5D, releases it and waits 50 ms: ~70 ms against the demo's 350 ms. With no pins set, SensorLib's `begin()` probes 0x5D then 0x14 by itself; the log prints `getAddress()`, the address it settled on.
+- Battery: `BAT_VOLT_DIVIDER` is 3 / 0.980952, as the demo's `BAT_Driver` computes it (`mV * 3 / Measurement_offset`): the calibration raises the reading by about 2 %. The charger is unnamed on the wiki; the other key is the battery power control.
+
+Hardware status, one ESP32-S3-Touch-LCD-2.8C (built as its own folder before it became this variant; same code): boot in 683 ms, GT911 at 0x5D, BLE pairing with the app and live usage, meters and pairing hint inside the circle (framebuffer screenshot), touch at centre and all four edges (centre ≈ (240, 260), top (314, 25), right (416, 242), left (45, 257)), no phantom touches over 25 s, hold-to-pair. With no cell fitted BAT reads about 4.2 V (also in Waveshare's factory firmware). That unit's panel has a hardware defect (a grid of wrongly lit tracks and dark patches, also under the factory firmware), so image quality, colours and the 12 MHz PCLK aren't verified on good glass. Battery not tested with a cell fitted.
