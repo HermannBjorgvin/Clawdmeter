@@ -43,6 +43,7 @@ DISPLAY_NAMES = {
     "waveshare_lcd_147": "Waveshare ESP32-S3 LCD 1.47\"",
     "waveshare_lcd_147_c6": "Waveshare ESP32-C6 LCD 1.47\"",
     "waveshare_lcd_21": "Waveshare ESP32-S3 LCD 2.1\" (round)",
+    "waveshare_lcd_28": "Waveshare ESP32-S3 LCD 2.8C\" (round)",
     "lilygo_t4s3": "LILYGO T4-S3 AMOLED 2.41\"",
     "waveshare_lcd_183": "Waveshare ESP32-S3 LCD 1.83\"",
     "esp32_s3_4848s040": "Guition ESP32-S3 4848S040 (4\")",

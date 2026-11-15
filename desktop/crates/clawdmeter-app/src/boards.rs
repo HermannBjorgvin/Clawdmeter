@@ -112,6 +112,18 @@ pub const BOARDS: [BoardInfo; 29] = [
         buttons: &[(Button::Primary, "BOOT")],
     },
     BoardInfo {
+        env: "waveshare_lcd_28",
+        name: "LCD 2.8C\"",
+        product: "Waveshare ESP32-S3-Touch-LCD-2.8C",
+        width: 480,
+        height: 480,
+        buy_url: "https://www.waveshare.com/esp32-s3-touch-lcd-2.8c.htm?&aff_id=149786",
+        summary: "480×480 · round",
+        chip: "ESP32-S3",
+        pwr_button: false,
+        buttons: &[(Button::Primary, "BOOT")],
+    },
+    BoardInfo {
         env: "waveshare_amoled_216_c6",
         name: "AMOLED 2.16 (C6)",
         product: "Waveshare ESP32-C6-Touch-AMOLED-2.16",
