@@ -33,6 +33,7 @@ frames.
 | `--page overview\|device\|flash\|accounts\|hooks\|settings` | A sidebar page |
 | `--setup welcome\|board\|flash\|pair\|hooks\|done` | A setup-wizard step |
 | `--board none\|fresh\|current\|old` | No board / board needing firmware / up to date / outdated |
+| `--env ENV` | The env a `current`/`old` board's firmware reports (default `waveshare_amoled_216`); `waveshare_lcd_21` shows the Identify page with a sibling (the 2.8C) and the rest folded |
 | `--flash-to identify\|firmware\|flash\|done` | The flasher advanced to a step |
 | `--status off` | The daemon not running |
 | `--accounts retrying` | A second, rate-limited account |

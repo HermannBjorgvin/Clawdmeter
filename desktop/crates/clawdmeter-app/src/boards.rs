@@ -406,6 +406,18 @@ pub fn board(env: &str) -> Option<&'static BoardInfo> {
     BOARDS.iter().find(|b| b.env == env)
 }
 
+/// The firmware board folder an env builds from. Variant envs share their
+/// base board's folder (`<env>_landscape`, and the LCD-2.8C built from the
+/// LCD-2.1's folder with `BOARD_LCD28C`), so envs with the same folder are
+/// the same hardware family: the Flash page offers them side by side, since
+/// a board running the wrong one reports that one's env.
+pub fn firmware_folder(env: &str) -> &str {
+    match env {
+        "waveshare_lcd_28c" => "waveshare_lcd_21",
+        env => env.trim_end_matches("_landscape"),
+    }
+}
+
 impl BoardInfo {
     /// The illustration's asset path (see [`crate::ui::Assets`]).
     pub fn illustration(&self) -> String {
@@ -417,13 +429,33 @@ impl BoardInfo {
 mod tests {
     use super::*;
 
-    /// The firmware board folder an env builds from: variant envs share their
-    /// base board's folder (`<env>_landscape`, and the LCD-2.8C built from the
-    /// LCD-2.1's folder with `BOARD_LCD28C`).
-    fn firmware_dir(env: &str) -> &str {
-        match env {
-            "waveshare_lcd_28c" => "waveshare_lcd_21",
-            env => env.trim_end_matches("_landscape"),
+    /// `firmware_folder` agrees with the folder each env's `build_src_filter`
+    /// includes in platformio.ini (following `extends`), so a new variant
+    /// can't be missed or a family split by accident.
+    #[test]
+    fn firmware_folders_match_platformio() {
+        let ini = include_str!("../../../../firmware/platformio.ini");
+        let mut folder = std::collections::HashMap::new();
+        let mut extends = std::collections::HashMap::new();
+        let mut env = None;
+        for line in ini.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                env = line.strip_prefix("[env:").and_then(|l| l.strip_suffix(']'));
+            } else if let Some(e) = env {
+                if let Some(parent) = line.strip_prefix("extends").and_then(|r| r.trim_start().strip_prefix('=')) {
+                    extends.insert(e, parent.trim().trim_start_matches("env:"));
+                } else if let Some(f) = line.strip_prefix("+<boards/").and_then(|r| r.strip_suffix("/>")) {
+                    folder.insert(e, f);
+                }
+            }
+        }
+        for b in BOARDS {
+            let mut e = b.env;
+            while !folder.contains_key(e) {
+                e = extends.get(e).unwrap_or_else(|| panic!("{}: no board folder in platformio.ini", b.env));
+            }
+            assert_eq!(firmware_folder(b.env), folder[e], "{}", b.env);
         }
     }
 
@@ -452,7 +484,7 @@ mod tests {
             })
         };
         for b in BOARDS {
-            let dir = boards.join(firmware_dir(b.env));
+            let dir = boards.join(firmware_folder(b.env));
             let caps = std::fs::read_to_string(dir.join("caps.cpp")).unwrap();
             let value = caps.split(".button_count").nth(1).and_then(|r| r.split(',').next()).unwrap();
             let firmware = if value.contains("BOARD_HAS_SECONDARY_BUTTON") {
@@ -478,7 +510,7 @@ mod tests {
     fn pwr_buttons_match_the_firmware() {
         let boards = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../firmware/src/boards");
         for b in BOARDS {
-            let caps = std::fs::read_to_string(boards.join(firmware_dir(b.env)).join("caps.cpp")).unwrap();
+            let caps = std::fs::read_to_string(boards.join(firmware_folder(b.env)).join("caps.cpp")).unwrap();
             let value = caps.split(".has_pwr_button").nth(1).and_then(|r| r.split(',').next()).unwrap();
             let firmware = match value.trim_start_matches([' ', '=']).trim() {
                 "true" => true,
