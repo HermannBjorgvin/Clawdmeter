@@ -607,6 +607,7 @@ void loop() {
             if (usage.btn_secondary >= 0) button_action_set(BTN_SLOT_SECONDARY, usage.btn_secondary);
             if (usage.btn_pwr >= 0)       button_action_set(BTN_SLOT_PWR, usage.btn_pwr);
             if (usage.has_theme) theme_set(usage.theme);
+            if (usage.has_fable_color) fable_color_set(usage.fable_color);
             ui_update(&usage);
             // A prompt (or you're back after a gap): you're at the computer,
             // so a dimmed or dark panel wakes before Clawd notices you. A

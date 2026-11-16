@@ -145,6 +145,34 @@ impl ResetCredits {
     }
 }
 
+/// The model-scoped weekly limit drawn inside the weekly meter, matched by
+/// display name, ignoring case.
+pub const FABLE_MODEL: &str = "Fable";
+
+/// Fable's weekly limit as a share of the overall weekly limit, in percent
+/// (the owner's figure; the endpoint's `weekly_scoped_shares` says the same,
+/// `allowance_percent_of_weekly: 50`). The meters draw Fable's own % times
+/// this share: a used-up Fable limit fills half the weekly bar. The firmware
+/// has the same constant, `FABLE_WEEKLY_SHARE_PCT` in `firmware/src/fable.h`.
+pub const FABLE_WEEKLY_SHARE_PCT: u32 = 50;
+
+/// How close (hundredths of a point of the bar) the Fable overlay may come to
+/// the end of the weekly fill and still be drawn as reaching it. Fable usage
+/// is part of the weekly usage, but `wf` and `w` are rounded apart (week
+/// 31 %, Fable 61 %: 30.5 % of the bar), so a week spent only on Fable fills
+/// the whole fill rather than leaving a sliver of it. A fixed number of
+/// points, so it means the same on every bar width. The firmware has the
+/// same rule, `fable_reaches_fill` in `firmware/src/fable.h`.
+pub const FABLE_SNAP_HUNDREDTHS: u32 = 150;
+
+/// Whether the Fable overlay (Fable at `fable_pct` of its own limit) runs to
+/// the end of a weekly fill at `week_pct`: Fable's share of the bar is
+/// within [`FABLE_SNAP_HUNDREDTHS`] of it, or past it. Integer arithmetic,
+/// as on the device.
+pub fn fable_reaches_week(fable_pct: u32, week_pct: u32) -> bool {
+    fable_pct.min(100) * FABLE_WEEKLY_SHARE_PCT + FABLE_SNAP_HUNDREDTHS >= week_pct.min(100) * 100
+}
+
 /// Everything `/usage` told us for one account.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UsageReading {
@@ -153,7 +181,9 @@ pub struct UsageReading {
     pub session: Option<Window>,
     /// `Current week (all models)`.
     pub week: Option<Window>,
-    /// `Current week (<model>)` lines, in order. Not sent to the device yet.
+    /// Model-scoped weekly windows (`Current week (<model>)` lines, the
+    /// endpoint's `weekly_scoped` limits), in order. Only Fable's is sent to
+    /// the device ([`UsageReading::fable`]).
     pub models: Vec<(String, Window)>,
     /// `Spend limit:` (spend-capped accounts, sent as the enterprise view).
     pub spend: Option<Spend>,
@@ -178,6 +208,12 @@ impl UsageReading {
             (None, _) if self.no_session_limit() => self.week.as_ref().map_or(0, |w| w.pct),
             _ => 0,
         }
+    }
+
+    /// The Fable weekly window ([`FABLE_MODEL`]), when this reading has one.
+    /// `None` means unknown or no such limit, never 0 %.
+    pub fn fable(&self) -> Option<&Window> {
+        self.models.iter().find(|(m, _)| m.eq_ignore_ascii_case(FABLE_MODEL)).map(|(_, w)| w)
     }
 
     /// What [`UsageReading::session_pct`] measures.
@@ -1017,7 +1053,8 @@ impl AccountState {
             // Once the pause has run out a probe answer ends it, so hours on
             // the probe don't lengthen the next one, unless the endpoint
             // missed again in this poll: misses in a row still climb.
-            Ok(r) if !polled.idle => {
+            Ok(mut r) if !polled.idle => {
+                crate::probe::carry_models(&mut r, self.last.as_ref(), now);
                 self.store(now, r);
                 if !self.backoff.active(now) && polled.idle_miss.is_none() {
                     self.backoff.on_success();
@@ -1124,6 +1161,17 @@ mod tests {
 
     fn at(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn fable_snaps_to_the_fill_within_a_point_and_a_half() {
+        // (week, Fable): Fable's half within 1.5 points of the week, or past it.
+        for (w, wf) in [(31, 61), (30, 60), (30, 58), (40, 78), (49, 96), (7, 12), (40, 77), (50, 250), (3, 50)] {
+            assert!(fable_reaches_week(wf, w), "{w}/{wf}");
+        }
+        for (w, wf) in [(40, 76), (40, 70), (60, 40), (100, 100)] {
+            assert!(!fable_reaches_week(wf, w), "{w}/{wf}");
+        }
     }
 
     #[cfg(unix)]

@@ -36,10 +36,12 @@ fn captured_max_plan() {
     assert_eq!(r.models.len(), 1);
     assert_eq!(r.models[0].0, "Fable");
     assert_eq!(r.models[0].1.pct, 0);
+    // `Current week (Fable): 0% used · resets Oct 18, 10pm`: a real 0 %.
+    assert_eq!(r.fable().map(|w| (w.pct, w.resets_at)), Some((0, Some(at("2026-10-18T22:00:00Z")))));
     assert!(r.window_started());
     assert_eq!(
         Payload::from_reading(&r, now()).to_json(),
-        r#"{"s":15,"sr":80,"w":6,"wr":8180,"st":"allowed","acct":"pro","ok":true}"#
+        r#"{"s":15,"sr":80,"w":6,"wr":8180,"wf":0,"st":"allowed","acct":"pro","ok":true}"#
     );
 }
 

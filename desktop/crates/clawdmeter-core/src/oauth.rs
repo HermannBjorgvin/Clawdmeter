@@ -200,29 +200,29 @@ pub fn parse_usage_json(body: &str, now: DateTime<Utc>) -> Result<UsageReading, 
     let v: Value = serde_json::from_str(body).map_err(|e| UsageError::BadOutput(format!("usage endpoint: {e}")))?;
     let session = window(v.get("five_hour"), "utilization").filter(|w| w.resets_at.is_some_and(|t| t > now));
     let week = window(v.get("seven_day"), "utilization");
-    let models = v
-        .get("model_scoped")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|m| Some((m.get("display_name")?.as_str()?.to_owned(), window(Some(m), "utilization")?)))
+    let limits = || v.get("limits").and_then(Value::as_array).into_iter().flatten();
+    let kind = |l: &Value, k: &str| l.get("kind").and_then(Value::as_str) == Some(k);
+    // Model-scoped weekly windows are `limits[]` rows:
+    // {"kind":"weekly_scoped","percent":3,"resets_at":…,
+    //  "scope":{"model":{"display_name":"Fable"}}}. (Claude Code's SDK
+    // projects them as `model_scoped`; the endpoint itself has no such key.)
+    let models = limits()
+        .filter(|l| kind(l, "weekly_scoped"))
+        .filter_map(|l| {
+            let name = l.get("scope")?.get("model")?.get("display_name")?.as_str()?;
+            Some((name.to_owned(), window(Some(l), "percent")?))
+        })
         .collect();
-    let limits_spend = v
-        .get("limits")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|l| l.get("kind").and_then(Value::as_str) == Some("spend"))
-        .and_then(|l| {
-            let w = window(Some(l), "percent")?;
-            let period = match l.get("group").and_then(Value::as_str) {
-                Some("daily") => Some(SpendPeriod::Daily),
-                Some("weekly") => Some(SpendPeriod::Weekly),
-                Some("monthly") => Some(SpendPeriod::Monthly),
-                _ => None,
-            };
-            Some(Spend { pct: w.pct, resets_at: w.resets_at, period })
-        });
+    let limits_spend = limits().find(|l| kind(l, "spend")).and_then(|l| {
+        let w = window(Some(l), "percent")?;
+        let period = match l.get("group").and_then(Value::as_str) {
+            Some("daily") => Some(SpendPeriod::Daily),
+            Some("weekly") => Some(SpendPeriod::Weekly),
+            Some("monthly") => Some(SpendPeriod::Monthly),
+            _ => None,
+        };
+        Some(Spend { pct: w.pct, resets_at: w.resets_at, period })
+    });
     // The top-level spend cap *is* the cap, not extra usage beyond a plan.
     let top_spend = if limits_spend.is_none() { top_level_spend(&v, now) } else { None };
     let from_top = top_spend.is_some();
@@ -335,13 +335,22 @@ mod tests {
         let now = at("2026-10-14T01:20:00Z");
         let body = r#"{"five_hour":{"utilization":35.0,"resets_at":"2026-10-14T02:40:00.123+00:00"},
             "seven_day":{"utilization":20.4,"resets_at":"2026-10-19T00:00:00Z"},
-            "seven_day_opus":null,"model_scoped":[{"display_name":"Fable","utilization":3,"resets_at":"2026-10-19T00:00:00Z"}],
+            "seven_day_opus":null,"limits":[{"kind":"weekly_all","group":"weekly","percent":20},
+              {"kind":"weekly_scoped","group":"weekly","percent":3,"resets_at":"2026-10-19T00:00:00Z",
+               "scope":{"model":{"id":null,"display_name":"Fable"},"surface":null}},
+              {"kind":"weekly_scoped","group":"weekly","percent":9,"resets_at":"2026-10-19T00:00:00Z",
+               "scope":{"model":{"id":null,"display_name":"Opus"},"surface":null}},
+              {"kind":"weekly_scoped","group":"weekly","percent":1,"scope":{"model":null,"surface":"cowork"}}],
             "extra_usage":{"is_enabled":false,"monthly_limit":null,"used_credits":null,"utilization":null}}"#;
         let r = parse_usage_json(body, now).unwrap();
         assert_eq!(r.session.as_ref().map(|w| w.pct), Some(35));
         assert!(r.window_started());
         assert_eq!(r.week, Some(Window { pct: 20, resets_at: Some(at("2026-10-19T00:00:00Z")) }));
-        assert_eq!(r.models[0].0, "Fable");
+        // Other scoped models are kept but not drawn; a row scoped to no
+        // model is skipped.
+        assert_eq!(r.models.iter().map(|(m, w)| (m.as_str(), w.pct)).collect::<Vec<_>>(), [("Fable", 3), ("Opus", 9)]);
+        assert_eq!(r.fable(), Some(&Window { pct: 3, resets_at: Some(at("2026-10-19T00:00:00Z")) }));
+        assert_eq!(crate::Payload::from_reading_in(&r, now, &Utc).wf, Some(3));
         assert!(!r.overage && r.spend.is_none());
     }
 
@@ -356,10 +365,12 @@ mod tests {
         assert_eq!(r.session, None, "a null reset is a window that hasn't started, not 0 % of one");
         assert!(!r.window_started());
         assert_eq!(r.week, Some(Window { pct: 40, resets_at: Some(at("2026-10-14T15:00:00.006703Z")) }));
-        assert!(r.spend.is_none() && !r.overage && r.models.is_empty());
+        assert!(r.spend.is_none() && !r.overage);
+        // The Fable row is a real 0 %, reset and all.
+        assert_eq!(r.fable(), Some(&Window { pct: 0, resets_at: Some(at("2026-10-14T15:00:00.006918Z")) }));
         assert_eq!(r.session_limit, SessionLimit::Applies, "the limit is there, its window isn't");
         let p = crate::Payload::from_reading(&r, now);
-        assert_eq!((p.s, p.sr, p.w, p.wr), (Some(0), Some(-1), Some(40), Some(750)));
+        assert_eq!((p.s, p.sr, p.w, p.wr, p.wf), (Some(0), Some(-1), Some(40), Some(750), Some(0)));
         assert_eq!(p.acct.as_deref(), Some("pro"));
         // So the next reading comes from here again, every 12 minutes, not the probe.
         let st = crate::usage::AccountState {
@@ -385,6 +396,9 @@ mod tests {
         // 5 d 12 h 29 min 59.88 s to the reset.
         assert_eq!((p.s, p.sr, p.w, p.wr), (Some(0), Some(-1), Some(48), Some(7950)), "older firmware: not started");
         assert_eq!((p.acct.as_deref(), p.st.as_deref()), (Some("week"), Some("allowed")));
+        // Fable's weekly_scoped row rides along for the week meter.
+        assert_eq!(r.fable(), Some(&Window { pct: 3, resets_at: Some(at("2026-11-07T01:59:59.879751Z")) }));
+        assert_eq!(p.wf, Some(3));
         // Never the probe: there's no window to follow.
         let st = crate::usage::AccountState {
             last: Some(r),

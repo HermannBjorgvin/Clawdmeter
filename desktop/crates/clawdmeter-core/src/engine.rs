@@ -680,6 +680,11 @@ impl Engine {
             p.pm = Some(pm);
             [p.k1, p.k2, p.k3] = k.map(Some);
             p.th = Some(th);
+            // The Fable overlay's colour goes with Claude's numbers only; the
+            // device keeps the last one, and the Codex screen draws no strip.
+            if p.pv.is_none() {
+                p.fc = Some(th.fable());
+            }
             (p, kind)
         };
 
@@ -856,7 +861,7 @@ mod tests {
         assert_eq!(w.kind, WriteKind::Poll);
         assert_eq!(
             w.payload.to_json(),
-            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413"}"#
+            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7"}"#
         );
         assert!(write(&mut e, T0 + 1).is_none());
     }
@@ -878,7 +883,7 @@ mod tests {
         let w = write(&mut e, T0).unwrap();
         assert_eq!(
             w.payload.to_json(),
-            r#"{"s":0,"sr":-1,"w":48,"wr":1440,"st":"allowed","acct":"week","ok":true,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413"}"#
+            r#"{"s":0,"sr":-1,"w":48,"wr":1440,"st":"allowed","acct":"week","ok":true,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7"}"#
         );
         // An account with the limit still wakes at its session reset.
         e.on_poll_results(T0 + 200, vec![(dir.clone(), Ok(reading(5)))]);
@@ -897,7 +902,7 @@ mod tests {
         assert_eq!(hb.kind, WriteKind::Heartbeat);
         assert_eq!(
             hb.payload.to_json(),
-            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413"}"#
+            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7"}"#
         );
         // Three misses: stale, heartbeats stop so the device's freshness lapses.
         for i in 1..=3 {
@@ -1486,6 +1491,12 @@ mod tests {
         assert_eq!((w.kind, w.payload.rp), (WriteKind::Event, Some(1)));
         assert_eq!(w.payload.th.unwrap().get(ColorToken::Accent), 0x647d99);
         assert!(write(&mut e, T0 + 3).is_none());
+        // Fable's colour rides beside th, and a change to it alone goes out too.
+        e.update_settings(settings("theme = custom\ncolor_accent = 647d99\ncolor_fable = 112233\n"));
+        let w = write(&mut e, T0 + 3).expect("a new Fable colour is sent right away");
+        assert_eq!(w.payload.fc, Some(crate::config::Rgb(0x112233)));
+        assert!(w.payload.to_json().contains(r#""fc":"112233""#));
+        assert!(write(&mut e, T0 + 3).is_none());
         e.on_connected();
         let resent = write(&mut e, T0 + 4).unwrap().payload.th.unwrap();
         assert_eq!(resent.get(ColorToken::Accent), 0x647d99, "resent on a reconnect");
@@ -1509,7 +1520,8 @@ mod tests {
         // A chosen preset doesn't follow the OS.
         e.update_settings(settings("theme = dracula\n"));
         let dracula = themes::find("dracula").unwrap().colors;
-        assert_eq!(write(&mut e, T0 + 5).unwrap().payload.th, Some(dracula));
+        let w = write(&mut e, T0 + 5).unwrap();
+        assert_eq!((w.payload.th, w.payload.fc), (Some(dracula), Some(crate::config::Rgb(0xbd93f9))));
         e.set_appearance(Appearance::Light);
         assert!(write(&mut e, T0 + 6).is_none(), "Dracula stays");
 
@@ -1608,10 +1620,15 @@ mod tests {
             (w.payload.acct.as_deref(), w.payload.pv.as_deref(), w.payload.w, w.payload.rc),
             (Some("week"), Some("codex"), Some(31), Some(2))
         );
-        // Claude's meter moves: back to Claude, and no `pv`.
+        assert_eq!((w.payload.wf, w.payload.fc), (None, None), "Fable is Claude's: no strip, no colour");
+        assert!(w.payload.th.is_some(), "the palette still goes");
+        // Claude's meter moves: back to Claude, and no `pv`; the Fable
+        // colour rides with Claude's numbers again.
         e.on_poll_results(T0 + 700, vec![(claude.clone(), Ok(reading(12)))]);
         assert_eq!(e.status(T0 + 700).active_account, Some(claude.clone()));
-        assert_eq!(write(&mut e, T0 + 700).unwrap().payload.pv, None);
+        let w = write(&mut e, T0 + 700).unwrap();
+        assert_eq!(w.payload.pv, None);
+        assert!(w.payload.fc.is_some());
         // Codex moves: Codex again; shown, it polls every 5 minutes, and a
         // refresh waits out the 2-minute gap.
         assert_eq!(e.begin_codex_poll(T0 + 1202), Some(vec![cx.clone()]));

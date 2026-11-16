@@ -10,7 +10,8 @@
 //!   [--flash-to identify|firmware|flash|done] [--shop] [--accounts retrying] [--refresh wait|checking]
 //!   [--app-update download|downloading|ready|failed|none|linux|linux-menu]
 //!   [--advanced] [--session idle|week] [--buttons custom] [--edit primary|secondary|pwr] [--record]
-//!   [--firmware-skipped] [--codex week|5h|listed] [--resets N] [--width PX] [--height PX]
+//!   [--firmware-skipped] [--codex week|5h|listed] [--resets N] [--fable PCT] [--week PCT]
+//!   [--width PX] [--height PX]
 //! ```
 //!
 //! `--codex` adds a Codex account (`~/.codex` with an `auth.json`, found as
@@ -19,6 +20,11 @@
 //! `listed` keeps Claude on the device. `--resets N` sets how many reset
 //! credits the `week` account holds (default 3); past ten, the rest have no
 //! date, as `rx` carries at most ten.
+//!
+//! `--fable PCT` gives the account a Fable weekly window at PCT % of its own
+//! limit, drawn inside the Overview's weekly meter (half the bar at 100).
+//!
+//! `--week PCT` sets the weekly meter (62 % by default).
 //!
 //! `--buttons custom` gives the secondary button a held shortcut and PWR a
 //! media key; `--edit` opens a button's editor on the Device page, and
@@ -127,14 +133,18 @@ fn release(paths: &Paths) -> std::path::PathBuf {
     dir.join("manifest.json")
 }
 
-fn fake_status(
-    paths: &Paths,
-    retrying: bool,
-    refresh: Option<String>,
+/// The made-up usage the status shows (`--session`, `--codex`, `--resets`,
+/// `--fable`, `--week`).
+struct FakeUsage {
     session: Option<String>,
     codex: Option<String>,
     resets: u32,
-) {
+    fable: Option<u32>,
+    week_pct: Option<u32>,
+}
+
+fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, usage: FakeUsage) {
+    let FakeUsage { session, codex, resets, fable, week_pct } = usage;
     // `idle`: session not started; `week`: no 5-hour limit (verified Ultra).
     let idle = session.as_deref() == Some("idle");
     let week = session.as_deref() == Some("week");
@@ -168,11 +178,12 @@ fn fake_status(
             account: Some(paths.home.join(".claude").display().to_string()),
             claude: Some(paths.home.join(".local/bin/claude").display().to_string()),
             session_pct: (!week).then_some(if idle { 0 } else { 34 }),
-            week_pct: Some(62),
+            week_pct: Some(week_pct.unwrap_or(62)),
             window_started: !idle && !week,
             no_session_limit: week,
             session_resets_at: (!idle && !week).then_some(started + 177 * 60),
             week_resets_at: Some(started + (5 * 24 + 11) * 3600 + 30),
+            fable_pct: fable,
             read_at: Some(now - 15),
             hooks: true,
             last_write_at: Some(now - 5),
@@ -243,9 +254,13 @@ fn main() {
             &paths,
             arg(&args, "--accounts").as_deref() == Some("retrying"),
             arg(&args, "--refresh"),
-            arg(&args, "--session"),
-            arg(&args, "--codex"),
-            arg(&args, "--resets").and_then(|n| n.parse().ok()).unwrap_or(3),
+            FakeUsage {
+                session: arg(&args, "--session"),
+                codex: arg(&args, "--codex"),
+                resets: arg(&args, "--resets").and_then(|n| n.parse().ok()).unwrap_or(3),
+                fable: arg(&args, "--fable").and_then(|p| p.parse().ok()),
+                week_pct: arg(&args, "--week").and_then(|p| p.parse().ok()),
+            },
         );
         let _ = ipc::save_firmware_record(&paths, &FirmwareRecord { env: ENV.into(), ver: OLD_VERSION.into() });
     } else {

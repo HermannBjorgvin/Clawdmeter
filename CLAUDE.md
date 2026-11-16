@@ -88,16 +88,19 @@ The app writes one complete JSON object per write to RX
 (`4c41555a-…-0002`); the firmware buffer is 512 B and the app caps writes at
 500. Every write is a full update. Fields and UUIDs: `docs/protocol.md`.
 
-- Usage: `s sr w wr st acct tp pd rd t tf c ok`. `sr`/`wr` = -1 means not
-  started or unknown. `acct:"ent"` is a spend-capped account: `s` is spend %,
-  `tp/pd/rd` the billing period. `acct:"week"` has no 5-hour limit (verified
+- Usage: `s sr w wr wf st acct tp pd rd t tf c ok`. `sr`/`wr` = -1 means not
+  started or unknown. `wf` is Fable's weekly % of its own limit, drawn
+  inside the weekly bar at half its width (`FABLE_WEEKLY_SHARE_PCT` on both
+  sides); absent = unknown, never 0. `acct:"ent"` is a spend-capped
+  account: `s` is spend %, `tp/pd/rd` the billing period. `acct:"week"` has no 5-hour limit (verified
   Ultra, the endpoint's `five_hour: null`): `s`/`sr` stay 0/-1 for older
   firmware, and the device shows `w`/`wr` alone as its main meter.
   `{"ok":false}` means no data.
 - Codex (a trial): `pv:"codex"` marks a Codex account's numbers (same usage
   keys; the device draws its Codex screen and keeps them out of Clawd's rate
   math), `rc`/`rx` its reset credits held and each held one's expiry date
-  (≤ 10; absent = unknown).
+  (≤ 10; absent = unknown). Fable is Claude's: `wf`/`fc` are never sent
+  with `pv`, and the Codex screen never draws the strip.
 - Attention: `b` (alert chime), `m` (ASCII message), `x` (clear).
 - Fast clock: `a` (activity 0–3), `e` + `es` (event `p`/`s`/`b` and its
   sequence), `n` (active sessions). `rp:1` marks the usage numbers as a replay
@@ -107,9 +110,11 @@ The app writes one complete JSON object per write to RX
   primary, secondary and PWR buttons do: presets 0–6, keyboard shortcuts
   and media keys as bit fields, `button_action.h`), `lv` (liveliness 1–5), `aa`
   (attention animation seconds: 120, 30, 10, 0 = off; only his animation,
-  not the alert), `pm` (pace marker on the usage bars, `pace.h`) and `th`
-  (the palette, 11 hex colours run together, `theme_palette.h`). The device
-  keeps them in NVS (`clawd_prefs.cpp`) so they apply from boot.
+  not the alert), `pm` (pace marker on the usage bars, `pace.h`), `th`
+  (the palette, 11 hex colours run together, `theme_palette.h`; never any
+  other length, or older firmware drops it) and `fc` (the Fable overlay's
+  colour, 6 hex digits, `fable.h`). The device keeps them in NVS
+  (`clawd_prefs.cpp`) so they apply from boot.
 - Device → app: `0x01` on REQ (`…-0004`) when it has no data yet;
   `{"dismiss":true}` on TX (`…-0003`) when a tap or the 2-minute timeout ends
   an alert. The app clears its own alert and doesn't echo a clear back. Alerts

@@ -15,6 +15,7 @@
 #include "layout.h"
 #include "ui_text.h"
 #include "pace.h"
+#include "fable.h"
 
 // Where everything goes, from the panel's shape (layout.h). Computed once in
 // ui_init() and treated as const for the rest of the program; a new panel
@@ -276,6 +277,66 @@ static void place_pace_tick(lv_obj_t* tick, float elapsed_pct) {
     lv_obj_set_x(tick, x - border);
     lv_obj_clear_flag(tick, LV_OBJ_FLAG_HIDDEN);
 }
+
+// ---- Fable overlay (payload `wf`, fable.h). A violet strip from the left
+// end of the bar that shows the week (the second card, or the first for an
+// account with no 5-hour limit), FABLE_WEEKLY_SHARE_PCT % of the bar wide at
+// Fable's full limit, drawn over the weekly fill and under the pace line.
+// Its left end follows the bar's rounded end and its right end is straight,
+// cut where Fable's share ends; it stops at the end of the weekly fill and
+// there takes the fill's rounded corner. LVGL radii are uniform, so the
+// shape is a rounded strip as wide as the fill inside a square container as
+// wide as the overlay: a container clips its children to its rectangle with
+// no extra buffer (clip_corner would render through ARGB layers on every
+// redraw, which the C6's internal-RAM LVGL pool can do without). The
+// straight end meets the fill directly. Its colour is the theme's (`fc`).
+// Hidden without `wf`, at 0 %, on spend-capped accounts (no weekly bar) and
+// on a mono panel, where it would print as the fill's ink.
+struct FableOverlay { lv_obj_t* clip; lv_obj_t* strip; };
+static FableOverlay fable_session = {};
+static FableOverlay fable_weekly  = {};
+
+static lv_obj_t* make_plain(lv_obj_t* parent, int h) {
+    lv_obj_t* o = lv_obj_create(parent);
+    lv_obj_remove_style_all(o);
+    lv_obj_set_size(o, 0, h);
+    lv_obj_clear_flag(o, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
+    return o;
+}
+
+static FableOverlay make_fable_overlay(lv_obj_t* bar) {
+    const int h = L.bar_h - 2 * lv_obj_get_style_border_width(bar, LV_PART_MAIN);
+    FableOverlay f;
+    f.clip = make_plain(bar, h);
+    f.strip = make_plain(f.clip, h);
+    lv_obj_set_style_bg_opa(f.strip, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(f.strip, lv_obj_get_style_radius(bar, LV_PART_INDICATOR), 0);
+    lv_obj_add_flag(f.clip, LV_OBJ_FLAG_HIDDEN);
+    return f;
+}
+
+// `value`: the bar's value (its weekly %), whose fill the overlay stays in.
+static void place_fable(const FableOverlay& f, int fable_pct, int value) {
+    const int bar_w = lv_obj_get_width(lv_obj_get_parent(f.clip));
+    const int fill_w = fable_fill_w(bar_w, value);
+    // A fill narrower than its two rounded ends is drawn by lv_bar clipped
+    // to the track's corners (or not at all at 1 px), which the strip can't
+    // follow: no overlay until the fill is that wide. A device-only limit;
+    // the app's strip follows any fill.
+    const int radius = lv_obj_get_style_radius(f.strip, LV_PART_MAIN);
+    const bool hide = board_caps().mono_panel || fill_w < 2 * radius;
+    const int w = hide ? 0 : fable_overlay_w(fable_pct, value, bar_w, fill_w);
+    if (w < 1) {
+        lv_obj_add_flag(f.clip, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_set_width(f.clip, w);
+    lv_obj_set_width(f.strip, fill_w);
+    lv_obj_set_style_bg_color(f.strip, lv_color_hex(theme_fable_hex()), 0);   // `fc`
+    lv_obj_clear_flag(f.clip, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void hide_fable(const FableOverlay& f) { lv_obj_add_flag(f.clip, LV_OBJ_FLAG_HIDDEN); }
 
 // `none`: what a missing reset time means (-1 in the payload): the session
 // window hasn't started, the weekly one is unknown.
@@ -598,6 +659,9 @@ static void init_usage_screen(lv_obj_t* scr) {
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
 
+    // The Fable overlay first, so the pace line draws over it.
+    fable_session = make_fable_overlay(bar_session);
+    fable_weekly  = make_fable_overlay(bar_weekly);
     tick_session = make_pace_tick(bar_session);
     tick_weekly  = make_pace_tick(bar_weekly);
 
@@ -806,15 +870,18 @@ static void draw_resets_card(const UsageData* d) {
     }
 }
 
-// The Pro/Max bars' fill colours and pace markers. A Codex account's bars
-// are white (TH_TEXT), marking numbers from the GPT side, with the pace
-// marker in TH_DIM so it shows on the fill.
+// The Pro/Max bars' fill colours, pace markers and Fable overlay. A Codex
+// account's bars are white (TH_TEXT), marking numbers from the GPT side,
+// with the pace marker in TH_DIM so it shows on the fill, and never the
+// Fable overlay (Fable is Claude's).
 static void apply_bar_colors(const UsageData* data) {
     const bool mono = board_caps().mono_panel;
     const ThemeColor tick = data->codex && !mono ? TH_DIM : TH_TEXT;
     lv_obj_set_style_bg_color(tick_session, theme_color(tick), 0);
     lv_obj_set_style_bg_color(tick_weekly, theme_color(tick), 0);
     if (data->codex) {
+        hide_fable(fable_session);
+        hide_fable(fable_weekly);
         lv_obj_set_style_bg_color(bar_session, theme_color(TH_TEXT), LV_PART_INDICATOR);
         lv_obj_set_style_bg_color(bar_weekly, theme_color(TH_TEXT), LV_PART_INDICATOR);
         const int first_window = data->weekly_only ? PACE_WEEK_MINS : PACE_SESSION_MINS;
@@ -825,10 +892,12 @@ static void apply_bar_colors(const UsageData* data) {
     }
     if (data->enterprise) {
         // Spending has no 5-hour window, and the Period bar (coloured in
-        // ui_update) already is the elapsed share: no markers.
+        // ui_update) already is the elapsed share: no markers, no week.
         lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
         place_pace_tick(tick_session, -1.0f);
         place_pace_tick(tick_weekly, -1.0f);
+        hide_fable(fable_session);
+        hide_fable(fable_weekly);
         return;
     }
     if (data->weekly_only) {
@@ -837,8 +906,12 @@ static void apply_bar_colors(const UsageData* data) {
             bar_color(data->session_pct, data->session_reset_mins, PACE_WEEK_MINS), LV_PART_INDICATOR);
         place_pace_tick(tick_session, pace_elapsed_pct(data->session_reset_mins, PACE_WEEK_MINS));
         place_pace_tick(tick_weekly, -1.0f);
+        place_fable(fable_session, data->fable_pct, (int)(data->session_pct + 0.5f));
+        hide_fable(fable_weekly);
         return;
     }
+    hide_fable(fable_session);
+    place_fable(fable_weekly, data->fable_pct, (int)(data->weekly_pct + 0.5f));
     lv_obj_set_style_bg_color(bar_session,
         bar_color(data->session_pct, data->session_reset_mins, PACE_SESSION_MINS), LV_PART_INDICATOR);
     place_pace_tick(tick_session, pace_elapsed_pct(data->session_reset_mins, PACE_SESSION_MINS));

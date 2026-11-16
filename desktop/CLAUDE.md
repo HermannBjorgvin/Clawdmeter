@@ -120,10 +120,12 @@ is faked behind `FlashHardware`.
   default, or `solarized`: the OS-following themes in `themes::FOLLOWING`; a
   preset id from `themes::PRESETS`; or `custom`; the old default
   `clawd` and unknown values read as `system`) and `color_<token>`
-  (`rrggbb`, no `#`; the custom theme's colours, all eleven written once it
+  (`rrggbb`, no `#`; the custom theme's colours, all twelve written once it
   has been chosen, which is how it knows not to start from the current theme
   again); the chosen palette's
-  eleven colours are sent as `th` (`Settings::colors`; System resolves to
+  first eleven colours are sent as `th` and the twelfth, `color_fable` (the
+  Fable overlay; each preset has its scheme's own purple), as `fc`
+  (`Settings::colors`; System resolves to
   Dark or Light, Solarized to Solarized Dark or Light, by the OS appearance,
   `platform::AppearanceWatch`: the xdg-desktop-portal `color-scheme` over
   D-Bus, macOS `AppleInterfaceStyle`,
@@ -201,6 +203,13 @@ Per account (`probe.rs`, `oauth.rs`):
   shown one, so the jump is never a rise.
   The plan name (`planDisplayName`, `rate_limit_tier`) isn't used: an
   unverified Ultra account still has a temporary 5-hour limit.
+- **Fable's weekly window** (`UsageReading::fable`, sent as `wf`): the
+  endpoint's `limits[]` `weekly_scoped` row scoped to the model named
+  Fable, the `/usage` line `Current week (Fable)`, or the probe's
+  `seven_day_overage_included` window (Claude Code's "Fable limit"; Haiku
+  answers rarely carry it). A probe reading without it keeps the last one
+  (`probe::carry_models`, rolled over like `not_started`'s weeks); nothing
+  asks the endpoint for it.
 - `claude` is found via `claude_path` → `PATH` / install dirs → the newest
   Claude-desktop-bundled build (`<userData>/claude-code/<version>/<hash>/claude`;
   verified on Linux, the macOS/Windows paths come from the desktop app's code
@@ -250,7 +259,9 @@ runs or shows (bar the Accounts page's trial note).
   account's reading, so it leaves the choice, and counts toward "every
   account logged out" (`codex_signed_out`).
 - **Payload**: `Provider::Codex` adds `pv:"codex"`, `rc` and `rx` (each
-  held credit's local expiry date, ≤ 10; both absent when unknown). The
+  held credit's local expiry date, ≤ 10; both absent when unknown), and
+  never `wf` or `fc` (Fable is Claude's; `Payload::from_reading_in`,
+  `Engine::next_write`), so no Fable strip on a Codex screen. The
   Overview and tray label the main meter "Codex" and draw it neutral; the
   Overview's Resets expire card lists the dates as chips, like the device
   (`ui/overview.rs` `resets_card`, at most two rows).
@@ -300,7 +311,7 @@ runs or shows (bar the Accounts page's trial note).
   also queues `settings-changed` on `<state>/app-commands`; the tray (it
   takes the queue every 200 ms) forwards it as `Command::ReloadSettings`, so
   a device setting goes out within about a second. `Engine::next_write` sends
-  a changed `lv`/`aa`/`pm`/`k1`–`k3`/`th` or clock format (`tf`, off
+  a changed `lv`/`aa`/`pm`/`k1`–`k3`/`th`/`fc` or clock format (`tf`, off
   included) at once, unless the numbers are stale (then it waits for the
   next good poll).
   The 5 s re-read stays for hand edits and `--daemon` without a tray.
