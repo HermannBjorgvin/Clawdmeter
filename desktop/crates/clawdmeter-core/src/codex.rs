@@ -37,10 +37,9 @@
 //!   windows has reset since ([`reading_from_log`]); otherwise no data.
 //!
 //! Reset credits: the usage endpoint gives the count held. When it changes,
-//! or hourly, two more read-only GETs the CLI uses fill in the ledger:
-//! `wham/rate-limit-reset-credits` (when each held credit expires) and
-//! `wham/rate-limit-reset-credits/history` (credits used in the trailing
-//! window). Nothing here ever consumes a credit.
+//! or hourly, one more read-only GET the CLI uses,
+//! `wham/rate-limit-reset-credits`, says when each held credit expires.
+//! Nothing here ever consumes a credit.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -58,7 +57,6 @@ pub const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 /// Held reset credits, with when each expires.
 pub const CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 /// Reset credits granted and used in the provider's trailing window.
-pub const CREDITS_HISTORY_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/history";
 /// Timeout for each call: the endpoint is slow, and a miss falls back.
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// The account's own limit in the session logs (`rate_limits.limit_id`).
@@ -302,15 +300,6 @@ pub fn parse_credit_expiries(body: &str) -> Option<Vec<DateTime<Utc>>> {
     Some(out)
 }
 
-/// Credits used in the history's trailing window (`events[]` of kind
-/// `used`). `None` when the answer isn't readable.
-pub fn parse_credits_used(body: &str) -> Option<u32> {
-    let v: Value = serde_json::from_str(body.trim()).ok()?;
-    let n =
-        v.get("events")?.as_array()?.iter().filter(|e| e.get("kind").and_then(Value::as_str) == Some("used")).count();
-    Some(n.min(u32::MAX as usize) as u32)
-}
-
 /// The newest account record in a session log's text that may stand in
 /// for the endpoint at `now`: `limit_id` "codex" (never a model's bucket),
 /// under [`LOG_MAX_AGE_SECS`] old, and with no window that has reset since
@@ -422,11 +411,10 @@ struct CreditsEntry {
     fetched_at: i64,
     held: u32,
     expiries: Vec<DateTime<Utc>>,
-    spent: Option<u32>,
 }
 
 /// What a Codex poll keeps per account between polls: the reset-credit
-/// details, so the two extra calls happen hourly or when the held count
+/// details, so the extra call happens hourly or when the held count
 /// changes, and when the endpoint last answered, so the log never takes a
 /// reading back.
 #[derive(Debug, Clone, Default)]
@@ -444,7 +432,7 @@ impl CodexCache {
     /// The details to show with `held` credits: fetched again when the
     /// cache is older than the TTL or holds another count. A failed fetch
     /// keeps what was known for the same count, and otherwise knows nothing
-    /// (a ledger that disagrees with the count is worse than none).
+    /// (dates that disagree with the count are worse than none).
     fn refresh(
         &mut self,
         dir: &Path,
@@ -462,21 +450,19 @@ impl CodexCache {
                     .and_then(parse_credit_expiries)
                     .or_else(|| same.map(|e| e.expiries.clone()))
                     .unwrap_or_default();
-                let spent =
-                    get(CREDITS_HISTORY_URL).as_deref().and_then(parse_credits_used).or(same.and_then(|e| e.spent));
-                let e = CreditsEntry { fetched_at: now, held, expiries, spent };
+                let e = CreditsEntry { fetched_at: now, held, expiries };
                 self.entries.insert(dir.to_path_buf(), e.clone());
                 e
             }
         };
-        ResetCredits { held, spent: entry.spent, expiries: ahead(&entry.expiries, now) }
+        ResetCredits { held, expiries: ahead(&entry.expiries, now) }
     }
 
     /// What the last good poll said, for a session-log reading (which has
     /// no credits) while it is within the TTL.
     fn last_known(&self, dir: &Path, now: i64) -> Option<ResetCredits> {
         let e = self.details(dir, now)?;
-        Some(ResetCredits { held: e.held, spent: e.spent, expiries: ahead(&e.expiries, now) })
+        Some(ResetCredits { held: e.held, expiries: ahead(&e.expiries, now) })
     }
 }
 
@@ -619,7 +605,7 @@ mod tests {
         assert_eq!(r.week, Some(Window { pct: 0, resets_at: epoch(1_795_303_084) }));
         assert_eq!(r.session_limit, SessionLimit::Absent);
         assert!(r.no_session_limit());
-        assert_eq!(r.resets, Some(ResetCredits { held: 2, spent: None, expiries: vec![] }));
+        assert_eq!(r.resets, Some(ResetCredits { held: 2, expiries: vec![] }));
     }
 
     // A plan with both windows, and a Spark bucket at 0 % beside it: the
@@ -689,9 +675,7 @@ mod tests {
     fn reset_credit_details() {
         let exp = parse_credit_expiries(&fixture("reset-credits.json")).unwrap();
         assert_eq!(exp, vec![at("2026-11-27T09:00:00Z"), at("2026-12-10T18:30:00Z")], "held ones, soonest first");
-        assert_eq!(parse_credits_used(&fixture("reset-credits-history.json")), Some(1));
         assert_eq!(parse_credit_expiries("{}"), None);
-        assert_eq!(parse_credits_used("[]"), None);
     }
 
     // The log fallback: the newest account record, under an hour old and
@@ -786,7 +770,6 @@ mod tests {
             Ok(match url {
                 USAGE_URL => (200, None, usage.clone()),
                 CREDITS_URL => (200, None, fixture("reset-credits.json")),
-                CREDITS_HISTORY_URL => (200, None, fixture("reset-credits-history.json")),
                 _ => panic!("unexpected call {url}"),
             })
         };
@@ -796,17 +779,13 @@ mod tests {
         let resets = p.result.unwrap().resets.unwrap();
         assert_eq!(
             resets,
-            ResetCredits {
-                held: 2,
-                spent: Some(1),
-                expiries: vec![at("2026-11-27T09:00:00Z"), at("2026-12-10T18:30:00Z")]
-            }
+            ResetCredits { held: 2, expiries: vec![at("2026-11-27T09:00:00Z"), at("2026-12-10T18:30:00Z")] }
         );
         // Within the hour, same count: only the usage call.
         let p = poll_with(&dir, now + chrono::Duration::minutes(5), &mut cache, &mut ok, &mut no_logs);
-        assert_eq!(p.result.unwrap().resets.unwrap().spent, Some(1));
+        assert_eq!(p.result.unwrap().resets.unwrap().expiries.len(), 2);
         drop(ok);
-        assert_eq!(calls, ["usage", "rate-limit-reset-credits", "history", "usage"]);
+        assert_eq!(calls, ["usage", "rate-limit-reset-credits", "usage"]);
 
         // The endpoint times out: a fresh log reading stands in, the miss
         // rides along (it backs the endpoint off), credits as last known.
@@ -844,23 +823,24 @@ mod tests {
     }
 
     // A changed count fetches the details again; a failed fetch for a new
-    // count knows nothing rather than show the old ledger.
+    // count knows nothing rather than show the old dates.
     #[test]
     fn credits_cache_follows_the_count() {
         let mut cache = CodexCache::default();
         let dir = Path::new("/c");
         let mut ok = |url: &str| -> Option<String> {
-            Some(fixture(if url == CREDITS_URL { "reset-credits.json" } else { "reset-credits-history.json" }))
+            assert_eq!(url, CREDITS_URL);
+            Some(fixture("reset-credits.json"))
         };
         let t = at(NOW).timestamp();
-        assert_eq!(cache.refresh(dir, 2, t, &mut ok).spent, Some(1));
+        assert_eq!(cache.refresh(dir, 2, t, &mut ok).expiries.len(), 2);
         let mut down = |_: &str| -> Option<String> { None };
         let c = cache.refresh(dir, 1, t + 60, &mut down);
-        assert_eq!((c.held, c.spent, c.next_expiry()), (1, None, None));
-        // Back at the old count after the TTL with the endpoint down: still
-        // nothing for this count (the entry now says 1).
-        assert_eq!(cache.refresh(dir, 1, t + 120, &mut ok).spent, None, "within the TTL, cached");
-        assert_eq!(cache.refresh(dir, 1, t + 60 + CREDITS_TTL_SECS, &mut ok).spent, Some(1));
+        assert_eq!((c.held, c.next_expiry()), (1, None));
+        // Back up within the TTL: the entry for this count is kept; past the
+        // TTL it is fetched again.
+        assert!(cache.refresh(dir, 1, t + 120, &mut ok).expiries.is_empty(), "within the TTL, cached");
+        assert_eq!(cache.refresh(dir, 1, t + 60 + CREDITS_TTL_SECS, &mut ok).expiries.len(), 2);
     }
 
     #[test]

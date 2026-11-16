@@ -130,9 +130,6 @@ impl Provider {
 pub struct ResetCredits {
     /// Credits still held (the usage endpoint's `available_count`).
     pub held: u32,
-    /// Credits spent in the provider's trailing window (30 days today), when
-    /// known.
-    pub spent: Option<u32>,
     /// When each held credit expires, soonest first, those still ahead and
     /// at most [`ResetCredits::MAX_EXPIRIES`]; empty when unknown.
     pub expiries: Vec<DateTime<Utc>>,

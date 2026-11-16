@@ -1573,7 +1573,7 @@ mod tests {
             week: Some(Window { pct, resets_at: Some(utc(T0 + 5 * 86_400)) }),
             session_limit: crate::usage::SessionLimit::Absent,
             provider: Provider::Codex,
-            resets: Some(crate::usage::ResetCredits { held: 2, spent: Some(1), expiries: vec![] }),
+            resets: Some(crate::usage::ResetCredits { held: 2, expiries: vec![] }),
             ..Default::default()
         }
     }

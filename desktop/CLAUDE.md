@@ -209,9 +209,8 @@ runs or shows (bar the Accounts page's trial note).
   `Polled` with `idle: false` and the miss in `idle_miss`, so the endpoint
   still backs off.
 - **Reset credits**: `rate_limit_reset_credits.available_count` is the count
-  held. `wham/rate-limit-reset-credits` (expiries of `available` ones) and
-  `.../history` (`used` events) fill in the ledger, fetched hourly or when
-  the count changes (`CodexCache`, carried through the daemon's Codex
+  held. `wham/rate-limit-reset-credits` (expiries of `available` ones) gives
+  their dates, fetched hourly or when the count changes (`CodexCache`, carried through the daemon's Codex
   task). Read-only; nothing ever consumes a credit.
 - **Engine**: `begin_codex_poll` / `on_codex_results`, a track of its own
   (`codex::due_at`: shown 5 min, others 10 min, a reset or refresh sooner,

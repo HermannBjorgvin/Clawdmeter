@@ -547,9 +547,6 @@ pub fn once(paths: &Paths) -> i32 {
                     || "reset credits unknown".to_owned(),
                     |c| {
                         let mut s = format!("{} reset credit(s) held", c.held);
-                        if let Some(n) = c.spent {
-                            s += &format!(", {n} spent in the last 30 days");
-                        }
                         if let Some(t) = c.next_expiry() {
                             s += &format!(", next expires {}", t.format("%Y-%m-%d %H:%M UTC"));
                         }

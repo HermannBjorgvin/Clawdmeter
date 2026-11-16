@@ -337,8 +337,8 @@ Claude Code, usage still updates every 12 minutes from the usage endpoint.
 A Codex account is read from the endpoint the Codex CLI uses
 (`chatgpt.com/backend-api/wham/usage`) with the sign-in in its `auth.json`,
 which Clawdmeter only reads and never refreshes: an expired or refused one is
-no data until Codex renews it (the account drops off the device meanwhile). The reset credits' expiry and spent count come
-from two more read-only calls the CLI makes, at most hourly. When the
+no data until Codex renews it (the account drops off the device meanwhile). The reset credits' expiry dates come
+from one more read-only call the CLI makes, at most hourly. When the
 endpoint doesn't answer (it is slow, so the wait is 30 seconds), the newest
 usage record in the CLI's session logs stands in, but only one under an hour
 old, newer than the endpoint's last answer, and whose window hasn't reset

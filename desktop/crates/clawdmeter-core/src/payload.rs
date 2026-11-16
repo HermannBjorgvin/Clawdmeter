@@ -543,7 +543,6 @@ mod tests {
             provider: Provider::Codex,
             resets: Some(ResetCredits {
                 held: 3,
-                spent: Some(1),
                 expiries: vec![at("2026-11-27T09:00:00Z"), at("2026-12-10T18:30:00Z"), at("2026-12-31T23:30:00Z")],
             }),
             ..Default::default()
