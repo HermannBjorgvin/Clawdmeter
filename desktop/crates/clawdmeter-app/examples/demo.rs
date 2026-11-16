@@ -10,8 +10,16 @@
 //!   [--flash-to identify|firmware|flash|done] [--shop] [--accounts retrying] [--refresh wait|checking]
 //!   [--app-update download|downloading|ready|failed|none|linux|linux-menu]
 //!   [--advanced] [--session idle|week] [--buttons custom] [--edit primary|secondary|pwr] [--record]
-//!   [--firmware-skipped] [--fable PCT] [--week PCT] [--height PX]
+//!   [--firmware-skipped] [--codex week|5h|listed] [--resets N] [--fable PCT] [--week PCT]
+//!   [--width PX] [--height PX]
 //! ```
+//!
+//! `--codex` adds a Codex account (`~/.codex` with an `auth.json`, found as
+//! the app finds it): `week` shows it on the device, weekly-only with reset
+//! credits like the $100 Pro plan; `5h` shows one with a 5-hour window;
+//! `listed` keeps Claude on the device. `--resets N` sets how many reset
+//! credits the `week` account holds (default 3); past ten, the rest have no
+//! date, as `rx` carries at most ten.
 //!
 //! `--fable PCT` gives the account a Fable weekly window at PCT % of its own
 //! limit, drawn inside the Overview's weekly meter (half the bar at 100).
@@ -125,14 +133,18 @@ fn release(paths: &Paths) -> std::path::PathBuf {
     dir.join("manifest.json")
 }
 
-fn fake_status(
-    paths: &Paths,
-    retrying: bool,
-    refresh: Option<String>,
+/// The made-up usage the status shows (`--session`, `--codex`, `--resets`,
+/// `--fable`, `--week`).
+struct FakeUsage {
     session: Option<String>,
+    codex: Option<String>,
+    resets: u32,
     fable: Option<u32>,
     week_pct: Option<u32>,
-) {
+}
+
+fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, usage: FakeUsage) {
+    let FakeUsage { session, codex, resets, fable, week_pct } = usage;
     // `idle`: session not started; `week`: no 5-hour limit (verified Ultra).
     let idle = session.as_deref() == Some("idle");
     let week = session.as_deref() == Some("week");
@@ -142,6 +154,10 @@ fn fake_status(
         std::fs::create_dir_all(&work).unwrap();
         std::fs::write(&paths.config_file, "config_dirs = ~/.claude, ~/.claude-work\n").unwrap();
     }
+    // A Codex account on the device: weekly-only with its reset credits, or
+    // with a 5-hour window.
+    let codex_shown = matches!(codex.as_deref(), Some("week" | "5h"));
+    let codex_week = codex.as_deref() == Some("week");
     let started = unix_now();
     std::thread::spawn(move || loop {
         let now = unix_now();
@@ -154,7 +170,7 @@ fn fake_status(
         } else {
             vec![]
         };
-        let snap = StatusSnapshot {
+        let mut snap = StatusSnapshot {
             updated_at: now,
             link: "connected".into(),
             device_key: Some("AA:BB:CC:DD:EE:FF".into()),
@@ -179,6 +195,30 @@ fn fake_status(
             polling: refresh.as_deref() == Some("checking"),
             ..Default::default()
         };
+        if codex_shown {
+            snap = StatusSnapshot {
+                account: Some(paths.home.join(".codex").display().to_string()),
+                codex: true,
+                session_pct: (!codex_week).then_some(21),
+                week_pct: Some(34),
+                window_started: !codex_week,
+                no_session_limit: codex_week,
+                session_resets_at: (!codex_week).then_some(started + 133 * 60),
+                week_resets_at: Some(started + (4 * 24 + 21) * 3600 + 30),
+                resets_held: codex_week.then_some(resets),
+                resets_expiries: if codex_week {
+                    // Spread over the next weeks, two on one day.
+                    [3, 4, 4, 8, 11, 16, 17, 23, 28, 29]
+                        .iter()
+                        .take(resets as usize)
+                        .map(|d| started + d * 86_400)
+                        .collect()
+                } else {
+                    vec![]
+                },
+                ..snap
+            };
+        }
         let _ = ipc::write_status(&paths, &snap);
         std::thread::sleep(Duration::from_secs(2));
     });
@@ -205,14 +245,22 @@ fn main() {
     let paths = Paths::for_user();
     std::fs::create_dir_all(paths.home.join(".claude")).unwrap();
     std::fs::create_dir_all(&paths.state_dir).unwrap();
+    if arg(&args, "--codex").is_some() {
+        std::fs::create_dir_all(paths.home.join(".codex")).unwrap();
+        std::fs::write(paths.home.join(".codex/auth.json"), "{}").unwrap();
+    }
     if arg(&args, "--status").as_deref() != Some("off") {
         fake_status(
             &paths,
             arg(&args, "--accounts").as_deref() == Some("retrying"),
             arg(&args, "--refresh"),
-            arg(&args, "--session"),
-            arg(&args, "--fable").and_then(|p| p.parse().ok()),
-            arg(&args, "--week").and_then(|p| p.parse().ok()),
+            FakeUsage {
+                session: arg(&args, "--session"),
+                codex: arg(&args, "--codex"),
+                resets: arg(&args, "--resets").and_then(|n| n.parse().ok()).unwrap_or(3),
+                fable: arg(&args, "--fable").and_then(|p| p.parse().ok()),
+                week_pct: arg(&args, "--week").and_then(|p| p.parse().ok()),
+            },
         );
         let _ = ipc::save_firmware_record(&paths, &FirmwareRecord { env: ENV.into(), ver: OLD_VERSION.into() });
     } else {
@@ -248,8 +296,9 @@ fn main() {
     // A taller window, so a long page fits one screenshot.
     let app_update = arg(&args, "--app-update");
     let height = arg(&args, "--height").and_then(|h| h.parse::<f32>().ok());
+    let width = arg(&args, "--width").and_then(|w| w.parse::<f32>().ok());
 
-    clawdmeter_app::ui::open_with_height(height, move |window, cx| {
+    clawdmeter_app::ui::open_with_size(width, height, move |window, cx| {
         let p = paths.clone();
         let hw: Arc<dyn FlashHardware> = Arc::new(FakeBoard { kind: board });
         let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));

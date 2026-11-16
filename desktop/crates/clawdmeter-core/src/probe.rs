@@ -135,6 +135,7 @@ pub fn not_started(last: &UsageReading, now: i64) -> UsageReading {
         spend: last.spend.clone(),
         overage: false,
         session_limit: last.session_limit,
+        ..Default::default()
     }
 }
 
@@ -206,6 +207,7 @@ pub fn parse_stream(stdout: &str) -> Result<UsageReading, UsageError> {
         models: window("seven_day_overage_included").map(|w| (usage::FABLE_MODEL.to_owned(), w)).into_iter().collect(),
         spend: None,
         overage: info.get("isUsingOverage").and_then(Value::as_bool).unwrap_or(false),
+        ..Default::default()
     };
     if reading.session.is_none() && reading.week.is_none() {
         return Err(UsageError::BadOutput("rate_limit_event without five_hour or seven_day".into()));

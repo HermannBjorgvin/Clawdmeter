@@ -80,6 +80,9 @@ struct MenuShape {
     session: bool,
     /// The Weekly row: gone on a spend-capped account, which has no week.
     weekly: bool,
+    /// A Codex account's reset credits ([`resets_row`]), while their count
+    /// is known.
+    resets: bool,
     /// "Update Clawdmeter / firmware to v…": while there's one to offer
     /// ([`update_offer`]). Flashing by hand otherwise is rare, and the
     /// window's Flash page has it.
@@ -89,7 +92,13 @@ struct MenuShape {
 #[cfg(any(not(target_os = "macos"), test))]
 impl MenuShape {
     fn of(snap: &StatusSnapshot, offer: Option<&Update>) -> Self {
-        MenuShape { session: snap.spend || !snap.no_session_limit, weekly: !snap.spend, update: offer.is_some() }
+        MenuShape {
+            session: snap.spend || !snap.no_session_limit,
+            weekly: !snap.spend,
+            // As the device and the Overview: a weekly-only Codex plan's.
+            resets: snap.codex && snap.no_session_limit && snap.resets_held.is_some(),
+            update: offer.is_some(),
+        }
     }
 }
 
@@ -195,6 +204,7 @@ struct Items {
     account: MenuItem,
     session: MenuItem,
     weekly: MenuItem,
+    resets: MenuItem,
     refresh: MenuItem,
     /// The chime on this computer (`desktop_chime`): the Overview's switch.
     chime: CheckMenuItem,
@@ -214,6 +224,7 @@ impl Items {
             account: MenuItem::with_id("account", "No usage data yet", true, None),
             session: MenuItem::with_id("session", "Session  –", true, None),
             weekly: MenuItem::with_id("weekly", "Weekly  –", true, None),
+            resets: MenuItem::with_id("resets", "Resets  –", true, None),
             refresh: MenuItem::with_id("refresh", "Refresh usage", true, None),
             chime: CheckMenuItem::with_id("chime", "Chime on this computer", true, false, None),
             update: MenuItem::with_id("update", "Update firmware…", true, None),
@@ -229,6 +240,9 @@ impl Items {
         }
         if shape.weekly {
             list.push(&it.weekly);
+        }
+        if shape.resets {
+            list.push(&it.resets);
         }
         list.extend([&sep2 as &dyn tray_icon::menu::IsMenuItem, &it.refresh, &it.chime, &sep3, &open, &settings]);
         if shape.update {
@@ -272,14 +286,20 @@ impl Items {
                 .and_then(|p| pace::pace(p, resets_at, window, now))
                 .map(|(_, level)| level)
         };
+        // A Codex account's main meter is "Codex"; its pace verdict shows as
+        // the device draws the marker on Codex bars too.
+        let (session, weekly) = meter_labels(snap);
         self.session.set_text(if snap.spend {
             meter_row("Spend", snap.session_pct, true, snap.spend_resets_at, None, now)
         } else {
             let pace = pace(snap.session_pct, snap.session_resets_at, pace::SESSION_WINDOW_SECS);
-            meter_row("Session", snap.session_pct, snap.window_started, snap.session_resets_at, pace, now)
+            meter_row(session, snap.session_pct, snap.window_started, snap.session_resets_at, pace, now)
         });
         let pace = pace(snap.week_pct, snap.week_resets_at, pace::WEEK_WINDOW_SECS);
-        self.weekly.set_text(meter_row("Weekly", snap.week_pct, true, snap.week_resets_at, pace, now));
+        self.weekly.set_text(meter_row(weekly, snap.week_pct, true, snap.week_resets_at, pace, now));
+        if let Some(held) = snap.resets_held.filter(|_| snap.codex && snap.no_session_limit) {
+            self.resets.set_text(resets_row(held, &snap.resets_expiries, &chrono::Local));
+        }
         let (refresh, can_refresh) = refresh_item(snap, pressed, now);
         self.refresh.set_text(refresh);
         self.refresh.set_enabled(can_refresh);
@@ -293,7 +313,7 @@ impl Items {
     fn command(id: &tray_icon::menu::MenuId, update_page: Page) -> Option<Click> {
         let open = |p: Page| Click::App(AppCommand::Open(p.as_str().into()));
         Some(match id.0.as_str() {
-            "status" | "session" | "weekly" | "open" => open(Page::Overview),
+            "status" | "session" | "weekly" | "resets" | "open" => open(Page::Overview),
             "account" => open(Page::Accounts),
             "settings" => open(Page::Settings),
             "refresh" => Click::App(AppCommand::Refresh),
@@ -339,11 +359,44 @@ fn refresh_item(snap: &StatusSnapshot, pressed: bool, now: i64) -> (String, bool
     match refresh_state(snap, pressed, now) {
         RefreshState::Checking => ("Checking usage…".into(), false),
         RefreshState::Paused(until) => {
-            let msg = clawdmeter_core::usage::paused_message(until, clawdmeter_core::platform::utc_offset_secs());
+            let msg = clawdmeter_core::usage::paused_message_by(
+                provider(snap),
+                until,
+                clawdmeter_core::platform::utc_offset_secs(),
+            );
             (msg.trim_end_matches('.').to_owned(), false)
         }
         RefreshState::Wait(secs) => (format!("Can check again in {}", wait_text(secs)), false),
         RefreshState::Ready => ("Refresh usage".into(), true),
+    }
+}
+
+/// A Codex account's reset credits in one row: "2 resets · next expires
+/// Dec 1" (the soonest held one's local date, as the device shows `rx`),
+/// "2 resets" with no dates known, "No resets available" with none.
+#[cfg(any(not(target_os = "macos"), test))]
+fn resets_row<Tz: chrono::TimeZone>(held: u32, expiries: &[i64], tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    use chrono::Datelike;
+    if held == 0 {
+        return "No resets available".into();
+    }
+    let mut row = format!("{held} reset{}", if held == 1 { "" } else { "s" });
+    if let Some(t) = expiries.first().and_then(|t| chrono::DateTime::from_timestamp(*t, 0)) {
+        let l = t.with_timezone(tz);
+        row.push_str(&format!(" · next expires {} {}", l.format("%b"), l.day()));
+    }
+    row
+}
+
+/// Whose endpoint the shown account's numbers come from.
+fn provider(snap: &StatusSnapshot) -> clawdmeter_core::usage::Provider {
+    if snap.codex {
+        clawdmeter_core::usage::Provider::Codex
+    } else {
+        clawdmeter_core::usage::Provider::Claude
     }
 }
 
@@ -370,12 +423,23 @@ fn icon_for(state: TrayState) -> Option<Icon> {
     Icon::from_rgba(tray_icon_rgba(state, 32), 32, 32).ok()
 }
 
+/// The session and weekly meters' names. A Codex account's main meter (its
+/// 5-hour window, else its week) is "Codex", as the device labels it.
+fn meter_labels(snap: &StatusSnapshot) -> (&'static str, &'static str) {
+    match (snap.codex, snap.no_session_limit) {
+        (true, true) => ("Session", "Codex"),
+        (true, false) => ("Codex", "Weekly"),
+        (false, _) => ("Session", "Weekly"),
+    }
+}
+
 fn tooltip(snap: &StatusSnapshot) -> String {
     let mut t = format!("Clawdmeter · {}", snap.tray_state().label());
+    let (session, weekly) = meter_labels(snap);
     match (snap.session_pct, snap.week_pct) {
         (Some(s), _) if snap.spend => t.push_str(&format!(" · Spend {s}%")),
-        (Some(s), Some(w)) => t.push_str(&format!(" · Session {s}% · Weekly {w}%")),
-        (None, Some(w)) if snap.no_session_limit => t.push_str(&format!(" · Weekly {w}%")),
+        (Some(s), Some(w)) => t.push_str(&format!(" · {session} {s}% · {weekly} {w}%")),
+        (None, Some(w)) if snap.no_session_limit => t.push_str(&format!(" · {weekly} {w}%")),
         _ => {}
     }
     t
@@ -511,6 +575,9 @@ impl TrayApp {
                 week_resets_at: Some(now + (5 * 24 + 11) * 3600),
                 no_session_limit: false,
                 spend: false,
+                codex: false,
+                resets_held: None,
+                resets_expiries: Vec::new(),
                 stale: false,
                 logged_out: false,
                 errors: Vec::new(),
@@ -856,6 +923,10 @@ mod tests {
         let ultra = StatusSnapshot { session_pct: None, no_session_limit: true, ..snap.clone() };
         assert!(tooltip(&ultra).ends_with(" · Weekly 40%"));
         assert!(!tooltip(&ultra).contains("Session"));
+        let codex = StatusSnapshot { codex: true, ..ultra.clone() };
+        assert!(tooltip(&codex).ends_with(" · Codex 40%"));
+        let codex_5h = StatusSnapshot { codex: true, ..snap.clone() };
+        assert!(tooltip(&codex_5h).ends_with(" · Codex 5% · Weekly 40%"));
     }
 
     #[test]
@@ -948,6 +1019,48 @@ mod tests {
         let spend = StatusSnapshot { spend: true, no_session_limit: true, ..Default::default() };
         let shape = MenuShape::of(&spend, None);
         assert!(shape.session && !shape.weekly, "a Spend row and no Weekly one");
+        assert!(!shape.resets, "reset credits are Codex's");
+        let codex = StatusSnapshot { codex: true, no_session_limit: true, resets_held: Some(2), ..Default::default() };
+        let shape = MenuShape::of(&codex, None);
+        assert!(!shape.session && shape.weekly && shape.resets, "the Codex row, then its resets");
+        assert!(
+            !MenuShape::of(&StatusSnapshot { resets_held: None, ..codex.clone() }, None).resets,
+            "count unknown: no row"
+        );
+        let five = StatusSnapshot { no_session_limit: false, ..codex };
+        assert!(!MenuShape::of(&five, None).resets, "with a 5-hour window the week shows instead, as on the device");
+    }
+
+    #[test]
+    fn a_codex_account_reads_as_codex() {
+        // Weekly-only: the one row is "Codex" (the Session row isn't listed).
+        let week = StatusSnapshot { codex: true, no_session_limit: true, ..Default::default() };
+        assert_eq!(meter_labels(&week).1, "Codex");
+        assert_eq!(meter_labels(&StatusSnapshot { no_session_limit: false, ..week.clone() }), ("Codex", "Weekly"));
+        assert_eq!(meter_labels(&StatusSnapshot::default()), ("Session", "Weekly"), "Claude keeps its names");
+        // A pause names OpenAI; a Claude account's still names Anthropic.
+        let now = 1_000_000;
+        let paused = StatusSnapshot { paused_until: Some(now + 600), refresh_at: Some(now + 600), ..week.clone() };
+        assert!(refresh_item(&paused, false, now).0.starts_with("Usage paused by OpenAI until "));
+        let claude = StatusSnapshot { codex: false, ..paused };
+        assert!(refresh_item(&claude, false, now).0.starts_with("Usage paused by Anthropic until "));
+        // The menu-bar percentage works from the week alone.
+        let codex_week = StatusSnapshot { week_pct: Some(34), ..week };
+        assert_eq!(menu_bar_title(&codex_week).as_deref(), Some("34%"));
+    }
+
+    #[test]
+    fn resets_fit_one_row() {
+        let utc = chrono::Utc;
+        let dec1 = chrono::NaiveDate::from_ymd_opt(2026, 12, 1).unwrap().and_hms_opt(22, 28, 0).unwrap().and_utc();
+        let dec12 = dec1 + chrono::Duration::days(11);
+        assert_eq!(resets_row(2, &[dec1.timestamp(), dec12.timestamp()], &utc), "2 resets · next expires Dec 1");
+        assert_eq!(resets_row(1, &[dec12.timestamp()], &utc), "1 reset · next expires Dec 12");
+        assert_eq!(resets_row(3, &[], &utc), "3 resets", "no dates known");
+        assert_eq!(resets_row(0, &[], &utc), "No resets available");
+        // Local time picks the day, as `rx` does.
+        let east = chrono::FixedOffset::east_opt(3 * 3600).unwrap();
+        assert_eq!(resets_row(1, &[dec1.timestamp()], &east), "1 reset · next expires Dec 2");
     }
 
     #[test]

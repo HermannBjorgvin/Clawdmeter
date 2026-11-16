@@ -111,6 +111,8 @@ static void check_title(const char* text) {
     check_apart("title vs battery", t, battery());
 }
 
+static void check_resets_card(void);
+
 static void check_panel(const Panel& p) {
     P = &p;
     L = layout_compute({ p.w, p.h, p.round });
@@ -156,7 +158,7 @@ static void check_panel(const Panel& p) {
     // Inside a card.
     const int inner_w = L.card[0].w - 2 * L.pad_x, inner_h = L.card[0].h - 2 * L.pad_y;
     const int pill_w = 2 * L.pill_pad_x + 4;   // padding + PILL_GAP
-    for (int i : { 0, 1, 3 })   // session, weekly, period: "100%" beside the pill
+    for (int i : { 0, 1, 3, 4 })   // session, weekly, period, Codex: "100%" beside the pill
         if (text_w(L.pct_font, "100%") + pill_w + text_w(L.pill_font, L.pills[i]) > inner_w)
             fail("percentage vs pill", card(i == 0 ? 0 : 1));
     if (text_w(L.ent_pct_font, "100") + 4 + text_w(L.reset_font, "%") + pill_w
@@ -164,6 +166,7 @@ static void check_panel(const Panel& p) {
         fail("spending vs pill", card(0));
     for (const char* s : RESET_TEXT_WIDEST)
         if (text_w(L.reset_font, s) > inner_w) fail(s, card(0));
+    check_resets_card();
     if (text_w(L.period_font, L.period_short ? PERIOD_TEXT_SHORT_WIDEST : PERIOD_TEXT_WIDEST) > inner_w)
         fail("period line", card(1));
     if (L.card[0].w >= 224 && L.period_short) fail("period line without its pace word", card(1));
@@ -297,6 +300,31 @@ static void test_row_320x172(void) {
 }
 
 // Kerned, per-glyph-rounded widths, as lv_font_get_glyph_width sums them.
+// The Codex Resets card in card[1]: the header row (title, count pill with
+// its ticket), then the chip grid, all inside the card's padding; each chip
+// holds its widest text; the empty and undated lines fit the first row.
+static void check_resets_card(void) {
+    static const int ticket_w[] = { 28, 14, 11 }, ticket_h[] = { 20, 10, 8 };
+    const int inner_w = L.card[1].w - 2 * L.pad_x, inner_h = L.card[1].h - 2 * L.pad_y;
+    const Box c = card(1);
+    if (!L.resets_title || !L.resets_font || L.resets_cols < 1 || L.resets_rows < 1) fail("resets card unset", c);
+    const int t = L.resets_ticket;
+    if (ticket_h[t] > ink_h(L.pill_font)) fail("ticket taller than the pill text", c);
+    const int pill_w = 2 * L.pill_pad_x + ticket_w[t] + L.resets_icon_gap + text_w(L.pill_font, RESETS_COUNT_WIDEST);
+    if (text_w(L.pill_font, L.resets_title) + L.resets_gap + pill_w > inner_w) fail("resets title vs pill", c);
+    const int pill_h = line_h(L.pill_font) + 2 * L.pill_pad_y;
+    if (L.resets_chips_y < 1 + pill_h) fail("chips vs header", c);
+    const int grid_h = L.resets_rows * L.resets_chip_h + (L.resets_rows - 1) * L.resets_gap;
+    if (L.resets_chips_y + grid_h > inner_h) fail("chips vs card bottom", c);
+    const int cell_w = (inner_w - (L.resets_cols - 1) * L.resets_gap) / L.resets_cols;
+    for (const char* s : RESETS_CHIP_WIDEST)
+        if (text_w(L.resets_font, s) > cell_w) fail(s, c);
+    if (ink_h(L.resets_font) > L.resets_chip_h) fail("chip text vs chip", c);
+    const int last = sizeof(RESETS_EMPTY) / sizeof(RESETS_EMPTY[0]) - 1;
+    if (text_w(L.resets_font, RESETS_EMPTY[last]) > inner_w) fail("no resets line", c);
+    if (text_w(L.resets_font, RESETS_UNDATED[last]) > inner_w) fail("undated line", c);
+}
+
 static void test_text_width(void) {
     TEST_ASSERT_EQUAL_INT32(371, layout_text_width(&font_styrene_28, "for 3 seconds, then release"));
     TEST_ASSERT_EQUAL_INT32(0, layout_text_width(&font_styrene_28, ""));
@@ -309,6 +337,10 @@ static void print_layouts(void) {
         snprintf(msg, sizeof(msg), "%-22s %3dx%-3d cards x%d y%d/%d %dx%d  status y%d w%d  title %s  pills %s",
                  p.name, p.w, p.h, L.card[0].x, L.card[0].y, L.card[1].y, L.card[0].w, L.card[0].h,
                  L.status_y, L.status_w, L.title_font[0] ? "yes" : "hidden", L.pills[0]);
+        TEST_MESSAGE(msg);
+        snprintf(msg, sizeof(msg), "%-22s resets: title \"%s\" ticket %d, chips %dx%d in a %dpx-line font, %d tall, gap %d, y %d",
+                 p.name, L.resets_title, L.resets_ticket, L.resets_cols, L.resets_rows,
+                 L.resets_font->line_height, L.resets_chip_h, L.resets_gap, L.resets_chips_y);
         TEST_MESSAGE(msg);
     }
 }

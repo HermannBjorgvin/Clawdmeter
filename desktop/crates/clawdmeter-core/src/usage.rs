@@ -103,6 +103,48 @@ pub enum MeterKind {
     Spend,
 }
 
+/// Whose usage a reading is: the account is a Claude config dir or a Codex
+/// home ([`crate::codex`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Provider {
+    /// Claude Code.
+    #[default]
+    Claude,
+    /// OpenAI Codex (a trial).
+    Codex,
+}
+
+impl Provider {
+    /// Who runs the usage endpoint, for "Usage paused by … until …".
+    pub fn company(self) -> &'static str {
+        match self {
+            Provider::Claude => "Anthropic",
+            Provider::Codex => "OpenAI",
+        }
+    }
+}
+
+/// Codex's rate-limit reset credits: one-shot resets of the usage limit that
+/// OpenAI grants and that expire after a while.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResetCredits {
+    /// Credits still held (the usage endpoint's `available_count`).
+    pub held: u32,
+    /// When each held credit expires, soonest first, those still ahead and
+    /// at most [`ResetCredits::MAX_EXPIRIES`]; empty when unknown.
+    pub expiries: Vec<DateTime<Utc>>,
+}
+
+impl ResetCredits {
+    /// The most expiries kept (and sent as `rx`).
+    pub const MAX_EXPIRIES: usize = 10;
+
+    /// When the soonest held credit expires, when known.
+    pub fn next_expiry(&self) -> Option<DateTime<Utc>> {
+        self.expiries.first().copied()
+    }
+}
+
 /// The model-scoped weekly limit drawn inside the weekly meter, matched by
 /// display name, ignoring case.
 pub const FABLE_MODEL: &str = "Fable";
@@ -149,6 +191,10 @@ pub struct UsageReading {
     pub overage: bool,
     /// Whether the account has a 5-hour limit at all.
     pub session_limit: SessionLimit,
+    /// Whose usage this is.
+    pub provider: Provider,
+    /// Codex's reset credits, when the reading came with them.
+    pub resets: Option<ResetCredits>,
 }
 
 impl UsageReading {
@@ -304,17 +350,31 @@ impl UsageError {
         }
     }
 
+    /// [`UsageError::user_message`] for an account of `provider`.
+    pub fn user_message_for(&self, provider: Provider, retry_in: Option<i64>) -> String {
+        if provider == Provider::Claude {
+            return self.user_message(retry_in);
+        }
+        let again = again(retry_in);
+        match self {
+            UsageError::Timeout => format!("Codex's usage took too long to answer. {again}"),
+            UsageError::BadOutput(_) => format!("Couldn't read Codex's usage response. {again}"),
+            UsageError::NotLoggedIn(_) => "Sign in to Codex for this folder (codex login).".into(),
+            UsageError::NoUsageLines(_) => format!("Codex didn't report a usage limit for this account. {again}"),
+            UsageError::TokenExpired => "Codex's sign-in has expired. Running Codex renews it.".into(),
+            UsageError::TokenRejected => {
+                format!("OpenAI refused Codex's sign-in. Running Codex or codex login renews it. {again}")
+            }
+            UsageError::Offline(_) => format!("Couldn't reach OpenAI. {again}"),
+            e => e.user_message(retry_in),
+        }
+    }
+
     /// One or two short sentences for the app's UI; `Display` keeps the
     /// details for logs. `retry_in` is how long the account's backoff has
     /// left (s), when it is backing off.
     pub fn user_message(&self, retry_in: Option<i64>) -> String {
-        let again = match retry_in.filter(|s| *s > 0) {
-            Some(s) => {
-                let m = (s + 59) / 60;
-                format!("Trying again in about {m} minute{}.", if m == 1 { "" } else { "s" })
-            }
-            None => "Retrying.".to_owned(),
-        };
+        let again = again(retry_in);
         match self {
             UsageError::Spawn(_) => {
                 "Couldn't run Claude Code. Check its installation and the claude_path setting.".into()
@@ -336,10 +396,27 @@ impl UsageError {
     }
 }
 
+/// "Trying again in about N minutes." for a backoff with `retry_in` (s)
+/// left, else "Retrying.".
+fn again(retry_in: Option<i64>) -> String {
+    match retry_in.filter(|s| *s > 0) {
+        Some(s) => {
+            let m = (s + 59) / 60;
+            format!("Trying again in about {m} minute{}.", if m == 1 { "" } else { "s" })
+        }
+        None => "Retrying.".to_owned(),
+    }
+}
+
 /// "Usage paused by Anthropic until 14:05." for a block ending at `until`
 /// (unix seconds), shown at `utc_offset` (seconds east of UTC).
 pub fn paused_message(until: i64, utc_offset: i64) -> String {
-    format!("Usage paused by Anthropic until {}.", paused_clock(until, utc_offset))
+    paused_message_by(Provider::Claude, until, utc_offset)
+}
+
+/// [`paused_message`] naming the company whose endpoint paused the account.
+pub fn paused_message_by(provider: Provider, until: i64, utc_offset: i64) -> String {
+    format!("Usage paused by {} until {}.", provider.company(), paused_clock(until, utc_offset))
 }
 
 /// The local time a pause ends, `HH:MM` (the time in [`paused_message`]).

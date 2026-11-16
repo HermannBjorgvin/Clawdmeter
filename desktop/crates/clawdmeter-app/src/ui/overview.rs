@@ -10,7 +10,7 @@ use gpui::{div, prelude::*, px, relative, rgb, Context, EventEmitter, Rgba, Shar
 
 use super::theme::{Theme, FONT_BODY, FONT_DISPLAY, R_M, R_PILL};
 use super::widgets::{
-    button, clawd, dot, field, icon_button, notice, toggle, tone_color, usage_tone, ButtonKind, Tone,
+    button, clawd, dot, field, icon, icon_button, notice, toggle, tone_color, usage_tone, ButtonKind, Tone,
 };
 use super::{command, live_status, not_running_text, Navigate, REFRESH};
 use crate::art::TrayState;
@@ -252,6 +252,29 @@ fn fable_color(t: &Theme) -> u32 {
 /// corners. Shaped like the fill even where GPUI narrows the corners of a
 /// short one, so it never shows outside it.
 fn meter(t: &Theme, label: &'static str, pct: Option<u32>, fable: Option<u32>, reset: String) -> impl IntoElement {
+    meter_in(t, label, pct, fable, reset, fill(t, pct.unwrap_or(0)))
+}
+
+/// A Codex account's meter: white / neutral, as the device marks data from
+/// the GPT side, and never a Fable strip (Fable is Claude's).
+fn codex_meter(t: &Theme, label: &'static str, pct: Option<u32>, reset: String) -> impl IntoElement {
+    meter_in(t, label, pct, None, reset, codex_fill(t))
+}
+
+/// A Codex account's bar fill: the text colour, white on dark, as the
+/// device draws it. The tray's drawn meters use it too.
+pub fn codex_fill(t: &Theme) -> Rgba {
+    t.text
+}
+
+fn meter_in(
+    t: &Theme,
+    label: &'static str,
+    pct: Option<u32>,
+    fable: Option<u32>,
+    reset: String,
+    fill: Rgba,
+) -> gpui::Div {
     let value = pct.map_or_else(|| "--%".to_owned(), |p| format!("{p}%"));
     let frac = pct.unwrap_or(0).min(100) as f32 / 100.;
     let fable = fable_extent(fable, pct.unwrap_or(0)).map(|(f, _)| {
@@ -291,10 +314,111 @@ fn meter(t: &Theme, label: &'static str, pct: Option<u32>, fable: Option<u32>, r
                 .w_full()
                 .rounded(px(4.))
                 .bg(t.track)
-                .child(div().h_full().w(relative(frac)).rounded(px(4.)).bg(fill(t, pct.unwrap_or(0))))
+                .child(div().h_full().w(relative(frac)).rounded(px(4.)).bg(fill))
                 .children(fable),
         )
         .child(div().mt(px(8.)).text_size(px(15.)).text_color(t.dim).child(reset))
+}
+
+/// What the Resets card lists in `cells` chips: each held credit's expiry
+/// date ("Nov 27", local time, as the device shows `rx`), soonest first;
+/// how many held credits have no chip of their own ("+N more", in the last
+/// cell); or, with none to list, the line in their place.
+#[derive(Debug, PartialEq)]
+struct ResetChips {
+    dates: Vec<String>,
+    more: u32,
+    note: Option<&'static str>,
+}
+
+fn reset_chips<Tz: chrono::TimeZone>(held: u32, expires_at: &[i64], cells: usize, tz: &Tz) -> ResetChips
+where
+    Tz::Offset: std::fmt::Display,
+{
+    use chrono::Datelike;
+    let day = |t: &i64| {
+        chrono::DateTime::from_timestamp(*t, 0).map(|t| {
+            let l = t.with_timezone(tz);
+            format!("{} {}", l.format("%b"), l.day())
+        })
+    };
+    let mut dates: Vec<String> = expires_at.iter().take(held as usize).filter_map(day).collect();
+    if dates.len() > cells || (dates.len() == cells && (held as usize) > cells) {
+        dates.truncate(cells.saturating_sub(1));
+    }
+    let note = match (held, dates.is_empty()) {
+        (0, _) => Some("No resets available"),
+        (_, true) => Some("Expiry dates unknown"),
+        _ => None,
+    };
+    let more = if dates.is_empty() { 0 } else { held - dates.len() as u32 };
+    ResetChips { dates, more, note }
+}
+
+/// The Resets card's chips: as many columns as fit the card at their
+/// narrowest ("+10 more" with room), and two rows at most.
+const CHIP_MIN_W: f32 = 84.;
+const CHIP_GAP: f32 = 8.;
+const CHIP_ROWS: usize = 2;
+
+/// Chips per row across a card `inner_w` wide (between its padding).
+fn chip_cols(inner_w: f32) -> usize {
+    (((inner_w + CHIP_GAP) / (CHIP_MIN_W + CHIP_GAP)) as usize).max(3)
+}
+
+/// A Codex account's reset credits: "Resets expire" with the count in a
+/// ticket pill (dim at 0), then a chip per held credit's expiry date,
+/// soonest first and highlighted, in at most two rows of equal chips across
+/// the card; the last cell is "+N more" when they don't all fit or a date
+/// isn't known. `inner_w` is the card's width inside its padding.
+fn resets_card(t: &Theme, held: u32, expires_at: &[i64], inner_w: f32) -> impl IntoElement {
+    let cols = chip_cols(inner_w);
+    let ResetChips { dates, more, note } = reset_chips(held, expires_at, cols * CHIP_ROWS, &chrono::Local);
+    let fg = if held == 0 { t.dim } else { t.text };
+    let header = div()
+        .flex()
+        .items_start()
+        .justify_between()
+        .child(div().text_size(px(22.)).line_height(px(28.)).text_color(t.text).child("Resets expire"))
+        .child(
+            div()
+                .mt(px(2.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(12.))
+                .py(px(3.))
+                .rounded(px(R_PILL))
+                .bg(t.track)
+                .text_size(px(14.))
+                .text_color(fg)
+                .child(icon("ticket", 15., fg))
+                .child(held.to_string()),
+        );
+    let chip = |text: String| {
+        div()
+            .w_full()
+            .h(px(30.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(R_PILL))
+            .text_size(px(14.))
+            .child(text)
+    };
+    let chips = dates.into_iter().enumerate().map(|(i, d)| {
+        if i == 0 {
+            chip(d).bg(t.text).text_color(t.panel)
+        } else {
+            chip(d).bg(t.track).text_color(t.text)
+        }
+    });
+    let more = (more > 0).then(|| chip(format!("+{more} more")).bg(t.track).text_color(t.dim));
+    let body = match note {
+        Some(n) => div().mt(px(12.)).text_size(px(15.)).text_color(t.dim).child(n),
+        None => div().mt(px(12.)).grid().grid_cols(cols as u16).gap(px(CHIP_GAP)).children(chips).children(more),
+    };
+    div().flex().flex_col().p(px(16.)).rounded(px(R_M)).bg(t.panel).font_family(FONT_BODY).child(header).child(body)
 }
 
 impl Render for OverviewView {
@@ -375,20 +499,42 @@ impl Render for OverviewView {
             return page.child(chime).child(setup);
         };
 
-        // A spend-capped account has one meter, the spend; no 5-hour limit
-        // (verified Ultra) leaves the week alone.
-        let meters: Vec<_> = if s.spend {
-            vec![meter(&t, "Spend", s.session_pct, None, reset_text(s.spend_resets_at, now, "---"))]
-        } else {
-            let session = (!s.no_session_limit).then(|| {
-                meter(&t, "Session", s.session_pct, None, reset_text(s.session_resets_at, now, "Not started"))
+        if s.codex {
+            // A Codex account (never spend-capped), as the device draws it:
+            // its main meter (the 5-hour window, else the week) is "Codex";
+            // the second card is the week with a 5-hour window, else the
+            // reset credits.
+            let meters = div().flex().flex_col().gap(px(12.));
+            // The cards' width: the page column beside the sidebar, inside its padding.
+            let card_w = (f32::from(window.viewport_size().width) - super::SIDEBAR_W).min(super::PAGE_MAX_W)
+                - 2. * super::PAGE_PAD_X;
+            let session_reset = reset_text(s.session_resets_at, now, "Not started");
+            let week_reset = reset_text(s.week_resets_at, now, "---");
+            page = page.child(if s.no_session_limit {
+                meters
+                    .child(codex_meter(&t, "Codex", s.week_pct, week_reset))
+                    .children(s.resets_held.map(|h| resets_card(&t, h, &s.resets_expiries, card_w - 32.)))
+            } else {
+                meters
+                    .child(codex_meter(&t, "Codex", s.session_pct, session_reset))
+                    .child(codex_meter(&t, "Weekly", s.week_pct, week_reset))
             });
-            session
-                .into_iter()
-                .chain([meter(&t, "Weekly", s.week_pct, s.fable_pct, reset_text(s.week_resets_at, now, "---"))])
-                .collect()
-        };
-        page = page.child(div().flex().flex_col().gap(px(12.)).children(meters));
+        } else {
+            // A spend-capped account has one meter, the spend; no 5-hour limit
+            // (verified Ultra) leaves the week alone.
+            let meters: Vec<_> = if s.spend {
+                vec![meter(&t, "Spend", s.session_pct, None, reset_text(s.spend_resets_at, now, "---"))]
+            } else {
+                let session = (!s.no_session_limit).then(|| {
+                    meter(&t, "Session", s.session_pct, None, reset_text(s.session_resets_at, now, "Not started"))
+                });
+                session
+                    .into_iter()
+                    .chain([meter(&t, "Weekly", s.week_pct, s.fable_pct, reset_text(s.week_resets_at, now, "---"))])
+                    .collect()
+            };
+            page = page.child(div().flex().flex_col().gap(px(12.)).children(meters));
+        }
         if let Some(tag) = self.firmware_nudge() {
             let v = tag.trim_start_matches('v').to_owned();
             page = page.child(
@@ -460,6 +606,7 @@ impl OverviewView {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{PAGE_MAX_W, PAGE_PAD_X, SIDEBAR_W};
     use super::*;
 
     #[test]
@@ -500,6 +647,51 @@ mod tests {
         let paused = StatusSnapshot { paused_until: Some(4_600), refresh_at: Some(4_600), ..Default::default() };
         assert_eq!(refresh_state(&paused, true, 1_000), RefreshState::Paused(4_600), "a press doesn't ask");
         assert_eq!(refresh_state(&paused, false, 4_600), RefreshState::Ready);
+    }
+
+    #[test]
+    fn reset_chips_list_each_date() {
+        let utc = chrono::Utc;
+        let day = |d: u32| {
+            chrono::NaiveDate::from_ymd_opt(2026, 11, d).unwrap().and_hms_opt(12, 0, 0).unwrap().and_utc().timestamp()
+        };
+        let none = ResetChips { dates: vec![], more: 0, note: Some("No resets available") };
+        assert_eq!(reset_chips(0, &[], 12, &utc), none);
+        let undated = ResetChips { dates: vec![], more: 0, note: Some("Expiry dates unknown") };
+        assert_eq!(reset_chips(2, &[], 12, &utc), undated);
+        let three = reset_chips(3, &[day(19), day(20), day(27)], 12, &utc);
+        assert_eq!(
+            three,
+            ResetChips { dates: vec!["Nov 19".into(), "Nov 20".into(), "Nov 27".into()], more: 0, note: None }
+        );
+        let ten: Vec<i64> = (17..27).map(day).collect();
+        // Twelve cells: all ten dates.
+        let c = reset_chips(10, &ten, 12, &utc);
+        assert_eq!((c.dates.len(), c.more), (10, 0));
+        // Eight cells: seven dates and "+3 more".
+        let c = reset_chips(10, &ten, 8, &utc);
+        assert_eq!((c.dates.len(), c.dates[6].as_str(), c.more), (7, "Nov 23", 3));
+        // Exactly full: every date, no "+N".
+        assert_eq!(reset_chips(8, &ten[..8], 8, &utc).more, 0);
+        // Twelve held, ten dates sent, ten cells: nine dates and "+3 more".
+        let c = reset_chips(12, &ten, 10, &utc);
+        assert_eq!((c.dates.len(), c.more), (9, 3));
+        // Twelve held, ten dates, twelve cells: ten dates and "+2 more".
+        assert_eq!(reset_chips(12, &ten, 12, &utc).more, 2);
+        // Never more dates than credits held.
+        assert_eq!(reset_chips(1, &ten, 12, &utc).dates, ["Nov 17"]);
+        // Local time picks the day, as `rx` does.
+        let east = chrono::FixedOffset::east_opt(14 * 3600).unwrap();
+        assert_eq!(reset_chips(1, &[day(30)], 12, &east).dates, ["Dec 1"]);
+    }
+
+    #[test]
+    fn chips_fill_two_rows_across_the_card() {
+        // The narrowest window (720 px) and the default (880 px).
+        let inner = |w: f32| (w - SIDEBAR_W).min(PAGE_MAX_W) - 2. * PAGE_PAD_X - 32.;
+        assert_eq!(chip_cols(inner(720.)), 4);
+        assert_eq!(chip_cols(inner(880.)), 6);
+        assert_eq!(chip_cols(inner(2000.)), 6);
     }
 
     #[test]

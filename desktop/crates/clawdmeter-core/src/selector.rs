@@ -28,6 +28,14 @@ impl<K: Clone + Eq + Hash + Ord> PlanSelector<K> {
     /// account. `None` only when `sessions` is empty. Ties beyond recency and
     /// % fall to the smallest key so the result is deterministic.
     pub fn choose(&mut self, sessions: &[(K, u32)]) -> Option<K> {
+        self.choose_preferring(sessions, |_| true)
+    }
+
+    /// [`PlanSelector::choose`], where before any rise (and between
+    /// accounts that rose in the same cycle) a `preferred` account beats one
+    /// that isn't, whatever their %. With every account preferred it is
+    /// exactly `choose`.
+    pub fn choose_preferring(&mut self, sessions: &[(K, u32)], preferred: impl Fn(&K) -> bool) -> Option<K> {
         self.seq += 1;
         for (k, s) in sessions {
             if self.prev.get(k).is_some_and(|p| s > p) {
@@ -40,7 +48,7 @@ impl<K: Clone + Eq + Hash + Ord> PlanSelector<K> {
             .max_by(|(ka, sa), (kb, sb)| {
                 let ra = self.last_active.get(ka).copied().unwrap_or(0);
                 let rb = self.last_active.get(kb).copied().unwrap_or(0);
-                ra.cmp(&rb).then(sa.cmp(sb)).then(kb.cmp(ka))
+                ra.cmp(&rb).then(preferred(ka).cmp(&preferred(kb))).then(sa.cmp(sb)).then(kb.cmp(ka))
             })
             .map(|(k, _)| k.clone())
     }
@@ -104,6 +112,19 @@ mod tests {
         let mut s = PlanSelector::default();
         s.choose(&[(A, 10), (B, 10)]);
         assert_eq!(s.choose(&[(A, 12), (B, 40)]), Some(B));
+    }
+
+    // A Codex account (not preferred) waits for its own rise before it is
+    // shown over a Claude account, whatever its %.
+    #[test]
+    fn preferred_wins_until_the_other_rises() {
+        let mut s = PlanSelector::default();
+        let claude = |k: &&str| *k == A;
+        assert_eq!(s.choose_preferring(&[(A, 10), (B, 30)], claude), Some(A));
+        assert_eq!(s.choose_preferring(&[(A, 10), (B, 30)], claude), Some(A));
+        assert_eq!(s.choose_preferring(&[(A, 10), (B, 31)], claude), Some(B), "B rose");
+        assert_eq!(s.choose_preferring(&[(A, 11), (B, 31)], claude), Some(A), "A rose");
+        assert_eq!(s.choose_preferring(&[(B, 31)], claude), Some(B), "alone");
     }
 
     #[test]

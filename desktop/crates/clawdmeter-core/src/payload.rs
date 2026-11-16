@@ -1,15 +1,16 @@
 //! The JSON written to the device's RX characteristic.
 //!
 //! Keys match `payload_parse()` in `firmware/src/payload.cpp`, in the order
-//! the old daemons wrote them, plus the Fable weekly % `wf`, the additive
-//! fast-clock fields `a`, `e`, `es`, `n`, `rp` and the device settings `lv`,
-//! `aa`, `pm`, `k1`–`k3`, `th` and `fc` (old firmware ignores unknown keys).
+//! the old daemons wrote them, plus the Fable weekly % `wf`, the Codex keys
+//! `pv`, `rc`, `rx`, the additive fast-clock fields `a`, `e`, `es`, `n`, `rp`
+//! and the device settings `lv`, `aa`, `pm`, `k1`–`k3`, `th` and `fc` (old
+//! firmware ignores unknown keys).
 
 use chrono::{DateTime, Datelike, Months, TimeZone, Utc};
 use serde::Serialize;
 
 use crate::config::{ClockMode, Palette, Rgb};
-use crate::usage::{SpendPeriod, UsageReading};
+use crate::usage::{Provider, ResetCredits, SpendPeriod, UsageReading};
 
 /// One device payload. `None` fields are omitted.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -41,6 +42,17 @@ pub struct Payload {
     /// 5-hour limit, e.g. verified Ultra) or "ent" (spending limit).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acct: Option<String>,
+    /// Whose usage the numbers are: "codex" for a Codex account (the device
+    /// draws its Codex screen); absent for Claude.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pv: Option<String>,
+    /// Codex reset credits held. Absent when unknown: no Resets card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rc: Option<u32>,
+    /// Each held reset credit's expiry date, host-local like `rd` ("Dec 1"),
+    /// soonest first, at most 10. Absent when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rx: Option<Vec<String>>,
     /// Enterprise: % of the billing period elapsed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tp: Option<u32>,
@@ -124,9 +136,10 @@ pub struct Payload {
 
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
-    "s", "sr", "w", "wr", "wf", "st", "acct", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x", "a", "e", "es",
-    "n", "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th", "fc",
+    "s", "sr", "w", "wr", "wf", "st", "acct", "pv", "rc", "rx", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x",
+    "a", "e", "es", "n", "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th", "fc",
 ];
+
 /// The fast-clock keys added in v0.4 (old firmware ignores them).
 pub const ADDITIVE_KEYS: &[&str] = &["a", "e", "es", "n", "rp"];
 
@@ -281,17 +294,32 @@ impl Payload {
         // doesn't know "week" draws exactly what it always did; newer
         // firmware shows `w`/`wr` alone and follows the week.
         let acct = if r.no_session_limit() { "week" } else { "pro" };
-        Payload {
+        let mut p = Payload {
             s: Some(s),
             sr: Some(sr),
             w: Some(w),
             wr: Some(wr),
-            wf: r.fable().map(|f| f.pct),
+            // Fable is Claude's: a Codex payload never carries `wf`.
+            wf: r.fable().filter(|_| r.provider == Provider::Claude).map(|f| f.pct),
             st: Some(st.to_owned()),
             acct: Some(acct.to_owned()),
             ok: true,
             ..Default::default()
+        };
+        if r.provider == Provider::Codex {
+            p.pv = Some("codex".to_owned());
+            if let Some(c) = &r.resets {
+                p.rc = Some(c.held);
+                if !c.expiries.is_empty() {
+                    let day = |t: &DateTime<Utc>| {
+                        let l = t.with_timezone(tz);
+                        format!("{} {}", l.format("%b"), l.day())
+                    };
+                    p.rx = Some(c.expiries.iter().take(ResetCredits::MAX_EXPIRIES).map(day).collect());
+                }
+            }
         }
+        p
     }
 
     /// The "no data" payload (every account logged out).
@@ -551,6 +579,57 @@ mod tests {
         assert!(v.get("m").is_none());
     }
 
+    // A Codex account: the usage keys as a Claude account's (weekly-only is
+    // "week", a 5-hour window the normal shape), plus `pv` and the reset
+    // credits. Unknown details are left out, never 0.
+    #[test]
+    fn codex_payload() {
+        use crate::usage::SessionLimit;
+        let now = at("2026-11-16T02:00:00Z");
+        let week = Window { pct: 34, resets_at: Some(at("2026-11-21T23:18:04Z")) };
+        let r = UsageReading {
+            week: Some(week.clone()),
+            session_limit: SessionLimit::Absent,
+            provider: Provider::Codex,
+            resets: Some(ResetCredits {
+                held: 3,
+                expiries: vec![at("2026-11-27T09:00:00Z"), at("2026-12-10T18:30:00Z"), at("2026-12-31T23:30:00Z")],
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            Payload::from_reading_in(&r, now, &chrono::Utc).to_json(),
+            r#"{"s":0,"sr":-1,"w":34,"wr":8478,"st":"allowed","acct":"week","pv":"codex","rc":3,"rx":["Nov 27","Dec 10","Dec 31"],"ok":true}"#
+        );
+        // Dates are the host's: the last one is New Year's Day an hour east.
+        let east = chrono::FixedOffset::east_opt(3600).unwrap();
+        assert_eq!(Payload::from_reading_in(&r, now, &east).rx.unwrap()[2], "Jan 1");
+        let partial = UsageReading { resets: Some(ResetCredits { held: 2, ..Default::default() }), ..r.clone() };
+        assert_eq!(
+            Payload::from_reading(&partial, now).to_json(),
+            r#"{"s":0,"sr":-1,"w":34,"wr":8478,"st":"allowed","acct":"week","pv":"codex","rc":2,"ok":true}"#
+        );
+        let no_resets = UsageReading { resets: None, ..r.clone() };
+        assert!(!Payload::from_reading(&no_resets, now).to_json().contains("\"rc\""));
+        let five_hour = UsageReading {
+            session: Some(Window { pct: 12, resets_at: Some(at("2026-11-16T04:00:00Z")) }),
+            session_limit: SessionLimit::Applies,
+            resets: None,
+            ..r.clone()
+        };
+        assert_eq!(
+            Payload::from_reading(&five_hour, now).to_json(),
+            r#"{"s":12,"sr":120,"w":34,"wr":8478,"st":"allowed","acct":"pro","pv":"codex","ok":true}"#
+        );
+        // Fable is Claude's: never `wf` with `pv`, whatever the reading holds.
+        let with_fable = UsageReading { models: vec![("fable".into(), week.clone())], ..r.clone() };
+        assert_eq!(Payload::from_reading(&with_fable, now).wf, None);
+        // A Claude reading never carries them.
+        let claude = UsageReading { provider: Provider::Claude, ..r };
+        let j = Payload::from_reading(&claude, now).to_json();
+        assert!(!j.contains("pv") && !j.contains("\"rc\""), "{j}");
+    }
+
     /// Every field at its widest, the longest alert line and three
     /// shortcuts still fit the app's 500-byte write without trimming `m`.
     #[test]
@@ -564,6 +643,9 @@ mod tests {
             wf: Some(999),
             st: Some("overage".into()),
             acct: Some("week".into()),
+            pv: Some("codex".into()),
+            rc: Some(999),
+            rx: Some(vec!["Sep 30".into(); ResetCredits::MAX_EXPIRIES]),
             tp: Some(100),
             pd: Some(31),
             rd: Some("Sep 30".into()),
@@ -603,6 +685,9 @@ mod tests {
             wf: Some(5),
             st: Some("allowed".into()),
             acct: Some("pro".into()),
+            pv: Some("codex".into()),
+            rc: Some(3),
+            rx: Some(vec!["Dec 1".into()]),
             tp: Some(1),
             pd: Some(30),
             rd: Some("Oct 1".into()),

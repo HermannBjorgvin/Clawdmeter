@@ -140,6 +140,16 @@ pub struct StatusSnapshot {
     /// Unix seconds the spend period resets (`None`: unknown).
     #[serde(default)]
     pub spend_resets_at: Option<i64>,
+    /// The shown account is a Codex account (a trial).
+    #[serde(default)]
+    pub codex: bool,
+    /// Its reset credits held, when known.
+    #[serde(default)]
+    pub resets_held: Option<u32>,
+    /// Unix seconds each held reset credit expires, soonest first (at most
+    /// `ResetCredits::MAX_EXPIRIES`); empty when unknown.
+    #[serde(default)]
+    pub resets_expiries: Vec<i64>,
 }
 
 impl StatusSnapshot {
@@ -202,6 +212,12 @@ impl StatusSnapshot {
                 .and_then(|r| r.spend.as_ref())
                 .and_then(|sp| sp.resets_at)
                 .map(|t| t.timestamp()),
+            codex: reading.is_some_and(|r| r.provider == clawdmeter_core::usage::Provider::Codex),
+            resets_held: reading.and_then(|r| r.resets.as_ref()).map(|c| c.held),
+            resets_expiries: reading
+                .and_then(|r| r.resets.as_ref())
+                .map(|c| c.expiries.iter().map(|t| t.timestamp()).collect())
+                .unwrap_or_default(),
         }
     }
 

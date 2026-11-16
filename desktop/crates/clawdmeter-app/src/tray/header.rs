@@ -7,11 +7,13 @@ use crate::ipc::StatusSnapshot;
 use crate::ui::overview::{reset_text, state_title, wait_text, RefreshState};
 use crate::ui::widgets::{usage_tone, Tone};
 use crate::{ago, tilde};
+use clawdmeter_core::usage::Provider;
 
 /// One usage window, laid out like a device panel.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Meter {
-    /// "Session", "Weekly" or "Spend".
+    /// "Session", "Weekly" or "Spend"; a Codex account's main meter is
+    /// "Codex" (`tray::meter_labels`).
     pub label: &'static str,
     /// "57%", or "--%" with no reading (no data is never a zero).
     pub value: String,
@@ -20,8 +22,10 @@ pub struct Meter {
     /// The fill's colour, as the device picks it (`bar_color` in
     /// firmware/src/ui.cpp): `Ok` green, `Accent` amber, `Bad` red, by the
     /// Overview's thresholds (`usage_tone`) or, with the pace marker on, by
-    /// pace (at or behind it, ahead of it, at the limit).
-    pub fill: Tone,
+    /// pace (at or behind it, ahead of it, at the limit). `None`: a Codex
+    /// account's neutral bar, the Overview's `codex_meter` colour (the
+    /// device draws Codex bars white, pace or not).
+    pub fill: Option<Tone>,
     /// "Resets in 3d 4h", "Not started", "---".
     pub reset: String,
     /// Where the pace marker sits, 0..=1, when it's on and the reset time
@@ -50,6 +54,8 @@ pub struct Header {
     /// The footer's update icon: what it offers (`tray::update_offer`; the
     /// tray sets it).
     pub update: Option<super::Update>,
+    /// Whose endpoint the numbers come from: the paused text names it.
+    pub provider: Provider,
 }
 
 impl Header {
@@ -86,9 +92,10 @@ impl Header {
             meters.push(meter("Spend", s.session_pct, reset, None, now));
         } else {
             // No 5-hour limit (verified Ultra): the week is the only meter.
+            let (session, weekly) = super::meter_labels(s);
             if !s.no_session_limit {
                 meters.push(meter(
-                    "Session",
+                    session,
                     s.session_pct,
                     reset_text(s.session_resets_at, now, "Not started"),
                     pace_marker.then_some((s.session_resets_at, SESSION_WINDOW_SECS)),
@@ -96,14 +103,30 @@ impl Header {
                 ));
             }
             meters.push(meter(
-                "Weekly",
+                weekly,
                 s.week_pct,
                 reset_text(s.week_resets_at, now, "---"),
                 pace_marker.then_some((s.week_resets_at, WEEK_WINDOW_SECS)),
                 now,
             ));
+            // A Codex account's bars are neutral, as on the device; the pace
+            // marker still shows where the window's time is.
+            if s.codex {
+                for m in &mut meters {
+                    m.fill = None;
+                }
+            }
         }
-        Header { title: state_title(s), detail, age, meters, refresh, chime: desktop_chime, update: None }
+        Header {
+            title: state_title(s),
+            detail,
+            age,
+            meters,
+            refresh,
+            chime: desktop_chime,
+            update: None,
+            provider: super::provider(s),
+        }
     }
 
     /// The reload button's tooltip.
@@ -112,11 +135,13 @@ impl Header {
             RefreshState::Ready => "Refresh usage".into(),
             RefreshState::Checking => "Checking usage…".into(),
             RefreshState::Wait(secs) => format!("Can check again in {}", wait_text(secs)),
-            RefreshState::Paused(until) => {
-                clawdmeter_core::usage::paused_message(until, clawdmeter_core::platform::utc_offset_secs())
-                    .trim_end_matches('.')
-                    .to_owned()
-            }
+            RefreshState::Paused(until) => clawdmeter_core::usage::paused_message_by(
+                self.provider,
+                until,
+                clawdmeter_core::platform::utc_offset_secs(),
+            )
+            .trim_end_matches('.')
+            .to_owned(),
         }
     }
 }
@@ -142,7 +167,7 @@ fn meter(label: &'static str, pct: Option<u32>, reset: String, pace: Option<(Opt
         label,
         value: pct.map_or_else(|| "--%".to_owned(), |p| format!("{p}%")),
         frac: used.min(100.0) / 100.0,
-        fill,
+        fill: Some(fill),
         // With no reading there's no window to describe either.
         reset: if pct.is_some() { reset } else { "---".into() },
         pace: pace.map(|(at, _)| at),
@@ -176,7 +201,7 @@ mod tests {
         let [s, w] = h.meters.as_slice() else { panic!("two meters") };
         assert_eq!((s.label, s.value.as_str(), s.reset.as_str()), ("Session", "34%", "Resets in 2h 56m"));
         assert_eq!((w.label, w.value.as_str(), w.reset.as_str()), ("Weekly", "62%", "Resets in 5d 11h"));
-        assert_eq!((s.fill, w.fill), (Tone::Ok, Tone::Accent), "50 and 80 are the device's thresholds");
+        assert_eq!((s.fill, w.fill), (Some(Tone::Ok), Some(Tone::Accent)), "50 and 80 are the device's thresholds");
         assert_eq!((s.pace, w.pace), (None, None), "no marker unless it's on");
     }
 
@@ -220,10 +245,10 @@ mod tests {
             Header::new(&s, Path::new("/home/u"), true, false, RefreshState::Ready, NOW).meters[0].clone()
         };
         assert_eq!(at(40).pace, Some(0.5));
-        assert_eq!(at(40).fill, Tone::Ok, "behind the marker");
-        assert_eq!(at(51).fill, Tone::Ok, "within a point of it");
-        assert_eq!(at(52).fill, Tone::Accent, "ahead of it");
-        assert_eq!(at(100).fill, Tone::Bad, "at the limit");
+        assert_eq!(at(40).fill, Some(Tone::Ok), "behind the marker");
+        assert_eq!(at(51).fill, Some(Tone::Ok), "within a point of it");
+        assert_eq!(at(52).fill, Some(Tone::Accent), "ahead of it");
+        assert_eq!(at(100).fill, Some(Tone::Bad), "at the limit");
         // A countdown longer than the window is a window just begun.
         let skew = StatusSnapshot { session_resets_at: Some(NOW + 6 * 3600), ..snap() };
         assert_eq!(
@@ -265,6 +290,32 @@ mod tests {
         let h = Header::new(&s, Path::new("/home/u"), true, false, RefreshState::Ready, NOW);
         let [m] = h.meters.as_slice() else { panic!("one meter, not a Weekly placeholder") };
         assert_eq!((m.label, m.value.as_str(), m.reset.as_str()), ("Spend", "104%", "Resets in 16d 0h"));
-        assert_eq!((m.frac, m.fill, m.pace), (1.0, Tone::Bad, None), "full, red, no pace marker");
+        assert_eq!((m.frac, m.fill, m.pace), (1.0, Some(Tone::Bad), None), "full, red, no pace marker");
+    }
+
+    #[test]
+    fn a_codex_account_is_labelled_codex_with_neutral_bars() {
+        // Weekly-only (the $100 Pro plan): one meter, "Codex".
+        let week = StatusSnapshot {
+            codex: true,
+            account: Some("/home/u/.codex".into()),
+            session_pct: None,
+            no_session_limit: true,
+            week_pct: Some(90),
+            week_resets_at: Some(NOW + 3 * 86400),
+            ..snap()
+        };
+        let h = Header::new(&week, Path::new("/home/u"), true, false, RefreshState::Ready, NOW);
+        let [m] = h.meters.as_slice() else { panic!("one meter") };
+        assert_eq!((m.label, m.value.as_str(), m.fill), ("Codex", "90%", None), "neutral, never the tone colours");
+        assert!(m.pace.is_some(), "the device draws the pace marker on Codex bars too");
+        // With a 5-hour window: "Codex" and "Weekly", both neutral.
+        let five = StatusSnapshot { codex: true, account: Some("/home/u/.codex".into()), ..snap() };
+        let h = Header::new(&five, Path::new("/home/u"), false, false, RefreshState::Ready, NOW);
+        let labels: Vec<_> = h.meters.iter().map(|m| (m.label, m.fill)).collect();
+        assert_eq!(labels, [("Codex", None), ("Weekly", None)]);
+        // A pause names OpenAI.
+        let paused = Header::new(&five, Path::new("/home/u"), false, false, RefreshState::Paused(NOW + 600), NOW);
+        assert!(paused.refresh_tip().starts_with("Usage paused by OpenAI until "));
     }
 }

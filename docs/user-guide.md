@@ -193,6 +193,21 @@ fill until the next full usage reading, near the end of that window at the
 latest. With no Fable reading yet there's no strip. The e-paper board
 doesn't draw it.
 
+**Codex accounts (a trial).** With the Codex CLI signed in to ChatGPT, its
+folder (`~/.codex`, or `$CODEX_HOME`) is picked up as an account on its own;
+the Accounts page's **Add account folder…** takes other Codex folders too (a
+folder with an `auth.json` is Codex, anything else Claude Code). A Codex
+account is shown once its own usage rises and stays until another account's
+does; until then a Claude account comes first, whatever the percentages. The
+device then draws white bars with a **Codex** pill and, on a weekly-only plan
+such as the $100 Pro plan, a **Resets expire** card: the count of reset
+credits still held beside a ticket, and each one's expiry date, soonest
+first and highlighted (up to six on the largest panels; past that, "+N
+more"). Clawd stays as he is: his reactions follow Claude Code's
+hooks, and Codex numbers don't touch his mood or the reset chime. With no
+Codex folder, nothing about Codex is polled or shown beyond the trial note on
+the Accounts page.
+
 The device boots to the meters. Clawd performs his shows right on them,
 in front of the panels. Tap a show or the screensaver to send him back to
 his seat.
@@ -301,6 +316,7 @@ seconds and preserves comments and unknown keys when saving.
 | `menu_bar_usage` | `off` | macOS: `on` shows the higher of the session and weekly percentages beside the menu bar icon (spend, on a spend-capped account), so the limit closest to stopping you. Set with **Show usage in the menu bar** on the Settings page. |
 | `theme` | `system` | The device's colours, Clawd's included: `system` (Dark or Light, following this computer's light or dark mode, and switching when it does; `clawd`, the old default, means the same), `dark` (the board's own palette), `light`, `catppuccin_mocha`, `dracula`, `gruvbox`, `monokai`, `nord`, `one_dark`, `solarized` (Solarized Dark or Light, following the mode like `system`), `solarized_dark`, `solarized_light`, `tokyo_night`, or `custom` for the `color_*` keys below. Set with **Colors** on the Device page. |
 | `color_<name>` | the default palette | The custom theme's colours as `rrggbb` (no `#`, which starts a comment): `color_bg`, `color_panel`, `color_text`, `color_dim`, `color_accent`, `color_green`, `color_amber`, `color_red`, `color_bar_bg`, `color_clawd`, `color_eye`, `color_fable` (the Fable strip in the weekly bar). Used only with `theme = custom` and kept while a preset is chosen. Set with **Custom +** under **Colors** on the Device page (a swatch or a typed hex code). The first time, Custom starts from the theme you're on and writes all twelve keys; from then on it keeps its own colours. A custom theme saved before `color_fable` existed starts it at the Dark theme's violet. |
+| `codex_dirs` | `~/.codex` when signed in | Comma-separated Codex folders (a trial). Absent: the Codex CLI's folder (`$CODEX_HOME`, else `~/.codex`) when it has an `auth.json`; empty: none. |
 | `poll_interval` | automatic | Override working and no-hooks polling intervals, in seconds. The scheduler enforces at least 120 seconds per account. Quiet and other-account schedules still apply. |
 | `heartbeat_interval` | `60` | Resend cached readings between usage checks. This does not fetch usage. Keep the default unless diagnosing the connection. |
 | `claude_path` | found on `PATH` | Full path to the Claude Code executable, if detection fails. |
@@ -355,6 +371,18 @@ Linux, verified; `~/Library/Application Support/Claude/claude-code` on macOS
 and `%APPDATA%\Claude\claude-code` on Windows, from the desktop app's code).
 Settings → Advanced and the Accounts page say which one is in use. Without
 Claude Code, usage still updates every 12 minutes from the usage endpoint.
+
+A Codex account is read from the endpoint the Codex CLI uses
+(`chatgpt.com/backend-api/wham/usage`) with the sign-in in its `auth.json`,
+which Clawdmeter only reads and never refreshes: an expired or refused one is
+no data until Codex renews it (the account drops off the device meanwhile). The reset credits' expiry dates come
+from one more read-only call the CLI makes, at most hourly. When the
+endpoint doesn't answer (it is slow, so the wait is 30 seconds), the newest
+usage record in the CLI's session logs stands in, but only one under an hour
+old, newer than the endpoint's last answer, and whose window hasn't reset
+since. The shown Codex account is checked every
+5 minutes, others every 10; a rate-limited answer pauses it ("Usage paused by
+OpenAI until HH:MM").
 
 Every trigger, including manual refresh, respects a two-minute minimum gap
 and any retry delay. Transient failures delay retries by 10, 20, then 30

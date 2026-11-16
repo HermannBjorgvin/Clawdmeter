@@ -485,6 +485,88 @@ static bool place_round(Layout& L, const Design& d, const Chrome** chrome) {
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
+// ─── Codex Resets card ───────────────────────────────────────────────────────
+
+// Height of a Styrene font's capitals (its 'H' glyph box in font_*.c),
+// which the ticket art and the chips size by.
+static int16_t cap_h(const lv_font_t* f) {
+    if (f == &font_styrene_28) return 20;
+    if (f == &font_styrene_24) return 17;
+    if (f == &font_styrene_20) return 14;
+    if (f == &font_styrene_16) return 11;
+    if (f == &font_styrene_14) return 10;
+    return 8;   // Styrene 12
+}
+
+// The ticket art (icons.h) per cap height: 20, 10 and 8 px tall.
+static const int16_t TICKET_H[] = { 20, 10, 8 };
+static const int16_t TICKET_W[] = { 28, 14, 11 };
+
+// Chip fonts, largest first: the card's own reset-line font and those under it.
+static const lv_font_t* const CHIP_FONTS[] = {
+    &font_styrene_24, &font_styrene_20, &font_styrene_16, &font_styrene_14, &font_styrene_12,
+};
+
+// The Resets card in card[1]: a header row like the first card's value row
+// (the title, the count pill with a ticket the pill text's cap height), then
+// chips 'gap' under it: a cols x rows grid of equal cells, as many cells and
+// as large a date as the card holds. The date stays at the reset line's size
+// or one step under it before the grid gives up columns, then rows.
+static void fit_resets(Layout& L) {
+    const int16_t inner_w = L.card[1].w - 2 * L.pad_x;
+    const int16_t inner_h = L.card[1].h - 2 * L.pad_y;
+    const int16_t pill_cap = cap_h(L.pill_font);
+    int t = 0;
+    while (t < 2 && TICKET_H[t] > pill_cap) t++;
+    L.resets_ticket = (int8_t)t;
+    L.resets_icon_gap = TICKET_H[t] >= 16 ? 8 : 4;
+    L.resets_gap = inner_w >= 300 ? 8 : 4;
+    const int16_t pill_h = line_h(L.pill_font) + 2 * L.pill_pad_y;
+    const int16_t pill_w = 2 * L.pill_pad_x + TICKET_W[t] + L.resets_icon_gap
+                         + layout_text_width(L.pill_font, RESETS_COUNT_WIDEST);
+    L.resets_title = RESETS_TITLE[2];
+    for (const char* title : RESETS_TITLE) {
+        if (layout_text_width(L.pill_font, title) + L.resets_gap + pill_w <= inner_w) {
+            L.resets_title = title;
+            break;
+        }
+    }
+    L.resets_chips_y = 1 + pill_h + L.resets_gap;   // the pill sits 1 px down, as "Codex" does
+
+    // The largest date, no bigger than the reset line and not under Styrene
+    // 14 (unless the reset line is), that gets a row of three cells, with as
+    // many cells as it holds; where none does, the size with the most.
+    const int n_chip = sizeof(RESETS_CHIP_WIDEST) / sizeof(RESETS_CHIP_WIDEST[0]);
+    int first = 0;
+    while (first < 4 && cap_h(CHIP_FONTS[first]) > cap_h(L.reset_font)) first++;
+    const int last = first > 3 ? first : 3;   // CHIP_FONTS[3] is Styrene 14
+    int best = 0;
+    for (int f = first; f <= last && best < 3; f++) {
+        const lv_font_t* font = CHIP_FONTS[f];
+        const int16_t chip_h = (int16_t)((cap_h(font) * 32 + 8) / 17);   // 32 at Styrene 24's 17 px caps
+        const int16_t text_w = widest(font, RESETS_CHIP_WIDEST, n_chip) + chip_h / 2;   // a quarter chip each side
+        for (int cols = 3; cols >= 1; cols--) {
+            const int16_t cell_w = (inner_w - (cols - 1) * L.resets_gap) / cols;
+            if (text_w > cell_w) continue;
+            for (int rows = 2; rows >= 1; rows--) {
+                if (L.resets_chips_y + rows * chip_h + (rows - 1) * L.resets_gap > inner_h) continue;
+                if (cols * rows <= best) continue;
+                best = cols * rows;
+                L.resets_font = font;
+                L.resets_chip_h = chip_h;
+                L.resets_cols = (int8_t)cols;
+                L.resets_rows = (int8_t)rows;
+            }
+        }
+    }
+    if (best) return;
+    // Nothing holds a chip: the smallest, one cell.
+    L.resets_font = &font_styrene_12;
+    L.resets_chip_h = (int16_t)((cap_h(&font_styrene_12) * 32 + 8) / 17);
+    L.resets_cols = 1;
+    L.resets_rows = 1;
+}
+
 Layout layout_compute(const LayoutShape& shape) {
     Layout L = {};
     L.w = shape.w;
@@ -513,6 +595,7 @@ Layout layout_compute(const LayoutShape& shape) {
     fit_title(L, *c);
     fit_pairing(L, *d);
     fit_period(L);
+    fit_resets(L);
     return L;
 }
 

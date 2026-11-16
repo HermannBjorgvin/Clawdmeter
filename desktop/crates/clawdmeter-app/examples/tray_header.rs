@@ -89,6 +89,32 @@ fn main() {
             },
         ),
         (
+            "codex-weekly-pace",
+            true,
+            StatusSnapshot {
+                codex: true,
+                account: Some("/Users/you/.codex".into()),
+                no_session_limit: true,
+                week_pct: Some(34),
+                week_resets_at: Some(now + (4 * 24 + 21) * 3600),
+                ..base.clone()
+            },
+        ),
+        (
+            "codex-5h",
+            false,
+            StatusSnapshot {
+                codex: true,
+                account: Some("/Users/you/.codex".into()),
+                session_pct: Some(21),
+                window_started: true,
+                session_resets_at: Some(now + 133 * 60),
+                week_pct: Some(34),
+                week_resets_at: Some(now + (4 * 24 + 21) * 3600),
+                ..base.clone()
+            },
+        ),
+        (
             "long-folder",
             false,
             StatusSnapshot {
