@@ -34,7 +34,7 @@ static void iox_write(uint8_t reg, uint8_t val) {
     Wire.write(val);
     uint8_t err = Wire.endTransmission();
     if (err != 0) {
-        Serial.printf("LCD-2.1 IO expander write reg 0x%02X=0x%02X failed (%u)\n",
+        Serial.printf(BOARD_LOG_TAG " IO expander write reg 0x%02X=0x%02X failed (%u)\n",
                       reg, val, err);
     }
 }
@@ -43,14 +43,14 @@ void io_expander_init(void) {
     if (!iox_probe()) {
         delay(10);
         if (!iox_probe()) {
-            Serial.println("LCD-2.1 IO expander not found (0x20): panel and touch stay in reset");
+            Serial.println(BOARD_LOG_TAG " IO expander not found (0x20): panel and touch stay in reset");
             return;
         }
     }
     expander_ok = true;
     iox_write(IOX_REG_OUTPUT, output_latch);
     iox_write(IOX_REG_CONFIG, IOX_INPUTS);
-    Serial.println("LCD-2.1 IO expander init OK");
+    Serial.println(BOARD_LOG_TAG " IO expander init OK");
 }
 
 void io_expander_set(uint8_t bit, bool high) {

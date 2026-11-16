@@ -1,7 +1,13 @@
 #include "../../hal/display_hal.h"
 #include "board.h"
 #include "io_expander.h"
+#ifdef BOARD_LCD28C
+#include "st7701_init_28c.h"
+#define ST7701_INIT_OPS      st7701_lcd28_init_operations
+#else
 #include "st7701_init.h"
+#define ST7701_INIT_OPS      st7701_lcd21_init_operations
+#endif
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
 
@@ -12,7 +18,8 @@
 // The init SPI's chip select is expander EXIO3, not a GPIO, so the display
 // gets no Arduino_GFX bus: display_hal_begin() pulls EXIO3 low and plays the
 // init table through st7701_send_init() below, then starts the RGB panel.
-// Porches are the Waveshare demo's (hsync 50/8/10, vsync 8/3/8). PCLK is the
+// Porches are each board's Waveshare demo's (hsync 50/8/10; vsync 8/3/8 on the
+// 2.1, 8/2/18 on the 2.8C, LCD_VSYNC_* in board.h). PCLK is the
 // library default, 12 MHz, as on the LCD-4, not the demo's 18 MHz: the frame
 // buffer streams from PSRAM, and flash writes (NVS prefs, BLE bonds) stall
 // the cache, so a faster scan risks bounce-buffer underruns.
@@ -82,7 +89,7 @@ void display_hal_init(void) {
         1 /* hsync_polarity */, 50 /* hsync_front_porch */,
         8 /* hsync_pulse_width */, 10 /* hsync_back_porch */,
         1 /* vsync_polarity */, 8 /* vsync_front_porch */,
-        3 /* vsync_pulse_width */, 8 /* vsync_back_porch */,
+        LCD_VSYNC_PULSE /* vsync_pulse_width */, LCD_VSYNC_BACK /* vsync_back_porch */,
         0 /* pclk_active_neg */, GFX_NOT_DEFINED /* prefer_speed: 12 MHz */,
         false /* useBigEndian */,
         0 /* de_idle_high */, 0 /* pclk_idle_high */,
@@ -100,13 +107,13 @@ void display_hal_begin(void) {
     pinMode(LCD_SPI_MOSI, OUTPUT);
     digitalWrite(LCD_SPI_SCK, LOW);
     io_expander_set(IOX_BIT_LCD_CS, false);
-    st7701_send_init(st7701_lcd21_init_operations, sizeof(st7701_lcd21_init_operations));
+    st7701_send_init(ST7701_INIT_OPS, sizeof(ST7701_INIT_OPS));
     io_expander_set(IOX_BIT_LCD_CS, true);
     if (!gfx->begin()) {
         // No frame buffer (PSRAM allocation or RGB panel creation failed):
         // drawing would write through a null pointer, so run headless and
         // leave the backlight off.
-        Serial.println("LCD-2.1 RGB panel begin failed; display disabled");
+        Serial.println(BOARD_LOG_TAG " RGB panel begin failed; display disabled");
         gfx = nullptr;
         return;
     }
