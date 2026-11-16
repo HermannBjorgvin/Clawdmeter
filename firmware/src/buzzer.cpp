@@ -1,4 +1,4 @@
-#include "buzzer_pulse.h"
+#include "buzzer.h"
 
 static buzzer_set_fn set_fn      = nullptr;
 static int           edges_left  = 0;      // on/off transitions still to do
@@ -13,7 +13,7 @@ static void off_failed(uint32_t now_ms) {
     next_ms     = now_ms + BUZZER_OFF_RETRY_MS;
 }
 
-void buzzer_pulse_init(buzzer_set_fn set, uint32_t now_ms) {
+void buzzer_init(buzzer_set_fn set, uint32_t now_ms) {
     set_fn      = set;
     edges_left  = 0;
     buzzing     = false;
@@ -21,17 +21,17 @@ void buzzer_pulse_init(buzzer_set_fn set, uint32_t now_ms) {
     next_ms     = now_ms;
     if (!set_fn) return;
     if (!set_fn(false)) off_failed(now_ms);
-    else                buzzer_pulse_start(now_ms, BUZZER_BOOT_BEEPS);
+    else                buzzer_start(now_ms, BUZZER_BOOT_BEEPS);
 }
 
-void buzzer_pulse_start(uint32_t now_ms, int beeps) {
-    if (!set_fn || beeps <= 0 || buzzer_pulse_busy()) return;
+void buzzer_start(uint32_t now_ms, int beeps) {
+    if (!set_fn || beeps <= 0 || buzzer_busy()) return;
     buzzing    = false;
     edges_left = beeps * 2;
     next_ms    = now_ms;
 }
 
-void buzzer_pulse_tick(uint32_t now_ms) {
+void buzzer_tick(uint32_t now_ms) {
     if (!set_fn || (int32_t)(now_ms - next_ms) < 0) return;
     if (off_pending) {
         if (set_fn(false)) off_pending = false;
@@ -48,6 +48,6 @@ void buzzer_pulse_tick(uint32_t now_ms) {
     next_ms = now_ms + (buzzing ? BUZZER_ON_MS : BUZZER_GAP_MS);
 }
 
-bool buzzer_pulse_busy(void) {
+bool buzzer_busy(void) {
     return edges_left > 0 || off_pending;
 }

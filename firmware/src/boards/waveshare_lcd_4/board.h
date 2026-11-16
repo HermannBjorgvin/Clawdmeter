@@ -109,4 +109,4 @@
 // and the backlight PWM for brightness steps (see io_expander.cpp).
 #define BOARD_HAS_BATTERY          0
 #define BOARD_HAS_IO_EXPANDER      1
-#define BOARD_HAS_SOUND            0    // no ding: sound.cpp beeps the on/off buzzer (buzzer_pulse)
+#define BOARD_HAS_SOUND            0    // no ding: sound.cpp beeps the on/off buzzer (buzzer.h)

@@ -69,12 +69,14 @@ Implement `sound_hal_init()`, `sound_hal_tick()`, `sound_hal_chime()`,
 and `sound_hal_tune(gain, volume)`. Playback must return promptly and
 advance during ticks. `sound_hal_tune` backs the `chime <gain> [volume]`
 serial command, which sets the level until reboot. Use it to tune a new
-board's speaker by ear, then set that board's defaults in its `sound.cpp`. Boards without an implemented audio output use no-ops. A fitted
-codec alone does not mean the firmware supports sound. A board whose buzzer
+board's speaker by ear, then set that board's defaults in its `sound.cpp`. 
+Boards without an implemented audio output use no-ops. A fitted codec
+alone does not mean the firmware supports sound. A board whose buzzer
 is a plain on/off switch (no pitch) can't play the ding: its `sound.cpp`
-passes a `bool set(bool on)` for the pin to `buzzer_pulse.h`, which plays
+passes a `bool set(bool on)` for the pin to `buzzer.h`, which plays
 three short beeps per chime and one at boot (in place of the boot ding)
-without blocking, and retries a failed "off" (LCD-4, LCD-2.1/2.8C). Such boards keep `BOARD_HAS_SOUND 0`: that flag means the ding.
+without blocking, and retries a failed "off", to avoid leaving the buzzer on. 
+Such boards keep `BOARD_HAS_SOUND 0` since that flag indicates a full speaker.
 
 ## `imu_hal.h`
 

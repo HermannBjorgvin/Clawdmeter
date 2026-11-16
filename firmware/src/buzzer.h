@@ -26,11 +26,11 @@ typedef bool (*buzzer_set_fn)(bool on);
 // Switches the buzzer off and queues the boot beep (BUZZER_BOOT_BEEPS), which
 // plays from the first tick, once setup() is done, as the boot ding does.
 // A failed "off" skips it. Call from sound_hal_init().
-void buzzer_pulse_init(buzzer_set_fn set, uint32_t now_ms);
+void buzzer_init(buzzer_set_fn set, uint32_t now_ms);
 // Queues `beeps` beeps (BUZZER_BEEPS for a chime). Ignored while a pattern
 // or an "off" retry is pending, so a second chime never cuts the first short.
-void buzzer_pulse_start(uint32_t now_ms, int beeps);
+void buzzer_start(uint32_t now_ms, int beeps);
 // Makes any edge that is due. Call every loop from sound_hal_tick().
-void buzzer_pulse_tick(uint32_t now_ms);
+void buzzer_tick(uint32_t now_ms);
 // A pattern or an "off" retry is still pending.
-bool buzzer_pulse_busy(void);
+bool buzzer_busy(void);

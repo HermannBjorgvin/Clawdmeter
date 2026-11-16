@@ -308,8 +308,8 @@ seconds and preserves comments and unknown keys when saving.
 | Key | Default | Effect |
 | --- | --- | --- |
 | `config_dirs` | `~/.claude` | Comma-separated Claude Code config folders. The app selects the account whose usage increased most recently (session usage, or weekly usage on an account with no 5-hour limit); before any rise, the one with the highest percentage. `CLAUDE_CONFIG_DIR` supplies the default when this key is absent. |
-| `reset_chime` | `off` | Chime on the device when the session usage resets (boards with a speaker; three beeps on boards with a plain buzzer). The older `chime` key still works. |
-| `alert_chime` | `off` | Chime on the device when Claude needs you (boards with a speaker; three beeps on boards with a plain buzzer). The older `beep` key still works. |
+| `reset_chime` | `off` | Play a chime or buzzer on devices with supported hardware, when the session usage resets. The older `chime` key still works. |
+| `alert_chime` | `off` | Play a chime or buzzer on devices with supported hardware, when Claude needs you. The older `beep` key still works. |
 | `desktop_chime` | `off` | Play the same chime on this computer when Claude needs you. Follows `alert_on`. |
 | `clock` | `off` | `auto`, `12`, or `24` replaces the device's Usage title with a clock. |
 | `liveliness` | `3` | How lively Clawd is, `1` (No-nonsense) to `5` (All-nonsense). Set with **Animation silliness** on the Device page. |

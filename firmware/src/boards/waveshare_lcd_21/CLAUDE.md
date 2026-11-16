@@ -17,12 +17,12 @@ Waveshare ESP32-S3-Touch-LCD-2.1 (ST7701S RGB parallel, 480×480 **round**, CST8
 - Touch: **CST820** @ 0x15, INT=GPIO 16 (falling), reset on EXIO2. No swap or mirror.
 - Battery: ETA6098 standalone charger (no I2C). BAT_ADC on GPIO 4 behind a 200k/100k divider (×3). Charging is unknowable. VBUS is always reported present (like the LCD-4) so USB desk use never idle-sleeps; on battery the display doesn't idle-sleep either.
 - Buttons: BOOT (GPIO 0) only. RESET is EN; SW1 is the battery power slide switch. No PWR role (`has_pwr_button = false`): re-pairing is the 5 s touch hold on the pairing hint, or the `unpair` serial command.
-- Buzzer: active, on/off via EXIO8. It can't play the ding, so `sound.cpp` plays three short beeps through the shared `buzzer_pulse` (alerts, session resets, the `chime`/`buzz` serial command), and one at boot where the speaker boards ding. `io_expander_set()` returns false on a failed write, so a failed "off" is retried every 200 ms; with no expander it reports success (nothing to drive). `io_expander_init()` writes the latch with the buzzer off, so a reset mid-beep comes back silent.
+- Buzzer: active, on/off via EXIO8. It can't play the ding, so `sound.cpp` plays three short beeps through the shared `buzzer` (alerts, session resets, the `chime`/`buzz` serial command), and one at boot where the speaker boards ding. `io_expander_set()` returns false on a failed write, so a failed "off" is retried every 200 ms; with no expander it reports success (nothing to drive). `io_expander_init()` writes the latch with the buzzer off, so a reset mid-beep comes back silent.
 - QMI8658 is populated but unused: no CPU-rotation path for the RGB panel yet (`BOARD_HAS_ROTATION 0`).
 
 ## Hardware status
 
-Seen working on an ESP32-S3-Touch-LCD-2.1: boot, BLE, the panel, the meters drawn inside the circle, touch (CST820, no swap or mirror needed) including hold-to-pair, no stray buzzer at boot. Beeps (`buzzer_pulse`): the `buzz` serial command and an app alert each play three. Battery not tested with a cell. With none fitted the icon reads nearly full: the charger holds BAT near 4.2 V, so the ADC can't tell "no battery" from "full" (the host gets ~100 % too).
+Seen working on an ESP32-S3-Touch-LCD-2.1: boot, BLE, the panel, the meters drawn inside the circle, touch (CST820, no swap or mirror needed) including hold-to-pair, no stray buzzer at boot. Beeps (`buzzer`): the `buzz` serial command and an app alert each play three. Battery not tested with a cell. With none fitted the icon reads nearly full: the charger holds BAT near 4.2 V, so the ADC can't tell "no battery" from "full" (the host gets ~100 % too).
 
 The CST820 didn't ACK its ID read when touch init ran ~6 s after reset (a debug delay); at the normal ~1 s it answers (ID 0xB7). It likely sleeps when idle.
 

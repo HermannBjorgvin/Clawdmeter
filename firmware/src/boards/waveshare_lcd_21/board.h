@@ -112,4 +112,4 @@
 #define BOARD_HAS_IMU              0
 #define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      1
-#define BOARD_HAS_SOUND            0    // no ding: sound.cpp beeps the on/off buzzer (buzzer_pulse)
+#define BOARD_HAS_SOUND            0    // no ding: sound.cpp beeps the on/off buzzer (buzzer.h)
