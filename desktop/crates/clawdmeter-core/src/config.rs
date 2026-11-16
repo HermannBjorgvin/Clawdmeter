@@ -606,7 +606,13 @@ impl Settings {
             cfg.get("heartbeat_interval").and_then(parse_interval).unwrap_or(DEFAULT_HEARTBEAT_INTERVAL);
         Settings {
             config_dirs: parse_config_dirs(cfg.get("config_dirs"), paths),
-            codex_dirs: parse_dir_list(cfg.get("codex_dirs").unwrap_or(""), paths),
+            codex_dirs: {
+                // A folder listed as both is a Claude account.
+                let claude = parse_config_dirs(cfg.get("config_dirs"), paths);
+                let mut v = parse_dir_list(cfg.get("codex_dirs").unwrap_or(""), paths);
+                v.retain(|d| !claude.contains(d));
+                v
+            },
             codex_default: None,
             poll_interval,
             poll_interval_explicit: file_poll.is_some() || env_default.is_some(),
@@ -673,6 +679,8 @@ impl Settings {
         if cfg.get("codex_dirs").is_none() {
             self.codex_dirs = self.codex_default.iter().cloned().collect();
         }
+        let claude = &self.config_dirs;
+        self.codex_dirs.retain(|d| !claude.contains(d));
     }
 
     /// With no `config_dirs` in the file, a `CLAUDE_CONFIG_DIR` in the
@@ -912,6 +920,11 @@ mod tests {
         assert_eq!(
             load("codex_dirs = ~/.codex, ~/codex-work\n", None).codex_dirs,
             vec![codex.clone(), PathBuf::from("/home/u/codex-work")]
+        );
+        assert_eq!(
+            load("config_dirs = ~/.claude, ~/both\ncodex_dirs = ~/both, ~/.codex\n", None).codex_dirs,
+            vec![codex.clone()],
+            "listed as both: Claude"
         );
 
         // Saving unchanged settings leaves the default implicit.

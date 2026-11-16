@@ -132,6 +132,9 @@ pub struct Engine {
     in_flight: Vec<PathBuf>,
     /// Codex accounts being polled ([`Engine::begin_codex_poll`]).
     codex_in_flight: Vec<PathBuf>,
+    /// The shown Codex account's sign-in died and no account has a reading
+    /// left: the device gets "no data" rather than keep its numbers.
+    codex_gone: bool,
     active: Option<PathBuf>,
     rate: RateTracker,
     hooks_installed: bool,
@@ -188,6 +191,7 @@ impl Engine {
             accounts: BTreeMap::new(),
             in_flight: Vec::new(),
             codex_in_flight: Vec::new(),
+            codex_gone: false,
             active: None,
             rate: RateTracker::default(),
             hooks_installed: false,
@@ -413,18 +417,23 @@ impl Engine {
         let (ok_dirs, rekinded) = self.record_results(now, results, &in_flight);
         // A dead Codex sign-in is no data, not the last numbers kept: the
         // account leaves the choice until it reads again.
+        let mut dropped_shown = false;
         for d in &dirs {
             let st = self.accounts.get_mut(d);
-            if let Some(st) = st.filter(|a| a.last_error.as_ref().is_some_and(codex_signed_out)) {
+            if let Some(st) = st.filter(|a| a.last.is_some() && a.last_error.as_ref().is_some_and(codex_signed_out)) {
                 st.last = None;
                 st.last_ok_at = None;
                 self.selector.forget(d);
+                dropped_shown |= self.active.as_ref() == Some(d);
             }
         }
         let active_fresh = self.choose_active(now, &ok_dirs, &rekinded);
         self.logged_out = self.all_auth();
+        // With nothing left to show, say so once.
+        let gone = dropped_shown && self.active.is_none();
+        self.codex_gone |= gone;
         // A Claude poll's results may still be waiting for their write.
-        self.fresh_poll |= active_fresh || (self.logged_out && polled);
+        self.fresh_poll |= active_fresh || (self.logged_out && polled) || gone;
     }
 
     /// Where this account's next reading would come from at `now`.
@@ -576,8 +585,12 @@ impl Engine {
         // must not enter the rate math, here or on the device: no `Poll`
         // write, so they would only ride along on a replay.
         let active_fresh = self.active.as_ref().is_some_and(|a| ok_dirs.contains(a));
+        if self.active.is_some() {
+            self.codex_gone = false;
+        }
         if active_fresh {
-            if self.active.as_ref().is_some_and(|a| rekinded.contains(a)) {
+            // Only Claude readings feed the tracker, so only theirs restart it.
+            if self.active.as_ref().is_some_and(|a| rekinded.contains(a) && !self.is_codex(a)) {
                 self.rate = RateTracker::default();
             }
             // Codex numbers aren't Claude's: the mood follows Claude only,
@@ -629,7 +642,7 @@ impl Engine {
             || self.sent_th != Some(th)
             || self.sent_tf != Some(tf);
 
-        let (mut payload, kind) = if self.logged_out {
+        let (mut payload, kind) = if self.logged_out || (self.codex_gone && self.active.is_none()) {
             if !(self.fresh_poll || self.attention.pending()) {
                 return None;
             }
@@ -1648,6 +1661,18 @@ mod tests {
             assert_eq!(e.status(T0 + 300).reading, None);
             assert_eq!(write(&mut e, T0 + 300).unwrap().kind, WriteKind::NoData);
         }
+        // Nothing else to show (Claude blocked, no reading yet): the dead
+        // token still ends in "no data", once, not frozen numbers.
+        let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
+        e.on_poll_results(T0, vec![(claude.clone(), Err(UsageError::Throttled { retry_after_secs: Some(3600) }))]);
+        e.on_codex_results(T0, vec![(cx.clone(), codex_ok(30))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.pv.as_deref(), Some("codex"));
+        e.on_codex_results(T0 + 300, vec![(cx.clone(), Err::<UsageReading, _>(UsageError::TokenExpired).into())]);
+        assert!(!e.status(T0 + 300).logged_out, "Claude isn't signed out");
+        assert_eq!(write(&mut e, T0 + 300).unwrap().kind, WriteKind::NoData);
+        assert!(write(&mut e, T0 + 400).is_none(), "once");
+        e.on_codex_results(T0 + 600, vec![(cx.clone(), codex_ok(31))]);
+        assert_eq!(write(&mut e, T0 + 600).unwrap().kind, WriteKind::Poll, "back");
         // With Claude working, a dead Codex token hands the device back.
         let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
         e.on_poll_results(T0, vec![(claude.clone(), Ok(reading(10)))]);
