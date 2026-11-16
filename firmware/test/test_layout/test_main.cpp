@@ -156,14 +156,19 @@ static void check_panel(const Panel& p) {
     // Inside a card.
     const int inner_w = L.card[0].w - 2 * L.pad_x, inner_h = L.card[0].h - 2 * L.pad_y;
     const int pill_w = 2 * L.pill_pad_x + 4;   // padding + PILL_GAP
-    for (int i : { 0, 1, 3 })   // session, weekly, period: "100%" beside the pill
+    for (int i : { 0, 1, 3, 4 })   // session, weekly, period, Codex: "100%" beside the pill
         if (text_w(L.pct_font, "100%") + pill_w + text_w(L.pill_font, L.pills[i]) > inner_w)
             fail("percentage vs pill", card(i == 0 ? 0 : 1));
+    // The Codex Resets card shows a count of credits, never a percentage.
+    if (text_w(L.pct_font, "999") + pill_w + text_w(L.pill_font, L.pills[5]) > inner_w)
+        fail("reset credits vs pill", card(1));
     if (text_w(L.ent_pct_font, "100") + 4 + text_w(L.reset_font, "%") + pill_w
         + text_w(L.pill_font, L.pills[2]) > inner_w)
         fail("spending vs pill", card(0));
     for (const char* s : RESET_TEXT_WIDEST)
         if (text_w(L.reset_font, s) > inner_w) fail(s, card(0));
+    if (text_w(L.reset_font, EXPIRY_TEXT_SHORT_WIDEST) > L.card[1].w - 2 * L.pad_x)
+        fail("reset credit expiry", card(1));
     if (text_w(L.period_font, L.period_short ? PERIOD_TEXT_SHORT_WIDEST : PERIOD_TEXT_WIDEST) > inner_w)
         fail("period line", card(1));
     if (L.card[0].w >= 224 && L.period_short) fail("period line without its pace word", card(1));

@@ -10,7 +10,7 @@ use chrono::{DateTime, Datelike, Months, TimeZone, Utc};
 use serde::Serialize;
 
 use crate::config::{ClockMode, Palette};
-use crate::usage::{Provider, SpendPeriod, UsageReading};
+use crate::usage::{Provider, ResetCredits, SpendPeriod, UsageReading};
 
 /// One device payload. `None` fields are omitted.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -50,6 +50,10 @@ pub struct Payload {
     /// Minutes until the soonest held reset credit expires, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub re: Option<i64>,
+    /// Each held reset credit's expiry date, host-local like `rd` ("Dec 1"),
+    /// soonest first, at most 10. Absent when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rx: Option<Vec<String>>,
     /// Enterprise: % of the billing period elapsed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tp: Option<u32>,
@@ -128,7 +132,7 @@ pub struct Payload {
 
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
-    "s", "sr", "w", "wr", "st", "acct", "pv", "rc", "ru", "re", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x",
+    "s", "sr", "w", "wr", "st", "acct", "pv", "rc", "ru", "re", "rx", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x",
     "a", "e", "es", "n", "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th",
 ];
 
@@ -296,7 +300,14 @@ impl Payload {
             if let Some(c) = &r.resets {
                 p.rc = Some(c.held);
                 p.ru = c.spent;
-                p.re = c.next_expiry.map(|t| minutes_until(t, now));
+                p.re = c.next_expiry().map(|t| minutes_until(t, now));
+                if !c.expiries.is_empty() {
+                    let day = |t: &DateTime<Utc>| {
+                        let l = t.with_timezone(tz);
+                        format!("{} {}", l.format("%b"), l.day())
+                    };
+                    p.rx = Some(c.expiries.iter().take(ResetCredits::MAX_EXPIRIES).map(day).collect());
+                }
             }
         }
         p
@@ -532,20 +543,27 @@ mod tests {
     // credits. Unknown details are left out, never 0.
     #[test]
     fn codex_payload() {
-        use crate::usage::{ResetCredits, SessionLimit};
+        use crate::usage::SessionLimit;
         let now = at("2026-11-16T02:00:00Z");
         let week = Window { pct: 34, resets_at: Some(at("2026-11-21T23:18:04Z")) };
         let r = UsageReading {
             week: Some(week.clone()),
             session_limit: SessionLimit::Absent,
             provider: Provider::Codex,
-            resets: Some(ResetCredits { held: 3, spent: Some(1), next_expiry: Some(at("2026-11-27T09:00:00Z")) }),
+            resets: Some(ResetCredits {
+                held: 3,
+                spent: Some(1),
+                expiries: vec![at("2026-11-27T09:00:00Z"), at("2026-12-10T18:30:00Z"), at("2026-12-31T23:30:00Z")],
+            }),
             ..Default::default()
         };
         assert_eq!(
-            Payload::from_reading(&r, now).to_json(),
-            r#"{"s":0,"sr":-1,"w":34,"wr":8478,"st":"allowed","acct":"week","pv":"codex","rc":3,"ru":1,"re":16260,"ok":true}"#
+            Payload::from_reading_in(&r, now, &chrono::Utc).to_json(),
+            r#"{"s":0,"sr":-1,"w":34,"wr":8478,"st":"allowed","acct":"week","pv":"codex","rc":3,"ru":1,"re":16260,"rx":["Nov 27","Dec 10","Dec 31"],"ok":true}"#
         );
+        // Dates are the host's: the last one is New Year's Day an hour east.
+        let east = chrono::FixedOffset::east_opt(3600).unwrap();
+        assert_eq!(Payload::from_reading_in(&r, now, &east).rx.unwrap()[2], "Jan 1");
         let partial = UsageReading { resets: Some(ResetCredits { held: 2, ..Default::default() }), ..r.clone() };
         assert_eq!(
             Payload::from_reading(&partial, now).to_json(),
@@ -585,6 +603,7 @@ mod tests {
             rc: Some(999),
             ru: Some(999),
             re: Some(99_999),
+            rx: Some(vec!["Sep 30".into(); ResetCredits::MAX_EXPIRIES]),
             tp: Some(100),
             pd: Some(31),
             rd: Some("Sep 30".into()),
@@ -626,6 +645,7 @@ mod tests {
             rc: Some(3),
             ru: Some(1),
             re: Some(15_840),
+            rx: Some(vec!["Dec 1".into()]),
             tp: Some(1),
             pd: Some(30),
             rd: Some("Oct 1".into()),

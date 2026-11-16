@@ -35,7 +35,11 @@ SignalsUpdate signals_ingest_at(const UsageData* d, uint32_t now_ms) {
     // A failed poll is not a zero: an {"ok":false} "no data" beat carries no
     // session % (it parses as 0), so it must not reach the rate ring or the
     // reset detector (it would read as a fresh window and fire the chime).
-    const bool real_sample = d->ok && !d->replay;
+    // Codex numbers aren't Claude's: Clawd's slow clock, his reaction to a
+    // rising meter and the reset chime follow Claude only, so to them a
+    // Codex payload's numbers are a replay. Its hook fields still count.
+    if (d->codex) u.replay = true;
+    const bool real_sample = d->ok && !d->replay && !d->codex;
     // The main meter changed what it measures (session, week or spend: an
     // account verified for no 5-hour limit, or a reading that couldn't tell
     // after an app restart). Its numbers aren't comparable: start over

@@ -133,8 +133,19 @@ pub struct ResetCredits {
     /// Credits spent in the provider's trailing window (30 days today), when
     /// known.
     pub spent: Option<u32>,
+    /// When each held credit expires, soonest first, those still ahead and
+    /// at most [`ResetCredits::MAX_EXPIRIES`]; empty when unknown.
+    pub expiries: Vec<DateTime<Utc>>,
+}
+
+impl ResetCredits {
+    /// The most expiries kept (and sent as `rx`).
+    pub const MAX_EXPIRIES: usize = 10;
+
     /// When the soonest held credit expires, when known.
-    pub next_expiry: Option<DateTime<Utc>>,
+    pub fn next_expiry(&self) -> Option<DateTime<Utc>> {
+        self.expiries.first().copied()
+    }
 }
 
 /// Everything `/usage` told us for one account.

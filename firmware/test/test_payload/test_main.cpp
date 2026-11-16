@@ -203,8 +203,46 @@ static void test_long_strings_truncate(void) {
     TEST_ASSERT_EQUAL_size_t(sizeof(d.status) - 1, strlen(d.status));
 }
 
+// Codex (a trial): `pv` names the provider, `rc`/`ru`/`re` the reset
+// credits. Absent is -1 (unknown), never 0; counts clamp to 0..999.
+static void test_codex_fields(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{\"s\":10,\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.codex);
+    TEST_ASSERT_EQUAL_INT(-1, d.resets_held);
+    TEST_ASSERT_EQUAL_INT(-1, d.resets_spent);
+    TEST_ASSERT_EQUAL_INT(-1, d.resets_expire_mins);
+    TEST_ASSERT_TRUE(payload_parse("{\"s\":0,\"sr\":-1,\"w\":34,\"wr\":8478,\"st\":\"allowed\",\"acct\":\"week\","
+                                   "\"pv\":\"codex\",\"rc\":3,\"ru\":1,\"re\":16260,\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_TRUE(d.codex);
+    TEST_ASSERT_TRUE(d.weekly_only);
+    TEST_ASSERT_EQUAL_FLOAT(34, d.session_pct);   // the week is the main meter
+    TEST_ASSERT_EQUAL_INT(3, d.resets_held);
+    TEST_ASSERT_EQUAL_INT(1, d.resets_spent);
+    TEST_ASSERT_EQUAL_INT(16260, d.resets_expire_mins);
+    TEST_ASSERT_EQUAL_INT(-1, d.resets_expiry_n);
+    TEST_ASSERT_TRUE(payload_parse("{\"pv\":\"codex\",\"rc\":2,\"rx\":[\"Nov 27\",7,\"Dec 10\"]}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(2, d.resets_expiry_n);   // a non-string is skipped
+    TEST_ASSERT_EQUAL_STRING("Nov 27", d.resets_expiry[0]);
+    TEST_ASSERT_EQUAL_STRING("Dec 10", d.resets_expiry[1]);
+    TEST_ASSERT_TRUE(payload_parse("{\"rx\":[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\",\"h\",\"i\",\"j\",\"k\",\"l\"]}",
+                                   &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(10, d.resets_expiry_n);   // capped
+    TEST_ASSERT_EQUAL_STRING("j", d.resets_expiry[9]);
+    TEST_ASSERT_TRUE(payload_parse("{\"rx\":[\"a very long date\"]}", &d, nullptr));
+    TEST_ASSERT_EQUAL_STRING("a very ", d.resets_expiry[0]);   // truncated to fit
+    TEST_ASSERT_TRUE(payload_parse("{\"pv\":\"codex\",\"rc\":-3,\"ru\":5000,\"re\":-5}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(0, d.resets_held);
+    TEST_ASSERT_EQUAL_INT(999, d.resets_spent);
+    TEST_ASSERT_EQUAL_INT(-1, d.resets_expire_mins);
+    TEST_ASSERT_TRUE(payload_parse("{\"pv\":\"other\",\"rc\":\"x\"}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.codex);
+    TEST_ASSERT_EQUAL_INT(-1, d.resets_held);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_codex_fields);
     RUN_TEST(test_rejects_malformed_json);
     RUN_TEST(test_empty_object_gives_legacy_defaults);
     RUN_TEST(test_legacy_fields);

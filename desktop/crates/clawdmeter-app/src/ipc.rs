@@ -205,7 +205,7 @@ impl StatusSnapshot {
             resets_spent: reading.and_then(|r| r.resets.as_ref()).and_then(|c| c.spent),
             resets_expire_at: reading
                 .and_then(|r| r.resets.as_ref())
-                .and_then(|c| c.next_expiry)
+                .and_then(|c| c.next_expiry())
                 .map(|t| t.timestamp()),
         }
     }

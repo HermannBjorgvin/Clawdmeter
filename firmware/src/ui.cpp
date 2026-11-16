@@ -95,6 +95,11 @@ static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
 static lv_obj_t* lbl_spending_desc = nullptr;     // "of spending limit"
 static lv_obj_t* lbl_spending_status = nullptr;   // "Under pace" / "On pace" / "Over pace"
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
+// Codex (a trial): the Resets card reuses panel_weekly, with a row of cells
+// in the bar's place: the reset credits as a ledger, held lit, spent hollow.
+#define MAX_RESET_CELLS 8
+static lv_obj_t* reset_cells_row = nullptr;
+static lv_obj_t* reset_cells[MAX_RESET_CELLS];
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
@@ -524,6 +529,28 @@ static void init_usage_screen(lv_obj_t* scr) {
     tick_session = make_pace_tick(bar_session);
     tick_weekly  = make_pace_tick(bar_weekly);
 
+    // Codex Resets card: the cells sit where the weekly bar does, shown in
+    // its place (draw_resets_card).
+    reset_cells_row = lv_obj_create(panel_weekly);
+    lv_obj_remove_style_all(reset_cells_row);
+    lv_obj_set_pos(reset_cells_row, 0, L.bar_y);
+    lv_obj_set_size(reset_cells_row, L.card[1].w - 2 * L.pad_x, L.bar_h);
+    lv_obj_clear_flag(reset_cells_row, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
+    lv_obj_add_flag(reset_cells_row, (lv_obj_flag_t)(LV_OBJ_FLAG_EVENT_BUBBLE | LV_OBJ_FLAG_HIDDEN));
+    for (int i = 0; i < MAX_RESET_CELLS; i++) {
+        lv_obj_t* c = lv_obj_create(reset_cells_row);
+        lv_obj_remove_style_all(c);
+        lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(c, 6, 0);
+        if (board_caps().mono_panel) {   // like the bars: a hollow cell is an outline
+            lv_obj_set_style_border_color(c, COL_TEXT, 0);
+            lv_obj_set_style_border_width(c, 2, 0);
+        }
+        lv_obj_clear_flag(c, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
+        lv_obj_add_flag(c, (lv_obj_flag_t)(LV_OBJ_FLAG_EVENT_BUBBLE | LV_OBJ_FLAG_HIDDEN));
+        reset_cells[i] = c;
+    }
+
     build_pair_group(usage_container);
 
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
@@ -610,8 +637,87 @@ void ui_init(void) {
     anim_verb_idx = fitting_verb(0);
 }
 
-// The Pro/Max bars' fill colours and pace markers.
+// A Codex account with its reset credits: the second card is the Resets
+// card. Without them (or with a 5-hour window, which keeps the week there)
+// the Claude layout holds.
+static bool codex_resets_card(const UsageData* d) {
+    return d->codex && d->weekly_only && d->resets_held >= 0;
+}
+
+// "Next expires in 11d", or "Expires in 11d" where the long one doesn't fit
+// the card (test_layout checks the short one fits every panel).
+static void format_expiry(const UsageData* d, char* buf, size_t len) {
+    if (d->resets_held == 0) { snprintf(buf, len, "None held"); return; }
+    const int m = d->resets_expire_mins;
+    if (m < 0) { snprintf(buf, len, "---"); return; }
+    char span[12];
+    if (m < 60)        snprintf(span, sizeof(span), "%dm", m);
+    else if (m < 1440) snprintf(span, sizeof(span), "%dh", m / 60);
+    else               snprintf(span, sizeof(span), "%dd", m / 1440);
+    snprintf(buf, len, "Next expires in %s", span);
+    if (layout_text_width(L.reset_font, buf) > L.card[1].w - 2 * L.pad_x)
+        snprintf(buf, len, "Expires in %s", span);
+}
+
+// Put panel_weekly back for the week: the Resets card's widgets go.
+static void hide_resets_card(void) {
+    if (reset_cells_row) lv_obj_add_flag(reset_cells_row, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(bar_weekly, LV_OBJ_FLAG_HIDDEN);
+}
+
+// The Codex Resets card, drawn into panel_weekly: everything it shows is
+// decided here (ui_update and a theme change call it), so its design can
+// change in one place. Today: the count still held, a cell per credit in
+// the ledger (held lit, spent hollow; at most MAX_RESET_CELLS) in the bar's
+// place, and when the next one expires. The data also carries each held
+// credit's expiry date (resets_expiry, up to 10).
+static void draw_resets_card(const UsageData* d) {
+    if (!reset_cells_row) return;
+    char buf[48];
+    lv_label_set_text(lbl_weekly_label, L.pills[5]);
+    lv_label_set_text_fmt(lbl_weekly_pct, "%d", d->resets_held);
+    format_expiry(d, buf, sizeof(buf));
+    lv_obj_set_style_text_font(lbl_weekly_reset, L.reset_font, 0);
+    lv_label_set_text(lbl_weekly_reset, buf);
+    lv_obj_add_flag(bar_weekly, LV_OBJ_FLAG_HIDDEN);
+    const int spent = d->resets_spent > 0 ? d->resets_spent : 0;
+    int n = d->resets_held + spent;
+    if (n > MAX_RESET_CELLS) n = MAX_RESET_CELLS;
+    const int lit = d->resets_held < n ? d->resets_held : n;
+    const int row_w = lv_obj_get_width(reset_cells_row);
+    const int gap = row_w >= 300 ? 8 : 4;
+    const int cell_w = n > 0 ? (row_w - gap * (n - 1)) / n : 0;
+    for (int i = 0; i < MAX_RESET_CELLS; i++) {
+        lv_obj_t* c = reset_cells[i];
+        if (i >= n) {
+            lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        lv_obj_set_size(c, cell_w, L.bar_h);
+        lv_obj_set_pos(c, i * (cell_w + gap), 0);
+        lv_obj_set_style_bg_color(c, theme_color(i < lit ? TH_TEXT : TH_BAR_BG), 0);
+        lv_obj_clear_flag(c, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_clear_flag(reset_cells_row, LV_OBJ_FLAG_HIDDEN);
+}
+
+// The Pro/Max bars' fill colours and pace markers. A Codex account's bars
+// are white (TH_TEXT), marking numbers from the GPT side, with the pace
+// marker in TH_DIM so it shows on the fill.
 static void apply_bar_colors(const UsageData* data) {
+    const bool mono = board_caps().mono_panel;
+    const ThemeColor tick = data->codex && !mono ? TH_DIM : TH_TEXT;
+    lv_obj_set_style_bg_color(tick_session, theme_color(tick), 0);
+    lv_obj_set_style_bg_color(tick_weekly, theme_color(tick), 0);
+    if (data->codex) {
+        lv_obj_set_style_bg_color(bar_session, theme_color(TH_TEXT), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(bar_weekly, theme_color(TH_TEXT), LV_PART_INDICATOR);
+        const int first_window = data->weekly_only ? PACE_WEEK_MINS : PACE_SESSION_MINS;
+        place_pace_tick(tick_session, pace_elapsed_pct(data->session_reset_mins, first_window));
+        place_pace_tick(tick_weekly, data->weekly_only ? -1.0f
+                                                       : pace_elapsed_pct(data->weekly_reset_mins, PACE_WEEK_MINS));
+        return;
+    }
     if (data->enterprise) {
         // Spending has no 5-hour window, and the Period bar (coloured in
         // ui_update) already is the elapsed share: no markers.
@@ -665,6 +771,7 @@ void ui_apply_theme(void) {
     apply_pair_text();   // its last line follows the hold state
     if (have_last_data) {
         apply_bar_colors(&last_data);
+        if (codex_resets_card(&last_data)) draw_resets_card(&last_data);
         if (last_data.enterprise) apply_period_colors(&last_data);
     }
 }
@@ -692,12 +799,15 @@ void ui_update(const UsageData* data) {
     }
 
     int s_pct = (int)(data->session_pct + 0.5f);
-
+    const bool resets_card = codex_resets_card(data);
     // No 5-hour limit: the one card left sits in the middle of the space the
-    // two cards take. LVGL skips the set when the position hasn't changed.
+    // two cards take, unless a Codex account's Resets card takes the second.
+    const bool lone = data->weekly_only && !resets_card;
+
+    // LVGL skips the set when the position hasn't changed.
     if (panel_session)
-        lv_obj_set_pos(panel_session, data->weekly_only ? layout_lone_card_x(L) : L.card[0].x,
-                       data->weekly_only ? layout_lone_card_y(L) : L.card[0].y);
+        lv_obj_set_pos(panel_session, lone ? layout_lone_card_x(L) : L.card[0].x,
+                       lone ? layout_lone_card_y(L) : L.card[0].y);
 
     if (data->enterprise) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
@@ -710,16 +820,17 @@ void ui_update(const UsageData* data) {
         if (panel_weekly) lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
     } else {
         // No 5-hour limit (verified Ultra): the week moves up into the first
-        // card and the second card goes away.
+        // card and the second card goes away. A Codex account's main meter is
+        // "Codex", whichever window it is.
         lv_obj_set_style_text_font(lbl_session_pct, L.pct_font, 0);
-        lv_label_set_text(lbl_session_label, L.pills[data->weekly_only ? 1 : 0]);
+        lv_label_set_text(lbl_session_label, L.pills[data->codex ? 4 : data->weekly_only ? 1 : 0]);
         lv_obj_clear_flag(lbl_session_reset, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_desc,   LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
         if (panel_weekly) {
-            if (data->weekly_only) lv_obj_add_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
-            else                   lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+            if (lone) lv_obj_add_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
+            else      lv_obj_clear_flag(panel_weekly, LV_OBJ_FLAG_HIDDEN);
         }
     }
 
@@ -744,6 +855,8 @@ void ui_update(const UsageData* data) {
         lv_bar_set_value(bar_weekly, data->time_pct, LV_ANIM_ON);
         lv_obj_set_style_text_font(lbl_weekly_reset, L.period_font, 0);
         apply_period_colors(data);
+    } else if (resets_card) {
+        draw_resets_card(data);
     } else {
         int w_pct = (int)(data->weekly_pct + 0.5f);
         lv_label_set_text(lbl_weekly_label, L.pills[1]);
@@ -753,6 +866,7 @@ void ui_update(const UsageData* data) {
         lv_obj_set_style_text_font(lbl_weekly_reset, L.reset_font, 0);
         lv_label_set_text(lbl_weekly_reset, buf);
     }
+    if (!resets_card) hide_resets_card();
     apply_bar_colors(data);
 }
 

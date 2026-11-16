@@ -21,7 +21,9 @@ struct SignalsUpdate {
     bool     meter_kind_changed; // a real sample measures something else than the
                               // last (session, week, spend): its % is a new
                               // baseline, not a rise or a reset
-    bool     replay;          // usage numbers repeat the last poll (rp=1)
+    bool     replay;          // usage numbers repeat the last poll (rp=1), or
+                              // are a Codex account's (pv): not Claude's to
+                              // react to
     bool     event_fired;     // a hook event the device hasn't reacted to yet
     char     event;           // 'p' prompt, 's' stop, 'b' back after a gap,
                               // or a future char; valid when event_fired

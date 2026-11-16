@@ -87,7 +87,7 @@ pub fn is_codex_dir(dir: &Path) -> bool {
 /// The Codex CLI's home: `$CODEX_HOME` when set, else `~/.codex`.
 pub fn default_dir(home: &Path, codex_home: Option<&str>) -> PathBuf {
     match codex_home.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(d) if d == "~" => home.to_path_buf(),
+        Some("~") => home.to_path_buf(),
         Some(d) => d.strip_prefix("~/").map_or_else(|| PathBuf::from(d), |rest| home.join(rest)),
         None => home.join(".codex"),
     }
@@ -458,19 +458,21 @@ impl CreditsCache {
                 e
             }
         };
-        ResetCredits { held, spent: entry.spent, next_expiry: entry.expiries.into_iter().find(|t| t.timestamp() > now) }
+        ResetCredits { held, spent: entry.spent, expiries: ahead(&entry.expiries, now) }
     }
 
     /// What the last good poll said, for a session-log reading (which has
     /// no credits) while it is within the TTL.
     fn last_known(&self, dir: &Path, now: i64) -> Option<ResetCredits> {
         let e = self.details(dir, now)?;
-        Some(ResetCredits {
-            held: e.held,
-            spent: e.spent,
-            next_expiry: e.expiries.iter().copied().find(|t| t.timestamp() > now),
-        })
+        Some(ResetCredits { held: e.held, spent: e.spent, expiries: ahead(&e.expiries, now) })
     }
+}
+
+/// The expiries still ahead at `now`, soonest first, at most
+/// [`ResetCredits::MAX_EXPIRIES`].
+fn ahead(expiries: &[DateTime<Utc>], now: i64) -> Vec<DateTime<Utc>> {
+    expiries.iter().copied().filter(|t| t.timestamp() > now).take(ResetCredits::MAX_EXPIRIES).collect()
 }
 
 /// One GET with the account's sign-in (blocking).
@@ -601,7 +603,7 @@ mod tests {
         assert_eq!(r.week, Some(Window { pct: 0, resets_at: epoch(1_795_303_084) }));
         assert_eq!(r.session_limit, SessionLimit::Absent);
         assert!(r.no_session_limit());
-        assert_eq!(r.resets, Some(ResetCredits { held: 2, spent: None, next_expiry: None }));
+        assert_eq!(r.resets, Some(ResetCredits { held: 2, spent: None, expiries: vec![] }));
     }
 
     // A plan with both windows, and a Spark bucket at 0 % beside it: the
@@ -772,7 +774,14 @@ mod tests {
         let p = poll_with(&dir, now, &mut cache, &mut ok, &mut no_logs);
         assert!(p.idle);
         let resets = p.result.unwrap().resets.unwrap();
-        assert_eq!(resets, ResetCredits { held: 2, spent: Some(1), next_expiry: Some(at("2026-11-27T09:00:00Z")) });
+        assert_eq!(
+            resets,
+            ResetCredits {
+                held: 2,
+                spent: Some(1),
+                expiries: vec![at("2026-11-27T09:00:00Z"), at("2026-12-10T18:30:00Z")]
+            }
+        );
         // Within the hour, same count: only the usage call.
         let p = poll_with(&dir, now + chrono::Duration::minutes(5), &mut cache, &mut ok, &mut no_logs);
         assert_eq!(p.result.unwrap().resets.unwrap().spent, Some(1));
@@ -823,7 +832,7 @@ mod tests {
         assert_eq!(cache.refresh(dir, 2, t, &mut ok).spent, Some(1));
         let mut down = |_: &str| -> Option<String> { None };
         let c = cache.refresh(dir, 1, t + 60, &mut down);
-        assert_eq!((c.held, c.spent, c.next_expiry), (1, None, None));
+        assert_eq!((c.held, c.spent, c.next_expiry()), (1, None, None));
         // Back at the old count after the TTL with the endpoint down: still
         // nothing for this count (the entry now says 1).
         assert_eq!(cache.refresh(dir, 1, t + 120, &mut ok).spent, None, "within the TTL, cached");

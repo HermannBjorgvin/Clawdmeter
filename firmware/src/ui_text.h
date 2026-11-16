@@ -12,13 +12,18 @@ static const char* const PAIR_TEXT_CLEARED[3] = { "Ready to pair", "choose Clawd
 static const char* const PAIR_TEXT_HOLDING    = "keep holding...";
 
 // Card pills: session, weekly, then the spend-capped account's spending and
-// period. The short set is for panels too narrow for the long one.
-static const char* const PILL_TEXT[4]       = { "Session", "Weekly", "Spending", "Period" };
-static const char* const PILL_TEXT_SHORT[4] = { "5h", "7d", "Spend", "Period" };
+// period, then a Codex account's main meter and its reset credits. The short
+// set is for panels too narrow for the long one.
+static const char* const PILL_TEXT[6]       = { "Session", "Weekly", "Spending", "Period", "Codex", "Resets" };
+static const char* const PILL_TEXT_SHORT[6] = { "5h", "7d", "Spend", "Period", "Codex", "Resets" };
 
 // Widest text a card's reset line shows: the weekly window's last day, the
 // spend-capped account's caption, and its period line (its widest pace word and date).
 static const char* const RESET_TEXT_WIDEST[] = { "Resets in 23h 59m", "Resets in 6d 23h", "of spending limit" };
+// The Codex Resets card says "Next expires in 29d" where that fits and the
+// short form where it doesn't. The layout isn't sized for it: test_layout
+// checks the short form's widest fits every panel the Claude lines decide.
+#define EXPIRY_TEXT_SHORT_WIDEST "Expires in 59m"
 #define PERIOD_TEXT_WIDEST "Under pace - Resets May 30"
 #define PERIOD_TEXT_SHORT_WIDEST "Resets May 30"   // where no size fits the pace word too
 

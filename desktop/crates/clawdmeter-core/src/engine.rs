@@ -1543,7 +1543,7 @@ mod tests {
             week: Some(Window { pct, resets_at: Some(utc(T0 + 5 * 86_400)) }),
             session_limit: crate::usage::SessionLimit::Absent,
             provider: Provider::Codex,
-            resets: Some(crate::usage::ResetCredits { held: 2, spent: Some(1), next_expiry: None }),
+            resets: Some(crate::usage::ResetCredits { held: 2, spent: Some(1), expiries: vec![] }),
             ..Default::default()
         }
     }
@@ -1560,7 +1560,7 @@ mod tests {
         let (claude, cx) = (PathBuf::from("/h/.claude"), PathBuf::from("/h/.codex"));
         assert_eq!(e.begin_poll(T0).unwrap().accounts, vec![claude.clone()], "Claude's plan is Claude's");
         assert_eq!(e.begin_codex_poll(T0), Some(vec![cx.clone()]));
-        assert_eq!(e.status(T0).polling, false, "nothing shown yet");
+        assert!(!e.status(T0).polling, "nothing shown yet");
         e.on_poll_results(T0, vec![(claude.clone(), Ok(reading(10)))]);
         e.on_codex_results(T0 + 1, vec![(cx.clone(), codex_ok(30))]);
         assert_eq!(e.status(T0 + 1).active_account, Some(cx.clone()), "the highest % before any rise");

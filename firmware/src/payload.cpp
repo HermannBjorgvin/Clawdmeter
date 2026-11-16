@@ -20,6 +20,13 @@ static int32_t button_field(JsonVariant v) {
     return button_action_clamp(v.as<int32_t>(), -1);
 }
 
+// A count (`rc`, `ru`): -1 when absent or not a number, else 0..999.
+static int16_t clamp_count(JsonVariant v) {
+    if (!v.is<int32_t>()) return -1;
+    const int32_t n = v.as<int32_t>();
+    return (int16_t)(n < 0 ? 0 : n > 999 ? 999 : n);
+}
+
 bool payload_parse(const char* json, UsageData* out, const char** err) {
     JsonDocument doc;
     DeserializationError e = deserializeJson(doc, json);
@@ -47,6 +54,23 @@ bool payload_parse(const char* json, UsageData* out, const char** err) {
         // that predates "week"; here the week is the main meter.
         d.session_pct = d.weekly_pct;
         d.session_reset_mins = d.weekly_reset_mins;
+    }
+    // Codex (a trial): the provider, then its reset credits, each -1 when
+    // absent (unknown, never 0).
+    d.codex = strcmp(doc["pv"] | "", "codex") == 0;
+    d.resets_held = clamp_count(doc["rc"]);
+    d.resets_spent = clamp_count(doc["ru"]);
+    JsonVariant re = doc["re"];
+    d.resets_expire_mins = re.is<int32_t>() && re.as<int32_t>() >= 0 ? re.as<int32_t>() : -1;
+    JsonVariant rx = doc["rx"];
+    d.resets_expiry_n = -1;
+    if (rx.is<JsonArray>()) {
+        d.resets_expiry_n = 0;
+        for (JsonVariant v : rx.as<JsonArray>()) {
+            if (d.resets_expiry_n == (int8_t)(sizeof(d.resets_expiry) / sizeof(d.resets_expiry[0]))) break;
+            if (!v.is<const char*>()) continue;
+            copy_str(d.resets_expiry[d.resets_expiry_n++], sizeof(d.resets_expiry[0]), v.as<const char*>());
+        }
     }
     d.time_pct = doc["tp"] | 0;
     d.period_days = doc["pd"] | 30;
