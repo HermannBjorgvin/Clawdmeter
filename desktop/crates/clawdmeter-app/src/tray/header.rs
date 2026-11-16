@@ -2,18 +2,11 @@
 //! words and numbers (the link, the account, a meter per usage window). Pure,
 //! so it's tested on every OS; `mac_menu` draws it.
 
+use super::pace::{self, Level, SESSION_WINDOW_SECS, WEEK_WINDOW_SECS};
 use crate::ipc::StatusSnapshot;
 use crate::ui::overview::{reset_text, state_title, wait_text, RefreshState};
 use crate::ui::widgets::{usage_tone, Tone};
 use crate::{ago, tilde};
-
-/// The 5-hour window and the week, in seconds (`PACE_*_MINS` in
-/// firmware/src/pace.h).
-const SESSION_WINDOW_SECS: i64 = 5 * 3600;
-const WEEK_WINDOW_SECS: i64 = 7 * 24 * 3600;
-/// Usage within a point of the marker still touches it: on pace
-/// (`PACE_GRACE_PCT`).
-const PACE_GRACE_PCT: f64 = 1.0;
 
 /// One usage window, laid out like a device panel.
 #[derive(Debug, Clone, PartialEq)]
@@ -135,14 +128,16 @@ fn clock(at: i64) -> String {
 
 /// `pace`: the window's reset time and length, with the marker on.
 fn meter(label: &'static str, pct: Option<u32>, reset: String, pace: Option<(Option<i64>, i64)>, now: i64) -> Meter {
-    let used = pct.unwrap_or(0) as f64;
-    let elapsed = pace.and_then(|(resets_at, window)| Some(elapsed_pct(resets_at?, window, now)));
-    let fill = match elapsed {
-        Some(_) if used >= 100.0 => Tone::Bad,
-        Some(e) if used > e + PACE_GRACE_PCT => Tone::Accent,
-        Some(_) => Tone::Ok,
-        None => usage_tone(pct.unwrap_or(0)),
+    let used = pct.unwrap_or(0);
+    // No reading, no marker: there's nothing to compare it with.
+    let pace = pace.filter(|_| pct.is_some()).and_then(|(resets_at, window)| pace::pace(used, resets_at, window, now));
+    let fill = match pace {
+        Some((_, Level::Limit)) => Tone::Bad,
+        Some((_, Level::Ahead)) => Tone::Accent,
+        Some((_, Level::On)) => Tone::Ok,
+        None => usage_tone(used),
     };
+    let used = f64::from(used);
     Meter {
         label,
         value: pct.map_or_else(|| "--%".to_owned(), |p| format!("{p}%")),
@@ -150,16 +145,8 @@ fn meter(label: &'static str, pct: Option<u32>, reset: String, pace: Option<(Opt
         fill,
         // With no reading there's no window to describe either.
         reset: if pct.is_some() { reset } else { "---".into() },
-        // No reading, no marker: there's nothing to compare it with.
-        pace: elapsed.filter(|_| pct.is_some()).map(|e| e / 100.0),
+        pace: pace.map(|(at, _)| at),
     }
-}
-
-/// The share of a window already elapsed, 0..=100 (`pace_elapsed_pct`). A
-/// countdown past the window's length (clock skew) is a window just begun.
-fn elapsed_pct(resets_at: i64, window: i64, now: i64) -> f64 {
-    let left = (resets_at - now).clamp(0, window);
-    100.0 * (window - left) as f64 / window as f64
 }
 
 #[cfg(test)]

@@ -66,9 +66,11 @@ The board's own alert chime isn't in the tray menu: switch it with **Alert
 chime** on the Device page. On Linux and Windows the menu lists **Refresh
 usage** (greyed out, saying when it can check again, until a check can run),
 **Chime on this computer** (checked while the Overview's switch is on;
-clicking it flips that switch), **Open Clawdmeter**, **Update Clawdmeter to
-v…** or **Update firmware to v…** and **Quit Clawdmeter** instead, with the
-same conditions.
+clicking it flips that switch), **Open Clawdmeter**, **Settings…**,
+**Update Clawdmeter to v…** or **Update firmware to v…** and **Quit
+Clawdmeter** instead, with the same conditions. With the pace marker on,
+their usage rows end with the marker's verdict: *on pace*, *ahead of pace*
+or *at the limit*.
 Without a tray, it uses a window; closing that window quits the app.
 You can skip setup and return through **Run setup again** in Settings.
 

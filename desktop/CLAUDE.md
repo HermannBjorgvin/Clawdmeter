@@ -83,7 +83,10 @@ is faked behind `FlashHardware`.
   `CLAUDE_CONFIG_DIR` (default account), `CLAWDMETER_BLE_ADDRESS`,
   `CLAWDMETER_DECORATIONS`, `CLAWDMETER_BUTTON_LAYOUT`,
   `CLAWDMETER_DEMO_FIRMWARE_UPDATE` (debug builds: pretend that firmware
-  release is out and the board older, for the tray's update icon).
+  release is out and the board older, for the tray's update icon),
+  `CLAWDMETER_DEMO_USAGE=1` (debug builds: the tray shows made-up usage,
+  the same on every OS; with the pace marker on, `--example tray_header`'s
+  `compare` render matches it, for side-by-side screenshots).
 - State lives in one dir, `~/.config/clawdmeter/` (Windows:
   `%LOCALAPPDATA%\Clawdmeter\`): `config`, `events.log`, `attention`,
   `clear-<sid>`, `ble-address`, `daemon.log`, `usage-blocks.json`, app

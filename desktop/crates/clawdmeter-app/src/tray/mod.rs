@@ -13,6 +13,7 @@ mod event_loop;
 pub mod header;
 #[cfg(target_os = "macos")]
 pub mod mac_menu;
+pub mod pace;
 #[cfg(target_os = "linux")]
 mod sni;
 
@@ -218,6 +219,7 @@ impl Items {
             update: MenuItem::with_id("update", "Update firmware…", true, None),
         };
         let open = MenuItem::with_id("open", "Open Clawdmeter", true, None);
+        let settings = MenuItem::with_id("settings", "Settings…", true, None);
         let quit = MenuItem::with_id("quit", "Quit Clawdmeter", true, None);
         let separator = PredefinedMenuItem::separator;
         let (sep1, sep2, sep3, sep4) = (separator(), separator(), separator(), separator());
@@ -228,7 +230,7 @@ impl Items {
         if shape.weekly {
             list.push(&it.weekly);
         }
-        list.extend([&sep2 as &dyn tray_icon::menu::IsMenuItem, &it.refresh, &it.chime, &sep3, &open]);
+        list.extend([&sep2 as &dyn tray_icon::menu::IsMenuItem, &it.refresh, &it.chime, &sep3, &open, &settings]);
         if shape.update {
             list.push(&it.update);
         }
@@ -263,12 +265,21 @@ impl Items {
             (None, _) if snap.logged_out => "Open Claude Code to sign in".into(),
             (None, _) => "No usage data yet".into(),
         });
+        // The pace marker's verdict, when it's on (never for spend: its
+        // period already is one, as on the device).
+        let pace = |pct: Option<u32>, resets_at, window| {
+            pct.filter(|_| settings.pace_marker)
+                .and_then(|p| pace::pace(p, resets_at, window, now))
+                .map(|(_, level)| level)
+        };
         self.session.set_text(if snap.spend {
-            meter_row("Spend", snap.session_pct, true, snap.spend_resets_at, now)
+            meter_row("Spend", snap.session_pct, true, snap.spend_resets_at, None, now)
         } else {
-            meter_row("Session", snap.session_pct, snap.window_started, snap.session_resets_at, now)
+            let pace = pace(snap.session_pct, snap.session_resets_at, pace::SESSION_WINDOW_SECS);
+            meter_row("Session", snap.session_pct, snap.window_started, snap.session_resets_at, pace, now)
         });
-        self.weekly.set_text(meter_row("Weekly", snap.week_pct, true, snap.week_resets_at, now));
+        let pace = pace(snap.week_pct, snap.week_resets_at, pace::WEEK_WINDOW_SECS);
+        self.weekly.set_text(meter_row("Weekly", snap.week_pct, true, snap.week_resets_at, pace, now));
         let (refresh, can_refresh) = refresh_item(snap, pressed, now);
         self.refresh.set_text(refresh);
         self.refresh.set_enabled(can_refresh);
@@ -284,6 +295,7 @@ impl Items {
         Some(match id.0.as_str() {
             "status" | "session" | "weekly" | "open" => open(Page::Overview),
             "account" => open(Page::Accounts),
+            "settings" => open(Page::Settings),
             "refresh" => Click::App(AppCommand::Refresh),
             "chime" => Click::Chime,
             "update" => open(update_page),
@@ -293,17 +305,29 @@ impl Items {
     }
 }
 
-/// One usage row, with the device's reset countdown:
-/// "Weekly  57% · resets in 3d 4h". `–` with no reading (no data is never a
-/// zero).
+/// One usage row, with the device's reset countdown and, with the pace
+/// marker on, its verdict: "Weekly  57% · resets in 3d 4h · on pace". `–`
+/// with no reading (no data is never a zero).
 #[cfg(any(not(target_os = "macos"), test))]
-fn meter_row(label: &str, pct: Option<u32>, started: bool, resets_at: Option<i64>, now: i64) -> String {
-    match (pct, resets_at) {
-        (None, _) => format!("{label}  –"),
-        (Some(_), _) if !started => format!("{label}  not started"),
+fn meter_row(
+    label: &str,
+    pct: Option<u32>,
+    started: bool,
+    resets_at: Option<i64>,
+    pace: Option<pace::Level>,
+    now: i64,
+) -> String {
+    let mut row = match (pct, resets_at) {
+        (None, _) => return format!("{label}  –"),
+        (Some(_), _) if !started => return format!("{label}  not started"),
         (Some(p), Some(t)) => format!("{label}  {p}% · resets in {}", crate::countdown(t - now)),
         (Some(p), None) => format!("{label}  {p}%"),
+    };
+    if let Some(level) = pace {
+        row.push_str(" · ");
+        row.push_str(level.words());
     }
+    row
 }
 
 /// The refresh item's text and whether it can be clicked (Linux, Windows),
@@ -468,6 +492,32 @@ impl TrayApp {
         if let Some(v) = std::env::var("CLAWDMETER_DEMO_FIRMWARE_UPDATE").ok().filter(|v| !v.trim().is_empty()) {
             snap.latest_firmware = Some(v.trim().to_owned());
             snap.device_firmware = Some("0.0.1".into());
+        }
+        // Debug builds only: `CLAWDMETER_DEMO_USAGE=1` shows made-up usage
+        // (connected, Session 34 % and Weekly 62 %), the same on every OS,
+        // for screenshots and for trying the menu without an account or a
+        // board.
+        #[cfg(debug_assertions)]
+        if std::env::var("CLAWDMETER_DEMO_USAGE").is_ok_and(|v| v == "1") {
+            snap = StatusSnapshot {
+                link: "connected".into(),
+                tray: "Connected".into(),
+                account: Some(self.paths.home.join(".claude").display().to_string()),
+                read_at: Some(now - 120),
+                session_pct: Some(34),
+                window_started: true,
+                session_resets_at: Some(now + 2 * 3600 + 30 * 60),
+                week_pct: Some(62),
+                week_resets_at: Some(now + (5 * 24 + 11) * 3600),
+                no_session_limit: false,
+                spend: false,
+                stale: false,
+                logged_out: false,
+                errors: Vec::new(),
+                paused_until: None,
+                polling: false,
+                ..snap
+            };
         }
         snap
     }
@@ -812,15 +862,21 @@ mod tests {
     fn meter_rows_carry_the_device_countdown() {
         let now = 1_000_000;
         let in_3d_4h = now + (3 * 24 + 4) * 3600 + 30;
-        assert_eq!(meter_row("Weekly", Some(57), true, Some(in_3d_4h), now), "Weekly  57% · resets in 3d 4h");
+        assert_eq!(meter_row("Weekly", Some(57), true, Some(in_3d_4h), None, now), "Weekly  57% · resets in 3d 4h");
         assert_eq!(
-            meter_row("Session", Some(34), true, Some(now + 2 * 3600 + 56 * 60), now),
+            meter_row("Session", Some(34), true, Some(now + 2 * 3600 + 56 * 60), None, now),
             "Session  34% · resets in 2h 56m"
         );
-        assert_eq!(meter_row("Session", Some(34), true, None, now), "Session  34%");
-        assert_eq!(meter_row("Session", Some(0), false, None, now), "Session  not started");
-        assert_eq!(meter_row("Weekly", None, true, Some(in_3d_4h), now), "Weekly  –", "no data is never a zero");
-        assert_eq!(meter_row("Session", Some(99), true, Some(now - 10), now), "Session  99% · resets in 0m");
+        assert_eq!(meter_row("Session", Some(34), true, None, None, now), "Session  34%");
+        assert_eq!(meter_row("Session", Some(0), false, None, None, now), "Session  not started");
+        assert_eq!(meter_row("Weekly", None, true, Some(in_3d_4h), None, now), "Weekly  –", "no data is never a zero");
+        assert_eq!(meter_row("Session", Some(99), true, Some(now - 10), None, now), "Session  99% · resets in 0m");
+        let ahead = Some(pace::Level::Ahead);
+        assert_eq!(
+            meter_row("Weekly", Some(57), true, Some(in_3d_4h), ahead, now),
+            "Weekly  57% · resets in 3d 4h · ahead of pace"
+        );
+        assert_eq!(meter_row("Weekly", None, true, None, ahead, now), "Weekly  –", "no reading, no verdict");
     }
 
     #[test]
@@ -849,6 +905,7 @@ mod tests {
         let open = |p: Page| Some(Click::App(AppCommand::Open(p.as_str().into())));
         assert_eq!(Items::command(&id("open"), Page::Flash), open(Page::Overview));
         assert_eq!(Items::command(&id("account"), Page::Flash), open(Page::Accounts));
+        assert_eq!(Items::command(&id("settings"), Page::Flash), open(Page::Settings));
         assert_eq!(Items::command(&id("update"), Page::Update), open(Page::Update));
         assert_eq!(Items::command(&id("chime"), Page::Flash), Some(Click::Chime), "the Overview's switch");
         assert_eq!(Items::command(&id("quit"), Page::Flash), Some(Click::App(AppCommand::Quit)));

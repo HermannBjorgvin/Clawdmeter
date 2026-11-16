@@ -175,6 +175,22 @@ fn main() {
             },
         ),
         (
+            // The sample the debug switches show on every OS
+            // (CLAWDMETER_DEMO_USAGE=1, CLAWDMETER_DEMO_FIRMWARE_UPDATE,
+            // pace marker on), for side-by-side screenshots.
+            "compare",
+            true,
+            StatusSnapshot {
+                session_pct: Some(34),
+                window_started: true,
+                session_resets_at: Some(now + 2 * 3600 + 30 * 60),
+                week_pct: Some(62),
+                week_resets_at: Some(now + (5 * 24 + 11) * 3600),
+                read_at: Some(now - 120),
+                ..base.clone()
+            },
+        ),
+        (
             "no-data",
             false,
             StatusSnapshot {
@@ -192,11 +208,14 @@ fn main() {
             let header = MenuHeader::install(&menu);
             let refresh = clawdmeter_app::ui::overview::refresh_state(&snap, false, now);
             // The chime on this computer: on, except in the "chime-off" state.
-            let chime = name != "chime-off";
+            let chime = name != "chime-off" && name != "compare";
             let mut h = Header::new(&snap, home, pace, chime, refresh, now);
             // The tray works out the offer (app first); here it's made up.
             if name == "update-available" {
                 h.update = Some(clawdmeter_app::tray::Update::App("v1.9.0".into()));
+            }
+            if name == "compare" {
+                h.update = Some(clawdmeter_app::tray::Update::Firmware("v1.9.0".into()));
             }
             let png = header.preview_png(&h, dark).expect("render");
             let path = out.join(format!("{name}-{}.png", if dark { "dark" } else { "light" }));
