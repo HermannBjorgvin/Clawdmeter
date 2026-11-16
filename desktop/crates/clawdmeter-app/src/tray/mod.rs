@@ -9,10 +9,13 @@
 //! tray, and closing it quits the app.
 
 mod event_loop;
+#[cfg(any(target_os = "macos", test))]
+pub mod header;
+#[cfg(target_os = "macos")]
+pub mod mac_menu;
 #[cfg(target_os = "linux")]
 mod sni;
 
-use std::cell::Cell;
 use std::process::{Child, Command as Proc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,7 +28,8 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use crate::art::{tray_icon_rgba, TrayState};
 use crate::daemon::{self, Command, DaemonHandle};
 use crate::ipc::{self, AppCommand, StatusSnapshot};
-use crate::{ago, tilde, Page};
+use crate::ui::overview::{refresh_settled, refresh_state};
+use crate::Page;
 
 /// Status file refresh even when nothing changed (windows use it as a
 /// liveness signal).
@@ -61,97 +65,239 @@ pub fn spawn_window(page: Page) -> std::io::Result<Child> {
     Proc::new(exe).arg("--window").arg(page.as_str()).spawn()
 }
 
+/// Which of the Linux/Windows menu's optional items it has. A change
+/// rebuilds the menu (`TrayIcon::set_menu`) rather than editing it in place,
+/// so no item ever moves under an open menu. On macOS the panel shows and
+/// hides its own parts, so the shape stays the default and the menu is never
+/// rebuilt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct MenuShape {
+    /// The Session row (Linux, Windows): gone with no 5-hour limit.
+    session: bool,
+    /// Mute chimes: while the device's alert chime or the desktop chime is on.
+    mute: bool,
+    /// "Update Clawdmeter / firmware to v…": while a newer release is out
+    /// ([`update_offer`]). Flashing by hand otherwise is rare, and the
+    /// window's Flash page has it.
+    update: bool,
+}
+
+impl MenuShape {
+    fn of(snap: &StatusSnapshot, settings: &Settings, offer: Option<&Update>) -> Self {
+        MenuShape {
+            // The macOS header draws the meters itself.
+            session: cfg!(not(target_os = "macos")) && !snap.no_session_limit,
+            // On macOS these are footer icons in the panel.
+            mute: cfg!(not(target_os = "macos")) && (settings.alert_chime || settings.desktop_chime),
+            update: cfg!(not(target_os = "macos")) && offer.is_some(),
+        }
+    }
+}
+
+/// A newer release the tray offers. Every release tag ships the app and the
+/// firmware together, so when both are behind the app goes first: the newer
+/// app's flasher and protocol match the new firmware, and once it's
+/// installed the offer moves on to the firmware.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Update {
+    /// This app is older than the release (`v1.9.0`): the Update page.
+    App(String),
+    /// The app is current, or not a release build, and the board runs older
+    /// firmware (`v1.9.0`): the Flash page.
+    Firmware(String),
+}
+
+impl Update {
+    /// The icon's tooltip and the item's text: "Update Clawdmeter to v1.9.0".
+    pub fn label(&self) -> String {
+        match self {
+            Update::App(v) => format!("Update Clawdmeter to {v}"),
+            Update::Firmware(v) => format!("Update firmware to {v}"),
+        }
+    }
+
+    /// The window page that installs it.
+    fn page(&self) -> Page {
+        match self {
+            Update::App(_) => Page::Update,
+            Update::Firmware(_) => Page::Flash,
+        }
+    }
+}
+
+/// What the tray offers, if anything. While a release build is behind the
+/// latest release, the app update when the sidebar would announce it (update
+/// checks on, the release not skipped; `UpdateView::announced`), and nothing
+/// otherwise: the board's firmware waits for the app. Once the app is current
+/// (or in a dev build, which is never offered one), the firmware update
+/// (`StatusSnapshot::update_available`).
+fn update_offer(snap: &StatusSnapshot, settings: &Settings, release_build: bool, app_version: &str) -> Option<Update> {
+    if let Some(tag) = snap.app_update(app_version).filter(|_| release_build) {
+        let skipped = settings.skipped_update.as_deref().and_then(clawdmeter_flash::release::release_tag);
+        return (settings.update_check && skipped.as_ref() != Some(&tag)).then_some(Update::App(tag));
+    }
+    snap.update_available().map(|v| Update::Firmware(display_version(v)))
+}
+
+/// The tray menu. On macOS it's the drawn panel alone (`mac_menu`); the
+/// native items are built but never added there.
 struct Items {
     menu: Menu,
+    /// The optional items it was built with.
+    shape: MenuShape,
     status: MenuItem,
     account: MenuItem,
     session: MenuItem,
-    /// `session` is in the menu (it leaves it with no 5-hour limit).
-    session_listed: Cell<bool>,
     weekly: MenuItem,
+    #[cfg(target_os = "macos")]
+    header: std::cell::RefCell<mac_menu::MenuHeader>,
     refresh: MenuItem,
     mute: CheckMenuItem,
     open: MenuItem,
     update: MenuItem,
-    settings: MenuItem,
     quit: MenuItem,
 }
 
 impl Items {
-    fn new() -> Self {
+    fn new(shape: MenuShape) -> Self {
+        let menu = Menu::new();
         let it = Items {
-            menu: Menu::new(),
-            status: MenuItem::new("Clawdmeter · Starting", false, None),
-            account: MenuItem::new("No usage data yet", false, None),
-            session: MenuItem::new("Session  –", false, None),
-            session_listed: Cell::new(true),
-            weekly: MenuItem::new("Weekly  –", false, None),
+            // The header goes in first, at the top of the empty menu.
+            #[cfg(target_os = "macos")]
+            header: std::cell::RefCell::new(mac_menu::MenuHeader::install(&menu)),
+            menu,
+            shape,
+            // The status and usage rows are enabled so they read at full
+            // contrast (a disabled item is greyed out); clicking one opens
+            // the page with the details.
+            status: MenuItem::new("Clawdmeter · Starting", true, None),
+            account: MenuItem::new("No usage data yet", true, None),
+            session: MenuItem::new("Session  –", true, None),
+            weekly: MenuItem::new("Weekly  –", true, None),
             refresh: MenuItem::new("Refresh usage", true, None),
             mute: CheckMenuItem::new("Mute chimes", true, false, None),
             open: MenuItem::new("Open Clawdmeter", true, None),
-            update: MenuItem::new("Flash firmware…", true, None),
-            settings: MenuItem::new("Settings…", true, None),
+            update: MenuItem::new("Update firmware…", true, None),
             quit: MenuItem::new("Quit Clawdmeter", true, None),
         };
-        let _ = it.menu.append_items(&[
-            &it.status,
-            &it.account,
-            &PredefinedMenuItem::separator(),
-            &it.session,
-            &it.weekly,
-            &PredefinedMenuItem::separator(),
-            &it.refresh,
-            &it.mute,
-            &PredefinedMenuItem::separator(),
-            &it.open,
-            &it.update,
-            &it.settings,
-            &PredefinedMenuItem::separator(),
-            &it.quit,
-        ]);
+        // On macOS the panel is the whole menu (its footer holds the
+        // actions); Linux and Windows list native items.
+        let separator = PredefinedMenuItem::separator;
+        let (sep1, sep2, sep3, sep4) = (separator(), separator(), separator(), separator());
+        let mut list: Vec<&dyn tray_icon::menu::IsMenuItem> = Vec::new();
+        if cfg!(not(target_os = "macos")) {
+            list.extend([&it.status as &dyn tray_icon::menu::IsMenuItem, &it.account, &sep1]);
+            if shape.session {
+                list.push(&it.session);
+            }
+            list.extend([&it.weekly as &dyn tray_icon::menu::IsMenuItem, &sep2, &it.refresh]);
+            if shape.mute {
+                list.push(&it.mute);
+            }
+            list.extend([&sep3 as &dyn tray_icon::menu::IsMenuItem, &it.open]);
+            if shape.update {
+                list.push(&it.update);
+            }
+            list.extend([&sep4 as &dyn tray_icon::menu::IsMenuItem, &it.quit]);
+        }
+        if let Err(e) = it.menu.append_items(&list) {
+            log::warn!("tray menu: {e}");
+        }
         it
     }
 
-    fn update(&self, snap: &StatusSnapshot, paths: &Paths, chimes_on: bool, now: i64) {
+    /// `pressed`: a refresh asked for and not yet served (the header shows
+    /// it as checking); `offer`: the update to offer ([`update_offer`]).
+    fn update(
+        &self,
+        snap: &StatusSnapshot,
+        paths: &Paths,
+        settings: &Settings,
+        pressed: bool,
+        offer: Option<&Update>,
+        now: i64,
+    ) {
+        #[cfg(target_os = "macos")]
+        {
+            let refresh = refresh_state(snap, pressed, now);
+            let mut h =
+                header::Header::new(snap, &paths.home, settings.pace_marker, settings.desktop_chime, refresh, now);
+            h.update = offer.cloned();
+            self.header.borrow_mut().update(&h);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (pressed, settings);
+            self.update_rows(snap, paths, now);
+            let (refresh, can_refresh) = refresh_item(snap, now);
+            self.refresh.set_text(refresh);
+            self.refresh.set_enabled(can_refresh);
+        }
+        self.mute.set_checked(snap.chimes_muted);
+        if let Some(u) = offer {
+            self.update.set_text(format!("{}…", u.label()));
+        }
+    }
+
+    /// The native status and usage rows (Linux, Windows).
+    #[cfg(not(target_os = "macos"))]
+    fn update_rows(&self, snap: &StatusSnapshot, paths: &Paths, now: i64) {
         let state = snap.tray_state();
         let mut label = state.label().to_owned();
         if snap.link == "no_adapter" {
             label = "Bluetooth unavailable".into();
         }
         self.status.set_text(format!("Clawdmeter · {label}"));
-        let account = snap.account.as_deref().map(|a| tilde(a, &paths.home));
+        let account = snap.account.as_deref().map(|a| crate::tilde(a, &paths.home));
         self.account.set_text(match (account, snap.age(now)) {
-            (Some(a), Some(age)) => format!("{a} · updated {}", ago(age)),
+            (Some(a), Some(age)) => format!("{a} · updated {}", crate::ago(age)),
             (Some(a), None) => a,
             (None, _) if snap.logged_out => "Open Claude Code to sign in".into(),
             (None, _) => "No usage data yet".into(),
         });
-        // No 5-hour limit (verified Ultra): no Session line at all. It goes
-        // back above Weekly, after the status, account and separator.
-        let listed = !snap.no_session_limit;
-        if listed != self.session_listed.get() {
-            let done = if listed { self.menu.insert(&self.session, 3) } else { self.menu.remove(&self.session) };
-            match done {
-                Ok(()) => self.session_listed.set(listed),
-                Err(e) => log::warn!("tray menu: {e}"),
-            }
-        }
-        self.session.set_text(match snap.session_pct {
-            Some(p) if snap.window_started => format!("Session  {p}%"),
-            Some(_) => "Session  not started".into(),
-            None => "Session  –".into(),
-        });
-        self.weekly.set_text(match snap.week_pct {
-            Some(p) => format!("Weekly  {p}%"),
-            None => "Weekly  –".into(),
-        });
-        self.mute.set_checked(snap.chimes_muted);
-        self.mute.set_enabled(chimes_on);
-        self.update.set_text(match snap.update_available() {
-            Some(v) => format!("Update firmware to {}…", display_version(v)),
-            None => "Flash firmware…".into(),
-        });
+        self.session.set_text(meter_row("Session", snap.session_pct, snap.window_started, snap.session_resets_at, now));
+        self.weekly.set_text(meter_row("Weekly", snap.week_pct, true, snap.week_resets_at, now));
     }
+}
+
+/// One usage row, with the device's reset countdown:
+/// "Weekly  57% · resets in 3d 4h". `–` with no reading (no data is never a
+/// zero).
+#[cfg(any(not(target_os = "macos"), test))]
+fn meter_row(label: &str, pct: Option<u32>, started: bool, resets_at: Option<i64>, now: i64) -> String {
+    match (pct, resets_at) {
+        (None, _) => format!("{label}  –"),
+        (Some(_), _) if !started => format!("{label}  not started"),
+        (Some(p), Some(t)) => format!("{label}  {p}% · resets in {}", crate::countdown(t - now)),
+        (Some(p), None) => format!("{label}  {p}%"),
+    }
+}
+
+/// The refresh item's text and whether it can be clicked (Linux, Windows).
+/// A click while the account was checked too recently still queues a check,
+/// so only a running check or a pause from Anthropic disables it.
+#[cfg(any(not(target_os = "macos"), test))]
+fn refresh_item(snap: &StatusSnapshot, now: i64) -> (String, bool) {
+    use crate::ui::overview::RefreshState;
+    match refresh_state(snap, false, now) {
+        RefreshState::Checking => ("Checking usage…".into(), false),
+        RefreshState::Paused(until) => {
+            let msg = clawdmeter_core::usage::paused_message(until, clawdmeter_core::platform::utc_offset_secs());
+            (msg.trim_end_matches('.').to_owned(), false)
+        }
+        RefreshState::Wait(_) | RefreshState::Ready => ("Refresh usage".into(), true),
+    }
+}
+
+/// The text beside the menu bar icon (macOS, `menu_bar_usage` on): the
+/// higher of the session's (spend's, on a spend-capped account) and the
+/// week's percentages, so the limit closest to stopping you. The menu shows
+/// which one it is. Nothing with no reading.
+fn menu_bar_title(snap: &StatusSnapshot) -> Option<String> {
+    if snap.logged_out {
+        return None;
+    }
+    snap.session_pct.max(snap.week_pct).map(|p| format!("{p}%"))
 }
 
 fn display_version(v: &str) -> String {
@@ -184,9 +330,15 @@ struct TrayApp {
     tray: Option<TrayIcon>,
     use_tray: bool,
     shown_state: Option<TrayState>,
+    /// The text beside the menu bar icon now (macOS).
+    shown_title: Option<String>,
+    /// The update the menu offers now ([`update_offer`]).
+    offer: Option<Update>,
     last_written: Option<StatusSnapshot>,
     last_written_at: i64,
     menu_at: i64,
+    /// When a refresh was asked for, until that check has run.
+    refresh_pressed: Option<i64>,
     chimes_muted: bool,
     /// The window process, while it runs.
     window: Option<Child>,
@@ -213,6 +365,12 @@ impl TrayApp {
         }
     }
 
+    /// Where the update icon or item leads: the Update page for the app,
+    /// the Flash page for the firmware.
+    fn offer_page(&self) -> Page {
+        self.offer.as_ref().map_or(Page::Flash, Update::page)
+    }
+
     fn send(&self, cmd: Command) {
         if let Some(d) = &self.daemon {
             let _ = d.commands.send(cmd);
@@ -221,7 +379,12 @@ impl TrayApp {
 
     fn handle(&mut self, cmd: AppCommand) -> bool {
         match cmd {
-            AppCommand::Refresh => self.send(Command::RefreshNow),
+            AppCommand::Refresh => {
+                self.send(Command::RefreshNow);
+                self.refresh_pressed = Some(unix_now());
+                // Show the spinner now, not at the next menu refresh.
+                self.menu_at = 0;
+            }
             AppCommand::Reconnect => self.send(Command::Reconnect),
             AppCommand::Forget => self.send(Command::Forget),
             AppCommand::Mute(m) => {
@@ -234,7 +397,11 @@ impl TrayApp {
                 }
             }
             AppCommand::CheckUpdate => self.check_now.store(true, Ordering::SeqCst),
-            AppCommand::SettingsChanged => self.send(Command::ReloadSettings),
+            AppCommand::SettingsChanged => {
+                // Re-read on the next tick too (the menu bar text).
+                self.settings_at = 0;
+                self.send(Command::ReloadSettings);
+            }
             AppCommand::Quit => return false,
         }
         true
@@ -247,6 +414,14 @@ impl TrayApp {
         snap.windowed = !self.use_tray;
         snap.latest_firmware = self.latest.lock().ok().and_then(|l| l.clone());
         snap.device_firmware = ipc::load_firmware_record(&self.paths).map(|r| r.ver);
+        // Debug builds only: `CLAWDMETER_DEMO_FIRMWARE_UPDATE=1.9.0` acts as if
+        // that release were out and the board older, to see the update icon
+        // (the Linux/Windows item, the Overview's nudge) without one.
+        #[cfg(debug_assertions)]
+        if let Some(v) = std::env::var("CLAWDMETER_DEMO_FIRMWARE_UPDATE").ok().filter(|v| !v.trim().is_empty()) {
+            snap.latest_firmware = Some(v.trim().to_owned());
+            snap.device_firmware = Some("0.0.1".into());
+        }
         snap
     }
 
@@ -264,16 +439,18 @@ impl TrayApp {
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             let Some(items) = &self.items else { continue };
             let id = ev.id;
-            let cmd = if id == *items.refresh.id() {
+            let cmd = if id == *items.status.id() || id == *items.session.id() || id == *items.weekly.id() {
+                Some(AppCommand::Open(Page::Overview.as_str().into()))
+            } else if id == *items.account.id() {
+                Some(AppCommand::Open(Page::Accounts.as_str().into()))
+            } else if id == *items.refresh.id() {
                 Some(AppCommand::Refresh)
             } else if id == *items.mute.id() {
                 Some(AppCommand::Mute(items.mute.is_checked()))
             } else if id == *items.open.id() {
                 Some(AppCommand::Open(Page::Overview.as_str().into()))
             } else if id == *items.update.id() {
-                Some(AppCommand::Open(Page::Flash.as_str().into()))
-            } else if id == *items.settings.id() {
-                Some(AppCommand::Open(Page::Device.as_str().into()))
+                Some(AppCommand::Open(self.offer_page().as_str().into()))
             } else if id == *items.quit.id() {
                 Some(AppCommand::Quit)
             } else {
@@ -284,6 +461,42 @@ impl TrayApp {
                     return false;
                 }
             }
+        }
+
+        // Clicks in the macOS panel.
+        #[cfg(target_os = "macos")]
+        for action in mac_menu::take_actions() {
+            use mac_menu::Action;
+            let cmd = match action {
+                Action::Refresh => AppCommand::Refresh,
+                Action::Open => AppCommand::Open(Page::Overview.as_str().into()),
+                Action::Settings => AppCommand::Open(Page::Settings.as_str().into()),
+                Action::Update => AppCommand::Open(self.offer_page().as_str().into()),
+                Action::Chime => {
+                    // The Overview's switch: saved, so it holds after a
+                    // restart and both places agree. It flips what the file
+                    // says, not the copy re-read every 5 s, so a change made
+                    // elsewhere a moment ago isn't undone. (Two clicks in one
+                    // 200 ms tick count as one.)
+                    let mut on = self.settings.desktop_chime;
+                    let saved = crate::ui::settings::write_settings(&self.paths, |s, _| {
+                        s.desktop_chime = !s.desktop_chime;
+                        on = s.desktop_chime;
+                    });
+                    match saved {
+                        Ok(()) => self.settings.desktop_chime = on,
+                        Err(e) => log::warn!("couldn't save desktop_chime: {e}"),
+                    }
+                    self.menu_at = 0;
+                    continue;
+                }
+                Action::Quit => AppCommand::Quit,
+            };
+            if !self.handle(cmd) {
+                return false;
+            }
+            // Show what changed (the speaker, the spinner) right away.
+            self.menu_at = 0;
         }
 
         // Commands from windows.
@@ -310,13 +523,45 @@ impl TrayApp {
             }
             self.shown_state = Some(state);
         }
+        // Only macOS draws a title beside the icon: Windows has none, and a
+        // StatusNotifierItem's title is the app's name in KDE's tray settings.
+        let title =
+            (cfg!(target_os = "macos") && self.settings.menu_bar_usage).then(|| menu_bar_title(&snap)).flatten();
+        if title != self.shown_title {
+            if let Some(t) = &self.tray {
+                t.set_title(title.as_deref());
+            }
+            self.shown_title = title;
+        }
+        if self.refresh_pressed.is_some_and(|at| refresh_settled(&snap, at, now)) {
+            self.refresh_pressed = None;
+            self.menu_at = 0;
+        }
         // The menu's "updated N s ago" ticks every couple of seconds; the
         // file is rewritten on change, or every few seconds as a heartbeat.
         if now - self.menu_at >= MENU_REFRESH_SECS || self.last_written.as_ref().is_none_or(|w| !w.same_content(&snap))
         {
             self.menu_at = now;
+            // A chime switched on or off, an update found or installed, the
+            // Session row gone or back: build the menu again.
+            self.offer = update_offer(&snap, &self.settings, crate::is_release_build(), crate::version());
+            let shape = MenuShape::of(&snap, &self.settings, self.offer.as_ref());
+            if let (Some(t), Some(items)) = (&self.tray, &self.items) {
+                if items.shape != shape {
+                    let items = Items::new(shape);
+                    t.set_menu(Some(Box::new(items.menu.clone())));
+                    self.items = Some(items);
+                }
+            }
             if let Some(items) = &self.items {
-                items.update(&snap, &self.paths, self.settings.alert_chime || self.settings.desktop_chime, now);
+                items.update(
+                    &snap,
+                    &self.paths,
+                    &self.settings,
+                    self.refresh_pressed.is_some(),
+                    self.offer.as_ref(),
+                    now,
+                );
             }
             if let Some(t) = &self.tray {
                 let _ = t.set_tooltip(Some(tooltip(&snap)));
@@ -341,7 +586,8 @@ impl TrayApp {
     }
 
     fn create_tray(&mut self) {
-        let items = Items::new();
+        // The first menu refresh rebuilds it with the real shape.
+        let items = Items::new(MenuShape::default());
         let built = TrayIconBuilder::new()
             .with_id("clawdmeter")
             .with_menu(Box::new(items.menu.clone()))
@@ -489,9 +735,12 @@ fn run_locked(paths: Paths, _lock: Option<std::fs::File>) -> i32 {
         tray: None,
         use_tray,
         shown_state: None,
+        shown_title: None,
+        offer: None,
         last_written: None,
         last_written_at: 0,
         menu_at: 0,
+        refresh_pressed: None,
         chimes_muted: false,
         window: None,
         latest,
@@ -529,5 +778,99 @@ mod tests {
         let ultra = StatusSnapshot { session_pct: None, no_session_limit: true, ..snap.clone() };
         assert!(tooltip(&ultra).ends_with(" · Weekly 40%"));
         assert!(!tooltip(&ultra).contains("Session"));
+    }
+
+    #[test]
+    fn meter_rows_carry_the_device_countdown() {
+        let now = 1_000_000;
+        let in_3d_4h = now + (3 * 24 + 4) * 3600 + 30;
+        assert_eq!(meter_row("Weekly", Some(57), true, Some(in_3d_4h), now), "Weekly  57% · resets in 3d 4h");
+        assert_eq!(
+            meter_row("Session", Some(34), true, Some(now + 2 * 3600 + 56 * 60), now),
+            "Session  34% · resets in 2h 56m"
+        );
+        assert_eq!(meter_row("Session", Some(34), true, None, now), "Session  34%");
+        assert_eq!(meter_row("Session", Some(0), false, None, now), "Session  not started");
+        assert_eq!(meter_row("Weekly", None, true, Some(in_3d_4h), now), "Weekly  –", "no data is never a zero");
+        assert_eq!(meter_row("Session", Some(99), true, Some(now - 10), now), "Session  99% · resets in 0m");
+    }
+
+    #[test]
+    fn refresh_item_follows_the_refresh_state() {
+        let now = 1_000;
+        assert_eq!(refresh_item(&StatusSnapshot::default(), now), ("Refresh usage".into(), true));
+        let wait = StatusSnapshot { refresh_at: Some(now + 60), ..Default::default() };
+        assert_eq!(refresh_item(&wait, now), ("Refresh usage".into(), true), "a click queues a check");
+        let polling = StatusSnapshot { polling: true, ..Default::default() };
+        assert_eq!(refresh_item(&polling, now), ("Checking usage…".into(), false));
+        let paused = StatusSnapshot { paused_until: Some(now + 600), ..Default::default() };
+        let (text, enabled) = refresh_item(&paused, now);
+        assert!(text.starts_with("Usage paused by Anthropic until ") && !text.ends_with('.'), "{text}");
+        assert!(!enabled);
+    }
+
+    #[test]
+    fn menu_bar_title_is_the_closest_limit() {
+        let snap = StatusSnapshot { session_pct: Some(34), week_pct: Some(62), ..Default::default() };
+        assert_eq!(menu_bar_title(&snap).as_deref(), Some("62%"));
+        let busy = StatusSnapshot { session_pct: Some(80), ..snap.clone() };
+        assert_eq!(menu_bar_title(&busy).as_deref(), Some("80%"));
+        let idle = StatusSnapshot { session_pct: Some(0), week_pct: Some(95), ..snap.clone() };
+        assert_eq!(menu_bar_title(&idle).as_deref(), Some("95%"), "no session running doesn't hide the week");
+        let ultra = StatusSnapshot { session_pct: None, no_session_limit: true, ..snap.clone() };
+        assert_eq!(menu_bar_title(&ultra).as_deref(), Some("62%"));
+        let spend = StatusSnapshot { session_pct: Some(40), week_pct: None, ..snap.clone() };
+        assert_eq!(menu_bar_title(&spend).as_deref(), Some("40%"));
+        assert_eq!(menu_bar_title(&StatusSnapshot::default()), None, "no data is never a zero");
+        let out = StatusSnapshot { logged_out: true, ..snap };
+        assert_eq!(menu_bar_title(&out), None);
+    }
+
+    #[test]
+    fn the_menu_lists_only_what_applies() {
+        let quiet = Settings::from_config(&Default::default(), &Paths::under(std::path::Path::new("/home/u")), None);
+        let shape = MenuShape::of(&StatusSnapshot::default(), &quiet, None);
+        assert!(!shape.mute, "no chime on: nothing to mute");
+        assert!(!shape.update, "no newer release: no firmware item");
+        assert_eq!(shape.session, cfg!(not(target_os = "macos")), "the macOS header draws the meters");
+
+        // Native items on Linux and Windows; footer icons in the macOS panel.
+        let native = cfg!(not(target_os = "macos"));
+        let chimes = Settings { desktop_chime: true, ..quiet.clone() };
+        assert_eq!(MenuShape::of(&StatusSnapshot::default(), &chimes, None).mute, native);
+        let older = StatusSnapshot {
+            latest_firmware: Some("2.5.0".into()),
+            device_firmware: Some("2.4.0".into()),
+            ..Default::default()
+        };
+        let offer = update_offer(&older, &quiet, false, "2.4.0");
+        assert_eq!(MenuShape::of(&older, &quiet, offer.as_ref()).update, native);
+        let ultra = StatusSnapshot { no_session_limit: true, ..Default::default() };
+        assert!(!MenuShape::of(&ultra, &quiet, None).session);
+    }
+
+    #[test]
+    fn the_update_offer_puts_the_app_first() {
+        let settings = Settings::from_config(&Default::default(), &Paths::under(std::path::Path::new("/home/u")), None);
+        let both_behind = StatusSnapshot {
+            latest_firmware: Some("1.9.0".into()),
+            device_firmware: Some("1.8.0".into()),
+            ..Default::default()
+        };
+        let app = Some(Update::App("v1.9.0".into()));
+        let firmware = Some(Update::Firmware("v1.9.0".into()));
+        assert_eq!(update_offer(&both_behind, &settings, true, "1.8.0"), app, "the app first");
+        assert_eq!(update_offer(&both_behind, &settings, true, "1.9.0"), firmware, "then the board");
+        assert_eq!(update_offer(&both_behind, &settings, false, "1.8.0"), firmware, "dev builds get no app offer");
+        let skipped = Settings { skipped_update: Some("1.9.0".into()), ..settings.clone() };
+        assert_eq!(update_offer(&both_behind, &skipped, true, "1.8.0"), None, "the firmware waits for the app");
+        let no_checks = Settings { update_check: false, ..settings.clone() };
+        assert_eq!(update_offer(&both_behind, &no_checks, true, "1.8.0"), None);
+        assert_eq!(update_offer(&both_behind, &no_checks, true, "1.9.0"), firmware, "as the Overview's nudge does");
+        let board_current = StatusSnapshot { device_firmware: Some("1.9.0".into()), ..both_behind.clone() };
+        assert_eq!(update_offer(&board_current, &settings, true, "1.8.0"), app, "the board flashed elsewhere");
+        assert_eq!(update_offer(&board_current, &settings, true, "1.9.0"), None);
+        assert_eq!(Update::App("v1.9.0".into()).label(), "Update Clawdmeter to v1.9.0");
+        assert_eq!(Update::Firmware("v1.9.0".into()).label(), "Update firmware to v1.9.0");
     }
 }

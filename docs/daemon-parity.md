@@ -143,7 +143,7 @@ saves it; the window edits it in place, keeping comments and unknown keys.
 
 | Behaviour | Old daemons | Rust | Notes |
 |---|---|---|---|
-| Tray | W only: green/amber/red bubble, "Connected · last update HH:MM", Start at login, Quit | Every OS: status, account and both meters, Refresh usage, Mute chimes, Open Clawdmeter, Flash firmware (Update firmware when a newer release exists), Settings, Quit (`clawdmeter-app/src/tray/`) | |
+| Tray | W only: green/amber/red bubble, "Connected · last update HH:MM", Start at login, Quit | Every OS: status, account and both meters with their reset countdowns. Linux/Windows: native items, then Refresh usage, Mute chimes until restart (while a chime is on), Open Clawdmeter, Update Clawdmeter or Update firmware (while one is behind the latest release), Quit. macOS: one drawn panel, as on the device, with a reload button and a footer (Open Clawdmeter; update, computer-chime switch, Settings and Quit icons), and optionally the higher % beside the icon (`clawdmeter-app/src/tray/`) | |
 | Error notification | W: toast when entering the error state | None; the tray state and status window show it | |
 | Daemon thread crash | W: supervised, restarted with backoff | Release builds abort on panic; the LaunchAgent and `clawdmeter.service` restart it, the XDG entry and Run value don't | |
 | Log file | L: journal · M: `~/Library/Logs/claude-usage-daemon.{out,err}.log` · W: `%LOCALAPPDATA%\Clawdmeter\daemon.log`, 512 KB × 3 | Tray: `~/.config/clawdmeter/daemon.log` (previous run kept as `.log.1`) · `--daemon`: stderr (journal) · LaunchAgent: `~/Library/Logs/clawdmeter.log` | No size cap within one run. |

@@ -47,7 +47,21 @@ is faked behind `FlashHardware`.
   Windows bonded-address fallback (PnP / `CLAWDMETER_BLE_ADDRESS`).
 - `clawdmeter-flash`: downloads the release `manifest.json`, matches boards by
   chip + flash size, writes with espflash.
-- `clawdmeter-app`: the `clawdmeter` binary. Tray (`tray/`, ksni on Linux),
+- `clawdmeter-app`: the `clawdmeter` binary. Tray (`tray/`, ksni on Linux;
+  on macOS the whole menu is one AppKit panel, `tray/mac_menu.rs`, put into
+  muda's NSMenu: the device's home screen, a reload button in its corner,
+  and a footer with Open Clawdmeter and icons for an update (`tray::
+  update_offer`: while the app is behind, its update, to the Update page,
+  when the sidebar would announce it, else nothing; once the app is current,
+  the board's firmware, to Flash; the Linux/Windows item does the same), the computer's chime (switches `desktop_chime` like
+  the Overview; Linux/Windows keep the until-restart Mute chimes), Settings
+  and Quit. The panel's buttons set
+  `mac_menu::take_actions` flags for the tick; the panel itself isn't
+  clickable. Its content is `tray/header.rs`, and `--example tray_header --
+  <dir>` renders it to PNGs. Icons are the window's bundled Lucide SVGs,
+  through resvg, as template images. Linux and Windows list native items;
+  muda inserts and removes by position, so the tray never edits the item
+  set but builds a new menu when `tray::MenuShape` changes),
   window (`ui/`), `daemon.rs` (drives the engine on its own thread: 0.5 s
   tick, config re-read every 5 s and on `Command::ReloadSettings`),
   `hooks/` (`clawdmeter hook alert|clear|event` and the settings.json
@@ -62,7 +76,9 @@ is faked behind `FlashHardware`.
   [--manifest PATH]`; `--ports`; `--info PORT`; `hook MODE [event]`.
 - Env: `CLAWDMETER_LOG`, `CLAWDMETER_NO_TRAY`, `POLL_INTERVAL`,
   `CLAUDE_CONFIG_DIR` (default account), `CLAWDMETER_BLE_ADDRESS`,
-  `CLAWDMETER_DECORATIONS`, `CLAWDMETER_BUTTON_LAYOUT`.
+  `CLAWDMETER_DECORATIONS`, `CLAWDMETER_BUTTON_LAYOUT`,
+  `CLAWDMETER_DEMO_FIRMWARE_UPDATE` (debug builds: pretend that firmware
+  release is out and the board older, for the tray's update icon).
 - State lives in one dir, `~/.config/clawdmeter/` (Windows:
   `%LOCALAPPDATA%\Clawdmeter\`): `config`, `events.log`, `attention`,
   `clear-<sid>`, `ble-address`, `daemon.log`, `usage-blocks.json`, app
@@ -73,7 +89,9 @@ is faked behind `FlashHardware`.
   this computer via rodio, ALSA on Linux), `clock`, `liveliness` (1–5,
   default 3: the Device page's Animation silliness slider, sent as `lv`),
   `attention_anim` (`off`/`10s`/`30s`/`2m`, default `2m`, sent as `aa`
-  seconds), `pace_marker` (default off, sent as `pm`), `button_primary`
+  seconds), `pace_marker` (default off, sent as `pm`), `menu_bar_usage`
+  (default off; macOS only: the higher of the session and weekly
+  percentages as the status item's title, `tray::menu_bar_title`), `button_primary`
   (default `space`), `button_secondary` (default `shift-tab`) and
   `button_pwr` (default `brightness`): `none`, `space`, `shift-tab`, `tab`,
   `enter`, `escape`, `brightness`, a media key (`play-pause`,
