@@ -9,8 +9,19 @@
 //
 // Pins are from Waveshare's schematic and ESP-IDF demo. The schematic labels
 // the RGB lines R1..R5 / B1..B5 (R0/B0 are NC); here they are 0-based.
+//
+// BOARD_LCD28C (env waveshare_lcd_28c, extends this env) builds the
+// Waveshare ESP32-S3-Touch-LCD-2.8C from this folder: same wiring, but a GT911
+// touch controller, its own ST7701S init table and vsync porches, and its
+// demo's battery calibration. The plain 2.8 (no touch) isn't supported.
 
+#ifdef BOARD_LCD28C
+#define BOARD_NAME           "Waveshare LCD 2.8C"
+#define BOARD_LOG_TAG        "LCD-2.8C"
+#else
 #define BOARD_NAME           "Waveshare LCD 2.1"
+#define BOARD_LOG_TAG        "LCD-2.1"
+#endif
 
 // ---- Display geometry ----
 #define LCD_WIDTH            480
@@ -38,6 +49,15 @@
 #define LCD_B3               47
 #define LCD_B4               21
 
+// ---- RGB vsync porches (each board's Waveshare demo; hsync 50/8/10 on both) ----
+#ifdef BOARD_LCD28C
+#define LCD_VSYNC_PULSE       2
+#define LCD_VSYNC_BACK       18
+#else
+#define LCD_VSYNC_PULSE       3
+#define LCD_VSYNC_BACK        8
+#endif
+
 // ---- Software SPI for ST7701S init commands (CS is expander EXIO3) ----
 #define LCD_SPI_SCK           2
 #define LCD_SPI_MOSI          1
@@ -49,8 +69,15 @@
 #define IIC_SDA              15
 #define IIC_SCL               7
 
-// ---- Touch (CST820) ----
+// ---- Touch: CST820 (2.1) or GT911 (2.8C) ----
+#ifdef BOARD_LCD28C
+// board_init() holds INT low through the GT911's reset, which latches 0x5D
+// (the 2.8C demo's address); SensorLib also probes 0x14.
+#define GT911_ADDR_PRIMARY   0x5D
+#define GT911_ADDR_ALT       0x14
+#else
 #define CST820_ADDR          0x15
+#endif
 #define TP_INT               16
 // TP_RST is expander EXIO2.
 
@@ -66,7 +93,13 @@
 
 // ---- Battery (ETA6098 charger, no I2C; 200k/100k divider on BAT_ADC) ----
 #define BAT_ADC_PIN           4
+#ifdef BOARD_LCD28C
+// The 2.8C demo's BAT_Driver computes mV * 3 / 0.980952 (its
+// Measurement_offset calibration), about 2 % up.
+#define BAT_VOLT_DIVIDER     (3.0f / 0.980952f)
+#else
 #define BAT_VOLT_DIVIDER     3.0f
+#endif
 
 // ---- Buttons ----
 #define BTN_BACK_GPIO        0     // BOOT — primary, Space (PTT)

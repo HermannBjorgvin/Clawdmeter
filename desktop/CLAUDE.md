@@ -57,7 +57,26 @@ is faked behind `FlashHardware`.
   Windows bonded-address fallback (PnP / `CLAWDMETER_BLE_ADDRESS`).
 - `clawdmeter-flash`: downloads the release `manifest.json`, matches boards by
   chip + flash size, writes with espflash.
-- `clawdmeter-app`: the `clawdmeter` binary. Tray (`tray/`, ksni on Linux),
+- `clawdmeter-app`: the `clawdmeter` binary. Tray (`tray/`, ksni on Linux;
+  on macOS the whole menu is one AppKit panel, `tray/mac_menu.rs`, put into
+  muda's NSMenu: the device's home screen, a reload button in its corner,
+  and a footer with Open Clawdmeter and icons for an update (`tray::
+  update_offer`: while the app is behind, its update, to the Update page,
+  when the sidebar would announce it, else nothing; once the app is current,
+  the board's firmware, to Flash; the Linux/Windows item does the same), the computer's chime (switches `desktop_chime` like
+  the Overview; the Linux/Windows item "Chime on this computer" is the
+  same switch), Settings
+  and Quit. The panel's buttons set
+  `mac_menu::take_actions` flags for the tick; the panel itself isn't
+  clickable. Its content is `tray/header.rs`, and `--example tray_header --
+  <dir>` renders it to PNGs. Icons are the window's bundled Lucide SVGs,
+  through resvg, as template images. Linux and Windows list native items;
+  muda inserts and removes by position, so the tray never edits the item
+  set but builds a new menu when `tray::MenuShape` changes; their ids are
+  fixed strings (`"open"`, `"quit"`, …), so a click still matches after a
+  rebuild. `Items` is per platform: on macOS just the menu and the panel.
+  `StatusSnapshot::spend` marks a spend-capped account, drawn as one Spend
+  meter in the panel, the rows and the Overview),
   window (`ui/`), `daemon.rs` (drives the engine on its own thread: 0.5 s
   tick, config re-read every 5 s and on `Command::ReloadSettings`),
   `hooks/` (`clawdmeter hook alert|clear|event` and the settings.json
@@ -72,7 +91,12 @@ is faked behind `FlashHardware`.
   [--manifest PATH]`; `--ports`; `--info PORT`; `hook MODE [event]`.
 - Env: `CLAWDMETER_LOG`, `CLAWDMETER_NO_TRAY`, `POLL_INTERVAL`,
   `CLAUDE_CONFIG_DIR` (default account), `CLAWDMETER_BLE_ADDRESS`,
-  `CLAWDMETER_DECORATIONS`, `CLAWDMETER_BUTTON_LAYOUT`.
+  `CLAWDMETER_DECORATIONS`, `CLAWDMETER_BUTTON_LAYOUT`,
+  `CLAWDMETER_DEMO_FIRMWARE_UPDATE` (debug builds: pretend that firmware
+  release is out and the board older, for the tray's update icon),
+  `CLAWDMETER_DEMO_USAGE=1` (debug builds: the tray shows made-up usage,
+  the same on every OS; with the pace marker on, `--example tray_header`'s
+  `compare` render matches it, for side-by-side screenshots).
 - State lives in one dir, `~/.config/clawdmeter/` (Windows:
   `%LOCALAPPDATA%\Clawdmeter\`): `config`, `events.log`, `attention`,
   `clear-<sid>`, `ble-address`, `daemon.log`, `usage-blocks.json`, app
@@ -83,7 +107,9 @@ is faked behind `FlashHardware`.
   this computer via rodio, ALSA on Linux), `clock`, `liveliness` (1–5,
   default 3: the Device page's Animation silliness slider, sent as `lv`),
   `attention_anim` (`off`/`10s`/`30s`/`2m`, default `2m`, sent as `aa`
-  seconds), `pace_marker` (default off, sent as `pm`), `button_primary`
+  seconds), `pace_marker` (default off, sent as `pm`), `menu_bar_usage`
+  (default off; macOS only: the higher of the session and weekly
+  percentages as the status item's title, `tray::menu_bar_title`), `button_primary`
   (default `space`), `button_secondary` (default `shift-tab`) and
   `button_pwr` (default `brightness`): `none`, `space`, `shift-tab`, `tab`,
   `enter`, `escape`, `brightness`, a media key (`play-pause`,
@@ -101,10 +127,12 @@ is faked behind `FlashHardware`.
   default, or `solarized`: the OS-following themes in `themes::FOLLOWING`; a
   preset id from `themes::PRESETS`; or `custom`; the old default
   `clawd` and unknown values read as `system`) and `color_<token>`
-  (`rrggbb`, no `#`; the custom theme's colours, all eleven written once it
+  (`rrggbb`, no `#`; the custom theme's colours, all twelve written once it
   has been chosen, which is how it knows not to start from the current theme
   again); the chosen palette's
-  eleven colours are sent as `th` (`Settings::colors`; System resolves to
+  first eleven colours are sent as `th` and the twelfth, `color_fable` (the
+  Fable overlay; each preset has its scheme's own purple), as `fc`
+  (`Settings::colors`; System resolves to
   Dark or Light, Solarized to Solarized Dark or Light, by the OS appearance,
   `platform::AppearanceWatch`: the xdg-desktop-portal `color-scheme` over
   D-Bus, macOS `AppleInterfaceStyle`,
@@ -182,6 +210,13 @@ Per account (`probe.rs`, `oauth.rs`):
   shown one, so the jump is never a rise.
   The plan name (`planDisplayName`, `rate_limit_tier`) isn't used: an
   unverified Ultra account still has a temporary 5-hour limit.
+- **Fable's weekly window** (`UsageReading::fable`, sent as `wf`): the
+  endpoint's `limits[]` `weekly_scoped` row scoped to the model named
+  Fable, the `/usage` line `Current week (Fable)`, or the probe's
+  `seven_day_overage_included` window (Claude Code's "Fable limit"; Haiku
+  answers rarely carry it). A probe reading without it keeps the last one
+  (`probe::carry_models`, rolled over like `not_started`'s weeks); nothing
+  asks the endpoint for it.
 - `claude` is found via `claude_path` → `PATH` / install dirs → the newest
   Claude-desktop-bundled build (`<userData>/claude-code/<version>/<hash>/claude`;
   verified on Linux, the macOS/Windows paths come from the desktop app's code
@@ -233,7 +268,7 @@ Per account (`probe.rs`, `oauth.rs`):
   also queues `settings-changed` on `<state>/app-commands`; the tray (it
   takes the queue every 200 ms) forwards it as `Command::ReloadSettings`, so
   a device setting goes out within about a second. `Engine::next_write` sends
-  a changed `lv`/`aa`/`pm`/`k1`–`k3`/`th` or clock format (`tf`, off
+  a changed `lv`/`aa`/`pm`/`k1`–`k3`/`th`/`fc` or clock format (`tf`, off
   included) at once, unless the numbers are stale (then it waits for the
   next good poll).
   The 5 s re-read stays for hand edits and `--daemon` without a tray.

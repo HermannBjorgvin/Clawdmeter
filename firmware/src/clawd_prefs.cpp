@@ -52,6 +52,9 @@ void theme_prefs_load(void) {
         clawd_anim_recolor();
         Serial.printf("Theme: %s (saved)\n", hex);
     }
+    prefs.begin("clawdmeter", true);
+    if (prefs.isKey("fable_col")) theme_fable_set((uint32_t)prefs.getInt("fable_col", (int32_t)theme_fable_hex()));
+    prefs.end();
 }
 
 static void save(const char* key, uint8_t v) {
@@ -107,6 +110,18 @@ void button_action_set(ButtonSlot slot, int32_t action) {
 
 int32_t button_action_get(ButtonSlot slot) {
     return (slot >= 0 && slot < BTN_SLOT_COUNT) ? btn_actions[slot] : BTN_ACT_NONE;
+}
+
+// Kept apart from the palette, as its own `fc`.
+void fable_color_set(uint32_t rgb) {
+    if (board_caps().mono_panel) return;   // 1-bit: no overlay to colour
+    if (!theme_fable_set(rgb)) return;
+    Preferences prefs;
+    prefs.begin("clawdmeter", false);
+    prefs.putInt("fable_col", (int32_t)theme_fable_hex());
+    prefs.end();
+    ui_apply_theme();
+    Serial.printf("Fable colour: %06lx\n", (unsigned long)theme_fable_hex());
 }
 
 void theme_set(const uint32_t p[TH_COUNT]) {

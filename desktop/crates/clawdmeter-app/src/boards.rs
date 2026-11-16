@@ -38,7 +38,7 @@ pub struct BoardInfo {
 }
 
 /// Every hardware env in `firmware/platformio.ini` (not `sim` / `native`).
-pub const BOARDS: [BoardInfo; 29] = [
+pub const BOARDS: [BoardInfo; 30] = [
     BoardInfo {
         env: "waveshare_amoled_216",
         name: "AMOLED 2.16",
@@ -106,6 +106,18 @@ pub const BOARDS: [BoardInfo; 29] = [
         width: 480,
         height: 480,
         buy_url: "https://www.waveshare.com/esp32-s3-touch-lcd-2.1.htm?&aff_id=149786",
+        summary: "480×480 · round",
+        chip: "ESP32-S3",
+        pwr_button: false,
+        buttons: &[(Button::Primary, "BOOT")],
+    },
+    BoardInfo {
+        env: "waveshare_lcd_28c",
+        name: "LCD 2.8C",
+        product: "Waveshare ESP32-S3-Touch-LCD-2.8C",
+        width: 480,
+        height: 480,
+        buy_url: "https://www.waveshare.com/esp32-s3-touch-lcd-2.8c.htm?&aff_id=149786",
         summary: "480×480 · round",
         chip: "ESP32-S3",
         pwr_button: false,
@@ -405,6 +417,16 @@ impl BoardInfo {
 mod tests {
     use super::*;
 
+    /// The firmware board folder an env builds from: variant envs share their
+    /// base board's folder (`<env>_landscape`, and the LCD-2.8C built from the
+    /// LCD-2.1's folder with `BOARD_LCD28C`).
+    fn firmware_dir(env: &str) -> &str {
+        match env {
+            "waveshare_lcd_28c" => "waveshare_lcd_21",
+            env => env.trim_end_matches("_landscape"),
+        }
+    }
+
     #[test]
     fn every_firmware_env_is_listed() {
         let ini = include_str!("../../../../firmware/platformio.ini");
@@ -430,7 +452,7 @@ mod tests {
             })
         };
         for b in BOARDS {
-            let dir = boards.join(b.env.trim_end_matches("_landscape"));
+            let dir = boards.join(firmware_dir(b.env));
             let caps = std::fs::read_to_string(dir.join("caps.cpp")).unwrap();
             let value = caps.split(".button_count").nth(1).and_then(|r| r.split(',').next()).unwrap();
             let firmware = if value.contains("BOARD_HAS_SECONDARY_BUTTON") {
@@ -456,8 +478,7 @@ mod tests {
     fn pwr_buttons_match_the_firmware() {
         let boards = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../firmware/src/boards");
         for b in BOARDS {
-            let caps =
-                std::fs::read_to_string(boards.join(b.env.trim_end_matches("_landscape")).join("caps.cpp")).unwrap();
+            let caps = std::fs::read_to_string(boards.join(firmware_dir(b.env)).join("caps.cpp")).unwrap();
             let value = caps.split(".has_pwr_button").nth(1).and_then(|r| r.split(',').next()).unwrap();
             let firmware = match value.trim_start_matches([' ', '=']).trim() {
                 "true" => true,

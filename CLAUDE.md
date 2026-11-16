@@ -36,6 +36,7 @@ Nested `CLAUDE.md` files load when you read or edit a file in their folder.
 | `waveshare_lcd_147_c6` | Waveshare ESP32-C6-Touch-LCD-1.47 | C6 (no PSRAM), JD9853 SPI TFT 320×172 landscape, BOOT (GPIO 9) as PWR |
 | `waveshare_lcd_4` | Waveshare ESP32-S3-Touch-LCD-4 | ST7701 RGB 480×480, one button; CH32V003 expander (V4.0: buzzer, opt-in battery via `BOARD_HAS_BATTERY`) or TCA9554 (earlier) |
 | `waveshare_lcd_21` | Waveshare ESP32-S3-Touch-LCD-2.1 / 2.1B | ST7701S RGB 480×480 round, CST820 touch, TCA9554, one button |
+| `waveshare_lcd_28c` | Waveshare ESP32-S3-Touch-LCD-2.8C | ST7701S RGB 480×480 round, GT911 touch, TCA9554, one button |
 | `lilygo_t4s3` | LILYGO T4-S3 | RM690B0 AMOLED 450×600, CST226SE touch, SY6970 charger |
 | `waveshare_lcd_183` | Waveshare ESP32-S3-Touch-LCD-1.83 | ST7789P SPI 240×284, CST816 touch, AXP2101 |
 | `esp32_s3_4848s040` | Guition-style ESP32-S3 4848S040 | ST7701S RGB 480×480, GT911 touch, no buttons readable |
@@ -87,9 +88,11 @@ The app writes one complete JSON object per write to RX
 (`4c41555a-…-0002`); the firmware buffer is 512 B and the app caps writes at
 500. Every write is a full update. Fields and UUIDs: `docs/protocol.md`.
 
-- Usage: `s sr w wr st acct tp pd rd t tf c ok`. `sr`/`wr` = -1 means not
-  started or unknown. `acct:"ent"` is a spend-capped account: `s` is spend %,
-  `tp/pd/rd` the billing period. `acct:"week"` has no 5-hour limit (verified
+- Usage: `s sr w wr wf st acct tp pd rd t tf c ok`. `sr`/`wr` = -1 means not
+  started or unknown. `wf` is Fable's weekly % of its own limit, drawn
+  inside the weekly bar at half its width (`FABLE_WEEKLY_SHARE_PCT` on both
+  sides); absent = unknown, never 0. `acct:"ent"` is a spend-capped
+  account: `s` is spend %, `tp/pd/rd` the billing period. `acct:"week"` has no 5-hour limit (verified
   Ultra, the endpoint's `five_hour: null`): `s`/`sr` stay 0/-1 for older
   firmware, and the device shows `w`/`wr` alone as its main meter.
   `{"ok":false}` means no data.
@@ -102,9 +105,11 @@ The app writes one complete JSON object per write to RX
   primary, secondary and PWR buttons do: presets 0–6, keyboard shortcuts
   and media keys as bit fields, `button_action.h`), `lv` (liveliness 1–5), `aa`
   (attention animation seconds: 120, 30, 10, 0 = off; only his animation,
-  not the alert), `pm` (pace marker on the usage bars, `pace.h`) and `th`
-  (the palette, 11 hex colours run together, `theme_palette.h`). The device
-  keeps them in NVS (`clawd_prefs.cpp`) so they apply from boot.
+  not the alert), `pm` (pace marker on the usage bars, `pace.h`), `th`
+  (the palette, 11 hex colours run together, `theme_palette.h`; never any
+  other length, or older firmware drops it) and `fc` (the Fable overlay's
+  colour, 6 hex digits, `fable.h`). The device keeps them in NVS
+  (`clawd_prefs.cpp`) so they apply from boot.
 - Device → app: `0x01` on REQ (`…-0004`) when it has no data yet;
   `{"dismiss":true}` on TX (`…-0003`) when a tap or the 2-minute timeout ends
   an alert. The app clears its own alert and doesn't echo a clear back. Alerts

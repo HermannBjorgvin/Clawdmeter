@@ -38,6 +38,8 @@ frames.
 | `--accounts retrying` | A second, rate-limited account |
 | `--refresh wait\|checking` | Overview refresh button waiting out the gap / mid-check |
 | `--session idle\|week` | Session not started / no 5-hour limit (weekly meter only) |
+| `--fable PCT` | A Fable weekly window at PCT % of its limit: the purple strip in the Overview's weekly meter (half the bar at 100) |
+| `--week PCT` | The weekly meter at PCT % (default 62) |
 | `--hooks-preview`, `--shop`, `--advanced` | Hooks file preview, board shop links, advanced settings |
 | `--buttons custom`, `--edit primary\|secondary\|pwr`, `--record` | A held shortcut on the secondary button and a media key on PWR; a button's editor open; it listening for a shortcut |
 | `--firmware-skipped` | The fake firmware release skipped, as the Overview's "Skip this update" does: no Overview nudge or Flash badge, the Device page still offers it |

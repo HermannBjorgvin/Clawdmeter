@@ -39,9 +39,6 @@ pub enum Command {
     Reconnect,
     /// Forget the cached device address, then look again (after swapping boards).
     Forget,
-    /// Mute the alert chimes (device and this computer) for this run,
-    /// whatever the config says.
-    SetChimesMuted(bool),
     /// Re-read the config now (the window saved it), not at the next
     /// periodic re-read.
     ReloadSettings,
@@ -117,15 +114,11 @@ pub fn spawn(paths: Paths) -> DaemonHandle {
     DaemonHandle { commands: cmd_tx, status: st_rx, thread: Some(thread) }
 }
 
-/// Re-read the config into the engine, keeping a tray mute and finding
-/// `claude` again when its path changed (or it wasn't found). An unreadable
-/// file keeps the settings in use.
-fn reload_settings(paths: &Paths, engine: &mut Engine, claude: &mut Option<PathBuf>, chimes_muted: bool) {
-    let Ok(mut s) = Settings::load(paths) else { return };
-    if chimes_muted {
-        s.alert_chime = false;
-        s.desktop_chime = false;
-    }
+/// Re-read the config into the engine, finding `claude` again when its path
+/// changed (or it wasn't found). An unreadable file keeps the settings in
+/// use.
+fn reload_settings(paths: &Paths, engine: &mut Engine, claude: &mut Option<PathBuf>) {
+    let Ok(s) = Settings::load(paths) else { return };
     if s.claude_path != engine.settings().claude_path || claude.is_none() {
         *claude = usage::find_claude(s.claude_path.as_deref(), &paths.home);
     }
@@ -200,7 +193,6 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let mut last_settings = unix_now();
     let mut last_link_check = unix_now();
     let mut last_write_at = None;
-    let mut chimes_muted = false;
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -225,21 +217,10 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     link_state = LinkState::Searching;
                     reconnect.retry_in(now, 0);
                 }
-                Ok(Command::SetChimesMuted(m)) => {
-                    chimes_muted = m;
-                    if m {
-                        let mut s = engine.settings().clone();
-                        s.alert_chime = false;
-                        s.desktop_chime = false;
-                        engine.update_settings(s);
-                    } else {
-                        reload_settings(&paths, &mut engine, &mut claude, false);
-                    }
-                }
                 Ok(Command::ReloadSettings) => {
                     // This tick's write check sees the new settings.
                     last_settings = now;
-                    reload_settings(&paths, &mut engine, &mut claude, chimes_muted);
+                    reload_settings(&paths, &mut engine, &mut claude);
                 }
                 Ok(Command::Shutdown) | Err(mpsc::error::TryRecvError::Disconnected) => {
                     if let Some(l) = link.take() {
@@ -256,7 +237,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         // this catches hand edits and a `--daemon` with no tray) ----
         if now - last_settings >= SETTINGS_EVERY {
             last_settings = now;
-            reload_settings(&paths, &mut engine, &mut claude, chimes_muted);
+            reload_settings(&paths, &mut engine, &mut claude);
         }
 
         // ---- fast clock ----

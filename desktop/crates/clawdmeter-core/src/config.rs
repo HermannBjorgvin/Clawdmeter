@@ -233,8 +233,10 @@ impl AttentionAnim {
     }
 }
 
-/// One of the device's UI colours, in the order the payload's `th` carries
-/// them (`firmware/src/theme_palette.h`).
+/// One of the device's UI colours: the eleven the payload's `th` carries, in
+/// its order (`firmware/src/theme_palette.h`), then the Fable overlay's,
+/// which goes out on its own as `fc` so `th` stays the length older firmware
+/// accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorToken {
     /// Screen background.
@@ -259,11 +261,30 @@ pub enum ColorToken {
     Clawd,
     /// The screensaver face's eyes.
     Eye,
+    /// The Fable overlay in the weekly bar (`fc`, not part of `th`).
+    Fable,
 }
 
 impl ColorToken {
-    /// Every token, in `th` order (also the Device page's order).
-    pub const ALL: [ColorToken; 11] = [
+    /// Every token: `th`'s eleven in order, then Fable (also the Device
+    /// page's order).
+    pub const ALL: [ColorToken; 12] = [
+        ColorToken::Bg,
+        ColorToken::Panel,
+        ColorToken::Text,
+        ColorToken::Dim,
+        ColorToken::Accent,
+        ColorToken::Green,
+        ColorToken::Amber,
+        ColorToken::Red,
+        ColorToken::BarBg,
+        ColorToken::Clawd,
+        ColorToken::Eye,
+        ColorToken::Fable,
+    ];
+
+    /// The tokens `th` carries.
+    pub const TH: [ColorToken; 11] = [
         ColorToken::Bg,
         ColorToken::Panel,
         ColorToken::Text,
@@ -291,6 +312,7 @@ impl ColorToken {
             ColorToken::BarBg => "color_bar_bg",
             ColorToken::Clawd => "color_clawd",
             ColorToken::Eye => "color_eye",
+            ColorToken::Fable => "color_fable",
         }
     }
 
@@ -308,6 +330,7 @@ impl ColorToken {
             ColorToken::BarBg => "Bar track",
             ColorToken::Clawd => "Clawd",
             ColorToken::Eye => "Face eyes",
+            ColorToken::Fable => "Fable",
         }
     }
 
@@ -316,15 +339,17 @@ impl ColorToken {
         Palette::default().get(self)
     }
 
-    /// Its place in `th`: the variants are declared in [`Self::ALL`]'s order.
+    /// Its place in [`Palette`] (and `th`): the variants are declared in
+    /// [`Self::ALL`]'s order.
     fn index(self) -> usize {
         self as usize
     }
 }
 
-/// The device's colours (`color_*` keys, sent as `th`).
+/// The device's colours (`color_*` keys): [`ColorToken::TH`]'s eleven are
+/// sent as `th`, Fable's as `fc`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Palette([u32; 11]);
+pub struct Palette([u32; 12]);
 
 impl Default for Palette {
     fn default() -> Self {
@@ -333,8 +358,8 @@ impl Default for Palette {
 }
 
 impl Palette {
-    /// From eleven 0xRRGGBB colours in [`ColorToken::ALL`] order.
-    pub const fn new(colors: [u32; 11]) -> Self {
+    /// From twelve 0xRRGGBB colours in [`ColorToken::ALL`] order.
+    pub const fn new(colors: [u32; 12]) -> Self {
         Palette(colors)
     }
 
@@ -348,15 +373,32 @@ impl Palette {
         self.0[t.index()] = rgb & 0xff_ffff;
     }
 
-    /// The payload's `th`: every colour as 6 lower-case hex digits, run together.
+    /// The payload's `th`: [`ColorToken::TH`]'s colours as 6 lower-case hex
+    /// digits each, run together (66 digits; Fable's isn't one of them).
     pub fn to_hex(&self) -> String {
-        self.0.iter().map(|c| format!("{c:06x}")).collect()
+        ColorToken::TH.iter().map(|&t| format!("{:06x}", self.get(t))).collect()
+    }
+
+    /// The payload's `fc`: Fable's colour.
+    pub fn fable(&self) -> Rgb {
+        Rgb(self.get(ColorToken::Fable))
     }
 }
 
+/// Serialized as `th` ([`Palette::to_hex`]).
 impl serde::Serialize for Palette {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_hex())
+    }
+}
+
+/// One 0xRRGGBB colour, serialized as six lower-case hex digits (`fc`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rgb(pub u32);
+
+impl serde::Serialize for Rgb {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&format!("{:06x}", self.0 & 0xff_ffff))
     }
 }
 
@@ -459,6 +501,9 @@ pub struct Settings {
     pub attention_anim: AttentionAnim,
     /// Pace marker on the device's usage bars (`pm`, default off).
     pub pace_marker: bool,
+    /// The main meter's percentage beside the macOS menu bar icon
+    /// (`menu_bar_usage`, default off).
+    pub menu_bar_usage: bool,
     /// What the device's primary, secondary and PWR buttons do, by
     /// [`Button::index`] (`button_primary`, `button_secondary`, `button_pwr`;
     /// sent as `k1`, `k2`, `k3`).
@@ -620,6 +665,7 @@ impl Settings {
             liveliness: cfg.get("liveliness").map(parse_liveliness).unwrap_or(DEFAULT_LIVELINESS),
             attention_anim: cfg.get("attention_anim").map(AttentionAnim::parse).unwrap_or_default(),
             pace_marker: on_off(cfg.get("pace_marker"), false),
+            menu_bar_usage: on_off(cfg.get("menu_bar_usage"), false),
             buttons: Button::ALL.map(|b| {
                 cfg.get(b.config_key()).map_or(b.default_action(), |v| ButtonAction::parse(v, b.default_action()))
             }),
@@ -686,12 +732,13 @@ impl Settings {
         }
         let oo = |b: bool| if b { "on" } else { "off" };
         // A changed chime is written under its new name; the old one goes.
-        // The pace marker rides along (it has no old name).
+        // The other switches ride along (they have no old name).
         for (key, old, now, was) in [
             ("reset_chime", "chime", self.reset_chime, current.reset_chime),
             ("alert_chime", "beep", self.alert_chime, current.alert_chime),
             ("desktop_chime", "", self.desktop_chime, current.desktop_chime),
             ("pace_marker", "", self.pace_marker, current.pace_marker),
+            ("menu_bar_usage", "", self.menu_bar_usage, current.menu_bar_usage),
         ] {
             if now != was {
                 cfg.set(key, oo(now));
@@ -749,7 +796,7 @@ impl Settings {
                 cfg.set("theme", self.theme.as_str());
             }
         }
-        // All eleven, default or not: their presence is how a later run knows
+        // All twelve, default or not: their presence is how a later run knows
         // Custom has colours of its own (`choose_custom`).
         if current.custom_colors != self.custom_colors {
             for t in ColorToken::ALL {
@@ -976,7 +1023,8 @@ mod tests {
         s.custom_colors.get_or_insert_default().set(ColorToken::Accent, 0x647d99);
         s.apply_to(&mut cfg, &paths());
         assert_eq!((cfg.get("theme"), cfg.get("color_accent")), (Some("custom"), Some("647d99")));
-        assert_eq!(cfg.get("color_bg"), Some("000000"), "all eleven are written");
+        assert_eq!(cfg.get("color_bg"), Some("000000"), "all twelve are written");
+        assert_eq!(cfg.get("color_fable"), Some("9775c7"));
         s.custom_colors.get_or_insert_default().set(ColorToken::Accent, ColorToken::Accent.default_rgb());
         s.apply_to(&mut cfg, &paths());
         assert_eq!(cfg.get("color_accent"), Some("d97757"), "a default stays, as Custom's own");
@@ -988,6 +1036,18 @@ mod tests {
         for (i, t) in ColorToken::ALL.into_iter().enumerate() {
             assert_eq!(t.index(), i, "{t:?}");
         }
+        assert_eq!(ColorToken::TH, ColorToken::ALL[..11], "th is the first eleven");
+    }
+
+    #[test]
+    fn fable_colour_is_its_own_key() {
+        // A custom theme saved before color_fable starts it at the default.
+        let s = settings("theme = custom\ncolor_accent = 647d99\n");
+        assert_eq!(s.colors(DARK).get(ColorToken::Fable), ColorToken::Fable.default_rgb());
+        let s = settings("theme = custom\ncolor_fable = 112233\n");
+        let p = s.colors(DARK);
+        assert_eq!((p.get(ColorToken::Fable), p.to_hex().len()), (0x112233, 66), "th doesn't carry it");
+        assert_eq!(serde_json::to_string(&p.fable()).unwrap(), r#""112233""#);
     }
 
     #[test]
@@ -1129,6 +1189,20 @@ mod tests {
         s.pace_marker = true;
         s.apply_to(&mut cfg, &paths());
         assert_eq!(cfg.get("pace_marker"), Some("on"));
+    }
+
+    #[test]
+    fn menu_bar_usage() {
+        assert!(!settings("").menu_bar_usage, "off by default");
+        assert!(settings("menu_bar_usage = on\n").menu_bar_usage);
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("menu_bar_usage").is_none(), "the default stays out of the file");
+        s.menu_bar_usage = true;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("menu_bar_usage"), Some("on"));
     }
 
     #[test]

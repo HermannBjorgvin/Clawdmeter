@@ -1,6 +1,9 @@
 //! Overview: what the tray menu shows, as a page. The link, the live
 //! meters, a refresh button, and a nudge when new firmware is out.
 
+use clawdmeter_core::config::ColorToken;
+use clawdmeter_core::themes;
+use clawdmeter_core::usage::{fable_reaches_week, FABLE_WEEKLY_SHARE_PCT};
 use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::release::release_tag;
 use gpui::{div, prelude::*, px, relative, rgb, Context, EventEmitter, Rgba, SharedString, Window};
@@ -60,16 +63,7 @@ impl OverviewView {
             self.skipped_firmware = s.skipped_firmware;
         }
         if let Some(at) = self.refreshing {
-            let done = match &self.snap {
-                None => true,
-                // The check ran (fresh numbers or a new error) or never will.
-                Some(s) => {
-                    s.read_at.is_some_and(|r| r >= at)
-                        || (!s.polling && now - at > REFRESH_SETTLE_SECS)
-                        || now - at > REFRESH_GIVE_UP_SECS
-                }
-            };
-            if done {
+            if self.snap.as_ref().is_none_or(|s| refresh_settled(s, at, now)) {
                 self.refreshing = None;
             }
         }
@@ -123,8 +117,17 @@ const REFRESH_SETTLE_SECS: i64 = 3;
 /// A `/usage` poll times out well before this.
 const REFRESH_GIVE_UP_SECS: i64 = 60;
 
+/// A refresh pressed at `at` is over: the check ran (fresh numbers or a new
+/// error) or never will. The Overview and the tray header show it as
+/// checking until then.
+pub fn refresh_settled(s: &StatusSnapshot, at: i64, now: i64) -> bool {
+    s.read_at.is_some_and(|r| r >= at)
+        || (!s.polling && now - at > REFRESH_SETTLE_SECS)
+        || now - at > REFRESH_GIVE_UP_SECS
+}
+
 /// "1 min 40 s" for a wait.
-fn wait_text(secs: i64) -> String {
+pub fn wait_text(secs: i64) -> String {
     match secs.max(1) {
         s if s < 60 => format!("{s} s"),
         s if s < 3600 && s % 60 == 0 => format!("{} min", s / 60),
@@ -190,18 +193,23 @@ pub fn state_title(s: &StatusSnapshot) -> &'static str {
 
 /// The device's reset line (`format_reset_time` in firmware/src/ui.cpp).
 pub fn reset_text(resets_at: Option<i64>, now: i64, none: &str) -> String {
-    let Some(t) = resets_at else { return none.to_owned() };
-    match (t - now).max(0) / 60 {
-        m if m < 60 => format!("Resets in {m}m"),
-        m if m < 1440 => format!("Resets in {}h {}m", m / 60, m % 60),
-        m => format!("Resets in {}d {}h", m / 1440, (m % 1440) / 60),
+    match resets_at {
+        Some(t) => format!("Resets in {}", crate::countdown(t - now)),
+        None => none.to_owned(),
     }
 }
 
 /// The device's bar fill for a percentage (`pct_color` in ui.cpp): green
 /// below 50, amber below 80, red from 80; the light theme's own tones.
 fn fill(t: &Theme, pct: u32) -> Rgba {
-    match (t.dark, usage_tone(pct)) {
+    bar_fill(t, usage_tone(pct))
+}
+
+/// A usage bar's fill for a tone (`Ok` green, `Accent` amber, else red):
+/// the device's own colours on dark, the light theme's tones on light. The
+/// tray's drawn meters use it too.
+pub fn bar_fill(t: &Theme, tone: Tone) -> Rgba {
+    match (t.dark, tone) {
         (true, Tone::Ok) => rgb(0x788c5d),
         (true, Tone::Accent) => rgb(0xd97757),
         (true, _) => rgb(0xc0392b),
@@ -209,12 +217,47 @@ fn fill(t: &Theme, pct: u32) -> Rgba {
     }
 }
 
+/// How much of the weekly bar the Fable overlay covers, 0..1: Fable's own %
+/// times its share of the week (`fable_bar_pct` in firmware/src/fable.h), so
+/// a used-up Fable limit fills half the bar. `None`: nothing to draw.
+fn fable_frac(fable_pct: Option<u32>) -> Option<f32> {
+    let share = fable_pct?.min(100) * FABLE_WEEKLY_SHARE_PCT;
+    (share > 0).then(|| share as f32 / 10_000.)
+}
+
+/// The overlay's width (0..1 of the bar) on a weekly fill at `week_pct`, and
+/// whether it reaches the fill's end. It never runs past the fill, and runs
+/// to its end by the device's rule ([`fable_reaches_week`]: within 1.5
+/// points of it, since Fable usage is part of the week's).
+fn fable_extent(fable_pct: Option<u32>, week_pct: u32) -> Option<(f32, bool)> {
+    let f = fable_frac(fable_pct)?;
+    let fable_pct = fable_pct?;
+    let fill = week_pct.min(100) as f32 / 100.;
+    (week_pct > 0).then(|| if fable_reaches_week(fable_pct, week_pct) { (fill, true) } else { (f.min(fill), false) })
+}
+
+/// The overlay's colour: the device's Dark or Light violet, as the meters
+/// here follow the device's Dark and Light palettes.
+fn fable_color(t: &Theme) -> u32 {
+    let preset = if t.dark { themes::default_preset() } else { themes::light() };
+    preset.colors.get(ColorToken::Fable)
+}
+
 /// One usage panel as the device draws it: the big percentage at the top
 /// left, the label as a pill at the top right, the track and fill, and the
-/// reset line.
-fn meter(t: &Theme, label: &'static str, pct: Option<u32>, reset: String) -> impl IntoElement {
+/// reset line. `fable` draws the Fable overlay over the fill as the device
+/// does on its weekly bar: a strip shaped like the fill, cut by a box as wide
+/// as the overlay, so its left end is the fill's rounded end and its right
+/// end straight, or, where it reaches the fill's end, the fill's own rounded
+/// corners. Shaped like the fill even where GPUI narrows the corners of a
+/// short one, so it never shows outside it.
+fn meter(t: &Theme, label: &'static str, pct: Option<u32>, fable: Option<u32>, reset: String) -> impl IntoElement {
     let value = pct.map_or_else(|| "--%".to_owned(), |p| format!("{p}%"));
     let frac = pct.unwrap_or(0).min(100) as f32 / 100.;
+    let fable = fable_extent(fable, pct.unwrap_or(0)).map(|(f, _)| {
+        let strip = div().h_full().w(relative(frac / f)).rounded(px(4.)).bg(rgb(fable_color(t)));
+        div().absolute().top_0().left_0().h_full().w(relative(f)).overflow_hidden().child(strip)
+    });
     div()
         .flex()
         .flex_col()
@@ -242,12 +285,14 @@ fn meter(t: &Theme, label: &'static str, pct: Option<u32>, reset: String) -> imp
         )
         .child(
             div()
+                .relative()
                 .mt(px(10.))
                 .h(px(14.))
                 .w_full()
                 .rounded(px(4.))
                 .bg(t.track)
-                .child(div().h_full().w(relative(frac)).rounded(px(4.)).bg(fill(t, pct.unwrap_or(0)))),
+                .child(div().h_full().w(relative(frac)).rounded(px(4.)).bg(fill(t, pct.unwrap_or(0))))
+                .children(fable),
         )
         .child(div().mt(px(8.)).text_size(px(15.)).text_color(t.dim).child(reset))
 }
@@ -310,7 +355,7 @@ impl Render for OverviewView {
         let chime = field(
             &t,
             "Play a chime on this computer when Claude needs you",
-            "Follows the alert types on the Hooks page. Mute from the tray until restart.",
+            "Follows the alert types on the Hooks page. The tray menu switches it too.",
             toggle(
                 &t,
                 "desktop-chime",
@@ -330,11 +375,20 @@ impl Render for OverviewView {
             return page.child(chime).child(setup);
         };
 
-        // No 5-hour limit (verified Ultra): the week is the only meter.
-        let session = (!s.no_session_limit)
-            .then(|| meter(&t, "Session", s.session_pct, reset_text(s.session_resets_at, now, "Not started")));
-        let weekly = meter(&t, "Weekly", s.week_pct, reset_text(s.week_resets_at, now, "---"));
-        page = page.child(div().flex().flex_col().gap(px(12.)).children(session).child(weekly));
+        // A spend-capped account has one meter, the spend; no 5-hour limit
+        // (verified Ultra) leaves the week alone.
+        let meters: Vec<_> = if s.spend {
+            vec![meter(&t, "Spend", s.session_pct, None, reset_text(s.spend_resets_at, now, "---"))]
+        } else {
+            let session = (!s.no_session_limit).then(|| {
+                meter(&t, "Session", s.session_pct, None, reset_text(s.session_resets_at, now, "Not started"))
+            });
+            session
+                .into_iter()
+                .chain([meter(&t, "Weekly", s.week_pct, s.fable_pct, reset_text(s.week_resets_at, now, "---"))])
+                .collect()
+        };
+        page = page.child(div().flex().flex_col().gap(px(12.)).children(meters));
         if let Some(tag) = self.firmware_nudge() {
             let v = tag.trim_start_matches('v').to_owned();
             page = page.child(
@@ -409,6 +463,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fable_overlay_is_half_the_bar_at_the_limit() {
+        assert_eq!(fable_frac(None), None);
+        assert_eq!(fable_frac(Some(0)), None, "nothing to draw at 0 %");
+        assert_eq!(fable_frac(Some(40)), Some(0.2));
+        assert_eq!(fable_frac(Some(100)), Some(0.5));
+        assert_eq!(fable_frac(Some(250)), Some(0.5), "past the limit stays at halfway");
+        // Straight-edged inside the fill; clamped to it, with its corner, at its end.
+        assert_eq!(fable_extent(Some(40), 60), Some((0.2, false)));
+        assert_eq!(fable_extent(Some(100), 72), Some((0.5, false)));
+        assert_eq!(fable_extent(Some(80), 30), Some((0.3, true)));
+        assert_eq!(fable_extent(Some(40), 0), None);
+        assert_eq!(fable_extent(None, 60), None);
+        // Fable is part of the week: within 1.5 points of the fill's end (the
+        // two rounded apart) runs to it, as on the device; a real gap stays.
+        assert_eq!(fable_extent(Some(61), 31), Some((0.31, true)));
+        assert_eq!(fable_extent(Some(60), 30), Some((0.30, true)));
+        assert_eq!(fable_extent(Some(40), 60), Some((0.2, false)));
+        for (w, wf) in [(30, 58), (40, 78), (49, 96), (7, 12), (40, 77)] {
+            assert_eq!(fable_extent(Some(wf), w).map(|e| e.1), Some(true), "{w}/{wf}");
+        }
+        assert_eq!(fable_extent(Some(76), 40), Some((0.38, false)), "2 points short");
+        assert_eq!(fable_extent(Some(70), 40), Some((0.35, false)), "other models' 5 points");
+        assert_eq!(fable_extent(Some(2), 10), Some((0.01, false)), "a sliver inside a short fill");
+    }
+
+    #[test]
     fn refresh_follows_the_gap_and_backoff() {
         let s = StatusSnapshot { refresh_at: Some(1_100), ..Default::default() };
         assert_eq!(refresh_state(&s, false, 1_000), RefreshState::Wait(100));
@@ -425,7 +505,8 @@ mod tests {
     #[test]
     fn reset_lines_match_the_device() {
         assert_eq!(reset_text(None, 0, "Not started"), "Not started");
-        assert_eq!(reset_text(Some(59 * 60 + 30), 0, "---"), "Resets in 59m");
+        assert_eq!(reset_text(Some(59 * 60 + 29), 0, "---"), "Resets in 59m");
+        assert_eq!(reset_text(Some(59 * 60 + 30), 0, "---"), "Resets in 1h 0m", "rounded, like the payload's minutes");
         assert_eq!(reset_text(Some(177 * 60), 0, "---"), "Resets in 2h 57m");
         assert_eq!(reset_text(Some(5 * 1440 * 60 + 11 * 3600), 0, "---"), "Resets in 5d 11h");
     }

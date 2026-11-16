@@ -1,4 +1,4 @@
-use libc::{c_char, c_int, c_void, size_t, ssize_t, uint32_t};
+use libc::{c_char, c_int, c_void, size_t, ssize_t};
 
 const XATTR_NOFOLLOW: c_int = 0x0001;
 
@@ -23,7 +23,7 @@ pub unsafe fn fsetxattr(
             name: *const c_char,
             value: *const c_void,
             size: size_t,
-            position: uint32_t,
+            position: u32,
             options: c_int,
         ) -> ssize_t;
     }
@@ -43,7 +43,7 @@ pub unsafe fn fgetxattr(
             name: *const c_char,
             value: *mut c_void,
             size: size_t,
-            position: uint32_t,
+            position: u32,
             options: c_int,
         ) -> ssize_t;
     }
@@ -79,7 +79,7 @@ pub unsafe fn lsetxattr(
             name: *const c_char,
             value: *const c_void,
             size: size_t,
-            position: uint32_t,
+            position: u32,
             options: c_int,
         ) -> ssize_t;
     }
@@ -99,7 +99,7 @@ pub unsafe fn lgetxattr(
             name: *const c_char,
             value: *mut c_void,
             size: size_t,
-            position: uint32_t,
+            position: u32,
             options: c_int,
         ) -> ssize_t;
     }
