@@ -1081,7 +1081,6 @@ mod tests {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
-    #[cfg(unix)]
     #[test]
     fn fable_snaps_to_the_fill_within_a_point_and_a_half() {
         // (week, Fable): Fable's half within 1.5 points of the week, or past it.
@@ -1093,6 +1092,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn finds_the_newest_desktop_bundled_claude() {
         use std::os::unix::fs::PermissionsExt;
