@@ -132,8 +132,8 @@ pub struct Payload {
 
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
-    "s", "sr", "w", "wr", "st", "acct", "pv", "rc", "ru", "re", "rx", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x",
-    "a", "e", "es", "n", "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th",
+    "s", "sr", "w", "wr", "st", "acct", "pv", "rc", "ru", "re", "rx", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m",
+    "x", "a", "e", "es", "n", "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th",
 ];
 
 /// The fast-clock keys added in v0.4 (old firmware ignores them).
