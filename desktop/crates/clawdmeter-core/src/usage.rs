@@ -380,8 +380,13 @@ pub fn paused_message(until: i64, utc_offset: i64) -> String {
 
 /// [`paused_message`] naming the company whose endpoint paused the account.
 pub fn paused_message_by(provider: Provider, until: i64, utc_offset: i64) -> String {
+    format!("Usage paused by {} until {}.", provider.company(), paused_clock(until, utc_offset))
+}
+
+/// The local time a pause ends, `HH:MM` (the time in [`paused_message`]).
+pub fn paused_clock(until: i64, utc_offset: i64) -> String {
     let t = DateTime::<Utc>::from_timestamp(until + utc_offset, 0).unwrap_or_default();
-    format!("Usage paused by {} until {}.", provider.company(), t.format("%H:%M"))
+    t.format("%H:%M").to_string()
 }
 
 fn snippet(s: &str) -> String {

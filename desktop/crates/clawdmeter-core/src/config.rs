@@ -467,6 +467,9 @@ pub struct Settings {
     pub attention_anim: AttentionAnim,
     /// Pace marker on the device's usage bars (`pm`, default off).
     pub pace_marker: bool,
+    /// The main meter's percentage beside the macOS menu bar icon
+    /// (`menu_bar_usage`, default off).
+    pub menu_bar_usage: bool,
     /// What the device's primary, secondary and PWR buttons do, by
     /// [`Button::index`] (`button_primary`, `button_secondary`, `button_pwr`;
     /// sent as `k1`, `k2`, `k3`).
@@ -636,6 +639,7 @@ impl Settings {
             liveliness: cfg.get("liveliness").map(parse_liveliness).unwrap_or(DEFAULT_LIVELINESS),
             attention_anim: cfg.get("attention_anim").map(AttentionAnim::parse).unwrap_or_default(),
             pace_marker: on_off(cfg.get("pace_marker"), false),
+            menu_bar_usage: on_off(cfg.get("menu_bar_usage"), false),
             buttons: Button::ALL.map(|b| {
                 cfg.get(b.config_key()).map_or(b.default_action(), |v| ButtonAction::parse(v, b.default_action()))
             }),
@@ -731,12 +735,13 @@ impl Settings {
         }
         let oo = |b: bool| if b { "on" } else { "off" };
         // A changed chime is written under its new name; the old one goes.
-        // The pace marker rides along (it has no old name).
+        // The other switches ride along (they have no old name).
         for (key, old, now, was) in [
             ("reset_chime", "chime", self.reset_chime, current.reset_chime),
             ("alert_chime", "beep", self.alert_chime, current.alert_chime),
             ("desktop_chime", "", self.desktop_chime, current.desktop_chime),
             ("pace_marker", "", self.pace_marker, current.pace_marker),
+            ("menu_bar_usage", "", self.menu_bar_usage, current.menu_bar_usage),
         ] {
             if now != was {
                 cfg.set(key, oo(now));
@@ -1239,6 +1244,20 @@ mod tests {
         s.pace_marker = true;
         s.apply_to(&mut cfg, &paths());
         assert_eq!(cfg.get("pace_marker"), Some("on"));
+    }
+
+    #[test]
+    fn menu_bar_usage() {
+        assert!(!settings("").menu_bar_usage, "off by default");
+        assert!(settings("menu_bar_usage = on\n").menu_bar_usage);
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("menu_bar_usage").is_none(), "the default stays out of the file");
+        s.menu_bar_usage = true;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("menu_bar_usage"), Some("on"));
     }
 
     #[test]

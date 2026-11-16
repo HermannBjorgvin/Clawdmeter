@@ -133,8 +133,13 @@ pub const PAYLOAD_KEYS: &[&str] = &[
 pub const ADDITIVE_KEYS: &[&str] = &["a", "e", "es", "n", "rp"];
 
 fn minutes_until(at: DateTime<Utc>, now: DateTime<Utc>) -> i64 {
-    // Round like the bash daemon's sprintf("%.0f"), clamp at 0.
-    let secs = (at - now).num_seconds();
+    minutes_left((at - now).num_seconds())
+}
+
+/// Whole minutes in `secs`, as the device is sent them (`sr`, `wr`):
+/// rounded like the bash daemon's sprintf("%.0f"), clamped at 0. The app's
+/// own countdowns use it too, so they read the same as the device.
+pub fn minutes_left(secs: i64) -> i64 {
     if secs <= 0 {
         0
     } else {

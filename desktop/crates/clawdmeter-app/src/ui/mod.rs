@@ -104,6 +104,7 @@ const ASSETS: &[(&str, &[u8])] = bundled![
         "settings",
         "rotate-ccw",
         "refresh-cw",
+        "power",
         "x",
         "minus",
         "square",
