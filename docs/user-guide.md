@@ -154,6 +154,20 @@ limit goes. For these accounts the reset chime and Clawd's fresh-window jump
 mark the weekly reset. Firmware older than this change keeps showing the
 session as not started; update it from the Flash page.
 
+Accounts with a Fable weekly limit get a purple strip at the left end of
+the **Weekly** bar, on the device and the Overview page. The device draws
+it in the chosen theme's own purple (**Fable** under **Custom +**); the
+Overview, like its other meters, uses the Dark or Light theme's. Fable's
+limit is half the weekly limit, so the strip grows to the middle of the
+bar as Fable is used: when it reaches the middle, Fable is used up for the
+week, while the rest of the bar still shows the overall weekly usage. Its
+right end is straight; it never runs past the weekly fill, and it waits
+until the fill is wider than its rounded ends. While you work through a
+5-hour window the quick usage check rarely reports Fable, so the strip can
+trail the weekly fill until the next full usage reading, near the end of
+that window at the latest. With no Fable reading yet there's no strip. The
+e-paper board doesn't draw it.
+
 The device boots to the meters. Clawd performs his shows right on them,
 in front of the panels. Tap a show or the screensaver to send him back to
 his seat.
@@ -260,7 +274,7 @@ seconds and preserves comments and unknown keys when saving.
 | `attention_anim` | `2m` | How long Clawd points and waves for an alert: `off`, `10s`, `30s` or `2m`. The alert itself is unchanged. Set with **Attention animation** on the Device page. |
 | `pace_marker` | `off` | `on` marks the elapsed share of each usage window on the device's bars and colours them by pace. Set with **Pace marker** on the Device page. |
 | `theme` | `system` | The device's colours, Clawd's included: `system` (Dark or Light, following this computer's light or dark mode, and switching when it does; `clawd`, the old default, means the same), `dark` (the board's own palette), `light`, `catppuccin_mocha`, `dracula`, `gruvbox`, `monokai`, `nord`, `one_dark`, `solarized` (Solarized Dark or Light, following the mode like `system`), `solarized_dark`, `solarized_light`, `tokyo_night`, or `custom` for the `color_*` keys below. Set with **Colors** on the Device page. |
-| `color_<name>` | the default palette | The custom theme's colours as `rrggbb` (no `#`, which starts a comment): `color_bg`, `color_panel`, `color_text`, `color_dim`, `color_accent`, `color_green`, `color_amber`, `color_red`, `color_bar_bg`, `color_clawd`, `color_eye`. Used only with `theme = custom` and kept while a preset is chosen. Set with **Custom +** under **Colors** on the Device page (a swatch or a typed hex code). The first time, Custom starts from the theme you're on and writes all eleven keys; from then on it keeps its own colours. |
+| `color_<name>` | the default palette | The custom theme's colours as `rrggbb` (no `#`, which starts a comment): `color_bg`, `color_panel`, `color_text`, `color_dim`, `color_accent`, `color_green`, `color_amber`, `color_red`, `color_bar_bg`, `color_clawd`, `color_eye`, `color_fable` (the Fable strip in the weekly bar). Used only with `theme = custom` and kept while a preset is chosen. Set with **Custom +** under **Colors** on the Device page (a swatch or a typed hex code). The first time, Custom starts from the theme you're on and writes all twelve keys; from then on it keeps its own colours. A custom theme saved before `color_fable` existed starts it at the Dark theme's violet. |
 | `poll_interval` | automatic | Override working and no-hooks polling intervals, in seconds. The scheduler enforces at least 120 seconds per account. Quiet and other-account schedules still apply. |
 | `heartbeat_interval` | `60` | Resend cached readings between usage checks. This does not fetch usage. Keep the default unless diagnosing the connection. |
 | `claude_path` | found on `PATH` | Full path to the Claude Code executable, if detection fails. |

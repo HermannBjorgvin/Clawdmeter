@@ -1,6 +1,9 @@
 //! Overview: what the tray menu shows, as a page. The link, the live
 //! meters, a refresh button, and a nudge when new firmware is out.
 
+use clawdmeter_core::config::ColorToken;
+use clawdmeter_core::themes;
+use clawdmeter_core::usage::FABLE_WEEKLY_SHARE_PCT;
 use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::release::release_tag;
 use gpui::{div, prelude::*, px, relative, rgb, Context, EventEmitter, Rgba, SharedString, Window};
@@ -209,12 +212,45 @@ fn fill(t: &Theme, pct: u32) -> Rgba {
     }
 }
 
+/// How much of the weekly bar the Fable overlay covers, 0..1: Fable's own %
+/// times its share of the week (`fable_bar_pct` in firmware/src/fable.h), so
+/// a used-up Fable limit fills half the bar. `None`: nothing to draw.
+fn fable_frac(fable_pct: Option<u32>) -> Option<f32> {
+    let share = fable_pct?.min(100) * FABLE_WEEKLY_SHARE_PCT;
+    (share > 0).then(|| share as f32 / 10_000.)
+}
+
+/// The overlay's width on a fill `fill` wide (0..1), and whether it reaches
+/// the fill's end. It never runs past the fill.
+fn fable_extent(fable_pct: Option<u32>, fill: f32) -> Option<(f32, bool)> {
+    let f = fable_frac(fable_pct)?;
+    (fill > 0.).then_some(if f >= fill { (fill, true) } else { (f, false) })
+}
+
+/// The overlay's colour: the device's Dark or Light violet, as the meters
+/// here follow the device's Dark and Light palettes.
+fn fable_color(t: &Theme) -> u32 {
+    let preset = if t.dark { themes::default_preset() } else { themes::light() };
+    preset.colors.get(ColorToken::Fable)
+}
+
 /// One usage panel as the device draws it: the big percentage at the top
 /// left, the label as a pill at the top right, the track and fill, and the
-/// reset line.
-fn meter(t: &Theme, label: &'static str, pct: Option<u32>, reset: String) -> impl IntoElement {
+/// reset line. `fable` draws the Fable overlay over the fill as the device
+/// does on its weekly bar: from the bar's rounded left end to a straight
+/// right edge, or, where it reaches the fill's end, the fill's own rounded
+/// corners.
+fn meter(t: &Theme, label: &'static str, pct: Option<u32>, fable: Option<u32>, reset: String) -> impl IntoElement {
     let value = pct.map_or_else(|| "--%".to_owned(), |p| format!("{p}%"));
     let frac = pct.unwrap_or(0).min(100) as f32 / 100.;
+    let fable = fable_extent(fable, frac).map(|(f, at_end)| {
+        let strip = div().absolute().top_0().left_0().h_full().w(relative(f)).bg(rgb(fable_color(t)));
+        if at_end {
+            strip.rounded(px(4.))
+        } else {
+            strip.rounded_l(px(4.)).border_r_1().border_color(t.panel)
+        }
+    });
     div()
         .flex()
         .flex_col()
@@ -242,12 +278,14 @@ fn meter(t: &Theme, label: &'static str, pct: Option<u32>, reset: String) -> imp
         )
         .child(
             div()
+                .relative()
                 .mt(px(10.))
                 .h(px(14.))
                 .w_full()
                 .rounded(px(4.))
                 .bg(t.track)
-                .child(div().h_full().w(relative(frac)).rounded(px(4.)).bg(fill(t, pct.unwrap_or(0)))),
+                .child(div().h_full().w(relative(frac)).rounded(px(4.)).bg(fill(t, pct.unwrap_or(0))))
+                .children(fable),
         )
         .child(div().mt(px(8.)).text_size(px(15.)).text_color(t.dim).child(reset))
 }
@@ -332,8 +370,8 @@ impl Render for OverviewView {
 
         // No 5-hour limit (verified Ultra): the week is the only meter.
         let session = (!s.no_session_limit)
-            .then(|| meter(&t, "Session", s.session_pct, reset_text(s.session_resets_at, now, "Not started")));
-        let weekly = meter(&t, "Weekly", s.week_pct, reset_text(s.week_resets_at, now, "---"));
+            .then(|| meter(&t, "Session", s.session_pct, None, reset_text(s.session_resets_at, now, "Not started")));
+        let weekly = meter(&t, "Weekly", s.week_pct, s.fable_pct, reset_text(s.week_resets_at, now, "---"));
         page = page.child(div().flex().flex_col().gap(px(12.)).children(session).child(weekly));
         if let Some(tag) = self.firmware_nudge() {
             let v = tag.trim_start_matches('v').to_owned();
@@ -407,6 +445,21 @@ impl OverviewView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fable_overlay_is_half_the_bar_at_the_limit() {
+        assert_eq!(fable_frac(None), None);
+        assert_eq!(fable_frac(Some(0)), None, "nothing to draw at 0 %");
+        assert_eq!(fable_frac(Some(40)), Some(0.2));
+        assert_eq!(fable_frac(Some(100)), Some(0.5));
+        assert_eq!(fable_frac(Some(250)), Some(0.5), "past the limit stays at halfway");
+        // Straight-edged inside the fill; clamped to it, with its corner, at its end.
+        assert_eq!(fable_extent(Some(40), 0.6), Some((0.2, false)));
+        assert_eq!(fable_extent(Some(100), 0.72), Some((0.5, false)));
+        assert_eq!(fable_extent(Some(80), 0.3), Some((0.3, true)));
+        assert_eq!(fable_extent(Some(40), 0.), None);
+        assert_eq!(fable_extent(None, 0.6), None);
+    }
 
     #[test]
     fn refresh_follows_the_gap_and_backoff() {

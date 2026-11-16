@@ -10,8 +10,11 @@
 //!   [--flash-to identify|firmware|flash|done] [--shop] [--accounts retrying] [--refresh wait|checking]
 //!   [--app-update download|downloading|ready|failed|none|linux|linux-menu]
 //!   [--advanced] [--session idle|week] [--buttons custom] [--edit primary|secondary|pwr] [--record]
-//!   [--firmware-skipped] [--height PX]
+//!   [--firmware-skipped] [--fable PCT] [--height PX]
 //! ```
+//!
+//! `--fable PCT` gives the account a Fable weekly window at PCT % of its own
+//! limit, drawn inside the Overview's weekly meter (half the bar at 100).
 //!
 //! `--buttons custom` gives the secondary button a held shortcut and PWR a
 //! media key; `--edit` opens a button's editor on the Device page, and
@@ -120,7 +123,7 @@ fn release(paths: &Paths) -> std::path::PathBuf {
     dir.join("manifest.json")
 }
 
-fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, session: Option<String>) {
+fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, session: Option<String>, fable: Option<u32>) {
     // `idle`: session not started; `week`: no 5-hour limit (verified Ultra).
     let idle = session.as_deref() == Some("idle");
     let week = session.as_deref() == Some("week");
@@ -155,6 +158,7 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, session: 
             no_session_limit: week,
             session_resets_at: (!idle && !week).then_some(started + 177 * 60),
             week_resets_at: Some(started + (5 * 24 + 11) * 3600 + 30),
+            fable_pct: fable,
             read_at: Some(now - 15),
             hooks: true,
             last_write_at: Some(now - 5),
@@ -198,6 +202,7 @@ fn main() {
             arg(&args, "--accounts").as_deref() == Some("retrying"),
             arg(&args, "--refresh"),
             arg(&args, "--session"),
+            arg(&args, "--fable").and_then(|p| p.parse().ok()),
         );
         let _ = ipc::save_firmware_record(&paths, &FirmwareRecord { env: ENV.into(), ver: OLD_VERSION.into() });
     } else {

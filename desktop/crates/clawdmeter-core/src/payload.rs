@@ -1,14 +1,14 @@
 //! The JSON written to the device's RX characteristic.
 //!
 //! Keys match `payload_parse()` in `firmware/src/payload.cpp`, in the order
-//! the old daemons wrote them, plus the additive fast-clock fields `a`, `e`,
-//! `es`, `n`, `rp` and the device settings `lv`, `aa`, `pm`, `k1`–`k3` and `th`
-//! (old firmware ignores unknown keys).
+//! the old daemons wrote them, plus the Fable weekly % `wf`, the additive
+//! fast-clock fields `a`, `e`, `es`, `n`, `rp` and the device settings `lv`,
+//! `aa`, `pm`, `k1`–`k3`, `th` and `fc` (old firmware ignores unknown keys).
 
 use chrono::{DateTime, Datelike, Months, TimeZone, Utc};
 use serde::Serialize;
 
-use crate::config::{ClockMode, Palette};
+use crate::config::{ClockMode, Palette, Rgb};
 use crate::usage::{SpendPeriod, UsageReading};
 
 /// One device payload. `None` fields are omitted.
@@ -27,6 +27,12 @@ pub struct Payload {
     /// Minutes until the weekly reset; -1 = unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wr: Option<i64>,
+    /// Fable's own weekly % used ([`UsageReading::fable`]), drawn inside
+    /// the weekly bar at [`crate::usage::FABLE_WEEKLY_SHARE_PCT`] of its
+    /// width. Absent when unknown or the account has no Fable limit (never 0
+    /// for "no data"), and on spend-capped ("ent") payloads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wf: Option<u32>,
     /// Status: "allowed", "limited" (a window or the spend cap is used up)
     /// or "overage" (extra usage is paying). Stored, not shown, by the firmware.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,12 +115,17 @@ pub struct Payload {
     /// it got.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub th: Option<Palette>,
+    /// The Fable overlay's colour, six hex digits ([`Palette::fable`]): its
+    /// own key, so `th` stays the eleven colours older firmware accepts. The
+    /// device keeps the last value it got.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fc: Option<Rgb>,
 }
 
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
-    "s", "sr", "w", "wr", "st", "acct", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x", "a", "e", "es", "n",
-    "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th",
+    "s", "sr", "w", "wr", "wf", "st", "acct", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x", "a", "e", "es",
+    "n", "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th", "fc",
 ];
 /// The fast-clock keys added in v0.4 (old firmware ignores them).
 pub const ADDITIVE_KEYS: &[&str] = &["a", "e", "es", "n", "rp"];
@@ -270,6 +281,7 @@ impl Payload {
             sr: Some(sr),
             w: Some(w),
             wr: Some(wr),
+            wf: r.fable().map(|f| f.pct),
             st: Some(st.to_owned()),
             acct: Some(acct.to_owned()),
             ok: true,
@@ -412,6 +424,38 @@ mod tests {
         assert_eq!(Payload::no_data().to_json(), r#"{"ok":false}"#);
     }
 
+    #[test]
+    fn fable_weekly_key() {
+        let now = at("2026-10-13T05:40:00Z");
+        let week = Window { pct: 60, resets_at: Some(at("2026-10-18T22:00:00Z")) };
+        let fable = |pct| ("fable".to_owned(), Window { pct, ..week.clone() });
+        let r = UsageReading { week: Some(week.clone()), models: vec![fable(40)], ..Default::default() };
+        assert_eq!(
+            Payload::from_reading(&r, now).to_json(),
+            r#"{"s":0,"sr":-1,"w":60,"wr":8180,"wf":40,"st":"allowed","acct":"pro","ok":true}"#,
+            "matched ignoring case, right after the week"
+        );
+        // A real 0 % is sent; no Fable window (unknown, or no such limit) is
+        // no key at all, never 0.
+        assert_eq!(Payload::from_reading(&UsageReading { models: vec![fable(0)], ..r.clone() }, now).wf, Some(0));
+        let none = UsageReading { models: vec![], ..r.clone() };
+        assert!(!Payload::from_reading(&none, now).to_json().contains("wf"));
+        let opus = UsageReading { models: vec![("Opus".into(), week.clone())], ..r.clone() };
+        assert_eq!(Payload::from_reading(&opus, now).wf, None, "other scoped models aren't drawn");
+        // The weekly-only meter carries it too; a spend-capped payload has no
+        // weekly bar to draw it in.
+        let ultra = UsageReading { session_limit: crate::usage::SessionLimit::Absent, ..r.clone() };
+        assert_eq!(Payload::from_reading(&ultra, now).wf, Some(40));
+        let spend = UsageReading {
+            week: None,
+            spend: Some(crate::usage::Spend { pct: 20, resets_at: None, period: None }),
+            ..r.clone()
+        };
+        assert_eq!(Payload::from_reading(&spend, now).wf, None);
+        // Replays keep it as it is.
+        assert_eq!(Payload::from_reading(&r, now).aged(600).wf, Some(40));
+    }
+
     // Ported from the enterprise branch of the old daemons
     // (`_billing_period_info`, test_windows_poll.py's guards).
     #[test]
@@ -512,6 +556,7 @@ mod tests {
             sr: Some(300),
             w: Some(100),
             wr: Some(10_080),
+            wf: Some(999),
             st: Some("overage".into()),
             acct: Some("week".into()),
             tp: Some(100),
@@ -536,6 +581,7 @@ mod tests {
             k2: Some(chord),
             k3: Some(chord),
             th: Some(Palette::default()),
+            fc: Some(Palette::default().fable()),
         };
         let json = pl.to_json();
         assert!(json.len() < 500, "{} bytes: {json}", json.len());
@@ -549,6 +595,7 @@ mod tests {
             sr: Some(2),
             w: Some(3),
             wr: Some(4),
+            wf: Some(5),
             st: Some("allowed".into()),
             acct: Some("pro".into()),
             tp: Some(1),
@@ -573,6 +620,7 @@ mod tests {
             k2: Some(2),
             k3: Some(6),
             th: Some(Palette::default()),
+            fc: Some(Palette::default().fable()),
         };
         let v: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&pl.to_json()).unwrap();
         // serde_json's Map is sorted without preserve_order; check membership.

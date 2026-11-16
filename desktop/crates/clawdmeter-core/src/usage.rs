@@ -103,6 +103,17 @@ pub enum MeterKind {
     Spend,
 }
 
+/// The model-scoped weekly limit drawn inside the weekly meter, matched by
+/// display name, ignoring case.
+pub const FABLE_MODEL: &str = "Fable";
+
+/// Fable's weekly limit as a share of the overall weekly limit, in percent
+/// (the owner's figure; the endpoint's `weekly_scoped_shares` says the same,
+/// `allowance_percent_of_weekly: 50`). The meters draw Fable's own % times
+/// this share: a used-up Fable limit fills half the weekly bar. The firmware
+/// has the same constant, `FABLE_WEEKLY_SHARE_PCT` in `firmware/src/fable.h`.
+pub const FABLE_WEEKLY_SHARE_PCT: u32 = 50;
+
 /// Everything `/usage` told us for one account.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UsageReading {
@@ -111,7 +122,9 @@ pub struct UsageReading {
     pub session: Option<Window>,
     /// `Current week (all models)`.
     pub week: Option<Window>,
-    /// `Current week (<model>)` lines, in order. Not sent to the device yet.
+    /// Model-scoped weekly windows (`Current week (<model>)` lines, the
+    /// endpoint's `weekly_scoped` limits), in order. Only Fable's is sent to
+    /// the device ([`UsageReading::fable`]).
     pub models: Vec<(String, Window)>,
     /// `Spend limit:` (spend-capped accounts, sent as the enterprise view).
     pub spend: Option<Spend>,
@@ -132,6 +145,12 @@ impl UsageReading {
             (None, _) if self.no_session_limit() => self.week.as_ref().map_or(0, |w| w.pct),
             _ => 0,
         }
+    }
+
+    /// The Fable weekly window ([`FABLE_MODEL`]), when this reading has one.
+    /// `None` means unknown or no such limit, never 0 %.
+    pub fn fable(&self) -> Option<&Window> {
+        self.models.iter().find(|(m, _)| m.eq_ignore_ascii_case(FABLE_MODEL)).map(|(_, w)| w)
     }
 
     /// What [`UsageReading::session_pct`] measures.
@@ -935,7 +954,8 @@ impl AccountState {
             // Once the pause has run out a probe answer ends it, so hours on
             // the probe don't lengthen the next one, unless the endpoint
             // missed again in this poll: misses in a row still climb.
-            Ok(r) if !polled.idle => {
+            Ok(mut r) if !polled.idle => {
+                crate::probe::carry_models(&mut r, self.last.as_ref(), now);
                 self.store(now, r);
                 if !self.backoff.active(now) && polled.idle_miss.is_none() {
                     self.backoff.on_success();

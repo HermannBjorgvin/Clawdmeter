@@ -1,4 +1,5 @@
 #include "theme_palette.h"
+#include "fable.h"
 #include <string.h>
 
 // Anthropic-inspired dark palette, AMOLED-friendly (true black bg).
@@ -54,6 +55,29 @@ uint32_t theme_hex(ThemeColor c) { return c < TH_COUNT ? palette[c] : 0; }
 bool theme_palette_set(const uint32_t p[TH_COUNT]) {
     if (memcmp(palette, p, sizeof(palette)) == 0) return false;
     memcpy(palette, p, sizeof(palette));
+    return true;
+}
+
+static uint32_t fable = FABLE_COLOR_DEFAULT;
+
+bool theme_parse_rgb(const char* s, uint32_t* out) {
+    if (!s || strlen(s) != 6) return false;
+    uint32_t v = 0;
+    for (int j = 0; j < 6; j++) {
+        const int d = hex_digit(s[j]);
+        if (d < 0) return false;
+        v = (v << 4) | (uint32_t)d;
+    }
+    *out = v;
+    return true;
+}
+
+uint32_t theme_fable_hex(void) { return fable; }
+
+bool theme_fable_set(uint32_t rgb) {
+    rgb &= 0xffffff;
+    if (rgb == fable) return false;
+    fable = rgb;
     return true;
 }
 

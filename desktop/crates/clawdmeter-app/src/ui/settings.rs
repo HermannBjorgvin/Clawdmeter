@@ -2263,12 +2263,24 @@ fn theme_board(t: &Theme, c: &Palette) -> gpui::Div {
                 .bg(col(ColorToken::Panel))
                 .child(div().w(px(18.)).h(px(4.)).rounded(px(1.)).bg(col(ColorToken::Dim)))
                 .child(
+                    // The weekly bar: the fill, and the Fable overlay over it.
                     div()
+                        .relative()
                         .w_full()
                         .h(px(5.))
                         .rounded(px(2.))
                         .bg(col(ColorToken::BarBg))
-                        .child(div().w(relative(0.6)).h_full().rounded(px(2.)).bg(col(ColorToken::Green))),
+                        .child(div().w(relative(0.6)).h_full().rounded(px(2.)).bg(col(ColorToken::Green)))
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .w(relative(0.2))
+                                .h_full()
+                                .rounded_l(px(2.))
+                                .bg(col(ColorToken::Fable)),
+                        ),
                 ),
         )
 }

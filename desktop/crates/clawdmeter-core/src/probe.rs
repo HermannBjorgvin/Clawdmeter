@@ -13,6 +13,12 @@
 //!    "seven_day":{"utilization":0.2,"resetsAt":1792360800}}}}
 //! ```
 //!
+//! Claude Code also reads a third window, `seven_day_overage_included` (the
+//! `anthropic-ratelimit-unified-7d_oi-*` headers), which it calls the "Fable
+//! limit"; it's read as Fable's weekly window when an answer carries it. A
+//! Haiku answer usually doesn't, so a probe reading keeps the last known
+//! model-scoped windows ([`carry_models`]).
+//!
 //! The probe ([`probe_command`]) sends one short Haiku message with no
 //! tools, hooks, MCP servers, memory or saved session, from a fixed working
 //! directory.
@@ -108,11 +114,20 @@ pub fn choose_source(st: &AccountState, unattributed: Option<i64>, now: i64) -> 
     Source::Usage
 }
 
+/// A weekly window as of `now`: back at 0 % with no reset once its reset has
+/// passed.
+fn rolled_over(w: &Window, now: i64) -> Window {
+    if w.resets_at.is_some_and(|t| t.timestamp() <= now) {
+        Window { pct: 0, resets_at: None }
+    } else {
+        w.clone()
+    }
+}
+
 /// `last` with the session window over: not started, and any weekly window
 /// whose reset has passed back at 0 % with no reset.
 pub fn not_started(last: &UsageReading, now: i64) -> UsageReading {
-    let over = |w: &Window| w.resets_at.is_some_and(|t| t.timestamp() <= now);
-    let reset = |w: &Window| if over(w) { Window { pct: 0, resets_at: None } } else { w.clone() };
+    let reset = |w: &Window| rolled_over(w, now);
     UsageReading {
         session: None,
         week: last.week.as_ref().map(reset),
@@ -120,6 +135,18 @@ pub fn not_started(last: &UsageReading, now: i64) -> UsageReading {
         spend: last.spend.clone(),
         overage: false,
         session_limit: last.session_limit,
+    }
+}
+
+/// Give a probe reading the model-scoped weekly windows it lacks (the
+/// headers rarely carry Fable's) from `last`, the account's previous
+/// reading, rolled over like [`not_started`]'s. The idle sources list every
+/// scoped window the account has, so only probe readings take this.
+pub fn carry_models(r: &mut UsageReading, last: Option<&UsageReading>, now: i64) {
+    for (m, w) in last.map(|l| l.models.as_slice()).unwrap_or_default() {
+        if !r.models.iter().any(|(n, _)| n.eq_ignore_ascii_case(m)) {
+            r.models.push((m.clone(), rolled_over(w, now)));
+        }
     }
 }
 
@@ -176,7 +203,7 @@ pub fn parse_stream(stdout: &str) -> Result<UsageReading, UsageError> {
         // [`poll`] asks the usage endpoint, which can tell.
         session_limit: SessionLimit::Unknown,
         week: window("seven_day"),
-        models: Vec::new(),
+        models: window("seven_day_overage_included").map(|w| (usage::FABLE_MODEL.to_owned(), w)).into_iter().collect(),
         spend: None,
         overage: info.get("isUsingOverage").and_then(Value::as_bool).unwrap_or(false),
     };
@@ -558,6 +585,64 @@ mod tests {
         assert!(parse_stream("not json\n").is_err());
         // A login problem says so.
         assert!(parse_stream("Not logged in · Please run /login\n").unwrap_err().is_auth());
+    }
+
+    #[test]
+    fn stream_reads_the_fable_window() {
+        let line = |windows: &str| {
+            format!(
+                r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"allowed","unifiedWindows":{windows}}}}}"#
+            )
+        };
+        // Claude Code's "Fable limit": seven_day_overage_included.
+        let windows = concat!(
+            r#"{"five_hour":{"utilization":0.32,"resetsAt":10},"seven_day":{"utilization":0.6,"resetsAt":30},"#,
+            r#""seven_day_overage_included":{"utilization":0.4,"resetsAt":30}}"#
+        );
+        let r = parse_stream(&line(windows)).unwrap();
+        assert_eq!(r.fable(), Some(&Window { pct: 40, resets_at: ts(30) }));
+        // The real probe answer (Haiku) has none.
+        let fixture = include_str!("../tests/fixtures/probe-stream.jsonl");
+        assert_eq!(parse_stream(fixture).unwrap().fable(), None);
+    }
+
+    #[test]
+    fn probe_answers_keep_the_last_fable_window() {
+        let fable = |pct, reset| ("Fable".to_owned(), Window { pct, resets_at: ts(reset) });
+        let probe_answer =
+            |r: UsageReading| Polled { result: Ok(r), idle: false, probe: ProbeRun::Answered, idle_miss: None };
+        let week = Some((60, Some(T0 + 86_400)));
+        // The endpoint's reading had Fable at 40 %.
+        let mut st = AccountState::default();
+        st.record(
+            T0,
+            Ok(UsageReading { models: vec![fable(40, T0 + 86_400)], ..reading(Some((30, Some(T0 + 3600))), week) }),
+        );
+        // A probe answer without the window keeps it, reset and all.
+        st.record_polled(T0 + 600, probe_answer(reading(Some((35, Some(T0 + 3600))), week)));
+        let last = st.last.clone().unwrap();
+        assert_eq!(
+            (last.session.as_ref().map(|w| w.pct), last.fable()),
+            (Some(35), Some(&Window { pct: 40, resets_at: ts(T0 + 86_400) }))
+        );
+        // One that carries it wins.
+        let with = UsageReading { models: vec![fable(45, T0 + 86_400)], ..reading(Some((36, Some(T0 + 3600))), week) };
+        st.record_polled(T0 + 900, probe_answer(with));
+        assert_eq!(st.last.as_ref().unwrap().fable().map(|w| w.pct), Some(45));
+        // Past Fable's reset: back at 0 % with no reset, like the week.
+        let after = reading(Some((5, Some(T0 + 86_400 + 3600))), Some((1, Some(T0 + 8 * 86_400))));
+        st.record_polled(T0 + 86_400 + 60, probe_answer(after));
+        assert_eq!(st.last.as_ref().unwrap().fable(), Some(&Window { pct: 0, resets_at: None }));
+        // Nothing known, nothing made up; the idle sources aren't topped up.
+        let mut fresh = AccountState::default();
+        fresh.record_polled(T0, probe_answer(reading(Some((30, Some(T0 + 3600))), week)));
+        assert_eq!(fresh.last.unwrap().fable(), None);
+        st.record(T0 + 86_400 + 120, Ok(reading(Some((5, Some(T0 + 86_400 + 3600))), week)));
+        assert_eq!(st.last.unwrap().fable(), None, "an idle reading without Fable has none");
+        // The window ending quietly keeps it too.
+        let ended = UsageReading { models: vec![fable(40, T0 + 86_400)], ..reading(Some((30, Some(T0))), week) };
+        let Source::NotStarted(r) = choose_source(&state(ended, T0 - 600), None, T0 + 60) else { panic!() };
+        assert_eq!(r.fable().map(|w| w.pct), Some(40));
     }
 
     #[test]

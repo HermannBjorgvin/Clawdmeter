@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "payload.h"
+#include "fable.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -197,6 +198,55 @@ static void test_theme(void) {
     TEST_ASSERT_FALSE(d.has_theme);
 }
 
+// `wf`: Fable's weekly %, unknown (-1) unless sent; fable_bar_pct() maps it
+// onto the weekly bar at half its width.
+static void test_fable_weekly(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{\"w\":60,\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.fable_pct);
+    TEST_ASSERT_TRUE(payload_parse("{\"w\":60,\"wf\":0,\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(0, d.fable_pct);
+    TEST_ASSERT_TRUE(payload_parse("{\"w\":60,\"wf\":40,\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(40, d.fable_pct);
+    TEST_ASSERT_TRUE(payload_parse("{\"wf\":-1}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.fable_pct);
+    TEST_ASSERT_TRUE(payload_parse("{\"wf\":\"x\"}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.fable_pct);
+    TEST_ASSERT_TRUE(payload_parse("{\"wf\":12345}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(999, d.fable_pct);
+    // The weekly-only meter keeps it alongside the week it moved up.
+    TEST_ASSERT_TRUE(payload_parse("{\"w\":48,\"wf\":3,\"acct\":\"week\",\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_TRUE(d.weekly_only);
+    TEST_ASSERT_EQUAL_INT(3, d.fable_pct);
+
+    // `fc`: the overlay's colour, its own key beside `th`.
+    TEST_ASSERT_FALSE(d.has_fable_color);
+    TEST_ASSERT_TRUE(payload_parse("{\"fc\":\"bd93f9\"}", &d, nullptr));
+    TEST_ASSERT_TRUE(d.has_fable_color);
+    TEST_ASSERT_EQUAL_HEX32(0xbd93f9, d.fable_color);
+    TEST_ASSERT_TRUE(payload_parse("{\"fc\":\"#bd93f9\"}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.has_fable_color);
+
+    TEST_ASSERT_EQUAL_FLOAT(-1.0f, fable_bar_pct(-1));
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, fable_bar_pct(0));
+    TEST_ASSERT_EQUAL_FLOAT(20.0f, fable_bar_pct(40));
+    TEST_ASSERT_EQUAL_FLOAT(50.0f, fable_bar_pct(100));
+    TEST_ASSERT_EQUAL_FLOAT(50.0f, fable_bar_pct(250));   // past the limit: still halfway
+
+    // On a 400 px bar with the week at 60 % (lv_bar's fill: 240 px), the
+    // overlay is 80 px at Fable 40 %, half the bar at 100 %, and never past
+    // the fill.
+    TEST_ASSERT_EQUAL_INT(240, fable_fill_w(400, 60));
+    TEST_ASSERT_EQUAL_INT(0, fable_fill_w(400, -3));
+    TEST_ASSERT_EQUAL_INT(400, fable_fill_w(400, 140));
+    TEST_ASSERT_EQUAL_INT(0, fable_overlay_w(-1, 400, 240));
+    TEST_ASSERT_EQUAL_INT(0, fable_overlay_w(0, 400, 240));
+    TEST_ASSERT_EQUAL_INT(80, fable_overlay_w(40, 400, 240));
+    TEST_ASSERT_EQUAL_INT(200, fable_overlay_w(100, 400, 240));
+    TEST_ASSERT_EQUAL_INT(120, fable_overlay_w(100, 400, fable_fill_w(400, 30)));   // clamped to the fill
+    TEST_ASSERT_EQUAL_INT(0, fable_overlay_w(40, 400, 0));
+}
+
 static void test_long_strings_truncate(void) {
     UsageData d;
     TEST_ASSERT_TRUE(payload_parse("{\"st\":\"abcdefghijklmnopqrstuvwxyz\"}", &d, nullptr));
@@ -216,6 +266,7 @@ int main(void) {
     RUN_TEST(test_pace_marker);
     RUN_TEST(test_button_actions);
     RUN_TEST(test_theme);
+    RUN_TEST(test_fable_weekly);
     RUN_TEST(test_long_strings_truncate);
     return UNITY_END();
 }

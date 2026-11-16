@@ -132,6 +132,10 @@ pub struct StatusSnapshot {
     /// Unix seconds the weekly window resets (`None`: unknown).
     #[serde(default)]
     pub week_resets_at: Option<i64>,
+    /// Fable's weekly % of its own limit, drawn inside the weekly meter
+    /// (`None`: unknown, no Fable limit, or a spend-capped account).
+    #[serde(default)]
+    pub fable_pct: Option<u32>,
 }
 
 impl StatusSnapshot {
@@ -188,6 +192,7 @@ impl StatusSnapshot {
                 .and_then(|w| w.resets_at)
                 .map(|t| t.timestamp()),
             week_resets_at: reading.and_then(|r| r.week.as_ref()).and_then(|w| w.resets_at).map(|t| t.timestamp()),
+            fable_pct: reading.filter(|r| !r.is_spend_only()).and_then(|r| r.fable()).map(|w| w.pct),
         }
     }
 
@@ -524,6 +529,27 @@ mod tests {
     }
 
     #[test]
+    fn fable_rides_with_the_week() {
+        let mut s = status(connected(), true, Some(990));
+        let r = s.engine.reading.as_mut().unwrap();
+        r.models = vec![
+            ("Opus".into(), Window { pct: 9, resets_at: None }),
+            ("FABLE".into(), Window { pct: 40, resets_at: None }),
+        ];
+        let snap = StatusSnapshot::from_status(&s, 1_000);
+        assert_eq!(snap.fable_pct, Some(40));
+        // A status file from before the field reads as unknown.
+        let mut old = serde_json::to_value(&snap).unwrap();
+        old.as_object_mut().unwrap().remove("fable_pct");
+        assert_eq!(serde_json::from_value::<StatusSnapshot>(old).unwrap().fable_pct, None);
+        // A spend-capped account has no weekly meter.
+        let r = s.engine.reading.as_mut().unwrap();
+        (r.session, r.week) = (None, None);
+        r.spend = Some(clawdmeter_core::usage::Spend { pct: 20, resets_at: None, period: None });
+        assert_eq!(StatusSnapshot::from_status(&s, 1_000).fable_pct, None);
+    }
+
+    #[test]
     fn no_session_limit_has_no_session_meter() {
         let mut s = status(connected(), true, Some(990));
         let r = s.engine.reading.as_mut().unwrap();
@@ -531,6 +557,7 @@ mod tests {
         let snap = StatusSnapshot::from_status(&s, 1_000);
         assert!(snap.no_session_limit);
         assert_eq!((snap.session_pct, snap.week_pct), (None, Some(12)));
+        assert_eq!(snap.fable_pct, None, "no Fable window: no overlay");
         // A snapshot from before the field: an ordinary account.
         let mut old = serde_json::to_value(&snap).unwrap();
         old.as_object_mut().unwrap().remove("no_session_limit");
