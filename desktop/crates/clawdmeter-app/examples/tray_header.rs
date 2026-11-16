@@ -22,7 +22,7 @@ fn main() {
         let _header = MenuHeader::install(&menu);
         let (a, b, c) = (
             MenuItem::new("Refresh usage", true, None),
-            CheckMenuItem::new("Mute chimes", true, false, None),
+            CheckMenuItem::new("Chime on this computer", true, false, None),
             MenuItem::new("Quit Clawdmeter", true, None),
         );
         menu.append_items(&[&a, &b, &PredefinedMenuItem::separator(), &c]).expect("append");

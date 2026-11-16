@@ -104,9 +104,6 @@ pub struct StatusSnapshot {
     pub claude: Option<String>,
     /// Last successful device write.
     pub last_write_at: Option<i64>,
-    /// Alert chimes muted for this run (tray menu).
-    #[serde(alias = "beep_muted")]
-    pub chimes_muted: bool,
     /// Latest firmware release, when the daily check found one.
     pub latest_firmware: Option<String>,
     /// Firmware the device last reported (flash or `info`).
@@ -182,7 +179,6 @@ impl StatusSnapshot {
             hooks: e.hooks,
             claude: s.claude.as_ref().map(|p| p.display().to_string()),
             last_write_at: s.last_write_at,
-            chimes_muted: false,
             latest_firmware: None,
             device_firmware: None,
             tray: format!("{:?}", tray_state(s, now)),
@@ -293,8 +289,6 @@ pub enum AppCommand {
     Reconnect,
     /// Forget the cached device address, then look again.
     Forget,
-    /// Mute / unmute the alert chimes for this run.
-    Mute(bool),
     /// Open the app window on a page (see [`crate::Page::parse`]).
     Open(String),
     /// Re-run the firmware update check now.
@@ -313,7 +307,6 @@ impl AppCommand {
             AppCommand::Refresh => "refresh".into(),
             AppCommand::Reconnect => "reconnect".into(),
             AppCommand::Forget => "forget".into(),
-            AppCommand::Mute(on) => format!("mute {}", if *on { "on" } else { "off" }),
             AppCommand::Open(w) => format!("open {w}"),
             AppCommand::CheckUpdate => "check-update".into(),
             AppCommand::SettingsChanged => "settings-changed".into(),
@@ -328,8 +321,6 @@ impl AppCommand {
             ("refresh", None) => AppCommand::Refresh,
             ("reconnect", None) => AppCommand::Reconnect,
             ("forget", None) => AppCommand::Forget,
-            ("mute", Some("on")) => AppCommand::Mute(true),
-            ("mute", Some("off")) => AppCommand::Mute(false),
             ("open", Some(w)) if crate::Page::parse(w).is_some() => AppCommand::Open(w.to_owned()),
             ("check-update", None) => AppCommand::CheckUpdate,
             ("settings-changed", None) => AppCommand::SettingsChanged,
@@ -556,7 +547,6 @@ mod tests {
         let paths = Paths::under(&dir);
         let cmds = [
             AppCommand::Refresh,
-            AppCommand::Mute(true),
             AppCommand::Open("hooks".into()),
             AppCommand::Forget,
             AppCommand::SettingsChanged,

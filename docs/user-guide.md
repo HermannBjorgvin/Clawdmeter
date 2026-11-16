@@ -62,12 +62,13 @@ new app first, then **Flash** for the board's firmware; skip the app's
 release and it stays hidden until the next one), a speaker
 that turns the chime on this computer on or off (the Overview's **Play a
 chime on this computer** switch), Settings, and a power icon that quits.
-The board's own alert chime isn't in the macOS menu: switch it with **Alert
+The board's own alert chime isn't in the tray menu: switch it with **Alert
 chime** on the Device page. On Linux and Windows the menu lists **Refresh
 usage** (greyed out, saying when it can check again, until a check can run),
-**Mute chimes**, **Open Clawdmeter**, **Update Clawdmeter to v…** or
-**Update firmware to v…** and **Quit Clawdmeter** instead, with the same
-conditions.
+**Chime on this computer** (checked while the Overview's switch is on;
+clicking it flips that switch), **Open Clawdmeter**, **Update Clawdmeter to
+v…** or **Update firmware to v…** and **Quit Clawdmeter** instead, with the
+same conditions.
 Without a tray, it uses a window; closing that window quits the app.
 You can skip setup and return through **Run setup again** in Settings.
 
@@ -292,8 +293,6 @@ seconds and preserves comments and unknown keys when saving.
 | `release_repo` | `HermannBjorgvin/Clawdmeter` | GitHub repository used for firmware releases. |
 | `onboarding_done` | unset | `true` after setup is finished or skipped. |
 
-On Linux and Windows, **Mute chimes** in the tray silences the alert chime
-and the desktop chime until the app restarts.
 
 The tray app writes `daemon.log` in the state folder and keeps the previous
 run as `daemon.log.1`. **Settings** links to the log and config file.

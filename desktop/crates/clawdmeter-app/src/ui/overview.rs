@@ -315,11 +315,7 @@ impl Render for OverviewView {
         let chime = field(
             &t,
             "Play a chime on this computer when Claude needs you",
-            if cfg!(target_os = "macos") {
-                "Follows the alert types on the Hooks page. The speaker in the menu bar menu switches it too."
-            } else {
-                "Follows the alert types on the Hooks page. Mute from the tray until restart."
-            },
+            "Follows the alert types on the Hooks page. The tray menu switches it too.",
             toggle(
                 &t,
                 "desktop-chime",

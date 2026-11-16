@@ -738,11 +738,7 @@ impl SettingsView {
             .child(field(
                 t,
                 "Alert chime",
-                if cfg!(target_os = "macos") {
-                    "Chimes when Claude needs you, on boards with a speaker."
-                } else {
-                    "Chimes when Claude needs you, on boards with a speaker. Mute from the tray until restart."
-                },
+                "Chimes when Claude needs you, on boards with a speaker.",
                 toggle(t, "alert-chime", alert, true, move |_, _, cx| {
                     let _ = me1.update(cx, |v, cx| {
                         v.save(|s, _| s.alert_chime = !alert);

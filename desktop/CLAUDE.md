@@ -54,7 +54,8 @@ is faked behind `FlashHardware`.
   update_offer`: while the app is behind, its update, to the Update page,
   when the sidebar would announce it, else nothing; once the app is current,
   the board's firmware, to Flash; the Linux/Windows item does the same), the computer's chime (switches `desktop_chime` like
-  the Overview; Linux/Windows keep the until-restart Mute chimes), Settings
+  the Overview; the Linux/Windows item "Chime on this computer" is the
+  same switch), Settings
   and Quit. The panel's buttons set
   `mac_menu::take_actions` flags for the tick; the panel itself isn't
   clickable. Its content is `tray/header.rs`, and `--example tray_header --

@@ -79,8 +79,6 @@ struct MenuShape {
     session: bool,
     /// The Weekly row: gone on a spend-capped account, which has no week.
     weekly: bool,
-    /// Mute chimes: while the device's alert chime or the desktop chime is on.
-    mute: bool,
     /// "Update Clawdmeter / firmware to v…": while there's one to offer
     /// ([`update_offer`]). Flashing by hand otherwise is rare, and the
     /// window's Flash page has it.
@@ -89,13 +87,8 @@ struct MenuShape {
 
 #[cfg(any(not(target_os = "macos"), test))]
 impl MenuShape {
-    fn of(snap: &StatusSnapshot, settings: &Settings, offer: Option<&Update>) -> Self {
-        MenuShape {
-            session: snap.spend || !snap.no_session_limit,
-            weekly: !snap.spend,
-            mute: settings.alert_chime || settings.desktop_chime,
-            update: offer.is_some(),
-        }
+    fn of(snap: &StatusSnapshot, offer: Option<&Update>) -> Self {
+        MenuShape { session: snap.spend || !snap.no_session_limit, weekly: !snap.spend, update: offer.is_some() }
     }
 }
 
@@ -128,6 +121,18 @@ impl Update {
             Update::Firmware(_) => Page::Flash,
         }
     }
+}
+
+/// What a click on a Linux/Windows menu item asks for. (The macOS panel's
+/// buttons arrive as `mac_menu::Action`s.)
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Click {
+    /// Something the window could ask for too.
+    App(AppCommand),
+    /// Switch the chime on this computer (`desktop_chime`), as the
+    /// Overview's switch does.
+    Chime,
 }
 
 /// What the tray offers, if anything. While a release build is behind the
@@ -190,7 +195,8 @@ struct Items {
     session: MenuItem,
     weekly: MenuItem,
     refresh: MenuItem,
-    mute: CheckMenuItem,
+    /// The chime on this computer (`desktop_chime`): the Overview's switch.
+    chime: CheckMenuItem,
     update: MenuItem,
 }
 
@@ -208,7 +214,7 @@ impl Items {
             session: MenuItem::with_id("session", "Session  –", true, None),
             weekly: MenuItem::with_id("weekly", "Weekly  –", true, None),
             refresh: MenuItem::with_id("refresh", "Refresh usage", true, None),
-            mute: CheckMenuItem::with_id("mute", "Mute chimes", true, false, None),
+            chime: CheckMenuItem::with_id("chime", "Chime on this computer", true, false, None),
             update: MenuItem::with_id("update", "Update firmware…", true, None),
         };
         let open = MenuItem::with_id("open", "Open Clawdmeter", true, None);
@@ -222,11 +228,7 @@ impl Items {
         if shape.weekly {
             list.push(&it.weekly);
         }
-        list.extend([&sep2 as &dyn tray_icon::menu::IsMenuItem, &it.refresh]);
-        if shape.mute {
-            list.push(&it.mute);
-        }
-        list.extend([&sep3 as &dyn tray_icon::menu::IsMenuItem, &open]);
+        list.extend([&sep2 as &dyn tray_icon::menu::IsMenuItem, &it.refresh, &it.chime, &sep3, &open]);
         if shape.update {
             list.push(&it.update);
         }
@@ -243,7 +245,7 @@ impl Items {
         &self,
         snap: &StatusSnapshot,
         paths: &Paths,
-        _settings: &Settings,
+        settings: &Settings,
         pressed: bool,
         offer: Option<&Update>,
         now: i64,
@@ -270,23 +272,22 @@ impl Items {
         let (refresh, can_refresh) = refresh_item(snap, pressed, now);
         self.refresh.set_text(refresh);
         self.refresh.set_enabled(can_refresh);
-        self.mute.set_checked(snap.chimes_muted);
+        self.chime.set_checked(settings.desktop_chime);
         if let Some(u) = offer {
             self.update.set_text(format!("{}…", u.label()));
         }
     }
 
-    /// What a click on item `id` asks for. Mute flips the tray's own state
-    /// (`chimes_muted`), not a checkbox a rebuild may have replaced.
-    fn command(id: &tray_icon::menu::MenuId, update_page: Page, chimes_muted: bool) -> Option<AppCommand> {
-        let open = |p: Page| AppCommand::Open(p.as_str().into());
+    /// What a click on item `id` asks for.
+    fn command(id: &tray_icon::menu::MenuId, update_page: Page) -> Option<Click> {
+        let open = |p: Page| Click::App(AppCommand::Open(p.as_str().into()));
         Some(match id.0.as_str() {
             "status" | "session" | "weekly" | "open" => open(Page::Overview),
             "account" => open(Page::Accounts),
-            "refresh" => AppCommand::Refresh,
-            "mute" => AppCommand::Mute(!chimes_muted),
+            "refresh" => Click::App(AppCommand::Refresh),
+            "chime" => Click::Chime,
             "update" => open(update_page),
-            "quit" => AppCommand::Quit,
+            "quit" => Click::App(AppCommand::Quit),
             _ => return None,
         })
     }
@@ -373,7 +374,6 @@ struct TrayApp {
     menu_at: i64,
     /// When a refresh was asked for, until that check has run.
     refresh_pressed: Option<i64>,
-    chimes_muted: bool,
     /// The window process, while it runs.
     window: Option<Child>,
     latest: Arc<Mutex<Option<String>>>,
@@ -399,6 +399,24 @@ impl TrayApp {
         }
     }
 
+    /// Switch the chime on this computer (`desktop_chime`), the Overview's
+    /// switch: saved, so it holds after a restart and the two agree. It flips
+    /// what the file says, not the copy re-read every 5 s, so a change made
+    /// elsewhere a moment ago isn't undone.
+    fn toggle_desktop_chime(&mut self) {
+        let mut on = self.settings.desktop_chime;
+        let saved = crate::ui::settings::write_settings(&self.paths, |s, _| {
+            s.desktop_chime = !s.desktop_chime;
+            on = s.desktop_chime;
+        });
+        match saved {
+            Ok(()) => self.settings.desktop_chime = on,
+            Err(e) => log::warn!("couldn't save desktop_chime: {e}"),
+        }
+        // Show the new state at once.
+        self.menu_at = 0;
+    }
+
     /// Where the update icon or item leads: the Update page for the app,
     /// the Flash page for the firmware.
     fn offer_page(&self) -> Page {
@@ -421,10 +439,6 @@ impl TrayApp {
             }
             AppCommand::Reconnect => self.send(Command::Reconnect),
             AppCommand::Forget => self.send(Command::Forget),
-            AppCommand::Mute(m) => {
-                self.chimes_muted = m;
-                self.send(Command::SetChimesMuted(m));
-            }
             AppCommand::Open(w) => {
                 if let Some(p) = Page::parse(&w) {
                     self.open(p);
@@ -444,7 +458,6 @@ impl TrayApp {
     fn snapshot(&self, now: i64) -> StatusSnapshot {
         let status = self.daemon.as_ref().map(|d| d.status.borrow().clone()).unwrap_or_default();
         let mut snap = StatusSnapshot::from_status(&status, now);
-        snap.chimes_muted = self.chimes_muted;
         snap.windowed = !self.use_tray;
         snap.latest_firmware = self.latest.lock().ok().and_then(|l| l.clone());
         snap.device_firmware = ipc::load_firmware_record(&self.paths).map(|r| r.ver);
@@ -472,10 +485,14 @@ impl TrayApp {
         // Menu clicks (Linux, Windows: macOS has no native items).
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             #[cfg(not(target_os = "macos"))]
-            if let Some(c) = Items::command(&ev.id, self.offer_page(), self.chimes_muted) {
-                if !self.handle(c) {
-                    return false;
+            match Items::command(&ev.id, self.offer_page()) {
+                Some(Click::App(c)) => {
+                    if !self.handle(c) {
+                        return false;
+                    }
                 }
+                Some(Click::Chime) => self.toggle_desktop_chime(),
+                None => {}
             }
             #[cfg(target_os = "macos")]
             let _ = ev;
@@ -491,21 +508,8 @@ impl TrayApp {
                 Action::Settings => AppCommand::Open(Page::Settings.as_str().into()),
                 Action::Update => AppCommand::Open(self.offer_page().as_str().into()),
                 Action::Chime => {
-                    // The Overview's switch: saved, so it holds after a
-                    // restart and both places agree. It flips what the file
-                    // says, not the copy re-read every 5 s, so a change made
-                    // elsewhere a moment ago isn't undone. (Two clicks in one
-                    // 200 ms tick count as one.)
-                    let mut on = self.settings.desktop_chime;
-                    let saved = crate::ui::settings::write_settings(&self.paths, |s, _| {
-                        s.desktop_chime = !s.desktop_chime;
-                        on = s.desktop_chime;
-                    });
-                    match saved {
-                        Ok(()) => self.settings.desktop_chime = on,
-                        Err(e) => log::warn!("couldn't save desktop_chime: {e}"),
-                    }
-                    self.menu_at = 0;
+                    // (Two clicks in one 200 ms tick count as one.)
+                    self.toggle_desktop_chime();
                     continue;
                 }
                 Action::Quit => AppCommand::Quit,
@@ -565,7 +569,7 @@ impl TrayApp {
             // row gone or back: build the Linux/Windows menu again.
             #[cfg(not(target_os = "macos"))]
             {
-                let shape = MenuShape::of(&snap, &self.settings, self.offer.as_ref());
+                let shape = MenuShape::of(&snap, self.offer.as_ref());
                 if let (Some(t), Some(items)) = (&self.tray, &self.items) {
                     if items.shape != shape {
                         let items = Items::new(shape);
@@ -766,7 +770,6 @@ fn run_locked(paths: Paths, _lock: Option<std::fs::File>) -> i32 {
         last_written_at: 0,
         menu_at: 0,
         refresh_pressed: None,
-        chimes_muted: false,
         window: None,
         latest,
         check_now,
@@ -843,17 +846,13 @@ mod tests {
     #[test]
     fn clicks_match_by_fixed_ids() {
         let id = |s: &str| tray_icon::menu::MenuId::new(s);
-        let open = |p: Page| Some(AppCommand::Open(p.as_str().into()));
-        assert_eq!(Items::command(&id("open"), Page::Flash, false), open(Page::Overview));
-        assert_eq!(Items::command(&id("account"), Page::Flash, false), open(Page::Accounts));
-        assert_eq!(Items::command(&id("update"), Page::Update, false), open(Page::Update));
-        assert_eq!(
-            Items::command(&id("mute"), Page::Flash, true),
-            Some(AppCommand::Mute(false)),
-            "flips the tray's state"
-        );
-        assert_eq!(Items::command(&id("quit"), Page::Flash, false), Some(AppCommand::Quit));
-        assert_eq!(Items::command(&id("12"), Page::Flash, false), None);
+        let open = |p: Page| Some(Click::App(AppCommand::Open(p.as_str().into())));
+        assert_eq!(Items::command(&id("open"), Page::Flash), open(Page::Overview));
+        assert_eq!(Items::command(&id("account"), Page::Flash), open(Page::Accounts));
+        assert_eq!(Items::command(&id("update"), Page::Update), open(Page::Update));
+        assert_eq!(Items::command(&id("chime"), Page::Flash), Some(Click::Chime), "the Overview's switch");
+        assert_eq!(Items::command(&id("quit"), Page::Flash), Some(Click::App(AppCommand::Quit)));
+        assert_eq!(Items::command(&id("12"), Page::Flash), None);
     }
 
     #[test]
@@ -876,24 +875,21 @@ mod tests {
     #[test]
     fn the_menu_lists_only_what_applies() {
         let quiet = Settings::from_config(&Default::default(), &Paths::under(std::path::Path::new("/home/u")), None);
-        let shape = MenuShape::of(&StatusSnapshot::default(), &quiet, None);
-        assert!(!shape.mute, "no chime on: nothing to mute");
+        let shape = MenuShape::of(&StatusSnapshot::default(), None);
         assert!(!shape.update, "no newer release: no firmware item");
         assert!(shape.session && shape.weekly);
 
-        let chimes = Settings { desktop_chime: true, ..quiet.clone() };
-        assert!(MenuShape::of(&StatusSnapshot::default(), &chimes, None).mute);
         let older = StatusSnapshot {
             latest_firmware: Some("2.5.0".into()),
             device_firmware: Some("2.4.0".into()),
             ..Default::default()
         };
         let offer = update_offer(&older, &quiet, false, "2.4.0");
-        assert!(MenuShape::of(&older, &quiet, offer.as_ref()).update);
+        assert!(MenuShape::of(&older, offer.as_ref()).update);
         let ultra = StatusSnapshot { no_session_limit: true, ..Default::default() };
-        assert!(!MenuShape::of(&ultra, &quiet, None).session);
+        assert!(!MenuShape::of(&ultra, None).session);
         let spend = StatusSnapshot { spend: true, no_session_limit: true, ..Default::default() };
-        let shape = MenuShape::of(&spend, &quiet, None);
+        let shape = MenuShape::of(&spend, None);
         assert!(shape.session && !shape.weekly, "a Spend row and no Weekly one");
     }
 
