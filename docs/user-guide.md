@@ -49,7 +49,8 @@ libraries.
 
 Launch Clawdmeter to open setup. It stays in the tray or macOS menu bar.
 Its menu shows what the device shows: the link, the account, and each usage
-meter with its reset countdown. On macOS the top of the menu draws them as on
+meter with its reset countdown (one **Spend** meter on a spend-capped
+account). On macOS the top of the menu draws them as on
 the device, with Clawd and the bars (and the pace marker when it's on), and
 **Show usage in the menu bar** in Settings puts the higher of the session
 and weekly percentages beside the icon. The reload button in the corner of
@@ -60,9 +61,13 @@ orange dot while a newer release is out (it opens **Update** to install the
 new app first, then **Flash** for the board's firmware; skip the app's
 release and it stays hidden until the next one), a speaker
 that turns the chime on this computer on or off (the Overview's **Play a
-chime on this computer** switch), Settings, and a power icon that quits. On Linux and Windows the menu lists **Refresh usage**, **Mute
-chimes**, **Open Clawdmeter**, **Update Clawdmeter to v…** or **Update
-firmware to v…** and **Quit Clawdmeter** instead, with the same conditions.
+chime on this computer** switch), Settings, and a power icon that quits.
+The board's own alert chime isn't in the macOS menu: switch it with **Alert
+chime** on the Device page. On Linux and Windows the menu lists **Refresh
+usage** (greyed out, saying when it can check again, until a check can run),
+**Mute chimes**, **Open Clawdmeter**, **Update Clawdmeter to v…** or
+**Update firmware to v…** and **Quit Clawdmeter** instead, with the same
+conditions.
 Without a tray, it uses a window; closing that window quits the app.
 You can skip setup and return through **Run setup again** in Settings.
 

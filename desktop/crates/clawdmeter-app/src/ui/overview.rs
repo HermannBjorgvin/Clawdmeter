@@ -199,7 +199,14 @@ pub fn reset_text(resets_at: Option<i64>, now: i64, none: &str) -> String {
 /// The device's bar fill for a percentage (`pct_color` in ui.cpp): green
 /// below 50, amber below 80, red from 80; the light theme's own tones.
 fn fill(t: &Theme, pct: u32) -> Rgba {
-    match (t.dark, usage_tone(pct)) {
+    bar_fill(t, usage_tone(pct))
+}
+
+/// A usage bar's fill for a tone (`Ok` green, `Accent` amber, else red):
+/// the device's own colours on dark, the light theme's tones on light. The
+/// tray's drawn meters use it too.
+pub fn bar_fill(t: &Theme, tone: Tone) -> Rgba {
+    match (t.dark, tone) {
         (true, Tone::Ok) => rgb(0x788c5d),
         (true, Tone::Accent) => rgb(0xd97757),
         (true, _) => rgb(0xc0392b),
@@ -332,11 +339,19 @@ impl Render for OverviewView {
             return page.child(chime).child(setup);
         };
 
-        // No 5-hour limit (verified Ultra): the week is the only meter.
-        let session = (!s.no_session_limit)
-            .then(|| meter(&t, "Session", s.session_pct, reset_text(s.session_resets_at, now, "Not started")));
-        let weekly = meter(&t, "Weekly", s.week_pct, reset_text(s.week_resets_at, now, "---"));
-        page = page.child(div().flex().flex_col().gap(px(12.)).children(session).child(weekly));
+        // A spend-capped account has one meter, the spend; no 5-hour limit
+        // (verified Ultra) leaves the week alone.
+        let meters: Vec<_> = if s.spend {
+            vec![meter(&t, "Spend", s.session_pct, reset_text(s.spend_resets_at, now, "---"))]
+        } else {
+            let session = (!s.no_session_limit)
+                .then(|| meter(&t, "Session", s.session_pct, reset_text(s.session_resets_at, now, "Not started")));
+            session
+                .into_iter()
+                .chain([meter(&t, "Weekly", s.week_pct, reset_text(s.week_resets_at, now, "---"))])
+                .collect()
+        };
+        page = page.child(div().flex().flex_col().gap(px(12.)).children(meters));
         if let Some(tag) = self.firmware_nudge() {
             let v = tag.trim_start_matches('v').to_owned();
             page = page.child(

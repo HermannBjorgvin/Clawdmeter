@@ -157,11 +157,10 @@ pub fn ago(secs: i64) -> String {
 }
 
 /// A countdown as the device writes it (`format_reset_time` in
-/// firmware/src/ui.cpp): "45m", "2h 56m", "3d 4h". Minutes round to the
-/// nearest, as the payload's do (`minutes_until`), so both read the same.
+/// firmware/src/ui.cpp): "45m", "2h 56m", "3d 4h", from the same whole
+/// minutes the device is sent (`payload::minutes_left`).
 pub fn countdown(secs: i64) -> String {
-    let mins = if secs <= 0 { 0 } else { (secs + 30) / 60 };
-    match mins {
+    match clawdmeter_core::payload::minutes_left(secs) {
         m if m < 60 => format!("{m}m"),
         m if m < 1440 => format!("{}h {}m", m / 60, m % 60),
         m => format!("{}d {}h", m / 1440, (m % 1440) / 60),

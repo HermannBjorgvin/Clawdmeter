@@ -61,7 +61,11 @@ is faked behind `FlashHardware`.
   <dir>` renders it to PNGs. Icons are the window's bundled Lucide SVGs,
   through resvg, as template images. Linux and Windows list native items;
   muda inserts and removes by position, so the tray never edits the item
-  set but builds a new menu when `tray::MenuShape` changes),
+  set but builds a new menu when `tray::MenuShape` changes; their ids are
+  fixed strings (`"open"`, `"quit"`, …), so a click still matches after a
+  rebuild. `Items` is per platform: on macOS just the menu and the panel.
+  `StatusSnapshot::spend` marks a spend-capped account, drawn as one Spend
+  meter in the panel, the rows and the Overview),
   window (`ui/`), `daemon.rs` (drives the engine on its own thread: 0.5 s
   tick, config re-read every 5 s and on `Command::ReloadSettings`),
   `hooks/` (`clawdmeter hook alert|clear|event` and the settings.json

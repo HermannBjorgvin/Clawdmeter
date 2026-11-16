@@ -4,6 +4,7 @@
 
 use crate::ipc::StatusSnapshot;
 use crate::ui::overview::{reset_text, state_title, wait_text, RefreshState};
+use crate::ui::widgets::{usage_tone, Tone};
 use crate::{ago, tilde};
 
 /// The 5-hour window and the week, in seconds (`PACE_*_MINS` in
@@ -14,28 +15,20 @@ const WEEK_WINDOW_SECS: i64 = 7 * 24 * 3600;
 /// (`PACE_GRACE_PCT`).
 const PACE_GRACE_PCT: f64 = 1.0;
 
-/// A bar's fill, as the device picks it (`bar_color` in firmware/src/ui.cpp).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fill {
-    /// Under 50 %, or at or behind the pace marker.
-    Green,
-    /// 50-80 %, or ahead of the pace marker.
-    Amber,
-    /// From 80 %, or at the limit with the pace marker on.
-    Red,
-}
-
 /// One usage window, laid out like a device panel.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Meter {
-    /// "Session" or "Weekly".
+    /// "Session", "Weekly" or "Spend".
     pub label: &'static str,
     /// "57%", or "--%" with no reading (no data is never a zero).
     pub value: String,
     /// The bar's fill, 0..=1.
     pub frac: f64,
-    /// The fill's colour.
-    pub fill: Fill,
+    /// The fill's colour, as the device picks it (`bar_color` in
+    /// firmware/src/ui.cpp): `Ok` green, `Accent` amber, `Bad` red, by the
+    /// Overview's thresholds (`usage_tone`) or, with the pace marker on, by
+    /// pace (at or behind it, ahead of it, at the limit).
+    pub fill: Tone,
     /// "Resets in 3d 4h", "Not started", "---".
     pub reset: String,
     /// Where the pace marker sits, 0..=1, when it's on and the reset time
@@ -53,7 +46,8 @@ pub struct Header {
     /// "updated 6 min ago", beside the account (it keeps its room when a long
     /// folder is cut short).
     pub age: Option<String>,
-    /// Session and Weekly, or Weekly alone on an account with no 5-hour limit.
+    /// Session and Weekly; Weekly alone on an account with no 5-hour limit;
+    /// Spend alone on a spend-capped account.
     pub meters: Vec<Meter>,
     /// What the reload button in the corner can do.
     pub refresh: RefreshState,
@@ -92,23 +86,30 @@ impl Header {
             None => ("No usage data yet".into(), None),
         };
         let mut meters = Vec::with_capacity(2);
-        // No 5-hour limit (verified Ultra): the week is the only meter.
-        if !s.no_session_limit {
+        if s.spend {
+            // A spend-capped account: one meter, its period's reset, and no
+            // pace marker (the device's Period bar already is one).
+            let reset = reset_text(s.spend_resets_at, now, "---");
+            meters.push(meter("Spend", s.session_pct, reset, None, now));
+        } else {
+            // No 5-hour limit (verified Ultra): the week is the only meter.
+            if !s.no_session_limit {
+                meters.push(meter(
+                    "Session",
+                    s.session_pct,
+                    reset_text(s.session_resets_at, now, "Not started"),
+                    pace_marker.then_some((s.session_resets_at, SESSION_WINDOW_SECS)),
+                    now,
+                ));
+            }
             meters.push(meter(
-                "Session",
-                s.session_pct,
-                reset_text(s.session_resets_at, now, "Not started"),
-                pace_marker.then_some((s.session_resets_at, SESSION_WINDOW_SECS)),
+                "Weekly",
+                s.week_pct,
+                reset_text(s.week_resets_at, now, "---"),
+                pace_marker.then_some((s.week_resets_at, WEEK_WINDOW_SECS)),
                 now,
             ));
         }
-        meters.push(meter(
-            "Weekly",
-            s.week_pct,
-            reset_text(s.week_resets_at, now, "---"),
-            pace_marker.then_some((s.week_resets_at, WEEK_WINDOW_SECS)),
-            now,
-        ));
         Header { title: state_title(s), detail, age, meters, refresh, chime: desktop_chime, update: None }
     }
 
@@ -118,15 +119,18 @@ impl Header {
             RefreshState::Ready => "Refresh usage".into(),
             RefreshState::Checking => "Checking usage…".into(),
             RefreshState::Wait(secs) => format!("Can check again in {}", wait_text(secs)),
-            RefreshState::Paused(until) => format!("Usage paused by Anthropic until {}", clock(until)),
+            RefreshState::Paused(until) => {
+                clawdmeter_core::usage::paused_message(until, clawdmeter_core::platform::utc_offset_secs())
+                    .trim_end_matches('.')
+                    .to_owned()
+            }
         }
     }
 }
 
-/// "14:20", local time.
+/// "14:20", local time: when a pause ends (`usage::paused_clock`).
 fn clock(at: i64) -> String {
-    let local = at + clawdmeter_core::platform::utc_offset_secs();
-    chrono::DateTime::<chrono::Utc>::from_timestamp(local, 0).unwrap_or_default().format("%H:%M").to_string()
+    clawdmeter_core::usage::paused_clock(at, clawdmeter_core::platform::utc_offset_secs())
 }
 
 /// `pace`: the window's reset time and length, with the marker on.
@@ -134,12 +138,10 @@ fn meter(label: &'static str, pct: Option<u32>, reset: String, pace: Option<(Opt
     let used = pct.unwrap_or(0) as f64;
     let elapsed = pace.and_then(|(resets_at, window)| Some(elapsed_pct(resets_at?, window, now)));
     let fill = match elapsed {
-        Some(_) if used >= 100.0 => Fill::Red,
-        Some(e) if used > e + PACE_GRACE_PCT => Fill::Amber,
-        Some(_) => Fill::Green,
-        None if used >= 80.0 => Fill::Red,
-        None if used >= 50.0 => Fill::Amber,
-        None => Fill::Green,
+        Some(_) if used >= 100.0 => Tone::Bad,
+        Some(e) if used > e + PACE_GRACE_PCT => Tone::Accent,
+        Some(_) => Tone::Ok,
+        None => usage_tone(pct.unwrap_or(0)),
     };
     Meter {
         label,
@@ -187,7 +189,7 @@ mod tests {
         let [s, w] = h.meters.as_slice() else { panic!("two meters") };
         assert_eq!((s.label, s.value.as_str(), s.reset.as_str()), ("Session", "34%", "Resets in 2h 56m"));
         assert_eq!((w.label, w.value.as_str(), w.reset.as_str()), ("Weekly", "62%", "Resets in 5d 11h"));
-        assert_eq!((s.fill, w.fill), (Fill::Green, Fill::Amber), "50 and 80 are the device's thresholds");
+        assert_eq!((s.fill, w.fill), (Tone::Ok, Tone::Accent), "50 and 80 are the device's thresholds");
         assert_eq!((s.pace, w.pace), (None, None), "no marker unless it's on");
     }
 
@@ -231,10 +233,10 @@ mod tests {
             Header::new(&s, Path::new("/home/u"), true, false, RefreshState::Ready, NOW).meters[0].clone()
         };
         assert_eq!(at(40).pace, Some(0.5));
-        assert_eq!(at(40).fill, Fill::Green, "behind the marker");
-        assert_eq!(at(51).fill, Fill::Green, "within a point of it");
-        assert_eq!(at(52).fill, Fill::Amber, "ahead of it");
-        assert_eq!(at(100).fill, Fill::Red, "at the limit");
+        assert_eq!(at(40).fill, Tone::Ok, "behind the marker");
+        assert_eq!(at(51).fill, Tone::Ok, "within a point of it");
+        assert_eq!(at(52).fill, Tone::Accent, "ahead of it");
+        assert_eq!(at(100).fill, Tone::Bad, "at the limit");
         // A countdown longer than the window is a window just begun.
         let skew = StatusSnapshot { session_resets_at: Some(NOW + 6 * 3600), ..snap() };
         assert_eq!(
@@ -259,5 +261,23 @@ mod tests {
     fn the_footer_shows_the_chime() {
         assert!(!Header::new(&snap(), Path::new("/home/u"), false, false, RefreshState::Ready, NOW).chime);
         assert!(Header::new(&snap(), Path::new("/home/u"), false, true, RefreshState::Ready, NOW).chime);
+    }
+
+    #[test]
+    fn a_spend_capped_account_has_one_spend_meter() {
+        let s = StatusSnapshot {
+            spend: true,
+            session_pct: Some(104),
+            window_started: false,
+            session_resets_at: None,
+            week_pct: None,
+            week_resets_at: None,
+            spend_resets_at: Some(NOW + 16 * 86400),
+            ..snap()
+        };
+        let h = Header::new(&s, Path::new("/home/u"), true, false, RefreshState::Ready, NOW);
+        let [m] = h.meters.as_slice() else { panic!("one meter, not a Weekly placeholder") };
+        assert_eq!((m.label, m.value.as_str(), m.reset.as_str()), ("Spend", "104%", "Resets in 16d 0h"));
+        assert_eq!((m.frac, m.fill, m.pace), (1.0, Tone::Bad, None), "full, red, no pace marker");
     }
 }

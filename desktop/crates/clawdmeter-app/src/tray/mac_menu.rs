@@ -31,9 +31,11 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSArray, NSData, NSPoint, NSRect, NSSize, NSString};
 
-use super::header::{Fill, Header};
+use super::header::Header;
 use crate::art::{cell_rgb, idle_cell, IDLE_H, IDLE_W};
 use crate::ui::overview::RefreshState;
+use crate::ui::theme::Theme;
+use crate::ui::widgets::Tone;
 
 /// The header's width; the menu grows to fit it.
 const W: f64 = 300.0;
@@ -365,17 +367,12 @@ fn srgb(rgb: u32) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(c(16), c(8), c(0), 1.0)
 }
 
-/// The Overview's bar fills (`overview::fill`): the device's own colours
-/// on dark, the light theme's tones on light.
-fn fill_color(fill: Fill, dark: bool) -> Retained<NSColor> {
-    srgb(match (fill, dark) {
-        (Fill::Green, true) => 0x788c5d,
-        (Fill::Amber, true) => 0xd97757,
-        (Fill::Red, true) => 0xc0392b,
-        (Fill::Green, false) => 0x5f7348,
-        (Fill::Amber, false) => 0xc6613f,
-        (Fill::Red, false) => 0xb33a26,
-    })
+/// A bar's fill in the Overview's colours (`overview::bar_fill`) for the
+/// view's appearance.
+fn fill_color(tone: Tone, dark: bool) -> Retained<NSColor> {
+    let theme = if dark { Theme::dark() } else { Theme::light() };
+    let c = crate::ui::overview::bar_fill(&theme, tone);
+    NSColor::colorWithSRGBRed_green_blue_alpha(c.r.into(), c.g.into(), c.b.into(), c.a.into())
 }
 
 /// An NSImage of `size` points from straight RGBA pixels.
@@ -503,7 +500,7 @@ impl MenuHeader {
                 value: label(mtm, &NSFont::monospacedDigitSystemFontOfSize_weight(22.0, medium), &primary),
                 label: label(mtm, &NSFont::systemFontOfSize_weight(11.0, regular), &secondary),
                 track: bar(mtm, 3.0, &NSColor::quaternaryLabelColor()),
-                fill: bar(mtm, 3.0, &fill_color(Fill::Green, true)),
+                fill: bar(mtm, 3.0, &fill_color(Tone::Ok, true)),
                 tick: bar(mtm, 1.0, &primary),
                 reset: label(mtm, &small, &secondary),
             };
@@ -533,7 +530,7 @@ impl MenuHeader {
         open.setControlSize(NSControlSize::Regular);
         open.sizeToFit();
         let update = HoverButton::new(mtm, "arrow-down-to-line", "Update", target, sel!(update:));
-        let update_dot = bar(mtm, 3.0, &fill_color(Fill::Amber, true));
+        let update_dot = bar(mtm, 3.0, &fill_color(Tone::Accent, true));
         let chime = HoverButton::new(mtm, "volume-2", CHIME_OFF_TIP, target, sel!(chime:));
         let chime_icons = [("volume-2", CHIME_OFF_TIP), ("volume-x", CHIME_ON_TIP)].map(|(icon, label)| {
             let image = icon_image(icon);
@@ -695,7 +692,7 @@ impl MenuHeader {
             let f = self.update.frame();
             let glyph_right = f.origin.x + pad + ICON;
             self.update_dot.setFrame(rect(glyph_right - 3.0, f.origin.y + pad - 3.0, 6.0, 6.0));
-            self.update_dot.setFillColor(&fill_color(Fill::Amber, dark));
+            self.update_dot.setFillColor(&fill_color(Tone::Accent, dark));
         }
         self.update_dot.setHidden(h.update.is_none());
         row + FOOT_ROW + FOOT_PAD

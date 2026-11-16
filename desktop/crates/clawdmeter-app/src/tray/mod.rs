@@ -22,7 +22,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clawdmeter_core::{unix_now, Paths, Settings};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+#[cfg(not(target_os = "macos"))]
+use tray_icon::menu::{CheckMenuItem, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{Menu, MenuEvent};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::art::{tray_icon_rgba, TrayState};
@@ -67,29 +69,32 @@ pub fn spawn_window(page: Page) -> std::io::Result<Child> {
 
 /// Which of the Linux/Windows menu's optional items it has. A change
 /// rebuilds the menu (`TrayIcon::set_menu`) rather than editing it in place,
-/// so no item ever moves under an open menu. On macOS the panel shows and
-/// hides its own parts, so the shape stays the default and the menu is never
-/// rebuilt.
+/// so no item ever moves under an open menu. macOS has no native items: its
+/// panel shows and hides its own parts.
+#[cfg(any(not(target_os = "macos"), test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct MenuShape {
-    /// The Session row (Linux, Windows): gone with no 5-hour limit.
+    /// The Session row (or Spend, on a spend-capped account): gone with no
+    /// 5-hour limit.
     session: bool,
+    /// The Weekly row: gone on a spend-capped account, which has no week.
+    weekly: bool,
     /// Mute chimes: while the device's alert chime or the desktop chime is on.
     mute: bool,
-    /// "Update Clawdmeter / firmware to v…": while a newer release is out
+    /// "Update Clawdmeter / firmware to v…": while there's one to offer
     /// ([`update_offer`]). Flashing by hand otherwise is rare, and the
     /// window's Flash page has it.
     update: bool,
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 impl MenuShape {
     fn of(snap: &StatusSnapshot, settings: &Settings, offer: Option<&Update>) -> Self {
         MenuShape {
-            // The macOS header draws the meters itself.
-            session: cfg!(not(target_os = "macos")) && !snap.no_session_limit,
-            // On macOS these are footer icons in the panel.
-            mute: cfg!(not(target_os = "macos")) && (settings.alert_chime || settings.desktop_chime),
-            update: cfg!(not(target_os = "macos")) && offer.is_some(),
+            session: snap.spend || !snap.no_session_limit,
+            weekly: !snap.spend,
+            mute: settings.alert_chime || settings.desktop_chime,
+            update: offer.is_some(),
         }
     }
 }
@@ -139,75 +144,24 @@ fn update_offer(snap: &StatusSnapshot, settings: &Settings, release_build: bool,
     snap.update_available().map(|v| Update::Firmware(display_version(v)))
 }
 
-/// The tray menu. On macOS it's the drawn panel alone (`mac_menu`); the
-/// native items are built but never added there.
+/// The macOS menu: the drawn panel alone (`mac_menu`), whose footer holds
+/// the actions.
+#[cfg(target_os = "macos")]
 struct Items {
     menu: Menu,
-    /// The optional items it was built with.
-    shape: MenuShape,
-    status: MenuItem,
-    account: MenuItem,
-    session: MenuItem,
-    weekly: MenuItem,
-    #[cfg(target_os = "macos")]
     header: std::cell::RefCell<mac_menu::MenuHeader>,
-    refresh: MenuItem,
-    mute: CheckMenuItem,
-    open: MenuItem,
-    update: MenuItem,
-    quit: MenuItem,
 }
 
+#[cfg(target_os = "macos")]
 impl Items {
-    fn new(shape: MenuShape) -> Self {
+    fn new() -> Self {
         let menu = Menu::new();
-        let it = Items {
-            // The header goes in first, at the top of the empty menu.
-            #[cfg(target_os = "macos")]
-            header: std::cell::RefCell::new(mac_menu::MenuHeader::install(&menu)),
-            menu,
-            shape,
-            // The status and usage rows are enabled so they read at full
-            // contrast (a disabled item is greyed out); clicking one opens
-            // the page with the details.
-            status: MenuItem::new("Clawdmeter · Starting", true, None),
-            account: MenuItem::new("No usage data yet", true, None),
-            session: MenuItem::new("Session  –", true, None),
-            weekly: MenuItem::new("Weekly  –", true, None),
-            refresh: MenuItem::new("Refresh usage", true, None),
-            mute: CheckMenuItem::new("Mute chimes", true, false, None),
-            open: MenuItem::new("Open Clawdmeter", true, None),
-            update: MenuItem::new("Update firmware…", true, None),
-            quit: MenuItem::new("Quit Clawdmeter", true, None),
-        };
-        // On macOS the panel is the whole menu (its footer holds the
-        // actions); Linux and Windows list native items.
-        let separator = PredefinedMenuItem::separator;
-        let (sep1, sep2, sep3, sep4) = (separator(), separator(), separator(), separator());
-        let mut list: Vec<&dyn tray_icon::menu::IsMenuItem> = Vec::new();
-        if cfg!(not(target_os = "macos")) {
-            list.extend([&it.status as &dyn tray_icon::menu::IsMenuItem, &it.account, &sep1]);
-            if shape.session {
-                list.push(&it.session);
-            }
-            list.extend([&it.weekly as &dyn tray_icon::menu::IsMenuItem, &sep2, &it.refresh]);
-            if shape.mute {
-                list.push(&it.mute);
-            }
-            list.extend([&sep3 as &dyn tray_icon::menu::IsMenuItem, &it.open]);
-            if shape.update {
-                list.push(&it.update);
-            }
-            list.extend([&sep4 as &dyn tray_icon::menu::IsMenuItem, &it.quit]);
-        }
-        if let Err(e) = it.menu.append_items(&list) {
-            log::warn!("tray menu: {e}");
-        }
-        it
+        let header = std::cell::RefCell::new(mac_menu::MenuHeader::install(&menu));
+        Items { menu, header }
     }
 
-    /// `pressed`: a refresh asked for and not yet served (the header shows
-    /// it as checking); `offer`: the update to offer ([`update_offer`]).
+    /// `pressed`: a refresh asked for and not yet served (the panel shows it
+    /// as checking); `offer`: the update to offer ([`update_offer`]).
     fn update(
         &self,
         snap: &StatusSnapshot,
@@ -217,31 +171,83 @@ impl Items {
         offer: Option<&Update>,
         now: i64,
     ) {
-        #[cfg(target_os = "macos")]
-        {
-            let refresh = refresh_state(snap, pressed, now);
-            let mut h =
-                header::Header::new(snap, &paths.home, settings.pace_marker, settings.desktop_chime, refresh, now);
-            h.update = offer.cloned();
-            self.header.borrow_mut().update(&h);
+        let refresh = refresh_state(snap, pressed, now);
+        let mut h = header::Header::new(snap, &paths.home, settings.pace_marker, settings.desktop_chime, refresh, now);
+        h.update = offer.cloned();
+        self.header.borrow_mut().update(&h);
+    }
+}
+
+/// The Linux/Windows menu: native items. Their ids are fixed strings, so a
+/// click still matches after the menu is rebuilt.
+#[cfg(not(target_os = "macos"))]
+struct Items {
+    menu: Menu,
+    /// The optional items it was built with.
+    shape: MenuShape,
+    status: MenuItem,
+    account: MenuItem,
+    session: MenuItem,
+    weekly: MenuItem,
+    refresh: MenuItem,
+    mute: CheckMenuItem,
+    update: MenuItem,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl Items {
+    fn new(shape: MenuShape) -> Self {
+        let it = Items {
+            menu: Menu::new(),
+            shape,
+            // The status and usage rows are enabled so they read at full
+            // contrast (a disabled item is greyed out); clicking one opens
+            // the page with the details.
+            status: MenuItem::with_id("status", "Clawdmeter · Starting", true, None),
+            account: MenuItem::with_id("account", "No usage data yet", true, None),
+            session: MenuItem::with_id("session", "Session  –", true, None),
+            weekly: MenuItem::with_id("weekly", "Weekly  –", true, None),
+            refresh: MenuItem::with_id("refresh", "Refresh usage", true, None),
+            mute: CheckMenuItem::with_id("mute", "Mute chimes", true, false, None),
+            update: MenuItem::with_id("update", "Update firmware…", true, None),
+        };
+        let open = MenuItem::with_id("open", "Open Clawdmeter", true, None);
+        let quit = MenuItem::with_id("quit", "Quit Clawdmeter", true, None);
+        let separator = PredefinedMenuItem::separator;
+        let (sep1, sep2, sep3, sep4) = (separator(), separator(), separator(), separator());
+        let mut list: Vec<&dyn tray_icon::menu::IsMenuItem> = vec![&it.status, &it.account, &sep1];
+        if shape.session {
+            list.push(&it.session);
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (pressed, settings);
-            self.update_rows(snap, paths, now);
-            let (refresh, can_refresh) = refresh_item(snap, now);
-            self.refresh.set_text(refresh);
-            self.refresh.set_enabled(can_refresh);
+        if shape.weekly {
+            list.push(&it.weekly);
         }
-        self.mute.set_checked(snap.chimes_muted);
-        if let Some(u) = offer {
-            self.update.set_text(format!("{}…", u.label()));
+        list.extend([&sep2 as &dyn tray_icon::menu::IsMenuItem, &it.refresh]);
+        if shape.mute {
+            list.push(&it.mute);
         }
+        list.extend([&sep3 as &dyn tray_icon::menu::IsMenuItem, &open]);
+        if shape.update {
+            list.push(&it.update);
+        }
+        list.extend([&sep4 as &dyn tray_icon::menu::IsMenuItem, &quit]);
+        if let Err(e) = it.menu.append_items(&list) {
+            log::warn!("tray menu: {e}");
+        }
+        it
     }
 
-    /// The native status and usage rows (Linux, Windows).
-    #[cfg(not(target_os = "macos"))]
-    fn update_rows(&self, snap: &StatusSnapshot, paths: &Paths, now: i64) {
+    /// `pressed`: a refresh asked for and not yet served (the item says it's
+    /// checking); `offer`: the update to offer ([`update_offer`]).
+    fn update(
+        &self,
+        snap: &StatusSnapshot,
+        paths: &Paths,
+        _settings: &Settings,
+        pressed: bool,
+        offer: Option<&Update>,
+        now: i64,
+    ) {
         let state = snap.tray_state();
         let mut label = state.label().to_owned();
         if snap.link == "no_adapter" {
@@ -255,8 +261,34 @@ impl Items {
             (None, _) if snap.logged_out => "Open Claude Code to sign in".into(),
             (None, _) => "No usage data yet".into(),
         });
-        self.session.set_text(meter_row("Session", snap.session_pct, snap.window_started, snap.session_resets_at, now));
+        self.session.set_text(if snap.spend {
+            meter_row("Spend", snap.session_pct, true, snap.spend_resets_at, now)
+        } else {
+            meter_row("Session", snap.session_pct, snap.window_started, snap.session_resets_at, now)
+        });
         self.weekly.set_text(meter_row("Weekly", snap.week_pct, true, snap.week_resets_at, now));
+        let (refresh, can_refresh) = refresh_item(snap, pressed, now);
+        self.refresh.set_text(refresh);
+        self.refresh.set_enabled(can_refresh);
+        self.mute.set_checked(snap.chimes_muted);
+        if let Some(u) = offer {
+            self.update.set_text(format!("{}…", u.label()));
+        }
+    }
+
+    /// What a click on item `id` asks for. Mute flips the tray's own state
+    /// (`chimes_muted`), not a checkbox a rebuild may have replaced.
+    fn command(id: &tray_icon::menu::MenuId, update_page: Page, chimes_muted: bool) -> Option<AppCommand> {
+        let open = |p: Page| AppCommand::Open(p.as_str().into());
+        Some(match id.0.as_str() {
+            "status" | "session" | "weekly" | "open" => open(Page::Overview),
+            "account" => open(Page::Accounts),
+            "refresh" => AppCommand::Refresh,
+            "mute" => AppCommand::Mute(!chimes_muted),
+            "update" => open(update_page),
+            "quit" => AppCommand::Quit,
+            _ => return None,
+        })
     }
 }
 
@@ -273,19 +305,20 @@ fn meter_row(label: &str, pct: Option<u32>, started: bool, resets_at: Option<i64
     }
 }
 
-/// The refresh item's text and whether it can be clicked (Linux, Windows).
-/// A click while the account was checked too recently still queues a check,
-/// so only a running check or a pause from Anthropic disables it.
+/// The refresh item's text and whether it can be clicked (Linux, Windows),
+/// by the Overview's rule: only when a press would check right away. A press
+/// shows as checking until that check has run (`pressed`).
 #[cfg(any(not(target_os = "macos"), test))]
-fn refresh_item(snap: &StatusSnapshot, now: i64) -> (String, bool) {
-    use crate::ui::overview::RefreshState;
-    match refresh_state(snap, false, now) {
+fn refresh_item(snap: &StatusSnapshot, pressed: bool, now: i64) -> (String, bool) {
+    use crate::ui::overview::{wait_text, RefreshState};
+    match refresh_state(snap, pressed, now) {
         RefreshState::Checking => ("Checking usage…".into(), false),
         RefreshState::Paused(until) => {
             let msg = clawdmeter_core::usage::paused_message(until, clawdmeter_core::platform::utc_offset_secs());
             (msg.trim_end_matches('.').to_owned(), false)
         }
-        RefreshState::Wait(_) | RefreshState::Ready => ("Refresh usage".into(), true),
+        RefreshState::Wait(secs) => (format!("Can check again in {}", wait_text(secs)), false),
+        RefreshState::Ready => ("Refresh usage".into(), true),
     }
 }
 
@@ -315,6 +348,7 @@ fn icon_for(state: TrayState) -> Option<Icon> {
 fn tooltip(snap: &StatusSnapshot) -> String {
     let mut t = format!("Clawdmeter · {}", snap.tray_state().label());
     match (snap.session_pct, snap.week_pct) {
+        (Some(s), _) if snap.spend => t.push_str(&format!(" · Spend {s}%")),
         (Some(s), Some(w)) => t.push_str(&format!(" · Session {s}% · Weekly {w}%")),
         (None, Some(w)) if snap.no_session_limit => t.push_str(&format!(" · Weekly {w}%")),
         _ => {}
@@ -435,32 +469,16 @@ impl TrayApp {
             self.create_tray();
         }
 
-        // Menu clicks.
+        // Menu clicks (Linux, Windows: macOS has no native items).
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
-            let Some(items) = &self.items else { continue };
-            let id = ev.id;
-            let cmd = if id == *items.status.id() || id == *items.session.id() || id == *items.weekly.id() {
-                Some(AppCommand::Open(Page::Overview.as_str().into()))
-            } else if id == *items.account.id() {
-                Some(AppCommand::Open(Page::Accounts.as_str().into()))
-            } else if id == *items.refresh.id() {
-                Some(AppCommand::Refresh)
-            } else if id == *items.mute.id() {
-                Some(AppCommand::Mute(items.mute.is_checked()))
-            } else if id == *items.open.id() {
-                Some(AppCommand::Open(Page::Overview.as_str().into()))
-            } else if id == *items.update.id() {
-                Some(AppCommand::Open(self.offer_page().as_str().into()))
-            } else if id == *items.quit.id() {
-                Some(AppCommand::Quit)
-            } else {
-                None
-            };
-            if let Some(c) = cmd {
+            #[cfg(not(target_os = "macos"))]
+            if let Some(c) = Items::command(&ev.id, self.offer_page(), self.chimes_muted) {
                 if !self.handle(c) {
                     return false;
                 }
             }
+            #[cfg(target_os = "macos")]
+            let _ = ev;
         }
 
         // Clicks in the macOS panel.
@@ -542,15 +560,18 @@ impl TrayApp {
         if now - self.menu_at >= MENU_REFRESH_SECS || self.last_written.as_ref().is_none_or(|w| !w.same_content(&snap))
         {
             self.menu_at = now;
-            // A chime switched on or off, an update found or installed, the
-            // Session row gone or back: build the menu again.
             self.offer = update_offer(&snap, &self.settings, crate::is_release_build(), crate::version());
-            let shape = MenuShape::of(&snap, &self.settings, self.offer.as_ref());
-            if let (Some(t), Some(items)) = (&self.tray, &self.items) {
-                if items.shape != shape {
-                    let items = Items::new(shape);
-                    t.set_menu(Some(Box::new(items.menu.clone())));
-                    self.items = Some(items);
+            // A chime switched on or off, an update found or installed, a
+            // row gone or back: build the Linux/Windows menu again.
+            #[cfg(not(target_os = "macos"))]
+            {
+                let shape = MenuShape::of(&snap, &self.settings, self.offer.as_ref());
+                if let (Some(t), Some(items)) = (&self.tray, &self.items) {
+                    if items.shape != shape {
+                        let items = Items::new(shape);
+                        t.set_menu(Some(Box::new(items.menu.clone())));
+                        self.items = Some(items);
+                    }
                 }
             }
             if let Some(items) = &self.items {
@@ -586,8 +607,12 @@ impl TrayApp {
     }
 
     fn create_tray(&mut self) {
-        // The first menu refresh rebuilds it with the real shape.
+        // On Linux/Windows the first menu refresh rebuilds it with the real
+        // shape.
+        #[cfg(not(target_os = "macos"))]
         let items = Items::new(MenuShape::default());
+        #[cfg(target_os = "macos")]
+        let items = Items::new();
         let built = TrayIconBuilder::new()
             .with_id("clawdmeter")
             .with_menu(Box::new(items.menu.clone()))
@@ -796,17 +821,39 @@ mod tests {
     }
 
     #[test]
-    fn refresh_item_follows_the_refresh_state() {
+    fn refresh_item_follows_the_overviews_rule() {
         let now = 1_000;
-        assert_eq!(refresh_item(&StatusSnapshot::default(), now), ("Refresh usage".into(), true));
-        let wait = StatusSnapshot { refresh_at: Some(now + 60), ..Default::default() };
-        assert_eq!(refresh_item(&wait, now), ("Refresh usage".into(), true), "a click queues a check");
+        assert_eq!(refresh_item(&StatusSnapshot::default(), false, now), ("Refresh usage".into(), true));
+        assert_eq!(
+            refresh_item(&StatusSnapshot::default(), true, now),
+            ("Checking usage…".into(), false),
+            "a press shows at once"
+        );
+        let wait = StatusSnapshot { refresh_at: Some(now + 100), ..Default::default() };
+        assert_eq!(refresh_item(&wait, false, now), ("Can check again in 1 min 40 s".into(), false));
         let polling = StatusSnapshot { polling: true, ..Default::default() };
-        assert_eq!(refresh_item(&polling, now), ("Checking usage…".into(), false));
+        assert_eq!(refresh_item(&polling, false, now), ("Checking usage…".into(), false));
         let paused = StatusSnapshot { paused_until: Some(now + 600), ..Default::default() };
-        let (text, enabled) = refresh_item(&paused, now);
+        let (text, enabled) = refresh_item(&paused, true, now);
         assert!(text.starts_with("Usage paused by Anthropic until ") && !text.ends_with('.'), "{text}");
         assert!(!enabled);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn clicks_match_by_fixed_ids() {
+        let id = |s: &str| tray_icon::menu::MenuId::new(s);
+        let open = |p: Page| Some(AppCommand::Open(p.as_str().into()));
+        assert_eq!(Items::command(&id("open"), Page::Flash, false), open(Page::Overview));
+        assert_eq!(Items::command(&id("account"), Page::Flash, false), open(Page::Accounts));
+        assert_eq!(Items::command(&id("update"), Page::Update, false), open(Page::Update));
+        assert_eq!(
+            Items::command(&id("mute"), Page::Flash, true),
+            Some(AppCommand::Mute(false)),
+            "flips the tray's state"
+        );
+        assert_eq!(Items::command(&id("quit"), Page::Flash, false), Some(AppCommand::Quit));
+        assert_eq!(Items::command(&id("12"), Page::Flash, false), None);
     }
 
     #[test]
@@ -832,21 +879,22 @@ mod tests {
         let shape = MenuShape::of(&StatusSnapshot::default(), &quiet, None);
         assert!(!shape.mute, "no chime on: nothing to mute");
         assert!(!shape.update, "no newer release: no firmware item");
-        assert_eq!(shape.session, cfg!(not(target_os = "macos")), "the macOS header draws the meters");
+        assert!(shape.session && shape.weekly);
 
-        // Native items on Linux and Windows; footer icons in the macOS panel.
-        let native = cfg!(not(target_os = "macos"));
         let chimes = Settings { desktop_chime: true, ..quiet.clone() };
-        assert_eq!(MenuShape::of(&StatusSnapshot::default(), &chimes, None).mute, native);
+        assert!(MenuShape::of(&StatusSnapshot::default(), &chimes, None).mute);
         let older = StatusSnapshot {
             latest_firmware: Some("2.5.0".into()),
             device_firmware: Some("2.4.0".into()),
             ..Default::default()
         };
         let offer = update_offer(&older, &quiet, false, "2.4.0");
-        assert_eq!(MenuShape::of(&older, &quiet, offer.as_ref()).update, native);
+        assert!(MenuShape::of(&older, &quiet, offer.as_ref()).update);
         let ultra = StatusSnapshot { no_session_limit: true, ..Default::default() };
         assert!(!MenuShape::of(&ultra, &quiet, None).session);
+        let spend = StatusSnapshot { spend: true, no_session_limit: true, ..Default::default() };
+        let shape = MenuShape::of(&spend, &quiet, None);
+        assert!(shape.session && !shape.weekly, "a Spend row and no Weekly one");
     }
 
     #[test]

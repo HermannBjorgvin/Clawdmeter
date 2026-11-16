@@ -132,6 +132,13 @@ pub struct StatusSnapshot {
     /// Unix seconds the weekly window resets (`None`: unknown).
     #[serde(default)]
     pub week_resets_at: Option<i64>,
+    /// A spend-capped account: `session_pct` is the spend % (it can pass
+    /// 100), and there is no session or weekly window to show.
+    #[serde(default)]
+    pub spend: bool,
+    /// Unix seconds the spend period resets (`None`: unknown).
+    #[serde(default)]
+    pub spend_resets_at: Option<i64>,
 }
 
 impl StatusSnapshot {
@@ -188,6 +195,12 @@ impl StatusSnapshot {
                 .and_then(|w| w.resets_at)
                 .map(|t| t.timestamp()),
             week_resets_at: reading.and_then(|r| r.week.as_ref()).and_then(|w| w.resets_at).map(|t| t.timestamp()),
+            spend: reading.is_some_and(|r| r.meter_kind() == clawdmeter_core::usage::MeterKind::Spend),
+            spend_resets_at: reading
+                .filter(|r| r.meter_kind() == clawdmeter_core::usage::MeterKind::Spend)
+                .and_then(|r| r.spend.as_ref())
+                .and_then(|sp| sp.resets_at)
+                .map(|t| t.timestamp()),
         }
     }
 
