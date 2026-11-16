@@ -45,6 +45,13 @@ bool theme_palette_set(const uint32_t p[TH_COUNT]);
 
 uint16_t theme_rgb565(uint32_t rgb);
 
+// The Fable overlay's colour (payload `fc`, fable.h): not a `th` token, so
+// the palette keeps the length older firmware accepts. `s` must be exactly
+// six hex digits; anything else returns false and leaves `out` untouched.
+bool theme_parse_rgb(const char* s, uint32_t* out);
+uint32_t theme_fable_hex(void);           // starts at FABLE_COLOR_DEFAULT
+bool theme_fable_set(uint32_t rgb);       // true when it changed
+
 // The official Clawd art in TH_CLAWD: its body orange becomes `clawd` and
 // the shaded side of his body the same shade of it; every other colour in
 // the art (eyes, props, scenery) is unchanged. A palette swap at draw time,

@@ -10,6 +10,8 @@ struct UsageData {
     int session_reset_mins;  // minutes until reset
     float weekly_pct;        // 7-day utilization (Pro/Max only; 0 for Enterprise)
     int weekly_reset_mins;   // minutes until weekly reset (Pro/Max only)
+    int16_t fable_pct;       // `wf` Fable's weekly % of its own limit (0-999); -1 = absent
+                             //   (unknown or no Fable limit): no overlay (fable.h)
     char status[16];         // "allowed", "limited", etc.
     bool chime;              // play the session-reset chime; false unless the app opts in
     bool beep;               // Claude needs attention: play the chime once for this packet
@@ -44,6 +46,8 @@ struct UsageData {
     int32_t  btn_pwr;        // `k3` the same for a PWR short press; -1 = absent
     bool     has_theme;      // `th` present and well-formed
     uint32_t theme[TH_COUNT];// `th` the palette, 0xRRGGBB per token (theme_palette.h)
+    bool     has_fable_color;// `fc` present and well-formed
+    uint32_t fable_color;    // `fc` the Fable overlay's colour, 0xRRGGBB (fable.h)
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
 };

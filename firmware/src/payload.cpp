@@ -33,6 +33,10 @@ bool payload_parse(const char* json, UsageData* out, const char** err) {
     d.session_reset_mins = doc["sr"] | -1;
     d.weekly_pct = doc["w"] | 0.0f;
     d.weekly_reset_mins = doc["wr"] | -1;
+    // Absent or negative: unknown, never 0 %. Clamped to what the overlay
+    // can use; fable_bar_pct() caps it at the limit.
+    const float wf = doc["wf"] | -1.0f;
+    d.fable_pct = wf < 0 ? -1 : wf >= 999.0f ? 999 : (int16_t)(wf + 0.5f);
     copy_str(d.status, sizeof(d.status), doc["st"] | "unknown");
     // as<bool>, not `| false`: daemons send 1, and `|` only accepts a JSON bool.
     d.chime = doc["c"].as<bool>();   // absent (old daemon / chime off) → stay silent
@@ -96,6 +100,7 @@ bool payload_parse(const char* json, UsageData* out, const char** err) {
     d.btn_secondary = button_field(doc["k2"]);
     d.btn_pwr       = button_field(doc["k3"]);
     d.has_theme = theme_parse_hex(doc["th"] | "", d.theme);
+    d.has_fable_color = theme_parse_rgb(doc["fc"] | "", &d.fable_color);
 
     d.ok = doc["ok"] | false;
     d.valid = true;
