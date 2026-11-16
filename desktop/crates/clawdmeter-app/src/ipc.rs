@@ -132,6 +132,18 @@ pub struct StatusSnapshot {
     /// Unix seconds the weekly window resets (`None`: unknown).
     #[serde(default)]
     pub week_resets_at: Option<i64>,
+    /// The shown account is a Codex account (a trial).
+    #[serde(default)]
+    pub codex: bool,
+    /// Its reset credits held, when known.
+    #[serde(default)]
+    pub resets_held: Option<u32>,
+    /// Its reset credits spent in the trailing 30 days, when known.
+    #[serde(default)]
+    pub resets_spent: Option<u32>,
+    /// Unix seconds the soonest held reset credit expires, when known.
+    #[serde(default)]
+    pub resets_expire_at: Option<i64>,
 }
 
 impl StatusSnapshot {
@@ -188,6 +200,13 @@ impl StatusSnapshot {
                 .and_then(|w| w.resets_at)
                 .map(|t| t.timestamp()),
             week_resets_at: reading.and_then(|r| r.week.as_ref()).and_then(|w| w.resets_at).map(|t| t.timestamp()),
+            codex: reading.is_some_and(|r| r.provider == clawdmeter_core::usage::Provider::Codex),
+            resets_held: reading.and_then(|r| r.resets.as_ref()).map(|c| c.held),
+            resets_spent: reading.and_then(|r| r.resets.as_ref()).and_then(|c| c.spent),
+            resets_expire_at: reading
+                .and_then(|r| r.resets.as_ref())
+                .and_then(|c| c.next_expiry)
+                .map(|t| t.timestamp()),
         }
     }
 

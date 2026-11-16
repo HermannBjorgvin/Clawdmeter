@@ -1,0 +1,14 @@
+{
+  "plan_type": "free",
+  "rate_limit": null,
+  "additional_rate_limits": [
+    {
+      "limit_name": "GPT-5.3-Codex-Spark",
+      "metered_feature": "codex_bengalfox",
+      "rate_limit": {
+        "primary_window": {"used_percent": 0, "limit_window_seconds": 604800, "reset_after_seconds": 604800, "reset_at": 1795597600},
+        "secondary_window": null
+      }
+    }
+  ]
+}

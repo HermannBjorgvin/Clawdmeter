@@ -246,7 +246,7 @@ pub fn parse_usage_json(body: &str, now: DateTime<Utc>) -> Result<UsageReading, 
     } else {
         SessionLimit::Unknown
     };
-    Ok(UsageReading { session, week, models, spend, overage, session_limit })
+    Ok(UsageReading { session, week, models, spend, overage, session_limit, ..Default::default() })
 }
 
 /// What one endpoint answer means.

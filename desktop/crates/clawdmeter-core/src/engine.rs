@@ -18,7 +18,7 @@ use crate::platform::Appearance;
 use crate::probe::{self, Plan as ProbePlan, Source};
 use crate::rate::{Mood, RateTracker};
 use crate::selector::PlanSelector;
-use crate::usage::{AccountState, UsageError, UsageReading};
+use crate::usage::{AccountState, Provider, UsageError, UsageReading};
 
 /// `a` changes are sent at most this often (s).
 pub const ACTIVITY_MIN_INTERVAL: i64 = 5;
@@ -130,6 +130,8 @@ pub struct Engine {
     selector: PlanSelector<PathBuf>,
     accounts: BTreeMap<PathBuf, AccountState>,
     in_flight: Vec<PathBuf>,
+    /// Codex accounts being polled ([`Engine::begin_codex_poll`]).
+    codex_in_flight: Vec<PathBuf>,
     active: Option<PathBuf>,
     rate: RateTracker,
     hooks_installed: bool,
@@ -179,6 +181,7 @@ impl Engine {
             selector: PlanSelector::default(),
             accounts: BTreeMap::new(),
             in_flight: Vec::new(),
+            codex_in_flight: Vec::new(),
             active: None,
             rate: RateTracker::default(),
             hooks_installed: false,
@@ -226,8 +229,8 @@ impl Engine {
         }
         self.scheduler.cadence = Cadence::from_settings(settings.poll_interval, settings.poll_interval_explicit);
         // A newly added account has never been polled, so it is due at once.
-        if settings.config_dirs != self.settings.config_dirs {
-            self.accounts.retain(|k, _| settings.config_dirs.contains(k));
+        if settings.config_dirs != self.settings.config_dirs || settings.codex_dirs != self.settings.codex_dirs {
+            self.accounts.retain(|k, _| settings.config_dirs.contains(k) || settings.codex_dirs.contains(k));
         }
         self.settings = settings;
     }
@@ -336,11 +339,75 @@ impl Engine {
     /// rest keep the endpoint and `claude -p /usage` away from that account
     /// until they pass, whatever asks.
     pub fn restore_blocks(&mut self, blocks: &BTreeMap<PathBuf, SavedBlock>, now: i64) {
-        for (d, b) in blocks.iter().filter(|(d, b)| b.until > now && self.settings.config_dirs.contains(d)) {
+        let restore: Vec<(&PathBuf, &SavedBlock)> =
+            blocks.iter().filter(|(d, b)| b.until > now && self.is_account(d)).collect();
+        for (d, b) in restore {
             let st = self.accounts.entry(d.clone()).or_default();
             st.backoff = crate::backoff::Backoff::restore(b.strikes, b.until);
             st.last_error.get_or_insert(UsageError::Throttled { retry_after_secs: None });
         }
+    }
+
+    /// A configured account, Claude or Codex.
+    fn is_account(&self, dir: &PathBuf) -> bool {
+        self.settings.config_dirs.contains(dir) || self.is_codex(dir)
+    }
+
+    /// A Codex account ([`crate::codex`]); the rest are Claude config dirs.
+    fn is_codex(&self, dir: &PathBuf) -> bool {
+        self.settings.codex_dirs.contains(dir)
+    }
+
+    fn provider(&self, dir: &PathBuf) -> Provider {
+        if self.is_codex(dir) {
+            Provider::Codex
+        } else {
+            Provider::Claude
+        }
+    }
+
+    /// When a Codex account is next due ([`crate::codex::due_at`]).
+    fn codex_due(&self, dir: &PathBuf) -> i64 {
+        let st = self.accounts.get(dir);
+        crate::codex::due_at(
+            st.and_then(|a| a.last_attempt_at),
+            self.active.as_ref().is_none_or(|a| a == dir),
+            st.and_then(|a| a.last.as_ref())
+                .and_then(|r| if r.no_session_limit() { r.week.as_ref() } else { r.session.as_ref() })
+                .and_then(|w| w.resets_at)
+                .map(|t| t.timestamp()),
+            self.scheduler.requested_at(),
+            st.and_then(|a| a.backoff.until()),
+        )
+    }
+
+    /// Start a Codex poll: the Codex accounts due now, stamped as attempted.
+    /// `None` when none is due. Hand the results to
+    /// [`Engine::on_codex_results`]. It runs beside the Claude poll, so a
+    /// slow Codex endpoint never holds up a Claude account.
+    pub fn begin_codex_poll(&mut self, now: i64) -> Option<Vec<PathBuf>> {
+        let due: Vec<PathBuf> = self.settings.codex_dirs.iter().filter(|d| self.codex_due(d) <= now).cloned().collect();
+        if due.is_empty() {
+            return None;
+        }
+        for d in &due {
+            self.accounts.entry(d.clone()).or_default().last_attempt_at = Some(now);
+        }
+        self.codex_in_flight = due.clone();
+        Some(due)
+    }
+
+    /// Results of one Codex poll. They join the Claude accounts' readings in
+    /// the choice of the shown account; the Claude poll's own bookkeeping
+    /// is left as it is.
+    pub fn on_codex_results(&mut self, now: i64, results: Vec<(PathBuf, probe::Polled)>) {
+        let polled = !results.is_empty();
+        let in_flight = std::mem::take(&mut self.codex_in_flight);
+        let (ok_dirs, rekinded) = self.record_results(now, results, &in_flight);
+        let active_fresh = self.choose_active(now, &ok_dirs, &rekinded);
+        self.logged_out = self.all_auth();
+        // A Claude poll's results may still be waiting for their write.
+        self.fresh_poll |= active_fresh || (self.logged_out && polled);
     }
 
     /// Where this account's next reading would come from at `now`.
@@ -417,6 +484,22 @@ impl Engine {
     pub fn on_poll_results<R: Into<probe::Polled>>(&mut self, now: i64, results: Vec<(PathBuf, R)>) {
         let results: Vec<(PathBuf, probe::Polled)> = results.into_iter().map(|(d, r)| (d, r.into())).collect();
         let polled = !results.is_empty();
+        let in_flight = self.in_flight.clone();
+        let (ok_dirs, rekinded) = self.record_results(now, results, &in_flight);
+        let active_fresh = self.choose_active(now, &ok_dirs, &rekinded);
+        self.in_flight.clear();
+        self.logged_out = self.all_auth();
+        self.fresh_poll = active_fresh || (self.logged_out && polled);
+    }
+
+    /// Store each account's result. Returns the accounts that answered and
+    /// those whose main meter now measures something else.
+    fn record_results(
+        &mut self,
+        now: i64,
+        results: Vec<(PathBuf, probe::Polled)>,
+        in_flight: &[PathBuf],
+    ) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let ok_dirs: Vec<PathBuf> = results.iter().filter(|(_, r)| r.result.is_ok()).map(|(d, _)| d.clone()).collect();
         // Accounts whose main meter now measures something else (session,
         // week or spend: verified for no 5-hour limit, or a first reading
@@ -425,7 +508,7 @@ impl Engine {
         for (dir, r) in results {
             let st = self.accounts.entry(dir.clone()).or_default();
             // Results without a `begin_poll` (`--once`) count as attempted now.
-            if !self.in_flight.contains(&dir) {
+            if !in_flight.contains(&dir) {
                 st.last_attempt_at = Some(now);
             }
             let kind = st.last.as_ref().map(UsageReading::meter_kind);
@@ -440,13 +523,24 @@ impl Engine {
         for d in &rekinded {
             self.selector.forget(d);
         }
-        // Every configured account's latest answer is a login problem.
-        let all_auth = !self.settings.config_dirs.is_empty()
+        (ok_dirs, rekinded)
+    }
+
+    /// Every configured account's latest answer is a login problem, Codex
+    /// accounts included.
+    fn all_auth(&self) -> bool {
+        !self.settings.config_dirs.is_empty()
             && self
                 .settings
                 .config_dirs
                 .iter()
-                .all(|d| self.accounts.get(d).and_then(|a| a.last_error.as_ref()).is_some_and(UsageError::is_auth));
+                .chain(&self.settings.codex_dirs)
+                .all(|d| self.accounts.get(d).and_then(|a| a.last_error.as_ref()).is_some_and(UsageError::is_auth))
+    }
+
+    /// Pick the shown account after new results. Returns whether it has
+    /// numbers read in this cycle (a real poll).
+    fn choose_active(&mut self, now: i64, ok_dirs: &[PathBuf], rekinded: &[PathBuf]) -> bool {
         // Accounts that missed (or weren't polled) keep their last values,
         // which don't count as a rise, so a miss, a rate limit or a backoff
         // never flips the shown account. Only an account with no reading at
@@ -469,14 +563,14 @@ impl Engine {
             if self.active.as_ref().is_some_and(|a| rekinded.contains(a)) {
                 self.rate = RateTracker::default();
             }
-            if let Some(r) = self.active_reading() {
+            // Codex numbers aren't Claude's: the mood follows Claude only,
+            // as the device's rate math does.
+            if let Some(r) = self.active_reading().filter(|r| r.provider == Provider::Claude) {
                 let pct = r.session_pct();
                 self.rate.sample(now, pct, false);
             }
         }
-        self.in_flight.clear();
-        self.logged_out = all_auth;
-        self.fresh_poll = active_fresh || (all_auth && polled);
+        active_fresh
     }
 
     fn active_state(&self) -> Option<&AccountState> {
@@ -636,11 +730,12 @@ impl Engine {
                     // A 429's pause comes from the backoff, as the Overview's
                     // does: a probe's answer clears the error, not the pause.
                     let paused = a.backoff.until().filter(|u| a.backoff.throttled() && *u > now);
+                    let provider = self.provider(k);
                     let (message, retrying) = match (paused, &a.last_error) {
                         (Some(until), _) => {
-                            (crate::usage::paused_message(until, crate::platform::utc_offset_secs()), true)
+                            (crate::usage::paused_message_by(provider, until, crate::platform::utc_offset_secs()), true)
                         }
-                        (None, Some(e)) => (e.user_message(a.backoff.remaining(now)), e.is_transient()),
+                        (None, Some(e)) => (e.user_message_for(provider, a.backoff.remaining(now)), e.is_transient()),
                         (None, None) => return None,
                     };
                     Some(AccountError { dir: k.clone(), message, retrying })
@@ -651,8 +746,21 @@ impl Engine {
             sessions: self.activity.sessions_active(now),
             hooks: self.activity.hooks_seen,
             mood: st.and_then(|a| a.last.as_ref()).map(|_| self.rate.mood(self.activity.level(now))),
-            next_poll_at: self.next_due(now).map(|(t, _)| t),
-            refresh_at: self.active.as_ref().and_then(|a| self.refresh_at(a, now)),
+            next_poll_at: self
+                .next_due(now)
+                .map(|(t, _)| t)
+                .into_iter()
+                .chain(self.settings.codex_dirs.iter().map(|d| self.codex_due(d).max(now)))
+                .min(),
+            refresh_at: self.active.as_ref().and_then(|a| {
+                if self.is_codex(a) {
+                    let st = self.accounts.get(a)?;
+                    let gap = st.last_attempt_at.map(|t| t + crate::codex::MIN_GAP_SECS);
+                    gap.max(st.backoff.until())
+                } else {
+                    self.refresh_at(a, now)
+                }
+            }),
             // The shown account, or the first one while nothing is shown yet.
             paused_until: self
                 .active
@@ -662,7 +770,10 @@ impl Engine {
                 .filter(|a| a.backoff.throttled())
                 .and_then(|a| a.backoff.until())
                 .filter(|u| *u > now),
-            polling: self.active.as_ref().is_some_and(|a| self.in_flight.contains(a)),
+            polling: self
+                .active
+                .as_ref()
+                .is_some_and(|a| self.in_flight.contains(a) || self.codex_in_flight.contains(a)),
         }
     }
 }
@@ -1425,5 +1536,101 @@ mod tests {
         e.on_poll_results(T0 + 40, vec![(dir, Err(UsageError::NotLoggedIn("x".into())))]);
         assert_eq!(write(&mut e, T0 + 40).unwrap().kind, WriteKind::NoData);
         assert_eq!(e.sent_tf, Some(24));
+    }
+
+    fn codex(pct: u32) -> UsageReading {
+        UsageReading {
+            week: Some(Window { pct, resets_at: Some(utc(T0 + 5 * 86_400)) }),
+            session_limit: crate::usage::SessionLimit::Absent,
+            provider: Provider::Codex,
+            resets: Some(crate::usage::ResetCredits { held: 2, spent: Some(1), next_expiry: None }),
+            ..Default::default()
+        }
+    }
+
+    fn codex_ok(pct: u32) -> probe::Polled {
+        Ok::<_, UsageError>(codex(pct)).into()
+    }
+
+    // A Codex account polls on its own track (never in the Claude plan),
+    // joins the choice of the shown account, and goes out with `pv`.
+    #[test]
+    fn codex_account_joins_the_selector() {
+        let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
+        let (claude, cx) = (PathBuf::from("/h/.claude"), PathBuf::from("/h/.codex"));
+        assert_eq!(e.begin_poll(T0).unwrap().accounts, vec![claude.clone()], "Claude's plan is Claude's");
+        assert_eq!(e.begin_codex_poll(T0), Some(vec![cx.clone()]));
+        assert_eq!(e.status(T0).polling, false, "nothing shown yet");
+        e.on_poll_results(T0, vec![(claude.clone(), Ok(reading(10)))]);
+        e.on_codex_results(T0 + 1, vec![(cx.clone(), codex_ok(30))]);
+        assert_eq!(e.status(T0 + 1).active_account, Some(cx.clone()), "the highest % before any rise");
+        let w = write(&mut e, T0 + 1).unwrap();
+        assert_eq!(w.kind, WriteKind::Poll);
+        assert_eq!(
+            (w.payload.acct.as_deref(), w.payload.pv.as_deref(), w.payload.w, w.payload.rc, w.payload.ru),
+            (Some("week"), Some("codex"), Some(30), Some(2), Some(1))
+        );
+        // Claude's meter moves: back to Claude, and no `pv`.
+        e.on_poll_results(T0 + 600, vec![(claude.clone(), Ok(reading(12)))]);
+        assert_eq!(e.status(T0 + 600).active_account, Some(claude.clone()));
+        assert_eq!(write(&mut e, T0 + 600).unwrap().payload.pv, None);
+        // Codex moves: Codex again.
+        assert_eq!(e.begin_codex_poll(T0 + 300), None, "not yet: another account is shown");
+        assert_eq!(e.begin_codex_poll(T0 + 601), Some(vec![cx.clone()]));
+        assert!(!e.status(T0 + 601).polling, "the shown account (Claude) isn't the one polled");
+        e.on_codex_results(T0 + 602, vec![(cx.clone(), codex_ok(31))]);
+        assert_eq!(e.status(T0 + 602).active_account, Some(cx.clone()));
+        // Shown, it polls every 5 minutes; a refresh waits out the 2-minute gap.
+        assert_eq!(e.begin_codex_poll(T0 + 601 + 299), None);
+        e.request_refresh(T0 + 650);
+        assert_eq!(e.begin_codex_poll(T0 + 700), None, "the gap");
+        assert_eq!(e.begin_codex_poll(T0 + 721), Some(vec![cx]));
+    }
+
+    // With no Codex home, nothing changes: no Codex poll, no `pv`.
+    #[test]
+    fn no_codex_home_no_codex() {
+        let mut e = Engine::new(settings(""));
+        assert_eq!(e.begin_codex_poll(T0), None);
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(10)))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.pv, None);
+    }
+
+    // Claude signed out but Codex reading: the device shows Codex, not
+    // "no data"; both signed out is no data. Codex numbers never reach
+    // the mood, which follows Claude like the device's rate math.
+    #[test]
+    fn codex_and_no_data() {
+        let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
+        let (claude, cx) = (PathBuf::from("/h/.claude"), PathBuf::from("/h/.codex"));
+        e.on_poll_results(T0, vec![(claude.clone(), Err(UsageError::NotLoggedIn("x".into())))]);
+        e.on_codex_results(T0, vec![(cx.clone(), codex_ok(30))]);
+        let w = write(&mut e, T0).unwrap();
+        assert_eq!((w.kind, w.payload.pv.as_deref()), (WriteKind::Poll, Some("codex")));
+        e.on_codex_results(T0 + 600, vec![(cx.clone(), codex_ok(90))]);
+        assert_eq!(e.status(T0 + 600).mood, Some(Mood::Idle), "60 points of Codex isn't Claude activity");
+        e.on_codex_results(T0 + 1200, vec![(cx, Err::<UsageReading, _>(UsageError::NotLoggedIn("x".into())).into())]);
+        assert_eq!(write(&mut e, T0 + 1200).unwrap().kind, WriteKind::NoData);
+    }
+
+    // A Codex 429 parks the account for its retry-after, is kept across a
+    // restart, and reads as OpenAI's pause.
+    #[test]
+    fn codex_block_is_openais() {
+        let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
+        let cx = PathBuf::from("/h/.codex");
+        e.begin_codex_poll(T0);
+        e.on_codex_results(T0, vec![(cx.clone(), codex_ok(30))]);
+        e.begin_codex_poll(T0 + 300);
+        let throttled = Err::<UsageReading, _>(UsageError::Throttled { retry_after_secs: Some(1800) });
+        e.on_codex_results(T0 + 300, vec![(cx.clone(), throttled.into())]);
+        assert_eq!(e.begin_codex_poll(T0 + 2000), None, "parked");
+        assert!(e.status(T0 + 400).errors[0].message.starts_with("Usage paused by OpenAI until "));
+        let blocks = e.blocks(T0 + 400);
+        assert_eq!(blocks.get(&cx).map(|b| b.until), Some(T0 + 2100));
+        let mut fresh = Engine::new(settings("codex_dirs = ~/.codex\n"));
+        fresh.restore_blocks(&blocks, T0 + 500);
+        assert_eq!(fresh.begin_codex_poll(T0 + 500), None, "restored");
+        assert_eq!(fresh.begin_codex_poll(T0 + 2100), Some(vec![cx]));
     }
 }

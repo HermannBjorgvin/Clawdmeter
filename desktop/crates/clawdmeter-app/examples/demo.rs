@@ -10,8 +10,13 @@
 //!   [--flash-to identify|firmware|flash|done] [--shop] [--accounts retrying] [--refresh wait|checking]
 //!   [--app-update download|downloading|ready|failed|none|linux|linux-menu]
 //!   [--advanced] [--session idle|week] [--buttons custom] [--edit primary|secondary|pwr] [--record]
-//!   [--firmware-skipped] [--height PX]
+//!   [--firmware-skipped] [--codex week|5h|listed] [--height PX]
 //! ```
+//!
+//! `--codex` adds a Codex account (`~/.codex` with an `auth.json`, found as
+//! the app finds it): `week` shows it on the device, weekly-only with reset
+//! credits like the $100 Pro plan; `5h` shows one with a 5-hour window;
+//! `listed` keeps Claude on the device.
 //!
 //! `--buttons custom` gives the secondary button a held shortcut and PWR a
 //! media key; `--edit` opens a button's editor on the Device page, and
@@ -120,7 +125,7 @@ fn release(paths: &Paths) -> std::path::PathBuf {
     dir.join("manifest.json")
 }
 
-fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, session: Option<String>) {
+fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, session: Option<String>, codex: Option<String>) {
     // `idle`: session not started; `week`: no 5-hour limit (verified Ultra).
     let idle = session.as_deref() == Some("idle");
     let week = session.as_deref() == Some("week");
@@ -130,6 +135,10 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, session: 
         std::fs::create_dir_all(&work).unwrap();
         std::fs::write(&paths.config_file, "config_dirs = ~/.claude, ~/.claude-work\n").unwrap();
     }
+    // A Codex account on the device: weekly-only with its reset credits, or
+    // with a 5-hour window.
+    let codex_shown = matches!(codex.as_deref(), Some("week" | "5h"));
+    let codex_week = codex.as_deref() == Some("week");
     let started = unix_now();
     std::thread::spawn(move || loop {
         let now = unix_now();
@@ -142,7 +151,7 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, session: 
         } else {
             vec![]
         };
-        let snap = StatusSnapshot {
+        let mut snap = StatusSnapshot {
             updated_at: now,
             link: "connected".into(),
             device_key: Some("AA:BB:CC:DD:EE:FF".into()),
@@ -166,6 +175,22 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, session: 
             polling: refresh.as_deref() == Some("checking"),
             ..Default::default()
         };
+        if codex_shown {
+            snap = StatusSnapshot {
+                account: Some(paths.home.join(".codex").display().to_string()),
+                codex: true,
+                session_pct: (!codex_week).then_some(21),
+                week_pct: Some(34),
+                window_started: !codex_week,
+                no_session_limit: codex_week,
+                session_resets_at: (!codex_week).then_some(started + 133 * 60),
+                week_resets_at: Some(started + (4 * 24 + 21) * 3600 + 30),
+                resets_held: codex_week.then_some(3),
+                resets_spent: codex_week.then_some(1),
+                resets_expire_at: codex_week.then_some(started + 11 * 86_400 + 30),
+                ..snap
+            };
+        }
         let _ = ipc::write_status(&paths, &snap);
         std::thread::sleep(Duration::from_secs(2));
     });
@@ -192,12 +217,17 @@ fn main() {
     let paths = Paths::for_user();
     std::fs::create_dir_all(paths.home.join(".claude")).unwrap();
     std::fs::create_dir_all(&paths.state_dir).unwrap();
+    if arg(&args, "--codex").is_some() {
+        std::fs::create_dir_all(paths.home.join(".codex")).unwrap();
+        std::fs::write(paths.home.join(".codex/auth.json"), "{}").unwrap();
+    }
     if arg(&args, "--status").as_deref() != Some("off") {
         fake_status(
             &paths,
             arg(&args, "--accounts").as_deref() == Some("retrying"),
             arg(&args, "--refresh"),
             arg(&args, "--session"),
+            arg(&args, "--codex"),
         );
         let _ = ipc::save_firmware_record(&paths, &FirmwareRecord { env: ENV.into(), ver: OLD_VERSION.into() });
     } else {

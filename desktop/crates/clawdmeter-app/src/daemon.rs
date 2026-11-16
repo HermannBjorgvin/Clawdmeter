@@ -14,6 +14,7 @@ use clawdmeter_ble::{
 };
 use clawdmeter_core::attention::AttentionInbox;
 use clawdmeter_core::backoff;
+use clawdmeter_core::codex::{self, CreditsCache};
 use clawdmeter_core::engine::PollPlan;
 use clawdmeter_core::events::EventTail;
 use clawdmeter_core::platform::AppearanceWatch;
@@ -134,6 +135,8 @@ fn reload_settings(paths: &Paths, engine: &mut Engine, claude: &mut Option<PathB
 }
 
 type PollResults = Vec<(PathBuf, probe::Polled)>;
+/// A Codex poll's results, and the reset-credit cache it carried.
+type CodexResults = (PollResults, CreditsCache);
 type ConnectResult = Result<(DeviceLink, DeviceEvents), LinkError>;
 
 /// Read each account of a poll plan: the probe, `/usage`, or a reading known
@@ -150,6 +153,13 @@ fn poll_all(claude: Option<PathBuf>, plan: PollPlan, home: PathBuf, cwd: PathBuf
         .collect()
 }
 
+/// Read each Codex account due (blocking; the endpoint is slow).
+fn poll_codex(dirs: Vec<PathBuf>, mut cache: CreditsCache) -> CodexResults {
+    let now = chrono::Utc::now();
+    let results = dirs.into_iter().map(|d| (d.clone(), codex::poll(&d, now, &mut cache))).collect();
+    (results, cache)
+}
+
 /// The daemon loop. Returns on [`Command::Shutdown`] or when every command
 /// sender is dropped.
 pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, status: watch::Sender<Status>) {
@@ -161,6 +171,12 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         "accounts: {}",
         settings.config_dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
     );
+    if !settings.codex_dirs.is_empty() {
+        log::info!(
+            "Codex accounts (trial): {}",
+            settings.codex_dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
+        );
+    }
     let mut engine = Engine::new(settings);
     // Blocks the usage endpoint set survive restarts (a call during one
     // lengthens it).
@@ -193,6 +209,10 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let mut device_events: Option<DeviceEvents> = None;
     let mut connecting: Option<JoinHandle<ConnectResult>> = None;
     let mut polling: Option<JoinHandle<PollResults>> = None;
+    // Codex accounts poll on their own task, so a slow endpoint never holds
+    // up a Claude account. The credits cache travels with it.
+    let mut codex_polling: Option<JoinHandle<CodexResults>> = None;
+    let mut credits = Some(CreditsCache::default());
     let mut link_state = LinkState::Starting;
     let mut reconnect = Reconnect::default();
     let bt = Bluetooth::default();
@@ -323,6 +343,39 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                 );
                 let (c, home, cwd) = (claude.clone(), paths.home.clone(), paths.state_dir.clone());
                 polling = Some(tokio::task::spawn_blocking(move || poll_all(c, plan, home, cwd)));
+            }
+        }
+        if codex_polling.as_ref().is_some_and(JoinHandle::is_finished) {
+            match codex_polling.take().expect("checked").await {
+                Ok((results, cache)) => {
+                    credits = Some(cache);
+                    for (d, r) in &results {
+                        if let Err(e) = &r.result {
+                            log::warn!("{}: {e}", d.display());
+                        } else if let Some(e) = &r.idle_miss {
+                            log::warn!("{}: {e}; using the Codex session log", d.display());
+                        }
+                    }
+                    engine.on_codex_results(unix_now(), results);
+                    let blocks = engine.blocks(unix_now());
+                    if blocks != saved_blocks {
+                        if let Err(e) = backoff::save_blocks(&paths.usage_blocks_file(), &blocks) {
+                            log::warn!("couldn't save usage blocks: {e}");
+                        }
+                        saved_blocks = blocks;
+                    }
+                }
+                Err(e) => {
+                    log::error!("Codex poll task failed: {e}");
+                    credits = Some(CreditsCache::default());
+                }
+            }
+        }
+        if codex_polling.is_none() {
+            if let Some(dirs) = engine.begin_codex_poll(now) {
+                log::debug!("polling Codex: {dirs:?}");
+                let cache = credits.take().unwrap_or_default();
+                codex_polling = Some(tokio::task::spawn_blocking(move || poll_codex(dirs, cache)));
             }
         }
 
@@ -458,6 +511,8 @@ pub fn once(paths: &Paths) -> i32 {
         accounts,
     };
     let results = poll_all(claude, plan, paths.home.clone(), paths.state_dir.clone());
+    let codex_dirs: Vec<PathBuf> = settings.codex_dirs.iter().filter(|d| !blocked.contains_key(*d)).cloned().collect();
+    let (codex_results, _) = poll_codex(codex_dirs, CreditsCache::default());
     let mut ok = false;
     for (d, r) in &results {
         match &r.result {
@@ -482,7 +537,42 @@ pub fn once(paths: &Paths) -> i32 {
             Err(e) => println!("{}: {e}", d.display()),
         }
     }
+    for (d, polled) in &codex_results {
+        match &polled.result {
+            Ok(r) => {
+                ok = true;
+                let resets = r.resets.as_ref().map_or_else(
+                    || "reset credits unknown".to_owned(),
+                    |c| {
+                        let mut s = format!("{} reset credit(s) held", c.held);
+                        if let Some(n) = c.spent {
+                            s += &format!(", {n} spent in the last 30 days");
+                        }
+                        if let Some(t) = c.next_expiry {
+                            s += &format!(", next expires {}", t.format("%Y-%m-%d %H:%M UTC"));
+                        }
+                        s
+                    },
+                );
+                let windows = match &r.session {
+                    Some(w) => format!("5-hour {}%, week {}%", w.pct, r.week.as_ref().map_or(0, |w| w.pct)),
+                    None => format!("no 5-hour limit, week {}%", r.session_pct()),
+                };
+                let source = match &polled.idle_miss {
+                    Some(e) => format!(" (from the session log: {e})"),
+                    None => String::new(),
+                };
+                println!("{} (Codex): {windows}, {resets}{source}", d.display());
+                println!(
+                    "  Codex payload: {}",
+                    clawdmeter_core::Payload::from_reading(r, chrono::Utc::now()).to_json()
+                );
+            }
+            Err(e) => println!("{} (Codex): {e}", d.display()),
+        }
+    }
     engine.on_poll_results(now, results);
+    engine.on_codex_results(now, codex_results);
     if let Err(e) = backoff::save_blocks(&paths.usage_blocks_file(), &engine.blocks(unix_now())) {
         eprintln!("couldn't save usage blocks: {e}");
     }

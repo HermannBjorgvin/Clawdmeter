@@ -136,14 +136,15 @@ impl Items {
                 Err(e) => log::warn!("tray menu: {e}"),
             }
         }
+        let (session, weekly) = meter_labels(snap);
         self.session.set_text(match snap.session_pct {
-            Some(p) if snap.window_started => format!("Session  {p}%"),
-            Some(_) => "Session  not started".into(),
-            None => "Session  –".into(),
+            Some(p) if snap.window_started => format!("{session}  {p}%"),
+            Some(_) => format!("{session}  not started"),
+            None => format!("{session}  –"),
         });
         self.weekly.set_text(match snap.week_pct {
-            Some(p) => format!("Weekly  {p}%"),
-            None => "Weekly  –".into(),
+            Some(p) => format!("{weekly}  {p}%"),
+            None => format!("{weekly}  –"),
         });
         self.mute.set_checked(snap.chimes_muted);
         self.mute.set_enabled(chimes_on);
@@ -166,11 +167,22 @@ fn icon_for(state: TrayState) -> Option<Icon> {
     Icon::from_rgba(tray_icon_rgba(state, 32), 32, 32).ok()
 }
 
+/// The session and weekly meters' names. A Codex account's main meter (its
+/// 5-hour window, else its week) is "Codex", as the device labels it.
+fn meter_labels(snap: &StatusSnapshot) -> (&'static str, &'static str) {
+    match (snap.codex, snap.no_session_limit) {
+        (true, true) => ("Session", "Codex"),
+        (true, false) => ("Codex", "Weekly"),
+        (false, _) => ("Session", "Weekly"),
+    }
+}
+
 fn tooltip(snap: &StatusSnapshot) -> String {
     let mut t = format!("Clawdmeter · {}", snap.tray_state().label());
+    let (session, weekly) = meter_labels(snap);
     match (snap.session_pct, snap.week_pct) {
-        (Some(s), Some(w)) => t.push_str(&format!(" · Session {s}% · Weekly {w}%")),
-        (None, Some(w)) if snap.no_session_limit => t.push_str(&format!(" · Weekly {w}%")),
+        (Some(s), Some(w)) => t.push_str(&format!(" · {session} {s}% · {weekly} {w}%")),
+        (None, Some(w)) if snap.no_session_limit => t.push_str(&format!(" · {weekly} {w}%")),
         _ => {}
     }
     t
@@ -529,5 +541,9 @@ mod tests {
         let ultra = StatusSnapshot { session_pct: None, no_session_limit: true, ..snap.clone() };
         assert!(tooltip(&ultra).ends_with(" · Weekly 40%"));
         assert!(!tooltip(&ultra).contains("Session"));
+        let codex = StatusSnapshot { codex: true, ..ultra.clone() };
+        assert!(tooltip(&codex).ends_with(" · Codex 40%"));
+        let codex_5h = StatusSnapshot { codex: true, ..snap.clone() };
+        assert!(tooltip(&codex_5h).ends_with(" · Codex 5% · Weekly 40%"));
     }
 }

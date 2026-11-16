@@ -213,33 +213,20 @@ fn fill(t: &Theme, pct: u32) -> Rgba {
 /// left, the label as a pill at the top right, the track and fill, and the
 /// reset line.
 fn meter(t: &Theme, label: &'static str, pct: Option<u32>, reset: String) -> impl IntoElement {
+    let fill = fill(t, pct.unwrap_or(0));
+    meter_in(t, label, pct, reset, fill)
+}
+
+/// A Codex account's meter: white / neutral, as the device marks data from
+/// the GPT side.
+fn codex_meter(t: &Theme, label: &'static str, pct: Option<u32>, reset: String) -> impl IntoElement {
+    meter_in(t, label, pct, reset, t.text)
+}
+
+fn meter_in(t: &Theme, label: &'static str, pct: Option<u32>, reset: String, fill: Rgba) -> gpui::Div {
     let value = pct.map_or_else(|| "--%".to_owned(), |p| format!("{p}%"));
     let frac = pct.unwrap_or(0).min(100) as f32 / 100.;
-    div()
-        .flex()
-        .flex_col()
-        .p(px(16.))
-        .rounded(px(R_M))
-        .bg(t.panel)
-        .font_family(FONT_BODY)
-        .child(
-            div()
-                .flex()
-                .items_start()
-                .justify_between()
-                .child(div().text_size(px(36.)).line_height(px(40.)).text_color(t.text).child(value))
-                .child(
-                    div()
-                        .mt(px(2.))
-                        .px(px(12.))
-                        .py(px(3.))
-                        .rounded(px(R_PILL))
-                        .bg(t.track)
-                        .text_size(px(14.))
-                        .text_color(t.text)
-                        .child(label),
-                ),
-        )
+    card(t, value, label)
         .child(
             div()
                 .mt(px(10.))
@@ -247,9 +234,62 @@ fn meter(t: &Theme, label: &'static str, pct: Option<u32>, reset: String) -> imp
                 .w_full()
                 .rounded(px(4.))
                 .bg(t.track)
-                .child(div().h_full().w(relative(frac)).rounded(px(4.)).bg(fill(t, pct.unwrap_or(0)))),
+                .child(div().h_full().w(relative(frac)).rounded(px(4.)).bg(fill)),
         )
         .child(div().mt(px(8.)).text_size(px(15.)).text_color(t.dim).child(reset))
+}
+
+/// A panel with the big value at the top left and the label as a pill at
+/// the top right.
+fn card(t: &Theme, value: String, label: &'static str) -> gpui::Div {
+    div().flex().flex_col().p(px(16.)).rounded(px(R_M)).bg(t.panel).font_family(FONT_BODY).child(
+        div()
+            .flex()
+            .items_start()
+            .justify_between()
+            .child(div().text_size(px(36.)).line_height(px(40.)).text_color(t.text).child(value))
+            .child(
+                div()
+                    .mt(px(2.))
+                    .px(px(12.))
+                    .py(px(3.))
+                    .rounded(px(R_PILL))
+                    .bg(t.track)
+                    .text_size(px(14.))
+                    .text_color(t.text)
+                    .child(label),
+            ),
+    )
+}
+
+/// "Next expires in 11d" for a credit expiring at `at`, as the device says it.
+pub fn expiry_text(at: Option<i64>, now: i64, held: u32) -> String {
+    match at {
+        _ if held == 0 => "None held".into(),
+        None => "---".into(),
+        Some(t) => match (t - now).max(0) / 60 {
+            m if m < 60 => format!("Next expires in {m}m"),
+            m if m < 1440 => format!("Next expires in {}h", m / 60),
+            m => format!("Next expires in {}d", m / 1440),
+        },
+    }
+}
+
+/// The Codex reset credits as a ledger: the count still held, a cell per
+/// credit (held lit, spent hollow), and when the next one expires.
+fn resets_card(t: &Theme, held: u32, spent: Option<u32>, expire_at: Option<i64>, now: i64) -> impl IntoElement {
+    let total = (held + spent.unwrap_or(0)).min(8);
+    let cells = (0..total).map(|i| {
+        let cell = div().flex_1().h(px(14.)).rounded(px(4.));
+        if i < held {
+            cell.bg(t.text)
+        } else {
+            cell.bg(t.track)
+        }
+    });
+    card(t, held.to_string(), "Resets")
+        .child(div().mt(px(10.)).h(px(14.)).w_full().flex().gap(px(6.)).children(cells))
+        .child(div().mt(px(8.)).text_size(px(15.)).text_color(t.dim).child(expiry_text(expire_at, now, held)))
 }
 
 impl Render for OverviewView {
@@ -330,11 +370,29 @@ impl Render for OverviewView {
             return page.child(chime).child(setup);
         };
 
-        // No 5-hour limit (verified Ultra): the week is the only meter.
-        let session = (!s.no_session_limit)
-            .then(|| meter(&t, "Session", s.session_pct, reset_text(s.session_resets_at, now, "Not started")));
-        let weekly = meter(&t, "Weekly", s.week_pct, reset_text(s.week_resets_at, now, "---"));
-        page = page.child(div().flex().flex_col().gap(px(12.)).children(session).child(weekly));
+        let meters = div().flex().flex_col().gap(px(12.));
+        page = page.child(if s.codex {
+            // A Codex account, as the device draws it: its main meter (the
+            // 5-hour window, else the week) is "Codex"; the second card is
+            // the week with a 5-hour window, else the reset credits.
+            let session_reset = reset_text(s.session_resets_at, now, "Not started");
+            let week_reset = reset_text(s.week_resets_at, now, "---");
+            if s.no_session_limit {
+                meters
+                    .child(codex_meter(&t, "Codex", s.week_pct, week_reset))
+                    .children(s.resets_held.map(|h| resets_card(&t, h, s.resets_spent, s.resets_expire_at, now)))
+            } else {
+                meters
+                    .child(codex_meter(&t, "Codex", s.session_pct, session_reset))
+                    .child(codex_meter(&t, "Weekly", s.week_pct, week_reset))
+            }
+        } else {
+            // No 5-hour limit (verified Ultra): the week is the only meter.
+            let session = (!s.no_session_limit)
+                .then(|| meter(&t, "Session", s.session_pct, reset_text(s.session_resets_at, now, "Not started")));
+            let weekly = meter(&t, "Weekly", s.week_pct, reset_text(s.week_resets_at, now, "---"));
+            meters.children(session).child(weekly)
+        });
         if let Some(tag) = self.firmware_nudge() {
             let v = tag.trim_start_matches('v').to_owned();
             page = page.child(
