@@ -368,10 +368,25 @@ fn srgb(rgb: u32) -> Retained<NSColor> {
 }
 
 /// A bar's fill in the Overview's colours (`overview::bar_fill`) for the
-/// view's appearance.
-fn fill_color(tone: Tone, dark: bool) -> Retained<NSColor> {
+/// view's appearance; `None`, a Codex account's neutral bar
+/// (`overview::codex_fill`).
+fn fill_color(tone: Option<Tone>, dark: bool) -> Retained<NSColor> {
     let theme = if dark { Theme::dark() } else { Theme::light() };
-    let c = crate::ui::overview::bar_fill(&theme, tone);
+    let c = match tone {
+        Some(tone) => crate::ui::overview::bar_fill(&theme, tone),
+        None => crate::ui::overview::codex_fill(&theme),
+    };
+    rgba_color(c)
+}
+
+/// The theme's dim colour, opaque: the pace marker on a neutral (Codex)
+/// bar, as the device draws it in `TH_DIM`.
+fn dim_color(dark: bool) -> Retained<NSColor> {
+    let theme = if dark { Theme::dark() } else { Theme::light() };
+    rgba_color(theme.dim)
+}
+
+fn rgba_color(c: gpui::Rgba) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(c.r.into(), c.g.into(), c.b.into(), c.a.into())
 }
 
@@ -500,7 +515,7 @@ impl MenuHeader {
                 value: label(mtm, &NSFont::monospacedDigitSystemFontOfSize_weight(22.0, medium), &primary),
                 label: label(mtm, &NSFont::systemFontOfSize_weight(11.0, regular), &secondary),
                 track: bar(mtm, 3.0, &NSColor::quaternaryLabelColor()),
-                fill: bar(mtm, 3.0, &fill_color(Tone::Ok, true)),
+                fill: bar(mtm, 3.0, &fill_color(Some(Tone::Ok), true)),
                 tick: bar(mtm, 1.0, &primary),
                 reset: label(mtm, &small, &secondary),
             };
@@ -530,7 +545,7 @@ impl MenuHeader {
         open.setControlSize(NSControlSize::Regular);
         open.sizeToFit();
         let update = HoverButton::new(mtm, "arrow-down-to-line", "Update", target, sel!(update:));
-        let update_dot = bar(mtm, 3.0, &fill_color(Tone::Accent, true));
+        let update_dot = bar(mtm, 3.0, &fill_color(Some(Tone::Accent), true));
         let chime = HoverButton::new(mtm, "volume-2", CHIME_OFF_TIP, target, sel!(chime:));
         let chime_icons = [("volume-2", CHIME_OFF_TIP), ("volume-x", CHIME_ON_TIP)].map(|(icon, label)| {
             let image = icon_image(icon);
@@ -628,6 +643,10 @@ impl MenuHeader {
             m.fill.setFrame(rect(PAD, y + 31.0, fill_w, 6.0));
             m.fill.setFillColor(&fill_color(data.fill, dark));
             m.fill.setHidden(fill_w == 0.0);
+            // On a neutral (Codex) bar the marker is the opaque dim colour so
+            // it shows on the fill, as the device's does.
+            let tick = if data.fill.is_some() { NSColor::labelColor() } else { dim_color(dark) };
+            m.tick.setFillColor(&tick);
             match data.pace {
                 Some(p) => {
                     m.tick.setFrame(rect(PAD + (bar_w * p - 1.0).clamp(0.0, bar_w - 2.0), y + 29.0, 2.0, 10.0));
@@ -692,7 +711,7 @@ impl MenuHeader {
             let f = self.update.frame();
             let glyph_right = f.origin.x + pad + ICON;
             self.update_dot.setFrame(rect(glyph_right - 3.0, f.origin.y + pad - 3.0, 6.0, 6.0));
-            self.update_dot.setFillColor(&fill_color(Tone::Accent, dark));
+            self.update_dot.setFillColor(&fill_color(Some(Tone::Accent), dark));
         }
         self.update_dot.setHidden(h.update.is_none());
         row + FOOT_ROW + FOOT_PAD

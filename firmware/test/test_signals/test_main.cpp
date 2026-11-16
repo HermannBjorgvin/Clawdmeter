@@ -154,8 +154,31 @@ static void test_sessions_change(void) {
     TEST_ASSERT_EQUAL_INT(0, signals_sessions());
 }
 
+// A Codex account's numbers never reach Clawd: not the rate ring, not the
+// reset chime, not a rise. Its hook fields (Claude Code's) still fire.
+static void test_codex_numbers_never_reach_clawd(void) {
+    UsageData claude = parse("{\"s\":60,\"sr\":90,\"w\":30,\"wr\":5000,\"acct\":\"pro\",\"es\":1,\"ok\":true}");
+    signals_ingest_at(&claude, 1 * MIN);
+    UsageData codex = parse("{\"s\":0,\"sr\":-1,\"w\":2,\"wr\":8000,\"acct\":\"week\",\"pv\":\"codex\","
+                            "\"e\":\"p\",\"es\":2,\"ok\":true}");
+    SignalsUpdate u = signals_ingest_at(&codex, 2 * MIN);
+    TEST_ASSERT_TRUE(u.replay);                 // to Clawd, not a sample
+    TEST_ASSERT_FALSE(u.session_reset);         // 60 -> 2 is not a fresh window
+    TEST_ASSERT_FALSE(u.meter_kind_changed);
+    TEST_ASSERT_TRUE(u.event_fired);            // the prompt still counts
+    TEST_ASSERT_EQUAL_CHAR('p', u.event);
+    // Back on Claude at the same 60 %: nothing happened in between.
+    u = signals_ingest_at(&claude, 3 * MIN);
+    TEST_ASSERT_FALSE(u.session_reset);
+    TEST_ASSERT_FALSE(u.meter_kind_changed);
+    // A real Claude reset still fires.
+    UsageData fresh = parse("{\"s\":1,\"sr\":299,\"w\":30,\"wr\":5000,\"acct\":\"pro\",\"ok\":true}");
+    TEST_ASSERT_TRUE(signals_ingest_at(&fresh, 4 * MIN).session_reset);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_codex_numbers_never_reach_clawd);
     RUN_TEST(test_old_daemon_payload_fires_nothing);
     RUN_TEST(test_first_seq_is_baseline_then_fires_once);
     RUN_TEST(test_event_in_replay_fires_once);

@@ -464,6 +464,14 @@ impl DeviceTheme {
 pub struct Settings {
     /// Claude config dirs to poll (accounts). Default `[~/.claude]`.
     pub config_dirs: Vec<PathBuf>,
+    /// Codex homes to poll (accounts, a trial: [`crate::codex`]). With no
+    /// `codex_dirs` key, the default Codex home when it has a sign-in
+    /// ([`Settings::load`]); an empty key is none.
+    pub codex_dirs: Vec<PathBuf>,
+    /// The default Codex home found at load (`$CODEX_HOME` or `~/.codex`
+    /// with an `auth.json`): what no `codex_dirs` key means, so saving an
+    /// unchanged list doesn't pin it into the file.
+    pub codex_default: Option<PathBuf>,
     /// `/usage` poll interval while a session is working (s, >= 10).
     pub poll_interval: u64,
     /// True when `poll_interval` came from the file or the env var, in which
@@ -643,6 +651,14 @@ impl Settings {
             cfg.get("heartbeat_interval").and_then(parse_interval).unwrap_or(DEFAULT_HEARTBEAT_INTERVAL);
         Settings {
             config_dirs: parse_config_dirs(cfg.get("config_dirs"), paths),
+            codex_dirs: {
+                // A folder listed as both is a Claude account.
+                let claude = parse_config_dirs(cfg.get("config_dirs"), paths);
+                let mut v = parse_dir_list(cfg.get("codex_dirs").unwrap_or(""), paths);
+                v.retain(|d| !claude.contains(d));
+                v
+            },
+            codex_default: None,
             poll_interval,
             poll_interval_explicit: file_poll.is_some() || env_default.is_some(),
             heartbeat_interval,
@@ -689,7 +705,28 @@ impl Settings {
         let env = std::env::var("POLL_INTERVAL").ok();
         let mut s = Self::from_config(&cfg, paths, env.as_deref());
         s.apply_env_config_dir(&cfg, paths, std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref());
+        s.discover_codex(&cfg, paths, std::env::var("CODEX_HOME").ok().as_deref());
         Ok(s)
+    }
+
+    /// [`Settings::apply_codex_default`] with the default Codex home found on
+    /// this machine (`codex_home` is `$CODEX_HOME`). Every path that loads
+    /// settings to save them again goes through this, so the default is
+    /// known when the list is edited.
+    pub fn discover_codex(&mut self, cfg: &ConfigFile, paths: &Paths, codex_home: Option<&str>) {
+        self.apply_codex_default(cfg, crate::codex::discover(&paths.home, codex_home));
+    }
+
+    /// The default Codex home (found by [`crate::codex::discover`]) is an
+    /// account unless the file lists Codex homes itself (`codex_dirs`, empty
+    /// for none). With no Codex home, nothing is polled and no Codex UI shows.
+    pub fn apply_codex_default(&mut self, cfg: &ConfigFile, found: Option<PathBuf>) {
+        self.codex_default = found;
+        if cfg.get("codex_dirs").is_none() {
+            self.codex_dirs = self.codex_default.iter().cloned().collect();
+        }
+        let claude = &self.config_dirs;
+        self.codex_dirs.retain(|d| !claude.contains(d));
     }
 
     /// With no `config_dirs` in the file, a `CLAUDE_CONFIG_DIR` in the
@@ -710,19 +747,27 @@ impl Settings {
     /// from what the file already says (so a hand-written `reset_chime = off` stays
     /// as written and absent keys at their defaults stay absent).
     pub fn apply_to(&self, cfg: &mut ConfigFile, paths: &Paths) {
-        let current = Settings::from_config(cfg, paths, None);
-        if current.config_dirs != self.config_dirs {
-            let home = &paths.home;
-            let list: Vec<String> = self
-                .config_dirs
-                .iter()
+        let mut current = Settings::from_config(cfg, paths, None);
+        current.apply_codex_default(cfg, self.codex_default.clone());
+        let home = &paths.home;
+        let list = |dirs: &[PathBuf]| -> String {
+            dirs.iter()
                 .map(|d| match d.strip_prefix(home) {
                     Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
                     Ok(rest) => format!("~/{}", rest.to_string_lossy().replace('\\', "/")),
                     Err(_) => d.to_string_lossy().into_owned(),
                 })
-                .collect();
-            cfg.set("config_dirs", &list.join(", "));
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if current.config_dirs != self.config_dirs {
+            cfg.set("config_dirs", &list(&self.config_dirs));
+        }
+        // Only a change is written: the default Codex home stays implicit
+        // until the list is edited, and then `codex_dirs =` (empty) keeps a
+        // removed default from coming back.
+        if current.codex_dirs != self.codex_dirs {
+            cfg.set("codex_dirs", &list(&self.codex_dirs));
         }
         if current.poll_interval != self.poll_interval {
             cfg.set("poll_interval", &self.poll_interval.to_string());
@@ -809,10 +854,14 @@ impl Settings {
     }
 }
 
+/// A comma list of folders, `~` expanded, blanks dropped.
+pub fn parse_dir_list(raw: &str, paths: &Paths) -> Vec<PathBuf> {
+    raw.split(',').map(str::trim).filter(|s| !s.is_empty()).map(|s| paths.expand_tilde(s)).collect()
+}
+
 /// `config_dirs`: comma list, `~` expanded, blanks dropped; default `[~/.claude]`.
 pub fn parse_config_dirs(raw: Option<&str>, paths: &Paths) -> Vec<PathBuf> {
-    let dirs: Vec<PathBuf> =
-        raw.unwrap_or("").split(',').map(str::trim).filter(|s| !s.is_empty()).map(|s| paths.expand_tilde(s)).collect();
+    let dirs = parse_dir_list(raw.unwrap_or(""), paths);
     if dirs.is_empty() {
         vec![paths.home.join(".claude")]
     } else {
@@ -898,6 +947,67 @@ mod tests {
             vec![PathBuf::from("/home/u/.claude"), PathBuf::from("/home/u/.claude-work")]
         );
         assert_eq!(settings("config_dirs = , ,\n").config_dirs, vec![PathBuf::from("/home/u/.claude")]);
+    }
+
+    // Codex accounts: the default Codex home with no key, the list once
+    // there is one (empty: none). With no Codex home, none at all.
+    #[test]
+    fn codex_dirs() {
+        let p = paths();
+        let codex = PathBuf::from("/home/u/.codex");
+        let load = |text: &str, found: Option<PathBuf>| {
+            let cfg = ConfigFile::parse(text);
+            let mut s = Settings::from_config(&cfg, &p, None);
+            s.apply_codex_default(&cfg, found);
+            s
+        };
+        assert_eq!(load("", None).codex_dirs, Vec::<PathBuf>::new(), "no Codex home: nothing");
+        assert_eq!(load("", Some(codex.clone())).codex_dirs, vec![codex.clone()]);
+        assert_eq!(load("codex_dirs =\n", Some(codex.clone())).codex_dirs, Vec::<PathBuf>::new(), "removed");
+        assert_eq!(
+            load("codex_dirs = ~/.codex, ~/codex-work\n", None).codex_dirs,
+            vec![codex.clone(), PathBuf::from("/home/u/codex-work")]
+        );
+        assert_eq!(
+            load("config_dirs = ~/.claude, ~/both\ncodex_dirs = ~/both, ~/.codex\n", None).codex_dirs,
+            vec![codex.clone()],
+            "listed as both: Claude"
+        );
+
+        // Saving unchanged settings leaves the default implicit.
+        let mut cfg = ConfigFile::parse("clock = auto\n");
+        let s = load("clock = auto\n", Some(codex.clone()));
+        s.apply_to(&mut cfg, &p);
+        assert_eq!(cfg.get("codex_dirs"), None);
+        // Removing it writes an empty list, so it stays removed.
+        let none = Settings { codex_dirs: Vec::new(), ..s.clone() };
+        none.apply_to(&mut cfg, &p);
+        assert_eq!(cfg.get("codex_dirs"), Some(""));
+        assert_eq!(load(&cfg.render(), Some(codex.clone())).codex_dirs, Vec::<PathBuf>::new());
+        // The window's save path: loaded with discovery, edited, saved.
+        let root = std::env::temp_dir().join(format!("cm-codex-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".codex")).unwrap();
+        std::fs::write(root.join(".codex/auth.json"), "{}").unwrap();
+        let rp = Paths::under(&root);
+        let save = |cfg: &mut ConfigFile, edit: &dyn Fn(&mut Settings)| {
+            let mut s = Settings::from_config(cfg, &rp, None);
+            s.discover_codex(cfg, &rp, None);
+            edit(&mut s);
+            s.apply_to(cfg, &rp);
+        };
+        let mut cfg = ConfigFile::default();
+        save(&mut cfg, &|s| s.codex_dirs.retain(|d| !d.ends_with(".codex")));
+        assert_eq!(cfg.get("codex_dirs"), Some(""), "removing the default sticks");
+        let mut cfg = ConfigFile::default();
+        save(&mut cfg, &|s| s.codex_dirs.push(PathBuf::from("/srv/codex")));
+        assert_eq!(cfg.get("codex_dirs"), Some("~/.codex, /srv/codex"), "adding one keeps the default");
+        let _ = std::fs::remove_dir_all(&root);
+        // Adding a second one lists both.
+        let mut cfg = ConfigFile::default();
+        let two = Settings { codex_dirs: vec![codex, PathBuf::from("/srv/codex")], ..s };
+        two.apply_to(&mut cfg, &p);
+        assert_eq!(cfg.get("codex_dirs"), Some("~/.codex, /srv/codex"));
     }
 
     // The Windows daemon read the token from $CLAUDE_CONFIG_DIR when set

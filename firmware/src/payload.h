@@ -22,6 +22,10 @@
 //       (button_action.h), -1 absent or unknown
 //   th  the palette: TH_COUNT 6-digit hex colours run together (theme_palette.h);
 //       has_theme false when absent or malformed
+//   pv  "codex" = an OpenAI Codex account (a trial): the Codex screen
+//   rc  Codex reset credits held (0-999, -1 absent)
+//   rx  each held credit's expiry date ("Dec 1"), soonest first, at most 10
+//       (resets_expiry_n -1 absent)
 //
 // Returns false on malformed JSON; `*err` (if non-null) then points at a
 // static description. `out` is fully overwritten on success, untouched on

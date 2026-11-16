@@ -145,6 +145,11 @@ impl Scheduler {
         self.requested_at = Some(now);
     }
 
+    /// When a refresh was last asked for (Codex accounts follow it too).
+    pub fn requested_at(&self) -> Option<i64> {
+        self.requested_at
+    }
+
     /// A prompt was sent.
     pub fn on_prompt(&mut self, now: i64) {
         self.prompt_at = Some(now);

@@ -38,6 +38,10 @@ pins and hardware gotchas, which loads when you work in that folder.
   fits, then shape rules (narrow, tall, short, round). Strings it sizes for
   are in `ui_text.h`. Never branch on a board or exact size; add a shape rule
   and a `test_layout` panel (`docs/porting/adding-a-board.md`).
+- **Codex (a trial)**: a `pv:"codex"` payload draws the Codex screen in
+  `ui.cpp` (white bars, "Codex" pill); the Resets card is all in
+  `draw_resets_card()`, its grid sized by `layout.cpp` `fit_resets()`. `signals` treats its numbers as a replay, so Clawd
+  never reacts to them.
 - **Sound**: `ding.cpp` synthesizes the one sound (a C#5 ding, mirrored by
   the desktop's `chime.rs`); `chime.cpp` streams it through the ES8311.
 - **Generated, never hand-edited**: `splash_animations.h` (only

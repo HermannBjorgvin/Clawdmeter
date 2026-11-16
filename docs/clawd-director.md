@@ -144,6 +144,11 @@ Small reactions on the meters, from `home` or `corner`:
   loop iteration as the chime.
   If he's out on a trip he hurries back for it; if he's in another room it
   waits up to 5 min for him to sit down. It outranks the wave.
+- **Codex accounts** (`pv:"codex"`, a trial): their numbers aren't
+  Claude's, so `signals` reports them as a replay. They never reach the slow
+  clock, the fresh-window joy and chime, or the rise that counts as you
+  being around, and the "window not started" quiet rule keeps the last
+  Claude payload's value. Hook fields in the same write still fire.
 
 ### A tap on the meters (the aquarium)
 
