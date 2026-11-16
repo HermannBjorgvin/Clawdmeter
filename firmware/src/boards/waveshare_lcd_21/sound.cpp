@@ -1,10 +1,21 @@
 #include "../../hal/sound_hal.h"
+#include "../../buzzer_pulse.h"
+#include "board.h"
+#include "io_expander.h"
+#include <Arduino.h>
 
 // The LCD-2.1's buzzer is an active one switched by expander EXIO8: on/off
-// only, no pitch, so it can't play the ding. board_init() keeps it off and
-// every sound call is a no-op.
+// only, no pitch or volume, so it can't play the ding. sound_hal_chime()
+// plays three short beeps instead (alerts and session resets), and it beeps
+// once at boot where the speaker boards ding, timed by buzzer_pulse without
+// blocking; a failed "off" is retried until it lands.
+// io_expander_init() writes the latch with the buzzer off, so a reset
+// mid-beep comes back silent. sound_hal_tune() has nothing to tune.
 
-void sound_hal_init(void) {}
-void sound_hal_tick(void) {}
-void sound_hal_chime(void) {}
-void sound_hal_tune(float, int) {}
+static bool set_buzzer(bool on) { return io_expander_set(IOX_BIT_BUZZER, on); }
+
+void sound_hal_init(void)  { buzzer_pulse_init(set_buzzer, millis()); }
+void sound_hal_tick(void)  { buzzer_pulse_tick(millis()); }
+void sound_hal_chime(void) { buzzer_pulse_start(millis(), BUZZER_BEEPS); }
+
+void sound_hal_tune(float gain, int volume) { (void)gain; (void)volume; }

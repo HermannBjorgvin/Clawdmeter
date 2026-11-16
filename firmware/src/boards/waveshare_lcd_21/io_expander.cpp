@@ -28,7 +28,7 @@ static bool iox_probe(void) {
     return Wire.endTransmission() == 0;
 }
 
-static void iox_write(uint8_t reg, uint8_t val) {
+static bool iox_write(uint8_t reg, uint8_t val) {
     Wire.beginTransmission(IO_EXPANDER_ADDR);
     Wire.write(reg);
     Wire.write(val);
@@ -37,6 +37,7 @@ static void iox_write(uint8_t reg, uint8_t val) {
         Serial.printf(BOARD_LOG_TAG " IO expander write reg 0x%02X=0x%02X failed (%u)\n",
                       reg, val, err);
     }
+    return err == 0;
 }
 
 void io_expander_init(void) {
@@ -53,9 +54,11 @@ void io_expander_init(void) {
     Serial.println(BOARD_LOG_TAG " IO expander init OK");
 }
 
-void io_expander_set(uint8_t bit, bool high) {
-    if (!expander_ok) return;
+// No expander means nothing to drive (the pins stay at their power-on state),
+// so that reports success: a buzzer "off" isn't retried forever.
+bool io_expander_set(uint8_t bit, bool high) {
+    if (!expander_ok) return true;
     if (high) output_latch |= (uint8_t)(1u << bit);
     else      output_latch &= (uint8_t)~(1u << bit);
-    iox_write(IOX_REG_OUTPUT, output_latch);
+    return iox_write(IOX_REG_OUTPUT, output_latch);
 }
