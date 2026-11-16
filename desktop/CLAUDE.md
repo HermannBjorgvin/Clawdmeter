@@ -204,21 +204,26 @@ runs or shows (bar the Accounts page's trial note).
 - **Session-log fallback** on a transient miss: the newest
   `limit_id:"codex"` `rate_limits` record in the two newest
   `sessions/YYYY/MM/DD/` folders, refused when over an hour old or when a
-  window has reset since (`codex::reading_from_log`). It rides as a
+  window has reset since, or not newer than the endpoint's last answer
+  (`codex::reading_from_log`; `CodexCache` remembers it). It rides as a
   `Polled` with `idle: false` and the miss in `idle_miss`, so the endpoint
   still backs off.
 - **Reset credits**: `rate_limit_reset_credits.available_count` is the count
   held. `wham/rate-limit-reset-credits` (expiries of `available` ones) and
   `.../history` (`used` events) fill in the ledger, fetched hourly or when
-  the count changes (`CreditsCache`, carried through the daemon's Codex
+  the count changes (`CodexCache`, carried through the daemon's Codex
   task). Read-only; nothing ever consumes a credit.
 - **Engine**: `begin_codex_poll` / `on_codex_results`, a track of its own
   (`codex::due_at`: shown 5 min, others 10 min, a reset or refresh sooner,
   never within 2 min, backoff honoured) on its own blocking task, so a slow
   call never holds up Claude's poll; Claude's plan, probe rules and cadence
-  never see a Codex dir. The results join `PlanSelector` like any account.
-  Codex readings never feed the rate tracker (the mood is Claude's), and
-  "every account logged out" counts Codex accounts too.
+  never see a Codex dir. The results join `PlanSelector`, but through
+  `choose_preferring`: before any rise a Claude account is shown over a
+  Codex one whatever the %, so Codex takes the device only when its own
+  meter rises. Codex readings never feed the rate tracker (the mood is
+  Claude's). A Codex sign-in failure (none, expired, refused) drops that
+  account's reading, so it leaves the choice, and counts toward "every
+  account logged out" (`codex_signed_out`).
 - **Payload**: `Provider::Codex` adds `pv:"codex"` and `rc`/`ru`/`re`/`rx`
   (`rx`: each held credit's local expiry date, ≤ 10; all absent when
   unknown). The Overview and tray label the main meter

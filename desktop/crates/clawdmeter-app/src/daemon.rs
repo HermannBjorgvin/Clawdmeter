@@ -14,7 +14,7 @@ use clawdmeter_ble::{
 };
 use clawdmeter_core::attention::AttentionInbox;
 use clawdmeter_core::backoff;
-use clawdmeter_core::codex::{self, CreditsCache};
+use clawdmeter_core::codex::{self, CodexCache};
 use clawdmeter_core::engine::PollPlan;
 use clawdmeter_core::events::EventTail;
 use clawdmeter_core::platform::AppearanceWatch;
@@ -136,7 +136,7 @@ fn reload_settings(paths: &Paths, engine: &mut Engine, claude: &mut Option<PathB
 
 type PollResults = Vec<(PathBuf, probe::Polled)>;
 /// A Codex poll's results, and the reset-credit cache it carried.
-type CodexResults = (PollResults, CreditsCache);
+type CodexResults = (PollResults, CodexCache);
 type ConnectResult = Result<(DeviceLink, DeviceEvents), LinkError>;
 
 /// Read each account of a poll plan: the probe, `/usage`, or a reading known
@@ -154,7 +154,7 @@ fn poll_all(claude: Option<PathBuf>, plan: PollPlan, home: PathBuf, cwd: PathBuf
 }
 
 /// Read each Codex account due (blocking; the endpoint is slow).
-fn poll_codex(dirs: Vec<PathBuf>, mut cache: CreditsCache) -> CodexResults {
+fn poll_codex(dirs: Vec<PathBuf>, mut cache: CodexCache) -> CodexResults {
     let now = chrono::Utc::now();
     let results = dirs.into_iter().map(|d| (d.clone(), codex::poll(&d, now, &mut cache))).collect();
     (results, cache)
@@ -212,7 +212,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     // Codex accounts poll on their own task, so a slow endpoint never holds
     // up a Claude account. The credits cache travels with it.
     let mut codex_polling: Option<JoinHandle<CodexResults>> = None;
-    let mut credits = Some(CreditsCache::default());
+    let mut credits = Some(CodexCache::default());
     let mut link_state = LinkState::Starting;
     let mut reconnect = Reconnect::default();
     let bt = Bluetooth::default();
@@ -367,7 +367,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                 }
                 Err(e) => {
                     log::error!("Codex poll task failed: {e}");
-                    credits = Some(CreditsCache::default());
+                    credits = Some(CodexCache::default());
                 }
             }
         }
@@ -501,7 +501,9 @@ pub fn once(paths: &Paths) -> i32 {
     // A blocked account isn't asked: a call during a block lengthens it.
     let blocked = engine.blocks(now);
     for (d, b) in &blocked {
-        println!("{}: {}", d.display(), usage::paused_message(b.until, clawdmeter_core::platform::utc_offset_secs()));
+        let provider = if settings.codex_dirs.contains(d) { usage::Provider::Codex } else { usage::Provider::Claude };
+        let paused = usage::paused_message_by(provider, b.until, clawdmeter_core::platform::utc_offset_secs());
+        println!("{}: {paused}", d.display());
     }
     // Nothing is known yet, so the idle source for every account (no message).
     let accounts: Vec<PathBuf> = settings.config_dirs.iter().filter(|d| !blocked.contains_key(*d)).cloned().collect();
@@ -512,7 +514,7 @@ pub fn once(paths: &Paths) -> i32 {
     };
     let results = poll_all(claude, plan, paths.home.clone(), paths.state_dir.clone());
     let codex_dirs: Vec<PathBuf> = settings.codex_dirs.iter().filter(|d| !blocked.contains_key(*d)).cloned().collect();
-    let (codex_results, _) = poll_codex(codex_dirs, CreditsCache::default());
+    let (codex_results, _) = poll_codex(codex_dirs, CodexCache::default());
     let mut ok = false;
     for (d, r) in &results {
         match &r.result {

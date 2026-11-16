@@ -2247,6 +2247,7 @@ pub(crate) fn write_settings(
     let path = &paths.config_file;
     let mut cfg = ConfigFile::load(path)?;
     let mut s = Settings::from_config(&cfg, paths, None);
+    s.discover_codex(&cfg, paths, std::env::var("CODEX_HOME").ok().as_deref());
     change(&mut s, &mut cfg);
     s.apply_to(&mut cfg, paths);
     if let Some(dir) = path.parent() {

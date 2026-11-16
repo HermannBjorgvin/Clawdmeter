@@ -315,8 +315,9 @@ pub fn parse_credits_used(body: &str) -> Option<u32> {
 /// for the endpoint at `now`: `limit_id` "codex" (never a model's bucket),
 /// under [`LOG_MAX_AGE_SECS`] old, and with no window that has reset since
 /// (its number would describe a window that's over). An older record never
-/// stands in for a refused newer one.
-pub fn reading_from_log(text: &str, now: DateTime<Utc>) -> Option<UsageReading> {
+/// stands in for a refused newer one, nor for anything at or before
+/// `not_before` (the last endpoint reading, which it would only take back).
+pub fn reading_from_log(text: &str, now: DateTime<Utc>, not_before: Option<DateTime<Utc>>) -> Option<UsageReading> {
     for line in text.lines().rev() {
         if !line.contains("\"rate_limits\"") {
             continue;
@@ -329,7 +330,10 @@ pub fn reading_from_log(text: &str, now: DateTime<Utc>) -> Option<UsageReading> 
             continue;
         }
         let at = v.get("timestamp").and_then(time_of)?;
-        if (now - at).num_seconds() > LOG_MAX_AGE_SECS || at > now + chrono::Duration::seconds(300) {
+        if (now - at).num_seconds() > LOG_MAX_AGE_SECS
+            || at > now + chrono::Duration::seconds(300)
+            || not_before.is_some_and(|t| at <= t)
+        {
             return None;
         }
         let (mut session, mut week) = (None, None);
@@ -371,7 +375,11 @@ fn tail(path: &Path) -> Option<String> {
 /// The session-log fallback for a Codex home: the newest rollout files
 /// (`sessions/YYYY/MM/DD/*.jsonl`, the two newest days, written in the last
 /// hour), newest first, through [`reading_from_log`].
-pub fn reading_from_session_logs(dir: &Path, now: DateTime<Utc>) -> Option<UsageReading> {
+pub fn reading_from_session_logs(
+    dir: &Path,
+    now: DateTime<Utc>,
+    not_before: Option<DateTime<Utc>>,
+) -> Option<UsageReading> {
     let subdirs = |p: &Path| -> Vec<PathBuf> {
         let mut v: Vec<PathBuf> = std::fs::read_dir(p)
             .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect())
@@ -405,7 +413,7 @@ pub fn reading_from_session_logs(dir: &Path, now: DateTime<Utc>) -> Option<Usage
         let text = tail(&p)?;
         text.contains("\"limit_id\":\"codex\"").then_some(text)
     })?;
-    reading_from_log(&newest, now)
+    reading_from_log(&newest, now, not_before)
 }
 
 /// One account's reset-credit details, kept between polls.
@@ -417,14 +425,17 @@ struct CreditsEntry {
     spent: Option<u32>,
 }
 
-/// The reset-credit details per account, so the two extra calls happen
-/// hourly or when the held count changes, not on every poll.
+/// What a Codex poll keeps per account between polls: the reset-credit
+/// details, so the two extra calls happen hourly or when the held count
+/// changes, and when the endpoint last answered, so the log never takes a
+/// reading back.
 #[derive(Debug, Clone, Default)]
-pub struct CreditsCache {
+pub struct CodexCache {
     entries: HashMap<PathBuf, CreditsEntry>,
+    endpoint_ok: HashMap<PathBuf, DateTime<Utc>>,
 }
 
-impl CreditsCache {
+impl CodexCache {
     /// The details for `held` credits, as last fetched (within the TTL).
     fn details(&self, dir: &Path, now: i64) -> Option<&CreditsEntry> {
         self.entries.get(dir).filter(|e| now - e.fetched_at < CREDITS_TTL_SECS)
@@ -500,17 +511,21 @@ pub fn http_get(url: &str, auth: &Auth) -> Result<Answer, UsageError> {
 /// Read one Codex account. A miss that may pass (a timeout, the endpoint
 /// unreachable, a 429, an odd answer) falls back to the session logs; a
 /// sign-in problem doesn't (no data).
-pub fn poll(dir: &Path, now: DateTime<Utc>, cache: &mut CreditsCache) -> Polled {
-    poll_with(dir, now, cache, &mut http_get, &mut |d, t| reading_from_session_logs(d, t))
+pub fn poll(dir: &Path, now: DateTime<Utc>, cache: &mut CodexCache) -> Polled {
+    poll_with(dir, now, cache, &mut http_get, &mut |d, t, nb| reading_from_session_logs(d, t, nb))
 }
+
+/// The session-log fallback: (home, now, the last endpoint reading) → a
+/// reading ([`reading_from_session_logs`]).
+pub type LogSource<'a> = dyn FnMut(&Path, DateTime<Utc>, Option<DateTime<Utc>>) -> Option<UsageReading> + 'a;
 
 /// [`poll`] with the network and the session logs injected (tests).
 pub fn poll_with(
     dir: &Path,
     now: DateTime<Utc>,
-    cache: &mut CreditsCache,
+    cache: &mut CodexCache,
     get: &mut dyn FnMut(&str, &Auth) -> Result<Answer, UsageError>,
-    logs: &mut dyn FnMut(&Path, DateTime<Utc>) -> Option<UsageReading>,
+    logs: &mut LogSource<'_>,
 ) -> Polled {
     let auth = match read_auth(dir) {
         Ok(a) => a,
@@ -521,6 +536,7 @@ pub fn poll_with(
     }
     match get(USAGE_URL, &auth).and_then(|a| interpret(a, now)) {
         Ok(mut r) => {
+            cache.endpoint_ok.insert(dir.to_path_buf(), now);
             if let Some(held) = r.resets.as_ref().map(|c| c.held) {
                 let mut fetch =
                     |url: &str| get(url, &auth).ok().filter(|(s, _, _)| (200..300).contains(s)).map(|(_, _, b)| b);
@@ -528,7 +544,7 @@ pub fn poll_with(
             }
             Polled::from(Ok::<_, UsageError>(r))
         }
-        Err(e) if e.is_transient() => match logs(dir, now) {
+        Err(e) if e.is_transient() => match logs(dir, now, cache.endpoint_ok.get(dir).copied()) {
             Some(mut r) => {
                 r.resets = cache.last_known(dir, now.timestamp());
                 Polled { result: Ok(r), idle: false, probe: ProbeRun::NotRun, idle_miss: Some(e) }
@@ -683,19 +699,23 @@ mod tests {
     #[test]
     fn stale_log_guard() {
         let log = fixture("rollout-weekly.jsonl");
-        let r = reading_from_log(&log, at("2026-11-16T01:50:00Z")).unwrap();
+        let r = reading_from_log(&log, at("2026-11-16T01:50:00Z"), None).unwrap();
         assert_eq!(r.week.as_ref().map(|w| w.pct), Some(34), "the account record, not Spark's 0 %");
         assert!(r.no_session_limit());
         assert_eq!(r.provider, Provider::Codex);
         // Over an hour old: refused.
-        assert_eq!(reading_from_log(&log, at("2026-11-16T02:20:01Z")), None);
+        assert_eq!(reading_from_log(&log, at("2026-11-16T02:20:01Z"), None), None);
         // Its window has reset since (1795303084 = 2026-11-21T23:18:04Z).
-        assert_eq!(reading_from_log(&log, at("2026-11-21T23:18:04Z")), None);
+        assert_eq!(reading_from_log(&log, at("2026-11-21T23:18:04Z"), None), None);
         let reset = log.replace("1795303084", "1794790000");
-        assert_eq!(reading_from_log(&reset, at("2026-11-16T01:50:00Z")), None, "window already over");
+        assert_eq!(reading_from_log(&reset, at("2026-11-16T01:50:00Z"), None), None, "window already over");
         // Only model buckets: nothing.
         let spark = log.replace(r#""limit_id":"codex","#, r#""limit_id":"premium","#);
-        assert_eq!(reading_from_log(&spark, at("2026-11-16T01:50:00Z")), None);
+        assert_eq!(reading_from_log(&spark, at("2026-11-16T01:50:00Z"), None), None);
+        // Older than the endpoint's last reading: it would take it back.
+        let t = at("2026-11-16T01:50:00Z");
+        assert_eq!(reading_from_log(&log, t, Some(at("2026-11-16T01:30:00Z"))), None);
+        assert!(reading_from_log(&log, t, Some(at("2026-11-16T01:10:00Z"))).is_some());
     }
 
     #[test]
@@ -713,8 +733,8 @@ mod tests {
         std::fs::write(day.join("rollout-a.jsonl"), format!("{rec}\n")).unwrap();
         // An older day dir with garbage is never read past the newest two.
         std::fs::create_dir_all(root.join("sessions/2025/01/01")).unwrap();
-        assert_eq!(reading_from_session_logs(&root, now).and_then(|r| r.week).map(|w| w.pct), Some(41));
-        assert_eq!(reading_from_session_logs(&root.join("nope"), now), None);
+        assert_eq!(reading_from_session_logs(&root, now, None).and_then(|r| r.week).map(|w| w.pct), Some(41));
+        assert_eq!(reading_from_session_logs(&root.join("nope"), now, None), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -757,7 +777,7 @@ mod tests {
     fn poll_paths() {
         let now = at(NOW);
         let dir = home_with_token("paths", now.timestamp() + 86_400);
-        let mut cache = CreditsCache::default();
+        let mut cache = CodexCache::default();
         let mut calls: Vec<String> = Vec::new();
         let usage = fixture("usage-pro-weekly.json");
         let mut ok = |url: &str, a: &Auth| -> Result<Answer, UsageError> {
@@ -770,7 +790,7 @@ mod tests {
                 _ => panic!("unexpected call {url}"),
             })
         };
-        let mut no_logs = |_: &Path, _: DateTime<Utc>| -> Option<UsageReading> { None };
+        let mut no_logs = |_: &Path, _: DateTime<Utc>, _: Option<DateTime<Utc>>| -> Option<UsageReading> { None };
         let p = poll_with(&dir, now, &mut cache, &mut ok, &mut no_logs);
         assert!(p.idle);
         let resets = p.result.unwrap().resets.unwrap();
@@ -790,10 +810,14 @@ mod tests {
 
         // The endpoint times out: a fresh log reading stands in, the miss
         // rides along (it backs the endpoint off), credits as last known.
+        // (The fixture's record is from 01:20; the endpoint last read at
+        // 02:05 below would refuse it, so this cache starts from a reading
+        // before it.)
         let log = fixture("rollout-weekly.jsonl");
         let t = at("2026-11-16T01:50:00Z");
+        cache.endpoint_ok.insert(dir.clone(), at("2026-11-16T01:00:00Z"));
         let mut slow = |_: &str, _: &Auth| -> Result<Answer, UsageError> { Err(UsageError::Timeout) };
-        let mut logs = |_: &Path, n: DateTime<Utc>| reading_from_log(&log, n);
+        let mut logs = |_: &Path, n: DateTime<Utc>, nb: Option<DateTime<Utc>>| reading_from_log(&log, n, nb);
         let p = poll_with(&dir, t, &mut cache, &mut slow, &mut logs);
         assert_eq!((p.idle, p.idle_miss.clone()), (false, Some(UsageError::Timeout)));
         let r = p.result.unwrap();
@@ -823,7 +847,7 @@ mod tests {
     // count knows nothing rather than show the old ledger.
     #[test]
     fn credits_cache_follows_the_count() {
-        let mut cache = CreditsCache::default();
+        let mut cache = CodexCache::default();
         let dir = Path::new("/c");
         let mut ok = |url: &str| -> Option<String> {
             Some(fixture(if url == CREDITS_URL { "reset-credits.json" } else { "reset-credits-history.json" }))

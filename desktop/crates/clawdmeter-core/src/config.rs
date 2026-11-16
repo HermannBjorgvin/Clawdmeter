@@ -653,8 +653,16 @@ impl Settings {
         let env = std::env::var("POLL_INTERVAL").ok();
         let mut s = Self::from_config(&cfg, paths, env.as_deref());
         s.apply_env_config_dir(&cfg, paths, std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref());
-        s.apply_codex_default(&cfg, crate::codex::discover(&paths.home, std::env::var("CODEX_HOME").ok().as_deref()));
+        s.discover_codex(&cfg, paths, std::env::var("CODEX_HOME").ok().as_deref());
         Ok(s)
+    }
+
+    /// [`Settings::apply_codex_default`] with the default Codex home found on
+    /// this machine (`codex_home` is `$CODEX_HOME`). Every path that loads
+    /// settings to save them again goes through this, so the default is
+    /// known when the list is edited.
+    pub fn discover_codex(&mut self, cfg: &ConfigFile, paths: &Paths, codex_home: Option<&str>) {
+        self.apply_codex_default(cfg, crate::codex::discover(&paths.home, codex_home));
     }
 
     /// The default Codex home (found by [`crate::codex::discover`]) is an
@@ -916,6 +924,25 @@ mod tests {
         none.apply_to(&mut cfg, &p);
         assert_eq!(cfg.get("codex_dirs"), Some(""));
         assert_eq!(load(&cfg.render(), Some(codex.clone())).codex_dirs, Vec::<PathBuf>::new());
+        // The window's save path: loaded with discovery, edited, saved.
+        let root = std::env::temp_dir().join(format!("cm-codex-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".codex")).unwrap();
+        std::fs::write(root.join(".codex/auth.json"), "{}").unwrap();
+        let rp = Paths::under(&root);
+        let save = |cfg: &mut ConfigFile, edit: &dyn Fn(&mut Settings)| {
+            let mut s = Settings::from_config(cfg, &rp, None);
+            s.discover_codex(cfg, &rp, None);
+            edit(&mut s);
+            s.apply_to(cfg, &rp);
+        };
+        let mut cfg = ConfigFile::default();
+        save(&mut cfg, &|s| s.codex_dirs.retain(|d| !d.ends_with(".codex")));
+        assert_eq!(cfg.get("codex_dirs"), Some(""), "removing the default sticks");
+        let mut cfg = ConfigFile::default();
+        save(&mut cfg, &|s| s.codex_dirs.push(PathBuf::from("/srv/codex")));
+        assert_eq!(cfg.get("codex_dirs"), Some("~/.codex, /srv/codex"), "adding one keeps the default");
+        let _ = std::fs::remove_dir_all(&root);
         // Adding a second one lists both.
         let mut cfg = ConfigFile::default();
         let two = Settings { codex_dirs: vec![codex, PathBuf::from("/srv/codex")], ..s };

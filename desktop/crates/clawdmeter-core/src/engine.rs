@@ -165,6 +165,12 @@ pub struct Engine {
     desktop_chime_due: bool,
 }
 
+/// A Codex account that can't be read until its sign-in is renewed: no
+/// sign-in, or a token that has expired or was refused (never refreshed here).
+fn codex_signed_out(e: &UsageError) -> bool {
+    e.is_auth() || matches!(e, UsageError::TokenExpired | UsageError::TokenRejected)
+}
+
 fn utc(now: i64) -> DateTime<Utc> {
     Utc.timestamp_opt(now, 0).single().unwrap_or_default()
 }
@@ -403,7 +409,18 @@ impl Engine {
     pub fn on_codex_results(&mut self, now: i64, results: Vec<(PathBuf, probe::Polled)>) {
         let polled = !results.is_empty();
         let in_flight = std::mem::take(&mut self.codex_in_flight);
+        let dirs: Vec<PathBuf> = results.iter().map(|(d, _)| d.clone()).collect();
         let (ok_dirs, rekinded) = self.record_results(now, results, &in_flight);
+        // A dead Codex sign-in is no data, not the last numbers kept: the
+        // account leaves the choice until it reads again.
+        for d in &dirs {
+            let st = self.accounts.get_mut(d);
+            if let Some(st) = st.filter(|a| a.last_error.as_ref().is_some_and(codex_signed_out)) {
+                st.last = None;
+                st.last_ok_at = None;
+                self.selector.forget(d);
+            }
+        }
         let active_fresh = self.choose_active(now, &ok_dirs, &rekinded);
         self.logged_out = self.all_auth();
         // A Claude poll's results may still be waiting for their write.
@@ -527,15 +544,12 @@ impl Engine {
     }
 
     /// Every configured account's latest answer is a login problem, Codex
-    /// accounts included.
+    /// accounts included (for them an expired or refused token is one too).
     fn all_auth(&self) -> bool {
+        let error = |d: &PathBuf| self.accounts.get(d).and_then(|a| a.last_error.as_ref());
         !self.settings.config_dirs.is_empty()
-            && self
-                .settings
-                .config_dirs
-                .iter()
-                .chain(&self.settings.codex_dirs)
-                .all(|d| self.accounts.get(d).and_then(|a| a.last_error.as_ref()).is_some_and(UsageError::is_auth))
+            && self.settings.config_dirs.iter().all(|d| error(d).is_some_and(UsageError::is_auth))
+            && self.settings.codex_dirs.iter().all(|d| error(d).is_some_and(codex_signed_out))
     }
 
     /// Pick the shown account after new results. Returns whether it has
@@ -548,7 +562,10 @@ impl Engine {
         let sessions: Vec<(PathBuf, u32)> =
             self.accounts.iter().filter_map(|(k, a)| a.last.as_ref().map(|r| (k.clone(), r.session_pct()))).collect();
         let prev_active = self.active.clone();
-        self.active = self.selector.choose(&sessions);
+        // A Codex account is shown once its own meter rises, never just for
+        // a higher % than a Claude account's (a trial: Claude comes first).
+        let codex = self.settings.codex_dirs.clone();
+        self.active = self.selector.choose_preferring(&sessions, |k| !codex.contains(k));
         if self.active != prev_active && self.settings.config_dirs.len() > 1 {
             if let Some(a) = &self.active {
                 log::info!("active plan: {}", a.display());
@@ -1553,7 +1570,8 @@ mod tests {
     }
 
     // A Codex account polls on its own track (never in the Claude plan),
-    // joins the choice of the shown account, and goes out with `pv`.
+    // is shown once its own meter rises (Claude comes first before that,
+    // whatever the %), and goes out with `pv`.
     #[test]
     fn codex_account_joins_the_selector() {
         let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
@@ -1563,28 +1581,33 @@ mod tests {
         assert!(!e.status(T0).polling, "nothing shown yet");
         e.on_poll_results(T0, vec![(claude.clone(), Ok(reading(10)))]);
         e.on_codex_results(T0 + 1, vec![(cx.clone(), codex_ok(30))]);
-        assert_eq!(e.status(T0 + 1).active_account, Some(cx.clone()), "the highest % before any rise");
-        let w = write(&mut e, T0 + 1).unwrap();
-        assert_eq!(w.kind, WriteKind::Poll);
-        assert_eq!(
-            (w.payload.acct.as_deref(), w.payload.pv.as_deref(), w.payload.w, w.payload.rc, w.payload.ru),
-            (Some("week"), Some("codex"), Some(30), Some(2), Some(1))
-        );
-        // Claude's meter moves: back to Claude, and no `pv`.
-        e.on_poll_results(T0 + 600, vec![(claude.clone(), Ok(reading(12)))]);
-        assert_eq!(e.status(T0 + 600).active_account, Some(claude.clone()));
-        assert_eq!(write(&mut e, T0 + 600).unwrap().payload.pv, None);
-        // Codex moves: Codex again.
-        assert_eq!(e.begin_codex_poll(T0 + 300), None, "not yet: another account is shown");
+        assert_eq!(e.status(T0 + 1).active_account, Some(claude.clone()), "Claude until Codex rises");
+        assert_eq!(write(&mut e, T0 + 1).unwrap().payload.pv, None);
+        // Not shown: every 10 minutes.
+        assert_eq!(e.begin_codex_poll(T0 + 300), None);
         assert_eq!(e.begin_codex_poll(T0 + 601), Some(vec![cx.clone()]));
         assert!(!e.status(T0 + 601).polling, "the shown account (Claude) isn't the one polled");
         e.on_codex_results(T0 + 602, vec![(cx.clone(), codex_ok(31))]);
-        assert_eq!(e.status(T0 + 602).active_account, Some(cx.clone()));
-        // Shown, it polls every 5 minutes; a refresh waits out the 2-minute gap.
-        assert_eq!(e.begin_codex_poll(T0 + 601 + 299), None);
-        e.request_refresh(T0 + 650);
-        assert_eq!(e.begin_codex_poll(T0 + 700), None, "the gap");
-        assert_eq!(e.begin_codex_poll(T0 + 721), Some(vec![cx]));
+        assert_eq!(e.status(T0 + 602).active_account, Some(cx.clone()), "Codex rose");
+        let w = write(&mut e, T0 + 602).unwrap();
+        assert_eq!(w.kind, WriteKind::Poll);
+        assert_eq!(
+            (w.payload.acct.as_deref(), w.payload.pv.as_deref(), w.payload.w, w.payload.rc, w.payload.ru),
+            (Some("week"), Some("codex"), Some(31), Some(2), Some(1))
+        );
+        // Claude's meter moves: back to Claude, and no `pv`.
+        e.on_poll_results(T0 + 700, vec![(claude.clone(), Ok(reading(12)))]);
+        assert_eq!(e.status(T0 + 700).active_account, Some(claude.clone()));
+        assert_eq!(write(&mut e, T0 + 700).unwrap().payload.pv, None);
+        // Codex moves: Codex again; shown, it polls every 5 minutes, and a
+        // refresh waits out the 2-minute gap.
+        assert_eq!(e.begin_codex_poll(T0 + 1202), Some(vec![cx.clone()]));
+        e.on_codex_results(T0 + 1202, vec![(cx.clone(), codex_ok(32))]);
+        assert_eq!(e.status(T0 + 1202).active_account, Some(cx.clone()));
+        assert_eq!(e.begin_codex_poll(T0 + 1202 + 299), None);
+        e.request_refresh(T0 + 1250);
+        assert_eq!(e.begin_codex_poll(T0 + 1300), None, "the gap");
+        assert_eq!(e.begin_codex_poll(T0 + 1322), Some(vec![cx]));
     }
 
     // With no Codex home, nothing changes: no Codex poll, no `pv`.
@@ -1609,8 +1632,30 @@ mod tests {
         assert_eq!((w.kind, w.payload.pv.as_deref()), (WriteKind::Poll, Some("codex")));
         e.on_codex_results(T0 + 600, vec![(cx.clone(), codex_ok(90))]);
         assert_eq!(e.status(T0 + 600).mood, Some(Mood::Idle), "60 points of Codex isn't Claude activity");
-        e.on_codex_results(T0 + 1200, vec![(cx, Err::<UsageReading, _>(UsageError::NotLoggedIn("x".into())).into())]);
+        e.on_codex_results(
+            T0 + 1200,
+            vec![(cx.clone(), Err::<UsageReading, _>(UsageError::NotLoggedIn("x".into())).into())],
+        );
         assert_eq!(write(&mut e, T0 + 1200).unwrap().kind, WriteKind::NoData);
+        // An expired or refused Codex token is no data too, never its old
+        // numbers kept on the device.
+        for dead in [UsageError::TokenExpired, UsageError::TokenRejected] {
+            let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
+            e.on_poll_results(T0, vec![(claude.clone(), Err(UsageError::NotLoggedIn("x".into())))]);
+            e.on_codex_results(T0, vec![(cx.clone(), codex_ok(30))]);
+            write(&mut e, T0).unwrap();
+            e.on_codex_results(T0 + 300, vec![(cx.clone(), Err::<UsageReading, _>(dead).into())]);
+            assert_eq!(e.status(T0 + 300).reading, None);
+            assert_eq!(write(&mut e, T0 + 300).unwrap().kind, WriteKind::NoData);
+        }
+        // With Claude working, a dead Codex token hands the device back.
+        let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
+        e.on_poll_results(T0, vec![(claude.clone(), Ok(reading(10)))]);
+        e.on_codex_results(T0, vec![(cx.clone(), codex_ok(30))]);
+        e.on_codex_results(T0 + 600, vec![(cx.clone(), codex_ok(31))]);
+        assert_eq!(e.status(T0 + 600).active_account, Some(cx.clone()));
+        e.on_codex_results(T0 + 900, vec![(cx, Err::<UsageReading, _>(UsageError::TokenRejected).into())]);
+        assert_eq!(e.status(T0 + 900).active_account, Some(claude));
     }
 
     // A Codex 429 parks the account for its retry-after, is kept across a

@@ -158,7 +158,8 @@ session as not started; update it from the Flash page.
 folder (`~/.codex`, or `$CODEX_HOME`) is picked up as an account on its own;
 the Accounts page's **Add account folder…** takes other Codex folders too (a
 folder with an `auth.json` is Codex, anything else Claude Code). A Codex
-account is shown when its usage rose most recently, like any account. The
+account is shown once its own usage rises and stays until another account's
+does; until then a Claude account comes first, whatever the percentages. The
 device then draws white bars with a **Codex** pill and, on a weekly-only plan
 such as the $100 Pro plan, a **Resets** card: the reset credits still held,
 a cell per credit (held lit, spent in the last 30 days hollow), and when the
@@ -335,11 +336,12 @@ Claude Code, usage still updates every 12 minutes from the usage endpoint.
 A Codex account is read from the endpoint the Codex CLI uses
 (`chatgpt.com/backend-api/wham/usage`) with the sign-in in its `auth.json`,
 which Clawdmeter only reads and never refreshes: an expired or refused one is
-no data until Codex renews it. The reset credits' expiry and spent count come
+no data until Codex renews it (the account drops off the device meanwhile). The reset credits' expiry and spent count come
 from two more read-only calls the CLI makes, at most hourly. When the
 endpoint doesn't answer (it is slow, so the wait is 30 seconds), the newest
 usage record in the CLI's session logs stands in, but only one under an hour
-old whose window hasn't reset since. The shown Codex account is checked every
+old, newer than the endpoint's last answer, and whose window hasn't reset
+since. The shown Codex account is checked every
 5 minutes, others every 10; a rate-limited answer pauses it ("Usage paused by
 OpenAI until HH:MM").
 
