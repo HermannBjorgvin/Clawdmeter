@@ -161,9 +161,10 @@ folder with an `auth.json` is Codex, anything else Claude Code). A Codex
 account is shown once its own usage rises and stays until another account's
 does; until then a Claude account comes first, whatever the percentages. The
 device then draws white bars with a **Codex** pill and, on a weekly-only plan
-such as the $100 Pro plan, a **Resets** card: the reset credits still held,
-a cell per credit (held lit, spent in the last 30 days hollow), and when the
-next one expires. Clawd stays as he is: his reactions follow Claude Code's
+such as the $100 Pro plan, a **Resets expire** card: the count of reset
+credits still held beside a ticket, and each one's expiry date, soonest
+first and highlighted (up to six on the largest panels; past that, "+N
+more"). Clawd stays as he is: his reactions follow Claude Code's
 hooks, and Codex numbers don't touch his mood or the reset chime. With no
 Codex folder, nothing about Codex is polled or shown beyond the trial note on
 the Accounts page.

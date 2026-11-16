@@ -95,11 +95,18 @@ static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
 static lv_obj_t* lbl_spending_desc = nullptr;     // "of spending limit"
 static lv_obj_t* lbl_spending_status = nullptr;   // "Under pace" / "On pace" / "Over pace"
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
-// Codex (a trial): the Resets card reuses panel_weekly, with a row of cells
-// in the bar's place: the reset credits as a ledger, held lit, spent hollow.
-#define MAX_RESET_CELLS 8
-static lv_obj_t* reset_cells_row = nullptr;
-static lv_obj_t* reset_cells[MAX_RESET_CELLS];
+// Codex (a trial): the Resets card is drawn into panel_weekly, over its own
+// widgets (draw_resets_card): a header row, then a grid of date chips.
+#define MAX_RESET_CHIPS 6
+static lv_obj_t* resets_group = nullptr;   // the card's inside, its widgets' parent
+static lv_obj_t* resets_title;
+static lv_obj_t* resets_pill;              // the count pill: ticket + number
+static lv_obj_t* resets_ticket;
+static lv_obj_t* resets_count;
+static lv_obj_t* resets_note;              // "No resets available" in the first chip row's place
+static lv_obj_t* resets_chip[MAX_RESET_CHIPS];
+static lv_obj_t* resets_chip_text[MAX_RESET_CHIPS];
+static lv_image_dsc_t ticket_dsc;
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
@@ -471,6 +478,71 @@ static void apply_title_font(void) {
     lv_obj_clear_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
 }
 
+// A bare object for the Resets card: no theme styles, not clickable (a tap
+// reaches the screen as anywhere else on the meters).
+static lv_obj_t* plain_obj(lv_obj_t* parent) {
+    lv_obj_t* o = lv_obj_create(parent);
+    lv_obj_remove_style_all(o);
+    lv_obj_clear_flag(o, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
+    lv_obj_add_flag(o, LV_OBJ_FLAG_EVENT_BUBBLE);
+    return o;
+}
+
+// The Codex Resets card's widgets, hidden until a Codex payload with reset
+// credits arrives. Geometry from layout.cpp (fit_resets); colours and text
+// from draw_resets_card.
+static void build_resets_card(void) {
+    static const int ticket_w[] = { ICON_TICKET_20_W, ICON_TICKET_10_W, ICON_TICKET_8_W };
+    static const int ticket_h[] = { ICON_TICKET_20_H, ICON_TICKET_10_H, ICON_TICKET_8_H };
+    static const uint8_t* const ticket_data[] = { icon_ticket_20_data, icon_ticket_10_data, icon_ticket_8_data };
+    const int t = L.resets_ticket;
+    init_icon_dsc_rgb565a8(&ticket_dsc, ticket_w[t], ticket_h[t], ticket_data[t]);
+
+    resets_group = plain_obj(panel_weekly);
+    lv_obj_set_pos(resets_group, 0, 0);
+    lv_obj_set_size(resets_group, L.card[1].w - 2 * L.pad_x, L.card[1].h - 2 * L.pad_y);
+    lv_obj_add_flag(resets_group, LV_OBJ_FLAG_HIDDEN);
+
+    // Header: the title on the pill text's baseline, the pill at the top
+    // right 1 px down, as the first card's "Codex" pill sits.
+    resets_title = lv_label_create(resets_group);
+    lv_label_set_text(resets_title, L.resets_title);
+    lv_obj_set_style_text_font(resets_title, L.pill_font, 0);
+    lv_obj_set_pos(resets_title, 0, 1 + L.pill_pad_y);
+
+    resets_pill = plain_obj(resets_group);
+    lv_obj_set_style_bg_opa(resets_pill, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(resets_pill, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_height(resets_pill, lv_font_get_line_height(L.pill_font) + 2 * L.pill_pad_y);
+    resets_ticket = lv_image_create(resets_pill);
+    lv_image_set_src(resets_ticket, &ticket_dsc);
+    lv_obj_set_style_image_recolor_opa(resets_ticket, LV_OPA_COVER, 0);
+    // The ticket stands on the number's baseline, its height the caps'.
+    const int baseline = L.pill_pad_y + L.pill_font->line_height - L.pill_font->base_line;
+    lv_obj_set_pos(resets_ticket, L.pill_pad_x, baseline - ticket_h[t]);
+    resets_count = lv_label_create(resets_pill);
+    lv_obj_set_style_text_font(resets_count, L.pill_font, 0);
+    lv_obj_set_pos(resets_count, L.pill_pad_x + ticket_w[t] + L.resets_icon_gap, L.pill_pad_y);
+
+    for (int i = 0; i < MAX_RESET_CHIPS; i++) {
+        lv_obj_t* c = plain_obj(resets_group);
+        lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(c, LV_RADIUS_CIRCLE, 0);
+        if (board_caps().mono_panel) {   // like the bars: the dark chip prints as paper, so outline it
+            lv_obj_set_style_border_color(c, COL_TEXT, 0);
+            lv_obj_set_style_border_width(c, 2, 0);
+        }
+        resets_chip_text[i] = lv_label_create(c);
+        lv_obj_set_style_text_font(resets_chip_text[i], L.resets_font, 0);
+        lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
+        resets_chip[i] = c;
+    }
+    resets_note = lv_label_create(resets_group);
+    lv_obj_set_style_text_font(resets_note, L.resets_font, 0);
+    lv_obj_set_pos(resets_note, 0,
+                   L.resets_chips_y + (L.resets_chip_h - lv_font_get_line_height(L.resets_font)) / 2);
+}
+
 static void init_usage_screen(lv_obj_t* scr) {
     usage_container = lv_obj_create(scr);
     lv_obj_set_size(usage_container, L.w, L.h);
@@ -529,27 +601,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     tick_session = make_pace_tick(bar_session);
     tick_weekly  = make_pace_tick(bar_weekly);
 
-    // Codex Resets card: the cells sit where the weekly bar does, shown in
-    // its place (draw_resets_card).
-    reset_cells_row = lv_obj_create(panel_weekly);
-    lv_obj_remove_style_all(reset_cells_row);
-    lv_obj_set_pos(reset_cells_row, 0, L.bar_y);
-    lv_obj_set_size(reset_cells_row, L.card[1].w - 2 * L.pad_x, L.bar_h);
-    lv_obj_clear_flag(reset_cells_row, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
-    lv_obj_add_flag(reset_cells_row, (lv_obj_flag_t)(LV_OBJ_FLAG_EVENT_BUBBLE | LV_OBJ_FLAG_HIDDEN));
-    for (int i = 0; i < MAX_RESET_CELLS; i++) {
-        lv_obj_t* c = lv_obj_create(reset_cells_row);
-        lv_obj_remove_style_all(c);
-        lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(c, 6, 0);
-        if (board_caps().mono_panel) {   // like the bars: a hollow cell is an outline
-            lv_obj_set_style_border_color(c, COL_TEXT, 0);
-            lv_obj_set_style_border_width(c, 2, 0);
-        }
-        lv_obj_clear_flag(c, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
-        lv_obj_add_flag(c, (lv_obj_flag_t)(LV_OBJ_FLAG_EVENT_BUBBLE | LV_OBJ_FLAG_HIDDEN));
-        reset_cells[i] = c;
-    }
+    build_resets_card();
 
     build_pair_group(usage_container);
 
@@ -644,61 +696,114 @@ static bool codex_resets_card(const UsageData* d) {
     return d->codex && d->weekly_only && d->resets_held >= 0;
 }
 
-// "Next expires in 11d", or "Expires in 11d" where the long one doesn't fit
-// the card (test_layout checks the short one fits every panel).
-static void format_expiry(const UsageData* d, char* buf, size_t len) {
-    if (d->resets_held == 0) { snprintf(buf, len, "None held"); return; }
-    const int m = d->resets_expire_mins;
-    if (m < 0) { snprintf(buf, len, "---"); return; }
-    char span[12];
-    if (m < 60)        snprintf(span, sizeof(span), "%dm", m);
-    else if (m < 1440) snprintf(span, sizeof(span), "%dh", m / 60);
-    else               snprintf(span, sizeof(span), "%dd", m / 1440);
-    snprintf(buf, len, "Next expires in %s", span);
-    if (layout_text_width(L.reset_font, buf) > L.card[1].w - 2 * L.pad_x)
-        snprintf(buf, len, "Expires in %s", span);
+// The first of `texts` that fits `w` in `font`, else the last.
+static const char* first_fitting(const lv_font_t* font, const char* const* texts, int n, int w) {
+    for (int i = 0; i < n - 1; i++)
+        if (layout_text_width(font, texts[i]) <= w) return texts[i];
+    return texts[n - 1];
 }
 
-// Put panel_weekly back for the week: the Resets card's widgets go.
+// The weekly widgets panel_weekly shows outside the Resets card.
+static void show_weekly_widgets(bool on) {
+    lv_obj_t* const parts[] = { lbl_weekly_pct, lbl_weekly_label, bar_weekly, lbl_weekly_reset };
+    for (lv_obj_t* o : parts) {
+        if (on) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// Put panel_weekly back for the week: the Resets card goes.
 static void hide_resets_card(void) {
-    if (reset_cells_row) lv_obj_add_flag(reset_cells_row, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(bar_weekly, LV_OBJ_FLAG_HIDDEN);
+    if (!resets_group || lv_obj_has_flag(resets_group, LV_OBJ_FLAG_HIDDEN)) return;
+    lv_obj_add_flag(resets_group, LV_OBJ_FLAG_HIDDEN);
+    show_weekly_widgets(true);
 }
 
-// The Codex Resets card, drawn into panel_weekly: everything it shows is
-// decided here (ui_update and a theme change call it), so its design can
-// change in one place. Today: the count still held, a cell per credit in
-// the ledger (held lit, spent hollow; at most MAX_RESET_CELLS) in the bar's
-// place, and when the next one expires. The data also carries each held
-// credit's expiry date (resets_expiry, up to 10).
+// The Codex Resets card, drawn into panel_weekly; ui_update and a theme
+// change call it, and its whole design is here. A header pinned to the top
+// like the first card's value row: "Resets expire" and a count pill with
+// the ticket (dim at 0). Under it, a cols x rows grid (layout.cpp
+// fit_resets) of date chips, soonest first, the soonest inverted; more
+// credits than cells: one fewer date and "+N more". No credits, or no
+// dates for them: a dim line in the first row's place.
 static void draw_resets_card(const UsageData* d) {
-    if (!reset_cells_row) return;
-    char buf[48];
-    lv_label_set_text(lbl_weekly_label, L.pills[5]);
-    lv_label_set_text_fmt(lbl_weekly_pct, "%d", d->resets_held);
-    format_expiry(d, buf, sizeof(buf));
-    lv_obj_set_style_text_font(lbl_weekly_reset, L.reset_font, 0);
-    lv_label_set_text(lbl_weekly_reset, buf);
-    lv_obj_add_flag(bar_weekly, LV_OBJ_FLAG_HIDDEN);
-    const int spent = d->resets_spent > 0 ? d->resets_spent : 0;
-    int n = d->resets_held + spent;
-    if (n > MAX_RESET_CELLS) n = MAX_RESET_CELLS;
-    const int lit = d->resets_held < n ? d->resets_held : n;
-    const int row_w = lv_obj_get_width(reset_cells_row);
-    const int gap = row_w >= 300 ? 8 : 4;
-    const int cell_w = n > 0 ? (row_w - gap * (n - 1)) / n : 0;
-    for (int i = 0; i < MAX_RESET_CELLS; i++) {
-        lv_obj_t* c = reset_cells[i];
-        if (i >= n) {
+    if (!resets_group) return;
+    show_weekly_widgets(false);
+    lv_obj_add_flag(tick_weekly, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(resets_group, LV_OBJ_FLAG_HIDDEN);
+    const bool mono = board_caps().mono_panel;
+    const int held = d->resets_held;
+    const int inner_w = L.card[1].w - 2 * L.pad_x;
+
+    // Header. The pill follows make_pill's colours (inverted on a mono panel).
+    lv_obj_set_style_text_color(resets_title, COL_TEXT, 0);
+    const ThemeColor fg = mono ? TH_BG : held ? TH_TEXT : TH_DIM;
+    lv_obj_set_style_bg_color(resets_pill, mono ? THEME_MONO_PILL : COL_BAR_BG, 0);
+    lv_obj_set_style_image_recolor(resets_ticket, theme_color(fg), 0);
+    lv_obj_set_style_text_color(resets_count, theme_color(fg), 0);
+    lv_label_set_text_fmt(resets_count, "%d", held);
+    lv_obj_set_width(resets_pill, lv_obj_get_x(resets_count)
+                                  + layout_text_width(L.pill_font, lv_label_get_text(resets_count)) + L.pill_pad_x);
+    lv_obj_align(resets_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
+
+    // What the chips show: the dates there are, soonest first.
+    const int cells = L.resets_cols * L.resets_rows;
+    int dated = d->resets_expiry_n > 0 ? d->resets_expiry_n : 0;
+    if (dated > held) dated = held;
+    int shown = dated, more = 0;
+    if (dated < held || held > cells) {
+        shown = dated < cells - 1 ? dated : cells - 1;
+        more = held - shown;
+    }
+    if (held > 0 && dated == 0) shown = more = 0;   // no dates to show: the note says so
+
+    const int n_note = sizeof(RESETS_EMPTY) / sizeof(RESETS_EMPTY[0]);
+    if (held == 0 || dated == 0) {
+        const char* const* texts = held == 0 ? RESETS_EMPTY : RESETS_UNDATED;
+        lv_label_set_text(resets_note, first_fitting(L.resets_font, texts, n_note, inner_w));
+        lv_obj_set_style_text_color(resets_note, COL_DIM, 0);
+        lv_obj_clear_flag(resets_note, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(resets_note, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    const int cols = L.resets_cols, gap = L.resets_gap;
+    for (int i = 0; i < MAX_RESET_CHIPS; i++) {
+        lv_obj_t* c = resets_chip[i];
+        lv_obj_t* label = resets_chip_text[i];
+        if (i >= shown + (more ? 1 : 0)) {
             lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
             continue;
         }
-        lv_obj_set_size(c, cell_w, L.bar_h);
-        lv_obj_set_pos(c, i * (cell_w + gap), 0);
-        lv_obj_set_style_bg_color(c, theme_color(i < lit ? TH_TEXT : TH_BAR_BG), 0);
+        // Equal cells on whole pixels; the last ends on the card's padding.
+        const int row = i / cols, col = i % cols;
+        const int x0 = col * (inner_w + gap) / cols;
+        const int x1 = (col + 1) * (inner_w + gap) / cols - gap;
+        lv_obj_set_pos(c, x0, L.resets_chips_y + row * (L.resets_chip_h + gap));
+        lv_obj_set_size(c, x1 - x0, L.resets_chip_h);
+        ThemeColor bg = TH_BAR_BG, text = TH_TEXT;
+        bool mono_pill = false;
+        if (i < shown) {
+            lv_label_set_text(label, d->resets_expiry[i]);
+            // The soonest, inverted. Paper text on ink prints broken in 1 bit,
+            // so a mono panel gives it the pill's grey instead (make_pill).
+            if (i == 0) {
+                if (mono) { mono_pill = true; text = TH_BG; }
+                else      { bg = TH_TEXT; text = TH_PANEL; }
+            }
+        } else {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "+%d more", more);
+            if (layout_text_width(L.resets_font, buf) + L.resets_chip_h / 2 > x1 - x0)
+                snprintf(buf, sizeof(buf), "+%d", more);
+            lv_label_set_text(label, buf);
+            text = TH_DIM;
+        }
+        lv_obj_set_style_bg_color(c, mono_pill ? THEME_MONO_PILL : theme_color(bg), 0);
+        lv_obj_set_style_text_color(label, theme_color(text), 0);
+        lv_obj_center(label);
         lv_obj_clear_flag(c, LV_OBJ_FLAG_HIDDEN);
     }
-    lv_obj_clear_flag(reset_cells_row, LV_OBJ_FLAG_HIDDEN);
 }
 
 // The Pro/Max bars' fill colours and pace markers. A Codex account's bars

@@ -52,6 +52,19 @@ struct Layout {
     const lv_font_t* pace_font;
     const char* const* pills;        // PILL_TEXT or PILL_TEXT_SHORT (ui_text.h)
 
+    // Codex Resets card, drawn in card[1] (ui.cpp draw_resets_card). A
+    // header row pinned to the top like the first card's value row: the
+    // title on the left (pill font, the pill text's baseline) and a count
+    // pill with a ticket on the right; then a grid of date chips under it.
+    // Worked out after everything else, so it never moves the rest.
+    const char* resets_title;        // RESETS_TITLE[...] that fits beside the pill
+    int8_t  resets_ticket;           // ticket art by the pill font's cap height: 0 20 px, 1 10 px, 2 8 px
+    int16_t resets_icon_gap;         // ticket to number in the count pill
+    int16_t resets_chips_y;          // first chip row's top, inside the padding
+    int16_t resets_chip_h, resets_gap;   // chip height; gap across and down
+    int8_t  resets_cols, resets_rows;    // the grid (cells = cols * rows)
+    const lv_font_t* resets_font;    // chip dates (and the empty-state line)
+
     // Status line, centred at the bottom.
     const lv_font_t* status_font;
     int16_t status_y;                // bottom edge offset from the panel's bottom (<= 0)
