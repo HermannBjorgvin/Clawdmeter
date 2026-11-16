@@ -203,10 +203,12 @@ device then draws white bars with a **Codex** pill and, on a weekly-only plan
 such as the $100 Pro plan, a **Resets expire** card: the count of reset
 credits still held beside a ticket, and each one's expiry date, soonest
 first and highlighted (up to six on the largest panels; past that, "+N
-more"). Clawd stays as he is: his reactions follow Claude Code's
-hooks, and Codex numbers don't touch his mood or the reset chime. With no
-Codex folder, nothing about Codex is polled or shown beyond the trial note on
-the Accounts page.
+more"). The Overview shows the same card, the macOS menu-bar panel a row of
+up to four dates under the meter, and the Linux and Windows tray menus one
+line, such as "3 resets · next expires Nov 30". Clawd stays as he is: his
+reactions follow Claude Code's hooks, and Codex numbers don't touch his mood
+or the reset chime. With no Codex folder, nothing about Codex is polled or
+shown beyond the trial note on the Accounts page.
 
 The device boots to the meters. Clawd performs his shows right on them,
 in front of the panels. Tap a show or the screensaver to send him back to

@@ -101,6 +101,61 @@ fn main() {
             },
         ),
         (
+            "codex-resets",
+            true,
+            StatusSnapshot {
+                codex: true,
+                account: Some("/Users/you/.codex".into()),
+                no_session_limit: true,
+                week_pct: Some(20),
+                week_resets_at: Some(now + (4 * 24 + 1) * 3600),
+                resets_held: Some(3),
+                resets_expiries: [14, 15, 26].map(|d| now + d * 86400).to_vec(),
+                ..base.clone()
+            },
+        ),
+        (
+            "codex-resets-many",
+            false,
+            StatusSnapshot {
+                codex: true,
+                account: Some("/Users/you/.codex".into()),
+                no_session_limit: true,
+                week_pct: Some(20),
+                week_resets_at: Some(now + (4 * 24 + 1) * 3600),
+                // More than the ten dated ones: "+10 more" in the last chip.
+                resets_held: Some(13),
+                resets_expiries: (1..=10).map(|d| now + d * 3 * 86400).collect(),
+                ..base.clone()
+            },
+        ),
+        (
+            "codex-resets-none",
+            false,
+            StatusSnapshot {
+                codex: true,
+                account: Some("/Users/you/.codex".into()),
+                no_session_limit: true,
+                week_pct: Some(20),
+                week_resets_at: Some(now + (4 * 24 + 1) * 3600),
+                resets_held: Some(0),
+                ..base.clone()
+            },
+        ),
+        (
+            "codex-resets-undated",
+            false,
+            StatusSnapshot {
+                codex: true,
+                account: Some("/Users/you/.codex".into()),
+                no_session_limit: true,
+                week_pct: Some(20),
+                week_resets_at: Some(now + (4 * 24 + 1) * 3600),
+                resets_held: Some(2),
+                ..base.clone()
+            },
+        ),
+        (
             "codex-5h",
             false,
             StatusSnapshot {

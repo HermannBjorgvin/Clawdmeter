@@ -1,5 +1,6 @@
 //! The macOS tray menu's panel: the device's home screen drawn in AppKit
-//! (Clawd, the link, a meter per usage window, the reset countdowns), with
+//! (Clawd, the link, a meter per usage window, the reset countdowns, and a
+//! weekly-only Codex plan's reset credits as the device's Resets card), with
 //! the Overview's reload button in its corner (the menu stays open while it
 //! checks, so the new numbers come in where you're looking) and a footer:
 //! Open Clawdmeter on the left; on the right, an update icon (while the app
@@ -31,7 +32,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSArray, NSData, NSPoint, NSRect, NSSize, NSString};
 
-use super::header::Header;
+use super::header::{Header, Resets, RESET_CHIPS};
 use crate::art::{cell_rgb, idle_cell, IDLE_H, IDLE_W};
 use crate::ui::overview::RefreshState;
 use crate::ui::theme::Theme;
@@ -51,6 +52,12 @@ const TEXT_X: f64 = PAD + CLAWD_W + 10.0;
 const METERS_Y: f64 = 10.0 + CLAWD_H + 14.0;
 const METER_H: f64 = 55.0;
 const METER_GAP: f64 = 12.0;
+/// The Resets block, in a meter's place: its header row's height, the
+/// ticket's size, and the chips' height and gap.
+const RESETS_HEAD_H: f64 = 20.0;
+const TICKET: f64 = 12.0;
+const CHIP_H: f64 = 22.0;
+const CHIP_GAP: f64 = 6.0;
 
 /// What a click in the panel asks the tray to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,6 +322,18 @@ struct MeterViews {
     reset: Retained<NSTextField>,
 }
 
+/// A weekly-only Codex plan's reset credits, laid out like the device's
+/// Resets card: "Resets expire", the count in a ticket pill, then a chip per
+/// held credit's expiry date (the soonest filled) or the line in their place.
+struct ResetViews {
+    title: Retained<NSTextField>,
+    pill: Retained<NSBox>,
+    ticket: Retained<NSImageView>,
+    count: Retained<NSTextField>,
+    chips: [(Retained<NSBox>, Retained<NSTextField>); RESET_CHIPS],
+    note: Retained<NSTextField>,
+}
+
 /// The header item and the views it updates.
 pub struct MenuHeader {
     item: Retained<NSMenuItem>,
@@ -325,6 +344,7 @@ pub struct MenuHeader {
     reload: Retained<HoverButton>,
     spinner: Retained<NSProgressIndicator>,
     meters: [MeterViews; 2],
+    resets: ResetViews,
     line: Retained<NSBox>,
     open: Retained<NSButton>,
     update: Retained<HoverButton>,
@@ -409,17 +429,22 @@ fn image_from_rgba(rgba: &[u8], w: usize, h: usize, size: NSSize) -> Option<Reta
 /// ones the window draws) at 2x, as a template image: AppKit tints it for
 /// the appearance and the button's state.
 fn icon_image(name: &str) -> Option<Retained<NSImage>> {
+    icon_image_at(name, ICON)
+}
+
+/// [`icon_image`], `size` points square.
+fn icon_image_at(name: &str, size: f64) -> Option<Retained<NSImage>> {
     use resvg::{tiny_skia, usvg};
     let svg = crate::ui::Assets::get(&format!("icons/{name}.svg"))?;
     let tree = usvg::Tree::from_data(svg, &usvg::Options::default()).ok()?;
-    let px = (ICON * 2.0) as u32;
+    let px = (size * 2.0) as u32;
     let mut pixmap = tiny_skia::Pixmap::new(px, px)?;
     let scale = px as f32 / tree.size().width();
     resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
     // A template only uses the alpha; tiny-skia's colour is premultiplied,
     // so keep the alpha alone.
     let rgba: Vec<u8> = pixmap.data().as_chunks::<4>().0.iter().flat_map(|p| [0, 0, 0, p[3]]).collect();
-    let image = image_from_rgba(&rgba, px as usize, px as usize, NSSize::new(ICON, ICON))?;
+    let image = image_from_rgba(&rgba, px as usize, px as usize, NSSize::new(size, size))?;
     image.setTemplate(true);
     Some(image)
 }
@@ -530,6 +555,35 @@ impl MenuHeader {
         };
         let meters = [meter(), meter()];
 
+        // The Resets block, in the second meter's place.
+        let chip_text = NSFont::monospacedDigitSystemFontOfSize_weight(11.0, medium);
+        let ticket = NSImageView::new(mtm);
+        if let Some(image) = icon_image_at("ticket", TICKET) {
+            ticket.setImage(Some(&image));
+        }
+        let resets = ResetViews {
+            title: label(mtm, &NSFont::systemFontOfSize_weight(13.0, medium), &primary),
+            pill: bar(mtm, RESETS_HEAD_H / 2.0, &NSColor::quaternaryLabelColor()),
+            ticket,
+            count: label(mtm, &chip_text, &primary),
+            chips: std::array::from_fn(|_| {
+                let text = label(mtm, &chip_text, &primary);
+                text.setAlignment(NSTextAlignment::Center);
+                (bar(mtm, CHIP_H / 2.0, &NSColor::quaternaryLabelColor()), text)
+            }),
+            note: label(mtm, &small, &secondary),
+        };
+        resets.title.setStringValue(&NSString::from_str("Resets expire"));
+        view.addSubview(&resets.title);
+        view.addSubview(&resets.pill);
+        view.addSubview(&resets.ticket);
+        view.addSubview(&resets.count);
+        for (chip, text) in &resets.chips {
+            view.addSubview(chip);
+            view.addSubview(text);
+        }
+        view.addSubview(&resets.note);
+
         // The footer: a line, Open Clawdmeter, and the icons on the right.
         let line = bar(mtm, 0.0, &NSColor::separatorColor());
         // SAFETY: the target is the panel view, which holds the button, and
@@ -576,6 +630,7 @@ impl MenuHeader {
             reload,
             spinner,
             meters,
+            resets,
             line,
             open,
             update,
@@ -660,7 +715,10 @@ impl MenuHeader {
                 v.setHidden(false);
             }
         }
-        let n = h.meters.len().min(2) as f64;
+        // A weekly-only Codex plan's resets take the second meter's place.
+        let slot = h.meters.len().min(1) as f64;
+        self.layout_resets(h.resets.as_ref(), METERS_Y + slot * (METER_H + METER_GAP), dark);
+        let n = (h.meters.len() + usize::from(h.resets.is_some())).min(2) as f64;
         let meters_end = METERS_Y + n * METER_H + (n - 1.0).max(0.0) * METER_GAP;
         let height = self.layout_footer(h, meters_end + FOOT_GAP, dark);
         if (self.view.frame().size.height - height).abs() > 0.5 {
@@ -671,6 +729,84 @@ impl MenuHeader {
             self.item.setView(Some(&self.view));
         }
         self.shown = Some((h.clone(), dark));
+    }
+
+    /// Lay out the Resets block from `y` (a meter's top), or hide it.
+    fn layout_resets(&self, resets: Option<&Resets>, y: f64, dark: bool) {
+        let r = &self.resets;
+        let Some(data) = resets else {
+            for v in [&**r.title, &**r.pill, &**r.ticket, &**r.count, &**r.note] {
+                v.setHidden(true);
+            }
+            for (chip, text) in &r.chips {
+                chip.setHidden(true);
+                text.setHidden(true);
+            }
+            return;
+        };
+        let bar_w = W - 2.0 * PAD;
+        // The header: the title, and the count in a pill at the right edge,
+        // its ticket dim with none held, as the device draws it.
+        r.title.setFrame(rect(PAD, y + 1.0, 160.0, 17.0));
+        r.count.setStringValue(&NSString::from_str(&data.held.to_string()));
+        r.count.sizeToFit();
+        let count_w = r.count.frame().size.width.ceil();
+        let pill_w = 8.0 + TICKET + 4.0 + count_w + 6.0;
+        let pill_x = W - PAD - pill_w;
+        r.pill.setFrame(rect(pill_x, y, pill_w, RESETS_HEAD_H));
+        r.ticket.setFrame(rect(pill_x + 8.0, y + (RESETS_HEAD_H - TICKET) / 2.0, TICKET, TICKET));
+        r.count.setFrame(rect(pill_x + 8.0 + TICKET + 4.0, y + 3.0, count_w, 14.0));
+        let fg = if data.held == 0 { NSColor::secondaryLabelColor() } else { NSColor::labelColor() };
+        r.ticket.setContentTintColor(Some(&fg));
+        r.count.setTextColor(Some(&fg));
+        for v in [&**r.title, &**r.pill, &**r.ticket, &**r.count] {
+            v.setHidden(false);
+        }
+        // The row: equal chips across the panel, the soonest filled like a
+        // Codex bar; or the line in their place.
+        let row_y = y + RESETS_HEAD_H + 7.0;
+        let chip_w = (bar_w - (RESET_CHIPS - 1) as f64 * CHIP_GAP) / RESET_CHIPS as f64;
+        let more = (data.chips.more > 0).then(|| format!("+{} more", data.chips.more));
+        let cells: Vec<&str> = data.chips.dates.iter().map(String::as_str).chain(more.as_deref()).collect();
+        let theme = if dark { Theme::dark() } else { Theme::light() };
+        for (i, (chip, text)) in r.chips.iter().enumerate() {
+            let Some(cell) = cells.get(i) else {
+                chip.setHidden(true);
+                text.setHidden(true);
+                continue;
+            };
+            let x = PAD + i as f64 * (chip_w + CHIP_GAP);
+            chip.setFrame(rect(x, row_y, chip_w, CHIP_H));
+            let soonest = i == 0 && !data.chips.dates.is_empty();
+            let is_more = more.is_some() && i == cells.len() - 1;
+            text.setStringValue(&NSString::from_str(cell));
+            // "+N more" shortens to "+N" where it doesn't fit, as on the device.
+            if is_more {
+                text.sizeToFit();
+                if text.frame().size.width > chip_w {
+                    text.setStringValue(&NSString::from_str(&format!("+{}", data.chips.more)));
+                }
+            }
+            text.setFrame(rect(x, row_y + (CHIP_H - 14.0) / 2.0, chip_w, 14.0));
+            if soonest {
+                chip.setFillColor(&fill_color(None, dark));
+                text.setTextColor(Some(&rgba_color(theme.panel)));
+            } else {
+                chip.setFillColor(&NSColor::quaternaryLabelColor());
+                let color = if is_more { NSColor::secondaryLabelColor() } else { NSColor::labelColor() };
+                text.setTextColor(Some(&color));
+            }
+            chip.setHidden(false);
+            text.setHidden(false);
+        }
+        match data.chips.note {
+            Some(note) => {
+                r.note.setStringValue(&NSString::from_str(note));
+                r.note.setFrame(rect(PAD, row_y + (CHIP_H - 14.0) / 2.0, bar_w, 14.0));
+                r.note.setHidden(false);
+            }
+            None => r.note.setHidden(true),
+        }
     }
 
     /// Lay out the footer from `top` (its line); the panel's height.

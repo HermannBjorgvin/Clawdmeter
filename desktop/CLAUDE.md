@@ -264,7 +264,10 @@ runs or shows (bar the Accounts page's trial note).
   `Engine::next_write`), so no Fable strip on a Codex screen. The
   Overview and tray label the main meter "Codex" and draw it neutral; the
   Overview's Resets expire card lists the dates as chips, like the device
-  (`ui/overview.rs` `resets_card`, at most two rows).
+  (`ui/overview.rs` `resets_card`, at most two rows), and so does the macOS
+  tray panel in the second meter's place (`tray::header::Resets`, one row
+  of `RESET_CHIPS` through the same `reset_chips`); the Linux/Windows menu
+  has one `resets_row` line.
 
 ## Cadence and backoff
 

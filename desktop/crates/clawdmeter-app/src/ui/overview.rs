@@ -323,15 +323,19 @@ fn meter_in(
 /// What the Resets card lists in `cells` chips: each held credit's expiry
 /// date ("Nov 27", local time, as the device shows `rx`), soonest first;
 /// how many held credits have no chip of their own ("+N more", in the last
-/// cell); or, with none to list, the line in their place.
-#[derive(Debug, PartialEq)]
-struct ResetChips {
-    dates: Vec<String>,
-    more: u32,
-    note: Option<&'static str>,
+/// cell); or, with none to list, the line in their place. The macOS tray
+/// panel lists them the same way (`tray::header::Resets`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResetChips {
+    /// The dates that get a chip, soonest first.
+    pub dates: Vec<String>,
+    /// Held credits without a chip of their own: "+N more" when not 0.
+    pub more: u32,
+    /// "No resets available" or "Expiry dates unknown", with no dates.
+    pub note: Option<&'static str>,
 }
 
-fn reset_chips<Tz: chrono::TimeZone>(held: u32, expires_at: &[i64], cells: usize, tz: &Tz) -> ResetChips
+pub(crate) fn reset_chips<Tz: chrono::TimeZone>(held: u32, expires_at: &[i64], cells: usize, tz: &Tz) -> ResetChips
 where
     Tz::Offset: std::fmt::Display,
 {
