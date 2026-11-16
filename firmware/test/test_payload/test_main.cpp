@@ -239,12 +239,21 @@ static void test_fable_weekly(void) {
     TEST_ASSERT_EQUAL_INT(240, fable_fill_w(400, 60));
     TEST_ASSERT_EQUAL_INT(0, fable_fill_w(400, -3));
     TEST_ASSERT_EQUAL_INT(400, fable_fill_w(400, 140));
-    TEST_ASSERT_EQUAL_INT(0, fable_overlay_w(-1, 400, 240));
-    TEST_ASSERT_EQUAL_INT(0, fable_overlay_w(0, 400, 240));
-    TEST_ASSERT_EQUAL_INT(80, fable_overlay_w(40, 400, 240));
-    TEST_ASSERT_EQUAL_INT(200, fable_overlay_w(100, 400, 240));
-    TEST_ASSERT_EQUAL_INT(120, fable_overlay_w(100, 400, fable_fill_w(400, 30)));   // clamped to the fill
-    TEST_ASSERT_EQUAL_INT(0, fable_overlay_w(40, 400, 0));
+    TEST_ASSERT_EQUAL_INT(0, fable_overlay_w(-1, 400, 240, 6));
+    TEST_ASSERT_EQUAL_INT(0, fable_overlay_w(0, 400, 240, 6));
+    TEST_ASSERT_EQUAL_INT(80, fable_overlay_w(40, 400, 240, 6));
+    TEST_ASSERT_EQUAL_INT(200, fable_overlay_w(100, 400, 240, 6));
+    TEST_ASSERT_EQUAL_INT(120, fable_overlay_w(100, 400, fable_fill_w(400, 30), 6));   // clamped to the fill
+    TEST_ASSERT_EQUAL_INT(0, fable_overlay_w(40, 400, 0, 6));
+    // Fable is part of the week: an overlay just short of the fill's end
+    // (wf and w rounded apart) runs to it. Week 31 %, Fable 61 %: 122 of
+    // 124 px, within the 6 px radius, so the whole fill.
+    TEST_ASSERT_EQUAL_INT(124, fable_overlay_w(61, 400, fable_fill_w(400, 31), 6));
+    TEST_ASSERT_EQUAL_INT(120, fable_overlay_w(60, 400, fable_fill_w(400, 30), 6));
+    TEST_ASSERT_EQUAL_INT(80, fable_overlay_w(40, 400, fable_fill_w(400, 60), 6));   // a real gap stays
+    // On a wide bar 1 point (9 px of 900) outweighs the radius: 9 px short snaps, 18 px doesn't.
+    TEST_ASSERT_EQUAL_INT(279, fable_overlay_w(60, 900, fable_fill_w(900, 31), 6));
+    TEST_ASSERT_EQUAL_INT(261, fable_overlay_w(58, 900, fable_fill_w(900, 31), 6));
 }
 
 static void test_long_strings_truncate(void) {

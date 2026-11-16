@@ -161,12 +161,12 @@ Overview, like its other meters, uses the Dark or Light theme's. Fable's
 limit is half the weekly limit, so the strip grows to the middle of the
 bar as Fable is used: when it reaches the middle, Fable is used up for the
 week, while the rest of the bar still shows the overall weekly usage. Its
-right end is straight; it never runs past the weekly fill, and it waits
-until the fill is wider than its rounded ends. While you work through a
-5-hour window the quick usage check rarely reports Fable, so the strip can
-trail the weekly fill until the next full usage reading, near the end of
-that window at the latest. With no Fable reading yet there's no strip. The
-e-paper board doesn't draw it.
+right end is straight; it never runs past the weekly fill, fills all of it
+when Fable is all you used, and it waits until the fill is wider than its
+rounded ends. While you work through a 5-hour window the quick usage check
+rarely reports Fable, so the strip can trail the weekly fill until the
+next full usage reading, near the end of that window at the latest. With
+no Fable reading yet there's no strip. The e-paper board doesn't draw it.
 
 The device boots to the meters. Clawd performs his shows right on them,
 in front of the panels. Tap a show or the screensaver to send him back to

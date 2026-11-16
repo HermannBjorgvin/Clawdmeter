@@ -220,11 +220,21 @@ fn fable_frac(fable_pct: Option<u32>) -> Option<f32> {
     (share > 0).then(|| share as f32 / 10_000.)
 }
 
+/// How close to the fill's end (a share of the bar) the overlay runs to it
+/// (`FABLE_SNAP_PCT` in firmware/src/fable.h): Fable usage is part of the
+/// weekly usage, and `wf` and `w` are rounded apart (week 31 %, Fable 61 %:
+/// 30.5 % of the bar), so a week spent only on Fable fills the whole fill.
+/// The device snaps by 1 point or its corner radius, whichever is wider; the
+/// Overview's track is about 400 px wide at the window's minimum size, so
+/// here 1 point always outweighs its 4 px radius.
+const FABLE_SNAP: f32 = 0.01;
+
 /// The overlay's width on a fill `fill` wide (0..1), and whether it reaches
-/// the fill's end. It never runs past the fill.
+/// the fill's end. It never runs past the fill, and runs to its end from
+/// within [`FABLE_SNAP`] of it.
 fn fable_extent(fable_pct: Option<u32>, fill: f32) -> Option<(f32, bool)> {
     let f = fable_frac(fable_pct)?;
-    (fill > 0.).then_some(if f >= fill { (fill, true) } else { (f, false) })
+    (fill > 0.).then_some(if f >= fill - FABLE_SNAP { (fill, true) } else { (f, false) })
 }
 
 /// The overlay's colour: the device's Dark or Light violet, as the meters
@@ -457,6 +467,12 @@ mod tests {
         assert_eq!(fable_extent(Some(40), 0.6), Some((0.2, false)));
         assert_eq!(fable_extent(Some(100), 0.72), Some((0.5, false)));
         assert_eq!(fable_extent(Some(80), 0.3), Some((0.3, true)));
+        // Fable is part of the week: just short of the fill's end (the two
+        // rounded apart) runs to it; a real gap stays.
+        assert_eq!(fable_extent(Some(61), 0.31), Some((0.31, true)));
+        assert_eq!(fable_extent(Some(60), 0.30), Some((0.30, true)));
+        assert_eq!(fable_extent(Some(40), 0.60), Some((0.2, false)));
+        assert_eq!(fable_extent(Some(58), 0.31), Some((0.29, false)), "2 points short");
         assert_eq!(fable_extent(Some(40), 0.), None);
         assert_eq!(fable_extent(None, 0.6), None);
     }
