@@ -3,7 +3,7 @@
 
 use clawdmeter_core::config::ColorToken;
 use clawdmeter_core::themes;
-use clawdmeter_core::usage::FABLE_WEEKLY_SHARE_PCT;
+use clawdmeter_core::usage::{fable_reaches_week, FABLE_WEEKLY_SHARE_PCT};
 use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::release::release_tag;
 use gpui::{div, prelude::*, px, relative, rgb, Context, EventEmitter, Rgba, SharedString, Window};
@@ -220,21 +220,15 @@ fn fable_frac(fable_pct: Option<u32>) -> Option<f32> {
     (share > 0).then(|| share as f32 / 10_000.)
 }
 
-/// How close to the fill's end (a share of the bar) the overlay runs to it
-/// (`FABLE_SNAP_PCT` in firmware/src/fable.h): Fable usage is part of the
-/// weekly usage, and `wf` and `w` are rounded apart (week 31 %, Fable 61 %:
-/// 30.5 % of the bar), so a week spent only on Fable fills the whole fill.
-/// The device snaps by 1 point or its corner radius, whichever is wider; the
-/// Overview's track is about 400 px wide at the window's minimum size, so
-/// here 1 point always outweighs its 4 px radius.
-const FABLE_SNAP: f32 = 0.01;
-
-/// The overlay's width on a fill `fill` wide (0..1), and whether it reaches
-/// the fill's end. It never runs past the fill, and runs to its end from
-/// within [`FABLE_SNAP`] of it.
-fn fable_extent(fable_pct: Option<u32>, fill: f32) -> Option<(f32, bool)> {
+/// The overlay's width (0..1 of the bar) on a weekly fill at `week_pct`, and
+/// whether it reaches the fill's end. It never runs past the fill, and runs
+/// to its end by the device's rule ([`fable_reaches_week`]: within 1.5
+/// points of it, since Fable usage is part of the week's).
+fn fable_extent(fable_pct: Option<u32>, week_pct: u32) -> Option<(f32, bool)> {
     let f = fable_frac(fable_pct)?;
-    (fill > 0.).then_some(if f >= fill - FABLE_SNAP { (fill, true) } else { (f, false) })
+    let fable_pct = fable_pct?;
+    let fill = week_pct.min(100) as f32 / 100.;
+    (week_pct > 0).then(|| if fable_reaches_week(fable_pct, week_pct) { (fill, true) } else { (f.min(fill), false) })
 }
 
 /// The overlay's colour: the device's Dark or Light violet, as the meters
@@ -247,19 +241,17 @@ fn fable_color(t: &Theme) -> u32 {
 /// One usage panel as the device draws it: the big percentage at the top
 /// left, the label as a pill at the top right, the track and fill, and the
 /// reset line. `fable` draws the Fable overlay over the fill as the device
-/// does on its weekly bar: from the bar's rounded left end to a straight
-/// right edge, or, where it reaches the fill's end, the fill's own rounded
-/// corners.
+/// does on its weekly bar: a strip shaped like the fill, cut by a box as wide
+/// as the overlay, so its left end is the fill's rounded end and its right
+/// end straight, or, where it reaches the fill's end, the fill's own rounded
+/// corners. Shaped like the fill even where GPUI narrows the corners of a
+/// short one, so it never shows outside it.
 fn meter(t: &Theme, label: &'static str, pct: Option<u32>, fable: Option<u32>, reset: String) -> impl IntoElement {
     let value = pct.map_or_else(|| "--%".to_owned(), |p| format!("{p}%"));
     let frac = pct.unwrap_or(0).min(100) as f32 / 100.;
-    let fable = fable_extent(fable, frac).map(|(f, at_end)| {
-        let strip = div().absolute().top_0().left_0().h_full().w(relative(f)).bg(rgb(fable_color(t)));
-        if at_end {
-            strip.rounded(px(4.))
-        } else {
-            strip.rounded_l(px(4.))
-        }
+    let fable = fable_extent(fable, pct.unwrap_or(0)).map(|(f, _)| {
+        let strip = div().h_full().w(relative(frac / f)).rounded(px(4.)).bg(rgb(fable_color(t)));
+        div().absolute().top_0().left_0().h_full().w(relative(f)).overflow_hidden().child(strip)
     });
     div()
         .flex()
@@ -464,17 +456,22 @@ mod tests {
         assert_eq!(fable_frac(Some(100)), Some(0.5));
         assert_eq!(fable_frac(Some(250)), Some(0.5), "past the limit stays at halfway");
         // Straight-edged inside the fill; clamped to it, with its corner, at its end.
-        assert_eq!(fable_extent(Some(40), 0.6), Some((0.2, false)));
-        assert_eq!(fable_extent(Some(100), 0.72), Some((0.5, false)));
-        assert_eq!(fable_extent(Some(80), 0.3), Some((0.3, true)));
-        // Fable is part of the week: just short of the fill's end (the two
-        // rounded apart) runs to it; a real gap stays.
-        assert_eq!(fable_extent(Some(61), 0.31), Some((0.31, true)));
-        assert_eq!(fable_extent(Some(60), 0.30), Some((0.30, true)));
-        assert_eq!(fable_extent(Some(40), 0.60), Some((0.2, false)));
-        assert_eq!(fable_extent(Some(58), 0.31), Some((0.29, false)), "2 points short");
-        assert_eq!(fable_extent(Some(40), 0.), None);
-        assert_eq!(fable_extent(None, 0.6), None);
+        assert_eq!(fable_extent(Some(40), 60), Some((0.2, false)));
+        assert_eq!(fable_extent(Some(100), 72), Some((0.5, false)));
+        assert_eq!(fable_extent(Some(80), 30), Some((0.3, true)));
+        assert_eq!(fable_extent(Some(40), 0), None);
+        assert_eq!(fable_extent(None, 60), None);
+        // Fable is part of the week: within 1.5 points of the fill's end (the
+        // two rounded apart) runs to it, as on the device; a real gap stays.
+        assert_eq!(fable_extent(Some(61), 31), Some((0.31, true)));
+        assert_eq!(fable_extent(Some(60), 30), Some((0.30, true)));
+        assert_eq!(fable_extent(Some(40), 60), Some((0.2, false)));
+        for (w, wf) in [(30, 58), (40, 78), (49, 96), (7, 12), (40, 77)] {
+            assert_eq!(fable_extent(Some(wf), w).map(|e| e.1), Some(true), "{w}/{wf}");
+        }
+        assert_eq!(fable_extent(Some(76), 40), Some((0.38, false)), "2 points short");
+        assert_eq!(fable_extent(Some(70), 40), Some((0.35, false)), "other models' 5 points");
+        assert_eq!(fable_extent(Some(2), 10), Some((0.01, false)), "a sliver inside a short fill");
     }
 
     #[test]

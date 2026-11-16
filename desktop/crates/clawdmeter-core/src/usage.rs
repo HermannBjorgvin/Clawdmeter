@@ -114,6 +114,23 @@ pub const FABLE_MODEL: &str = "Fable";
 /// has the same constant, `FABLE_WEEKLY_SHARE_PCT` in `firmware/src/fable.h`.
 pub const FABLE_WEEKLY_SHARE_PCT: u32 = 50;
 
+/// How close (hundredths of a point of the bar) the Fable overlay may come to
+/// the end of the weekly fill and still be drawn as reaching it. Fable usage
+/// is part of the weekly usage, but `wf` and `w` are rounded apart (week
+/// 31 %, Fable 61 %: 30.5 % of the bar), so a week spent only on Fable fills
+/// the whole fill rather than leaving a sliver of it. A fixed number of
+/// points, so it means the same on every bar width. The firmware has the
+/// same rule, `fable_reaches_fill` in `firmware/src/fable.h`.
+pub const FABLE_SNAP_HUNDREDTHS: u32 = 150;
+
+/// Whether the Fable overlay (Fable at `fable_pct` of its own limit) runs to
+/// the end of a weekly fill at `week_pct`: Fable's share of the bar is
+/// within [`FABLE_SNAP_HUNDREDTHS`] of it, or past it. Integer arithmetic,
+/// as on the device.
+pub fn fable_reaches_week(fable_pct: u32, week_pct: u32) -> bool {
+    fable_pct.min(100) * FABLE_WEEKLY_SHARE_PCT + FABLE_SNAP_HUNDREDTHS >= week_pct.min(100) * 100
+}
+
 /// Everything `/usage` told us for one account.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UsageReading {
@@ -1065,6 +1082,17 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn fable_snaps_to_the_fill_within_a_point_and_a_half() {
+        // (week, Fable): Fable's half within 1.5 points of the week, or past it.
+        for (w, wf) in [(31, 61), (30, 60), (30, 58), (40, 78), (49, 96), (7, 12), (40, 77), (50, 250), (3, 50)] {
+            assert!(fable_reaches_week(wf, w), "{w}/{wf}");
+        }
+        for (w, wf) in [(40, 76), (40, 70), (60, 40), (100, 100)] {
+            assert!(!fable_reaches_week(wf, w), "{w}/{wf}");
+        }
+    }
+
     #[test]
     fn finds_the_newest_desktop_bundled_claude() {
         use std::os::unix::fs::PermissionsExt;

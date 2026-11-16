@@ -309,9 +309,11 @@ static void place_fable(const FableOverlay& f, int fable_pct, int value) {
     const int fill_w = fable_fill_w(bar_w, value);
     // A fill narrower than its two rounded ends is drawn by lv_bar clipped
     // to the track's corners (or not at all at 1 px), which the strip can't
-    // follow: no overlay until the fill is that wide.
+    // follow: no overlay until the fill is that wide. A device-only limit;
+    // the app's strip follows any fill.
     const int radius = lv_obj_get_style_radius(f.strip, LV_PART_MAIN);
-    const int w = board_caps().mono_panel || fill_w < 2 * radius ? 0 : fable_overlay_w(fable_pct, bar_w, fill_w, radius);
+    const bool hide = board_caps().mono_panel || fill_w < 2 * radius;
+    const int w = hide ? 0 : fable_overlay_w(fable_pct, value, bar_w, fill_w);
     if (w < 1) {
         lv_obj_add_flag(f.clip, LV_OBJ_FLAG_HIDDEN);
         return;

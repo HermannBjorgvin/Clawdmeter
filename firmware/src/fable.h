@@ -26,10 +26,11 @@
 // Fable usage is part of the weekly usage, so a week spent only on Fable
 // fills the whole fill. `wf` and `w` are rounded apart (week 31 %, Fable
 // 61 %: 30.5 % of the bar), so an overlay that stops within
-// FABLE_SNAP_PCT points of the bar, or the fill's corner radius if that's
-// wider, from the fill's end runs to it instead of leaving a sliver of fill
-// beside a straight end. The app snaps the same way (`ui/overview.rs`).
-#define FABLE_SNAP_PCT 1
+// FABLE_SNAP_HUNDREDTHS hundredths of a point of the fill's end runs to it
+// instead of leaving a sliver of fill beside a straight end. A fixed number
+// of points, so it means the same on every bar width; the app has the same
+// rule in integer arithmetic (`usage::fable_reaches_week`).
+#define FABLE_SNAP_HUNDREDTHS 150
 
 // How much of the bar the overlay covers, 0..FABLE_WEEKLY_SHARE_PCT (Fable
 // past its limit stays at the halfway point). -1 when there's nothing to
@@ -46,13 +47,20 @@ static inline int fable_fill_w(int bar_w, int value) {
     return bar_w * value / 100;
 }
 
-// 0 = nothing to draw. `radius`: the fill's corner radius.
-static inline int fable_overlay_w(int fable_pct, int bar_w, int fill_w, int radius) {
-    const float share = fable_bar_pct(fable_pct);
-    if (share < 0) return 0;
-    const int w = (int)(share * bar_w / 100.0f + 0.5f);
-    if (w < 1) return 0;
-    const int pct_px = (bar_w * FABLE_SNAP_PCT + 50) / 100;
-    const int snap = pct_px > radius ? pct_px : radius;
-    return w < fill_w - snap ? w : fill_w;
+// Fable at `fable_pct` (0-100+) runs to the end of a weekly fill at `value`
+// (0-100): its share of the bar is within FABLE_SNAP_HUNDREDTHS of it, or
+// past it.
+static inline bool fable_reaches_fill(int fable_pct, int value) {
+    const int f = fable_pct > 100 ? 100 : fable_pct;
+    const int v = value < 0 ? 0 : value > 100 ? 100 : value;
+    return f * FABLE_WEEKLY_SHARE_PCT + FABLE_SNAP_HUNDREDTHS >= v * 100;
+}
+
+// The overlay's width on a weekly fill at `value` (fill_w px of a bar
+// bar_w px wide). 0 = nothing to draw: `wf` absent or 0.
+static inline int fable_overlay_w(int fable_pct, int value, int bar_w, int fill_w) {
+    if (fable_pct <= 0) return 0;
+    if (fable_reaches_fill(fable_pct, value)) return fill_w;
+    const int w = (int)(fable_bar_pct(fable_pct) * bar_w / 100.0f + 0.5f);
+    return w < fill_w ? w : fill_w;
 }

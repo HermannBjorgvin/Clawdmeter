@@ -239,21 +239,29 @@ static void test_fable_weekly(void) {
     TEST_ASSERT_EQUAL_INT(240, fable_fill_w(400, 60));
     TEST_ASSERT_EQUAL_INT(0, fable_fill_w(400, -3));
     TEST_ASSERT_EQUAL_INT(400, fable_fill_w(400, 140));
-    TEST_ASSERT_EQUAL_INT(0, fable_overlay_w(-1, 400, 240, 6));
-    TEST_ASSERT_EQUAL_INT(0, fable_overlay_w(0, 400, 240, 6));
-    TEST_ASSERT_EQUAL_INT(80, fable_overlay_w(40, 400, 240, 6));
-    TEST_ASSERT_EQUAL_INT(200, fable_overlay_w(100, 400, 240, 6));
-    TEST_ASSERT_EQUAL_INT(120, fable_overlay_w(100, 400, fable_fill_w(400, 30), 6));   // clamped to the fill
-    TEST_ASSERT_EQUAL_INT(0, fable_overlay_w(40, 400, 0, 6));
-    // Fable is part of the week: an overlay just short of the fill's end
-    // (wf and w rounded apart) runs to it. Week 31 %, Fable 61 %: 122 of
-    // 124 px, within the 6 px radius, so the whole fill.
-    TEST_ASSERT_EQUAL_INT(124, fable_overlay_w(61, 400, fable_fill_w(400, 31), 6));
-    TEST_ASSERT_EQUAL_INT(120, fable_overlay_w(60, 400, fable_fill_w(400, 30), 6));
-    TEST_ASSERT_EQUAL_INT(80, fable_overlay_w(40, 400, fable_fill_w(400, 60), 6));   // a real gap stays
-    // On a wide bar 1 point (9 px of 900) outweighs the radius: 9 px short snaps, 18 px doesn't.
-    TEST_ASSERT_EQUAL_INT(279, fable_overlay_w(60, 900, fable_fill_w(900, 31), 6));
-    TEST_ASSERT_EQUAL_INT(261, fable_overlay_w(58, 900, fable_fill_w(900, 31), 6));
+    TEST_ASSERT_EQUAL_INT(0, fable_overlay_w(-1, 60, 400, 240));
+    TEST_ASSERT_EQUAL_INT(0, fable_overlay_w(0, 60, 400, 240));
+    TEST_ASSERT_EQUAL_INT(80, fable_overlay_w(40, 60, 400, 240));
+    TEST_ASSERT_EQUAL_INT(200, fable_overlay_w(100, 60, 400, 240));
+    TEST_ASSERT_EQUAL_INT(120, fable_overlay_w(100, 30, 400, fable_fill_w(400, 30)));   // clamped to the fill
+    TEST_ASSERT_EQUAL_INT(0, fable_overlay_w(40, 0, 400, 0));
+    // Fable is part of the week: Fable's share within 1.5 points of the
+    // fill's end (wf and w rounded apart) runs to it; a real gap stays.
+    TEST_ASSERT_EQUAL_INT(124, fable_overlay_w(61, 31, 400, fable_fill_w(400, 31)));
+    TEST_ASSERT_EQUAL_INT(120, fable_overlay_w(60, 30, 400, fable_fill_w(400, 30)));
+    TEST_ASSERT_EQUAL_INT(80, fable_overlay_w(40, 60, 400, fable_fill_w(400, 60)));
+    // Inclusive 1-point cases, and the 1.5-point boundary either side.
+    TEST_ASSERT_TRUE(fable_reaches_fill(58, 30));
+    TEST_ASSERT_TRUE(fable_reaches_fill(78, 40));
+    TEST_ASSERT_TRUE(fable_reaches_fill(96, 49));
+    TEST_ASSERT_TRUE(fable_reaches_fill(12, 7));
+    TEST_ASSERT_TRUE(fable_reaches_fill(77, 40));    // 38.5 of 40: exactly 1.5 short
+    TEST_ASSERT_FALSE(fable_reaches_fill(76, 40));   // 38 of 40: 2 short
+    TEST_ASSERT_FALSE(fable_reaches_fill(70, 40));   // 35 of 40: other models' 5 points stay
+    TEST_ASSERT_TRUE(fable_reaches_fill(250, 50));   // past the limit: still half, at the fill's end
+    // The same in points on any bar: the M5StickS3's 111 px bar at 40/70
+    // keeps its gap.
+    TEST_ASSERT_EQUAL_INT(39, fable_overlay_w(70, 40, 111, fable_fill_w(111, 40)));
 }
 
 static void test_long_strings_truncate(void) {

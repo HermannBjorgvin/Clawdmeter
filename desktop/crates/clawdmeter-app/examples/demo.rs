@@ -10,11 +10,13 @@
 //!   [--flash-to identify|firmware|flash|done] [--shop] [--accounts retrying] [--refresh wait|checking]
 //!   [--app-update download|downloading|ready|failed|none|linux|linux-menu]
 //!   [--advanced] [--session idle|week] [--buttons custom] [--edit primary|secondary|pwr] [--record]
-//!   [--firmware-skipped] [--fable PCT] [--height PX]
+//!   [--firmware-skipped] [--fable PCT] [--week PCT] [--height PX]
 //! ```
 //!
 //! `--fable PCT` gives the account a Fable weekly window at PCT % of its own
 //! limit, drawn inside the Overview's weekly meter (half the bar at 100).
+//!
+//! `--week PCT` sets the weekly meter (62 % by default).
 //!
 //! `--buttons custom` gives the secondary button a held shortcut and PWR a
 //! media key; `--edit` opens a button's editor on the Device page, and
@@ -123,7 +125,14 @@ fn release(paths: &Paths) -> std::path::PathBuf {
     dir.join("manifest.json")
 }
 
-fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, session: Option<String>, fable: Option<u32>) {
+fn fake_status(
+    paths: &Paths,
+    retrying: bool,
+    refresh: Option<String>,
+    session: Option<String>,
+    fable: Option<u32>,
+    week_pct: Option<u32>,
+) {
     // `idle`: session not started; `week`: no 5-hour limit (verified Ultra).
     let idle = session.as_deref() == Some("idle");
     let week = session.as_deref() == Some("week");
@@ -153,7 +162,7 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, session: 
             account: Some(paths.home.join(".claude").display().to_string()),
             claude: Some(paths.home.join(".local/bin/claude").display().to_string()),
             session_pct: (!week).then_some(if idle { 0 } else { 34 }),
-            week_pct: Some(62),
+            week_pct: Some(week_pct.unwrap_or(62)),
             window_started: !idle && !week,
             no_session_limit: week,
             session_resets_at: (!idle && !week).then_some(started + 177 * 60),
@@ -203,6 +212,7 @@ fn main() {
             arg(&args, "--refresh"),
             arg(&args, "--session"),
             arg(&args, "--fable").and_then(|p| p.parse().ok()),
+            arg(&args, "--week").and_then(|p| p.parse().ok()),
         );
         let _ = ipc::save_firmware_record(&paths, &FirmwareRecord { env: ENV.into(), ver: OLD_VERSION.into() });
     } else {
