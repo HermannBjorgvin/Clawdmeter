@@ -48,6 +48,29 @@ an upgrade. `nix develop` gives a shell with Rust, PlatformIO and the Linux
 libraries.
 
 Launch Clawdmeter to open setup. It stays in the tray or macOS menu bar.
+Its menu shows what the device shows: the link, the account, and each usage
+meter with its reset countdown (one **Spend** meter on a spend-capped
+account). On macOS the top of the menu draws them as on
+the device, with Clawd and the bars (and the pace marker when it's on), and
+**Show usage in the menu bar** in Settings puts the higher of the session
+and weekly percentages beside the icon. The reload button in the corner of
+the macOS menu checks usage now and keeps the menu open while it does; it's
+dimmed while a check can't run yet (its tooltip says when it can). The
+bottom row has **Open Clawdmeter** and, on the right, an update icon with an
+orange dot while a newer release is out (it opens **Update** to install the
+new app first, then **Flash** for the board's firmware; skip the app's
+release and it stays hidden until the next one), a speaker
+that turns the chime on this computer on or off (the Overview's **Play a
+chime on this computer** switch), Settings, and a power icon that quits.
+The board's own alert chime isn't in the tray menu: switch it with **Alert
+chime** on the Device page. On Linux and Windows the menu lists **Refresh
+usage** (greyed out, saying when it can check again, until a check can run),
+**Chime on this computer** (checked while the Overview's switch is on;
+clicking it flips that switch), **Open Clawdmeter**, **Settings…**,
+**Update Clawdmeter to v…** or **Update firmware to v…** and **Quit
+Clawdmeter** instead, with the same conditions. With the pace marker on,
+their usage rows end with the marker's verdict: *on pace*, *ahead of pace*
+or *at the limit*.
 Without a tray, it uses a window; closing that window quits the app.
 You can skip setup and return through **Run setup again** in Settings.
 
@@ -275,6 +298,7 @@ seconds and preserves comments and unknown keys when saving.
 | `liveliness` | `3` | How lively Clawd is, `1` (No-nonsense) to `5` (All-nonsense). Set with **Animation silliness** on the Device page. |
 | `attention_anim` | `2m` | How long Clawd points and waves for an alert: `off`, `10s`, `30s` or `2m`. The alert itself is unchanged. Set with **Attention animation** on the Device page. |
 | `pace_marker` | `off` | `on` marks the elapsed share of each usage window on the device's bars and colours them by pace. Set with **Pace marker** on the Device page. |
+| `menu_bar_usage` | `off` | macOS: `on` shows the higher of the session and weekly percentages beside the menu bar icon (spend, on a spend-capped account), so the limit closest to stopping you. Set with **Show usage in the menu bar** on the Settings page. |
 | `theme` | `system` | The device's colours, Clawd's included: `system` (Dark or Light, following this computer's light or dark mode, and switching when it does; `clawd`, the old default, means the same), `dark` (the board's own palette), `light`, `catppuccin_mocha`, `dracula`, `gruvbox`, `monokai`, `nord`, `one_dark`, `solarized` (Solarized Dark or Light, following the mode like `system`), `solarized_dark`, `solarized_light`, `tokyo_night`, or `custom` for the `color_*` keys below. Set with **Colors** on the Device page. |
 | `color_<name>` | the default palette | The custom theme's colours as `rrggbb` (no `#`, which starts a comment): `color_bg`, `color_panel`, `color_text`, `color_dim`, `color_accent`, `color_green`, `color_amber`, `color_red`, `color_bar_bg`, `color_clawd`, `color_eye`, `color_fable` (the Fable strip in the weekly bar). Used only with `theme = custom` and kept while a preset is chosen. Set with **Custom +** under **Colors** on the Device page (a swatch or a typed hex code). The first time, Custom starts from the theme you're on and writes all twelve keys; from then on it keeps its own colours. A custom theme saved before `color_fable` existed starts it at the Dark theme's violet. |
 | `poll_interval` | automatic | Override working and no-hooks polling intervals, in seconds. The scheduler enforces at least 120 seconds per account. Quiet and other-account schedules still apply. |
@@ -287,8 +311,6 @@ seconds and preserves comments and unknown keys when saving.
 | `release_repo` | `HermannBjorgvin/Clawdmeter` | GitHub repository used for firmware releases. |
 | `onboarding_done` | unset | `true` after setup is finished or skipped. |
 
-**Mute chimes** in the tray silences the alert chime and the desktop chime
-until the app restarts.
 
 The tray app writes `daemon.log` in the state folder and keeps the previous
 run as `daemon.log.1`. **Settings** links to the log and config file.

@@ -339,8 +339,13 @@ impl UsageError {
 /// "Usage paused by Anthropic until 14:05." for a block ending at `until`
 /// (unix seconds), shown at `utc_offset` (seconds east of UTC).
 pub fn paused_message(until: i64, utc_offset: i64) -> String {
+    format!("Usage paused by Anthropic until {}.", paused_clock(until, utc_offset))
+}
+
+/// The local time a pause ends, `HH:MM` (the time in [`paused_message`]).
+pub fn paused_clock(until: i64, utc_offset: i64) -> String {
     let t = DateTime::<Utc>::from_timestamp(until + utc_offset, 0).unwrap_or_default();
-    format!("Usage paused by Anthropic until {}.", t.format("%H:%M"))
+    t.format("%H:%M").to_string()
 }
 
 fn snippet(s: &str) -> String {

@@ -738,7 +738,7 @@ impl SettingsView {
             .child(field(
                 t,
                 "Alert chime",
-                "Chimes when Claude needs you, on boards with a speaker. Mute from the tray until restart.",
+                "Chimes when Claude needs you, on boards with a speaker.",
                 toggle(t, "alert-chime", alert, true, move |_, _, cx| {
                     let _ = me1.update(cx, |v, cx| {
                         v.save(|s, _| s.alert_chime = !alert);
@@ -1852,6 +1852,23 @@ impl SettingsView {
                         });
                     }),
                 ))));
+        }
+
+        // Only macOS draws text beside a tray icon.
+        if cfg!(target_os = "macos") {
+            let me = cx.entity().downgrade();
+            let on = self.settings.menu_bar_usage;
+            pane = pane.child(field(
+                t,
+                "Show usage in the menu bar",
+                "Shows the higher of your session and weekly usage beside the Clawd icon.",
+                toggle(t, "menu-bar-usage", on, true, move |_, _, cx| {
+                    let _ = me.update(cx, |v, cx| {
+                        v.save(|s, _| s.menu_bar_usage = !on);
+                        cx.notify();
+                    });
+                }),
+            ));
         }
 
         let poll = if self.settings.poll_interval_explicit {

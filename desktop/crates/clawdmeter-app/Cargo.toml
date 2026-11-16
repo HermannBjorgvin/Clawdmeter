@@ -44,7 +44,50 @@ windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_UI_Wind
 [target.'cfg(target_os = "macos")'.dependencies]
 tray-icon = { version = "0.26", default-features = false }
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSAppearance",
+    "NSApplication",
+    "NSBitmapImageRep",
+    "NSBox",
+    "NSButton",
+    "NSCell",
+    "NSColor",
+    "NSControl",
+    "NSEvent",
+    "NSFont",
+    "NSFontDescriptor",
+    "NSImage",
+    "NSImageRep",
+    "NSImageView",
+    "NSMenu",
+    "NSMenuItem",
+    "NSParagraphStyle",
+    "NSProgressIndicator",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSText",
+    "NSTextField",
+    "NSTrackingArea",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSArray",
+    "NSData",
+    "NSDictionary",
+    "NSGeometry",
+    "NSString",
+] }
+# The tray panel's Clawd and icons, handed to NSImage as PNGs (already built
+# for tray-icon's own icons).
+png = "0.18"
+# Rasterizes the tray panel's icons from the app's bundled SVGs (already
+# built for gpui).
+resvg = { version = "0.45", default-features = false }
 dispatch2 = "0.3"
 
 # Embeds the app icon and manifest in clawdmeter.exe (build.rs). Host-gated: only a
