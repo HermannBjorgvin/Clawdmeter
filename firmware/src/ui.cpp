@@ -276,12 +276,11 @@ static void place_pace_tick(lv_obj_t* tick, float elapsed_pct) {
 // shape is a rounded strip as wide as the fill inside a square container as
 // wide as the overlay: a container clips its children to its rectangle with
 // no extra buffer (clip_corner would render through ARGB layers on every
-// redraw, which the C6's internal-RAM LVGL pool can do without). A 1 px edge
-// in the card colour on the straight end parts it from a fill of a similar
-// lightness. Its colour is the theme's (`fc`). Hidden without `wf`, at 0 %,
-// on spend-capped accounts (no weekly bar) and on a mono panel, where it
-// would print as the fill's ink.
-struct FableOverlay { lv_obj_t* clip; lv_obj_t* strip; lv_obj_t* edge; };
+// redraw, which the C6's internal-RAM LVGL pool can do without). The
+// straight end meets the fill directly. Its colour is the theme's (`fc`).
+// Hidden without `wf`, at 0 %, on spend-capped accounts (no weekly bar) and
+// on a mono panel, where it would print as the fill's ink.
+struct FableOverlay { lv_obj_t* clip; lv_obj_t* strip; };
 static FableOverlay fable_session = {};
 static FableOverlay fable_weekly  = {};
 
@@ -300,9 +299,6 @@ static FableOverlay make_fable_overlay(lv_obj_t* bar) {
     f.strip = make_plain(f.clip, h);
     lv_obj_set_style_bg_opa(f.strip, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(f.strip, lv_obj_get_style_radius(bar, LV_PART_INDICATOR), 0);
-    f.edge = make_plain(f.clip, h);
-    lv_obj_set_width(f.edge, 1);
-    lv_obj_set_style_bg_opa(f.edge, LV_OPA_COVER, 0);
     lv_obj_add_flag(f.clip, LV_OBJ_FLAG_HIDDEN);
     return f;
 }
@@ -323,14 +319,6 @@ static void place_fable(const FableOverlay& f, int fable_pct, int value) {
     lv_obj_set_width(f.clip, w);
     lv_obj_set_width(f.strip, fill_w);
     lv_obj_set_style_bg_color(f.strip, lv_color_hex(theme_fable_hex()), 0);   // `fc`
-    // At the fill's end the strip's own rounded end shows: no edge there.
-    if (w < fill_w) {
-        lv_obj_set_x(f.edge, w - 1);
-        lv_obj_set_style_bg_color(f.edge, COL_PANEL, 0);   // follows the palette
-        lv_obj_clear_flag(f.edge, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(f.edge, LV_OBJ_FLAG_HIDDEN);
-    }
     lv_obj_clear_flag(f.clip, LV_OBJ_FLAG_HIDDEN);
 }
 

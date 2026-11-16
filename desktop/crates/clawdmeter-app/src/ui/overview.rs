@@ -248,7 +248,7 @@ fn meter(t: &Theme, label: &'static str, pct: Option<u32>, fable: Option<u32>, r
         if at_end {
             strip.rounded(px(4.))
         } else {
-            strip.rounded_l(px(4.)).border_r_1().border_color(t.panel)
+            strip.rounded_l(px(4.))
         }
     });
     div()

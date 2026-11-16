@@ -22,12 +22,22 @@ pub struct ThemePreset {
 /// bar track, Clawd and the face's eyes (the `th` order), then the Fable
 /// overlay (`fc`).
 ///
-/// Fable: the scheme's own purple, from its published palette. Anthropic's
-/// brand palette has no purple, so Dark and Light take a violet at the
-/// brand accents' saturation and lightness (blue `#6a9bcc`, terra-cotta
-/// `#d97757`: about 45 % and 60 %), hue 265°, deeper for Light; both read at
-/// about 4:1 on their bar track. Nord's purple (nord15) reads at 2.6:1 on
-/// its track, the scheme's own lowest-contrast accent.
+/// Fable: always the scheme's own colour from the slot its published
+/// palette names purple, the variant the preset's other colours come from,
+/// even where that slot doesn't look purple; never a hand-picked purple.
+/// Where a scheme names the slot otherwise, it's that slot: Catppuccin
+/// Mocha's mauve `#cba6f7`, Dracula's purple `#bd93f9`, Gruvbox's bright
+/// purple `#d3869b` (the dark scheme's bright set, like the preset's green,
+/// yellow and red), classic Monokai's purple `#ae81ff`, Nord's aurora purple
+/// nord15 `#b48ead`, One Dark's purple `#c678dd`, Solarized's violet
+/// `#6c71c4` (both variants share it), and Tokyo Night's purple `#9d7cd8`
+/// (tokyonight.nvim's `purple`; `#bb9af7` is its `magenta`). Nord15 reads at
+/// 2.6:1 on Nord's track, the scheme's own lowest-contrast accent.
+///
+/// Anthropic's brand palette has no purple slot, so Dark and Light take a
+/// violet at the brand accents' saturation and lightness (blue `#6a9bcc`,
+/// terra-cotta `#d97757`: about 45 % and 60 %), hue 265°, deeper for Light;
+/// both read at about 4:1 on their bar track.
 pub static PRESETS: [ThemePreset; 11] = [
     preset(
         "dark",
