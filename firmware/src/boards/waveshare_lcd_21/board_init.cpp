@@ -3,7 +3,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-// Shared I2C, then the expander, then pulse the LCD and touch resets (both
+// Clear the I2C bus, then shared I2C, then the expander, then pulse the LCD and touch resets (both
 // are expander pins). Timings are the Waveshare demo's. All of this MUST
 // happen before display_hal_begin() or the ST7701S and touch controller stay
 // in reset.
@@ -15,6 +15,9 @@
 // then release both resets together, hold INT low >= 5 ms, release it and
 // wait 50 ms before I2C. About 70 ms in all (the demo waits 350 ms).
 extern "C" void board_init(void) {
+    // The expander keeps its latch through an ESP32 reset and may be stuck
+    // mid-transaction (io_expander_recover_bus()).
+    if (!io_expander_recover_bus()) Serial.println(BOARD_LOG_TAG " I2C: SDA/SCL held low after bus recovery");
     Wire.begin(IIC_SDA, IIC_SCL);
     io_expander_init();
 

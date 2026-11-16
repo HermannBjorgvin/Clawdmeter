@@ -152,14 +152,33 @@ static void test_failed_on_carries_on(void) {
 }
 
 static void test_millis_wrap(void) {
-    const uint32_t start = 0xFFFFFFFFu - 100;   // wraps during the first gap
+    // millis() wraps after the first beep: the gaps and beeps must keep their
+    // length across it (a plain `now < next` compare would fire the next edge
+    // at once).
+    const uint32_t start = 0xFFFFFFFFu - 100;
     buzzer_init(fake_set, start - 1000);
     run(start - 1000, start);
     on_edges = 0;
     buzzer_start(start, BUZZER_BEEPS);
     uint32_t t = start;
-    for (int i = 0; i < 2000; i++, t++) buzzer_tick(t);
-    TEST_ASSERT_EQUAL_INT(BUZZER_BEEPS, on_edges);
+    uint32_t elapsed = 0, last_rise = 0, last_fall = 0;
+    int rises = 0, on_ms = 0;
+    bool was = false;
+    for (; elapsed < 2000; elapsed++, t++) {
+        buzzer_tick(t);
+        if (level) on_ms++;
+        if (level && !was) {
+            if (rises > 0) TEST_ASSERT_EQUAL_UINT32(BUZZER_ON_MS + BUZZER_GAP_MS, elapsed - last_rise);
+            else TEST_ASSERT_EQUAL_UINT32(0, elapsed);
+            last_rise = elapsed;
+            rises++;
+        }
+        if (!level && was) last_fall = elapsed;
+        was = level;
+    }
+    TEST_ASSERT_EQUAL_INT(BUZZER_BEEPS, rises);
+    TEST_ASSERT_EQUAL_INT(BUZZER_BEEPS * BUZZER_ON_MS, on_ms);
+    TEST_ASSERT_EQUAL_UINT32(PATTERN_MS, last_fall);
     TEST_ASSERT_FALSE(level);
 }
 

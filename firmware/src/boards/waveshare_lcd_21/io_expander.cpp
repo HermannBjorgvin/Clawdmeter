@@ -23,6 +23,36 @@
 static bool    expander_ok  = false;
 static uint8_t output_latch = IOX_LATCH_INIT;
 
+// The TCA9554 has no reset line and keeps its latch through an ESP32 reset,
+// so a reset in the middle of an I2C transaction can leave it (or another
+// chip on the bus) holding SDA low, and EXIO8 still driving the buzzer.
+// Clock the bus free before Wire.begin(): up to 9 SCL pulses let a slave
+// finish the byte it's stuck in, then a STOP. Same as the LCD-4's.
+bool io_expander_recover_bus(void) {
+    pinMode(IIC_SDA, INPUT_PULLUP);
+    pinMode(IIC_SCL, OUTPUT_OPEN_DRAIN);
+    digitalWrite(IIC_SCL, HIGH);
+    delayMicroseconds(10);
+    for (int i = 0; i < 9 && digitalRead(IIC_SDA) == LOW; ++i) {
+        digitalWrite(IIC_SCL, LOW);
+        delayMicroseconds(10);
+        digitalWrite(IIC_SCL, HIGH);
+        delayMicroseconds(10);
+    }
+    // STOP condition: SDA low → high while SCL is high.
+    pinMode(IIC_SDA, OUTPUT_OPEN_DRAIN);
+    digitalWrite(IIC_SDA, LOW);
+    delayMicroseconds(10);
+    digitalWrite(IIC_SCL, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(IIC_SDA, HIGH);
+    delayMicroseconds(10);
+    pinMode(IIC_SDA, INPUT_PULLUP);
+    pinMode(IIC_SCL, INPUT_PULLUP);
+    delay(2);
+    return digitalRead(IIC_SDA) == HIGH && digitalRead(IIC_SCL) == HIGH;
+}
+
 static bool iox_probe(void) {
     Wire.beginTransmission(IO_EXPANDER_ADDR);
     return Wire.endTransmission() == 0;
@@ -44,7 +74,7 @@ void io_expander_init(void) {
     if (!iox_probe()) {
         delay(10);
         if (!iox_probe()) {
-            Serial.println(BOARD_LOG_TAG " IO expander not found (0x20): panel and touch stay in reset");
+            Serial.println(BOARD_LOG_TAG " IO expander not found (0x20): panel and touch stay in reset, buzzer can't be switched");
             return;
         }
     }

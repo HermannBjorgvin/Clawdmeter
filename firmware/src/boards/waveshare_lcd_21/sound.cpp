@@ -9,8 +9,9 @@
 // plays three short beeps instead (alerts and session resets), and it beeps
 // once at boot where the speaker boards ding, timed by the buzzer module
 // without blocking; a failed "off" is retried until it lands (buzzer.h).
-// io_expander_init() writes the latch with the buzzer off, so a reset
-// mid-beep comes back silent. sound_hal_tune() has nothing to tune.
+// board_init() clears the I2C bus and io_expander_init() writes the latch
+// with the buzzer off, so a reset mid-beep comes back silent. sound_hal_tune()
+// has nothing to tune.
 
 static bool set_buzzer(bool on) { return io_expander_set(IOX_BIT_BUZZER, on); }
 
