@@ -246,7 +246,13 @@ runs or shows (bar the Accounts page's trial note).
 - **Reset credits**: `rate_limit_reset_credits.available_count` is the count
   held. `wham/rate-limit-reset-credits` (expiries of `available` ones) gives
   their dates, fetched hourly or when the count changes (`CodexCache`, carried through the daemon's Codex
-  task). Read-only; nothing ever consumes a credit.
+  task). Read-only; nothing ever consumes a credit. A credit that expires
+  after the endpoint's last answer leaves the dates and the count, on a
+  kept reading (`ResetCredits::at`, in the payload and the status
+  snapshot) and on a session-log reading (`CodexCache::last_known`). A
+  board already showing stale gets no writes, so it keeps its last dates
+  until data returns. Every surface shows them under one rule,
+  `StatusSnapshot::shown_resets`.
 - **Engine**: `begin_codex_poll` / `on_codex_results`, a track of its own
   (`codex::due_at`: shown 5 min, others 10 min, a reset or refresh sooner,
   never within 2 min, backoff honoured) on its own blocking task, so a slow

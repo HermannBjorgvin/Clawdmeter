@@ -166,13 +166,13 @@ impl Header {
     }
 }
 
-/// The reset credits a weekly-only Codex plan shows (`tray::MenuShape`'s
-/// rule), dated in `tz`.
+/// The reset credits the panel shows (`StatusSnapshot::shown_resets`, the
+/// rule every surface uses), dated in `tz`.
 fn resets<Tz: chrono::TimeZone>(s: &StatusSnapshot, tz: &Tz) -> Option<Resets>
 where
     Tz::Offset: std::fmt::Display,
 {
-    let held = s.resets_held.filter(|_| s.codex && s.no_session_limit && !s.spend)?;
+    let held = s.shown_resets()?;
     Some(Resets { held, chips: reset_chips(held, &s.resets_expiries, RESET_CHIPS, tz) })
 }
 

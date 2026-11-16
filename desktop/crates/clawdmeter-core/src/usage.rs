@@ -143,6 +143,16 @@ impl ResetCredits {
     pub fn next_expiry(&self) -> Option<DateTime<Utc>> {
         self.expiries.first().copied()
     }
+
+    /// The credits still held at `now`: those whose expiry has passed are
+    /// gone, from the dates and the count. A reading stays shown while its
+    /// account is parked or offline, so an expiry can pass before the next
+    /// poll drops it; the device, the Overview and the tray all take this.
+    pub fn at(&self, now: DateTime<Utc>) -> ResetCredits {
+        let ahead: Vec<_> = self.expiries.iter().copied().filter(|t| *t > now).collect();
+        let gone = (self.expiries.len() - ahead.len()) as u32;
+        ResetCredits { held: self.held.saturating_sub(gone), expiries: ahead }
+    }
 }
 
 /// The model-scoped weekly limit drawn inside the weekly meter, matched by
@@ -1161,6 +1171,24 @@ mod tests {
 
     fn at(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn reset_credits_past_their_expiry_are_gone() {
+        let c = ResetCredits {
+            held: 3,
+            expiries: vec![at("2026-11-30T19:56:00Z"), at("2026-12-01T12:00:00Z"), at("2026-12-12T12:00:00Z")],
+        };
+        assert_eq!(c.at(at("2026-11-16T17:00:00Z")), c, "all ahead");
+        let dec1 = c.at(at("2026-12-01T00:00:00Z"));
+        assert_eq!((dec1.held, dec1.expiries.len(), dec1.next_expiry()), (2, 2, Some(at("2026-12-01T12:00:00Z"))));
+        assert_eq!(c.at(at("2026-11-30T19:56:00Z")).held, 2, "gone at its expiry");
+        assert_eq!(c.at(at("2027-01-01T00:00:00Z")), ResetCredits { held: 0, expiries: vec![] });
+        // Undated credits (more held than dates known) stay counted.
+        let more = ResetCredits { held: 12, ..c.clone() };
+        assert_eq!(more.at(at("2026-12-01T00:00:00Z")).held, 11);
+        let undated = ResetCredits { held: 2, expiries: vec![] };
+        assert_eq!(undated.at(at("2027-01-01T00:00:00Z")), undated);
     }
 
     #[test]
