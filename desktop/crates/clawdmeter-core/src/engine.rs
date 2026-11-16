@@ -1605,8 +1605,8 @@ mod tests {
         let w = write(&mut e, T0 + 602).unwrap();
         assert_eq!(w.kind, WriteKind::Poll);
         assert_eq!(
-            (w.payload.acct.as_deref(), w.payload.pv.as_deref(), w.payload.w, w.payload.rc, w.payload.ru),
-            (Some("week"), Some("codex"), Some(31), Some(2), Some(1))
+            (w.payload.acct.as_deref(), w.payload.pv.as_deref(), w.payload.w, w.payload.rc),
+            (Some("week"), Some("codex"), Some(31), Some(2))
         );
         // Claude's meter moves: back to Claude, and no `pv`.
         e.on_poll_results(T0 + 700, vec![(claude.clone(), Ok(reading(12)))]);

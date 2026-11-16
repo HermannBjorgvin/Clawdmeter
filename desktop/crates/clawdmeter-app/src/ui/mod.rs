@@ -40,6 +40,12 @@ pub const REFRESH: Duration = Duration::from_millis(500);
 /// The window's size, and the smallest it can be made.
 const SIZE: (f32, f32) = (880., 640.);
 const MIN_SIZE: (f32, f32) = (720., 540.);
+/// The sidebar's width (its right hairline drawn inside it).
+pub const SIDEBAR_W: f32 = 216.;
+/// The page column's widest.
+pub const PAGE_MAX_W: f32 = 720.;
+/// The page column's side padding.
+pub const PAGE_PAD_X: f32 = 32.;
 
 /// Images bundled into the binary, served by path. Board art goes through
 /// `img()` (GPUI's resvg path, full colour); the Lucide icons through
@@ -118,6 +124,7 @@ const ASSETS: &[(&str, &[u8])] = bundled![
         "sun",
         "ban",
         "linux",
+        "ticket",
     ],
 ];
 
@@ -180,15 +187,18 @@ pub fn run(page: Option<Page>, paths: Paths, args: WindowArgs) -> i32 {
 /// Run GPUI with the bundled fonts and images, open the app window with the
 /// root `build` makes, and return when it closes.
 pub fn open(build: impl FnOnce(&mut Window, &mut gpui::Context<app::AppView>) -> app::AppView + 'static) {
-    open_with_height(None, build)
+    open_with_size(None, None, build)
 }
 
-/// [`open`] with the window `height` px tall instead of the default (the
-/// demo's `--height`, for screenshots of a whole page).
-pub fn open_with_height(
+/// [`open`] with the window `width` and `height` px instead of the default,
+/// never under the minimum (the demo's `--width` and `--height`, for
+/// screenshots of a whole page or a narrow window).
+pub fn open_with_size(
+    width: Option<f32>,
     height: Option<f32>,
     build: impl FnOnce(&mut Window, &mut gpui::Context<app::AppView>) -> app::AppView + 'static,
 ) {
+    let width = width.unwrap_or(SIZE.0).max(MIN_SIZE.0);
     let height = height.unwrap_or(SIZE.1).max(MIN_SIZE.1);
     let window_decorations = decorations::wanted();
     decorations::follow_button_layout(window_decorations);
@@ -205,7 +215,7 @@ pub fn open_with_height(
         .detach();
         decorations::await_button_layout(window_decorations);
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(SIZE.0), px(height)), cx))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(width), px(height)), cx))),
             titlebar: Some(TitlebarOptions { title: Some("Clawdmeter".into()), ..Default::default() }),
             app_id: Some("clawdmeter".into()),
             is_resizable: true,

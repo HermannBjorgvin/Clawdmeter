@@ -1,7 +1,7 @@
 //! The JSON written to the device's RX characteristic.
 //!
 //! Keys match `payload_parse()` in `firmware/src/payload.cpp`, in the order
-//! the old daemons wrote them, plus the Codex keys `pv`, `rc`, `ru`, `re`, the
+//! the old daemons wrote them, plus the Codex keys `pv`, `rc`, `rx`, the
 //! additive fast-clock fields `a`, `e`, `es`, `n`, `rp` and the device
 //! settings `lv`, `aa`, `pm`, `k1`–`k3` and `th` (old firmware ignores
 //! unknown keys).
@@ -43,13 +43,6 @@ pub struct Payload {
     /// Codex reset credits held. Absent when unknown: no Resets card.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rc: Option<u32>,
-    /// Codex reset credits spent in the provider's trailing window (30
-    /// days), when known.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ru: Option<u32>,
-    /// Minutes until the soonest held reset credit expires, when known.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub re: Option<i64>,
     /// Each held reset credit's expiry date, host-local like `rd` ("Dec 1"),
     /// soonest first, at most 10. Absent when unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -132,8 +125,8 @@ pub struct Payload {
 
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
-    "s", "sr", "w", "wr", "st", "acct", "pv", "rc", "ru", "re", "rx", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m",
-    "x", "a", "e", "es", "n", "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th",
+    "s", "sr", "w", "wr", "st", "acct", "pv", "rc", "rx", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x", "a",
+    "e", "es", "n", "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th",
 ];
 
 /// The fast-clock keys added in v0.4 (old firmware ignores them).
@@ -299,8 +292,6 @@ impl Payload {
             p.pv = Some("codex".to_owned());
             if let Some(c) = &r.resets {
                 p.rc = Some(c.held);
-                p.ru = c.spent;
-                p.re = c.next_expiry().map(|t| minutes_until(t, now));
                 if !c.expiries.is_empty() {
                     let day = |t: &DateTime<Utc>| {
                         let l = t.with_timezone(tz);
@@ -323,7 +314,7 @@ impl Payload {
     pub fn aged(&self, secs: i64) -> Self {
         let mins = secs / 60;
         let mut p = self.clone();
-        for x in [&mut p.sr, &mut p.wr, &mut p.re].into_iter().flatten() {
+        for x in [&mut p.sr, &mut p.wr].into_iter().flatten() {
             if *x > 0 {
                 *x = (*x - mins).max(0);
             }
@@ -559,7 +550,7 @@ mod tests {
         };
         assert_eq!(
             Payload::from_reading_in(&r, now, &chrono::Utc).to_json(),
-            r#"{"s":0,"sr":-1,"w":34,"wr":8478,"st":"allowed","acct":"week","pv":"codex","rc":3,"ru":1,"re":16260,"rx":["Nov 27","Dec 10","Dec 31"],"ok":true}"#
+            r#"{"s":0,"sr":-1,"w":34,"wr":8478,"st":"allowed","acct":"week","pv":"codex","rc":3,"rx":["Nov 27","Dec 10","Dec 31"],"ok":true}"#
         );
         // Dates are the host's: the last one is New Year's Day an hour east.
         let east = chrono::FixedOffset::east_opt(3600).unwrap();
@@ -601,8 +592,6 @@ mod tests {
             acct: Some("week".into()),
             pv: Some("codex".into()),
             rc: Some(999),
-            ru: Some(999),
-            re: Some(99_999),
             rx: Some(vec!["Sep 30".into(); ResetCredits::MAX_EXPIRIES]),
             tp: Some(100),
             pd: Some(31),
@@ -643,8 +632,6 @@ mod tests {
             acct: Some("pro".into()),
             pv: Some("codex".into()),
             rc: Some(3),
-            ru: Some(1),
-            re: Some(15_840),
             rx: Some(vec!["Dec 1".into()]),
             tp: Some(1),
             pd: Some(30),

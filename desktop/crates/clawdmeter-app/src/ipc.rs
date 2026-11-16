@@ -138,12 +138,10 @@ pub struct StatusSnapshot {
     /// Its reset credits held, when known.
     #[serde(default)]
     pub resets_held: Option<u32>,
-    /// Its reset credits spent in the trailing 30 days, when known.
+    /// Unix seconds each held reset credit expires, soonest first (at most
+    /// `ResetCredits::MAX_EXPIRIES`); empty when unknown.
     #[serde(default)]
-    pub resets_spent: Option<u32>,
-    /// Unix seconds the soonest held reset credit expires, when known.
-    #[serde(default)]
-    pub resets_expire_at: Option<i64>,
+    pub resets_expiries: Vec<i64>,
 }
 
 impl StatusSnapshot {
@@ -202,11 +200,10 @@ impl StatusSnapshot {
             week_resets_at: reading.and_then(|r| r.week.as_ref()).and_then(|w| w.resets_at).map(|t| t.timestamp()),
             codex: reading.is_some_and(|r| r.provider == clawdmeter_core::usage::Provider::Codex),
             resets_held: reading.and_then(|r| r.resets.as_ref()).map(|c| c.held),
-            resets_spent: reading.and_then(|r| r.resets.as_ref()).and_then(|c| c.spent),
-            resets_expire_at: reading
+            resets_expiries: reading
                 .and_then(|r| r.resets.as_ref())
-                .and_then(|c| c.next_expiry())
-                .map(|t| t.timestamp()),
+                .map(|c| c.expiries.iter().map(|t| t.timestamp()).collect())
+                .unwrap_or_default(),
         }
     }
 

@@ -10,13 +10,15 @@
 //!   [--flash-to identify|firmware|flash|done] [--shop] [--accounts retrying] [--refresh wait|checking]
 //!   [--app-update download|downloading|ready|failed|none|linux|linux-menu]
 //!   [--advanced] [--session idle|week] [--buttons custom] [--edit primary|secondary|pwr] [--record]
-//!   [--firmware-skipped] [--codex week|5h|listed] [--height PX]
+//!   [--firmware-skipped] [--codex week|5h|listed] [--resets N] [--width PX] [--height PX]
 //! ```
 //!
 //! `--codex` adds a Codex account (`~/.codex` with an `auth.json`, found as
 //! the app finds it): `week` shows it on the device, weekly-only with reset
 //! credits like the $100 Pro plan; `5h` shows one with a 5-hour window;
-//! `listed` keeps Claude on the device.
+//! `listed` keeps Claude on the device. `--resets N` sets how many reset
+//! credits the `week` account holds (default 3); past ten, the rest have no
+//! date, as `rx` carries at most ten.
 //!
 //! `--buttons custom` gives the secondary button a held shortcut and PWR a
 //! media key; `--edit` opens a button's editor on the Device page, and
@@ -125,7 +127,14 @@ fn release(paths: &Paths) -> std::path::PathBuf {
     dir.join("manifest.json")
 }
 
-fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, session: Option<String>, codex: Option<String>) {
+fn fake_status(
+    paths: &Paths,
+    retrying: bool,
+    refresh: Option<String>,
+    session: Option<String>,
+    codex: Option<String>,
+    resets: u32,
+) {
     // `idle`: session not started; `week`: no 5-hour limit (verified Ultra).
     let idle = session.as_deref() == Some("idle");
     let week = session.as_deref() == Some("week");
@@ -185,9 +194,17 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, session: 
                 no_session_limit: codex_week,
                 session_resets_at: (!codex_week).then_some(started + 133 * 60),
                 week_resets_at: Some(started + (4 * 24 + 21) * 3600 + 30),
-                resets_held: codex_week.then_some(3),
-                resets_spent: codex_week.then_some(1),
-                resets_expire_at: codex_week.then_some(started + 11 * 86_400 + 30),
+                resets_held: codex_week.then_some(resets),
+                resets_expiries: if codex_week {
+                    // Spread over the next weeks, two on one day.
+                    [3, 4, 4, 8, 11, 16, 17, 23, 28, 29]
+                        .iter()
+                        .take(resets as usize)
+                        .map(|d| started + d * 86_400)
+                        .collect()
+                } else {
+                    vec![]
+                },
                 ..snap
             };
         }
@@ -228,6 +245,7 @@ fn main() {
             arg(&args, "--refresh"),
             arg(&args, "--session"),
             arg(&args, "--codex"),
+            arg(&args, "--resets").and_then(|n| n.parse().ok()).unwrap_or(3),
         );
         let _ = ipc::save_firmware_record(&paths, &FirmwareRecord { env: ENV.into(), ver: OLD_VERSION.into() });
     } else {
@@ -263,8 +281,9 @@ fn main() {
     // A taller window, so a long page fits one screenshot.
     let app_update = arg(&args, "--app-update");
     let height = arg(&args, "--height").and_then(|h| h.parse::<f32>().ok());
+    let width = arg(&args, "--width").and_then(|w| w.parse::<f32>().ok());
 
-    clawdmeter_app::ui::open_with_height(height, move |window, cx| {
+    clawdmeter_app::ui::open_with_size(width, height, move |window, cx| {
         let p = paths.clone();
         let hw: Arc<dyn FlashHardware> = Arc::new(FakeBoard { kind: board });
         let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));

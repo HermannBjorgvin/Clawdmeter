@@ -24,8 +24,6 @@ struct UsageData {
                              //   "Codex" pill) and never reach Clawd's rate math
     int16_t resets_held;     // `rc` Codex reset credits held (0-999); -1 = absent:
                              //   no Resets card
-    int16_t resets_spent;    // `ru` reset credits spent in the trailing 30 days; -1 = absent
-    int32_t resets_expire_mins; // `re` minutes until the next held credit expires; -1 = absent
     int8_t  resets_expiry_n; // `rx` how many expiry dates came (0-10); -1 = absent
     char    resets_expiry[10][8]; // `rx` each held credit's expiry, host-local
                              //   ("Dec 1"), soonest first

@@ -224,10 +224,11 @@ runs or shows (bar the Accounts page's trial note).
   Claude's). A Codex sign-in failure (none, expired, refused) drops that
   account's reading, so it leaves the choice, and counts toward "every
   account logged out" (`codex_signed_out`).
-- **Payload**: `Provider::Codex` adds `pv:"codex"` and `rc`/`ru`/`re`/`rx`
-  (`rx`: each held credit's local expiry date, ≤ 10; all absent when
-  unknown). The Overview and tray label the main meter
-  "Codex" and draw it neutral, with the Resets card as the device does.
+- **Payload**: `Provider::Codex` adds `pv:"codex"`, `rc` and `rx` (each
+  held credit's local expiry date, ≤ 10; both absent when unknown). The
+  Overview and tray label the main meter "Codex" and draw it neutral; the
+  Overview's Resets expire card lists the dates as chips, like the device
+  (`ui/overview.rs` `resets_card`, at most two rows).
 
 ## Cadence and backoff
 

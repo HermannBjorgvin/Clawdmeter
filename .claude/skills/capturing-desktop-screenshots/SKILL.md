@@ -39,10 +39,11 @@ frames.
 | `--refresh wait\|checking` | Overview refresh button waiting out the gap / mid-check |
 | `--session idle\|week` | Session not started / no 5-hour limit (weekly meter only) |
 | `--codex week\|5h\|listed` | A Codex account (`~/.codex`): shown weekly-only with reset credits / shown with a 5-hour window / listed while Claude is shown |
+| `--resets N` | How many reset credits the `--codex week` account holds (default 3; past ten, the rest have no date) |
 | `--hooks-preview`, `--shop`, `--advanced` | Hooks file preview, board shop links, advanced settings |
 | `--buttons custom`, `--edit primary\|secondary\|pwr`, `--record` | A held shortcut on the secondary button and a media key on PWR; a button's editor open; it listening for a shortcut |
 | `--firmware-skipped` | The fake firmware release skipped, as the Overview's "Skip this update" does: no Overview nudge or Flash badge, the Device page still offers it |
-| `--height PX` | A taller window (default 640) so a long page fits one capture |
+| `--width PX`, `--height PX` | A wider or narrower window (default 880, at least 720), or a taller one (default 640) so a long page fits one capture |
 
 `demo.rs`'s header comment is the source of truth if these drift.
 

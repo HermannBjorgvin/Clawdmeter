@@ -96,8 +96,8 @@ The app writes one complete JSON object per write to RX
   `{"ok":false}` means no data.
 - Codex (a trial): `pv:"codex"` marks a Codex account's numbers (same usage
   keys; the device draws its Codex screen and keeps them out of Clawd's rate
-  math), `rc`/`ru`/`re`/`rx` its reset credits held, spent, minutes to the
-  next expiry and each held one's expiry date (≤ 10; absent = unknown).
+  math), `rc`/`rx` its reset credits held and each held one's expiry date
+  (≤ 10; absent = unknown).
 - Attention: `b` (alert chime), `m` (ASCII message), `x` (clear).
 - Fast clock: `a` (activity 0–3), `e` + `es` (event `p`/`s`/`b` and its
   sequence), `n` (active sessions). `rp:1` marks the usage numbers as a replay
