@@ -164,6 +164,10 @@ impl StatusSnapshot {
         };
         let e = &s.engine;
         let reading = e.reading.as_ref();
+        // Credits that expired since the poll are gone (`ResetCredits::at`).
+        let resets = reading
+            .and_then(|r| r.resets.as_ref())
+            .map(|c| chrono::DateTime::from_timestamp(now, 0).map_or_else(|| c.clone(), |at| c.at(at)));
         StatusSnapshot {
             updated_at: now,
             link: link.into(),
@@ -213,12 +217,16 @@ impl StatusSnapshot {
                 .and_then(|sp| sp.resets_at)
                 .map(|t| t.timestamp()),
             codex: reading.is_some_and(|r| r.provider == clawdmeter_core::usage::Provider::Codex),
-            resets_held: reading.and_then(|r| r.resets.as_ref()).map(|c| c.held),
-            resets_expiries: reading
-                .and_then(|r| r.resets.as_ref())
-                .map(|c| c.expiries.iter().map(|t| t.timestamp()).collect())
-                .unwrap_or_default(),
+            resets_held: resets.as_ref().map(|c| c.held),
+            resets_expiries: resets.map(|c| c.expiries.iter().map(|t| t.timestamp()).collect()).unwrap_or_default(),
         }
+    }
+
+    /// The reset credits held, where every surface shows them (the device's
+    /// Resets card, the Overview, both trays): a weekly-only Codex plan
+    /// whose count is known. With a 5-hour window the week takes that place.
+    pub fn shown_resets(&self) -> Option<u32> {
+        self.resets_held.filter(|_| self.codex && self.no_session_limit)
     }
 
     /// Seconds since the numbers were read.
@@ -505,6 +513,33 @@ mod tests {
 
     fn connected() -> LinkState {
         LinkState::Connected { key: "AA:BB".into(), name: Some("Clawdmeter".into()) }
+    }
+
+    #[test]
+    fn reset_credits_show_on_a_weekly_only_codex_plan_until_they_expire() {
+        use clawdmeter_core::usage::{Provider, ResetCredits, SessionLimit};
+        let day =
+            |d: u32| chrono::NaiveDate::from_ymd_opt(2026, 12, d).unwrap().and_hms_opt(12, 0, 0).unwrap().and_utc();
+        let mut s = status(connected(), true, None);
+        s.engine.reading = Some(UsageReading {
+            week: Some(Window { pct: 20, resets_at: None }),
+            session_limit: SessionLimit::Absent,
+            provider: Provider::Codex,
+            resets: Some(ResetCredits { held: 3, expiries: vec![day(1), day(5), day(12)] }),
+            ..Default::default()
+        });
+        let snap = StatusSnapshot::from_status(&s, day(1).timestamp() - 60);
+        assert_eq!((snap.shown_resets(), snap.resets_expiries.len()), (Some(3), 3));
+        // Kept past the soonest expiry (no poll since): that credit is gone.
+        let later = StatusSnapshot::from_status(&s, day(2).timestamp());
+        assert_eq!(
+            (later.shown_resets(), later.resets_expiries),
+            (Some(2), vec![day(5).timestamp(), day(12).timestamp()])
+        );
+        // Only a weekly-only Codex plan with a known count shows them.
+        assert_eq!(StatusSnapshot { no_session_limit: false, ..snap.clone() }.shown_resets(), None);
+        assert_eq!(StatusSnapshot { codex: false, ..snap.clone() }.shown_resets(), None);
+        assert_eq!(StatusSnapshot { resets_held: None, ..snap }.shown_resets(), None);
     }
 
     #[test]

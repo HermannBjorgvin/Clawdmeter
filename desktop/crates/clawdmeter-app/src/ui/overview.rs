@@ -517,7 +517,7 @@ impl Render for OverviewView {
             page = page.child(if s.no_session_limit {
                 meters
                     .child(codex_meter(&t, "Codex", s.week_pct, week_reset))
-                    .children(s.resets_held.map(|h| resets_card(&t, h, &s.resets_expiries, card_w - 32.)))
+                    .children(s.shown_resets().map(|h| resets_card(&t, h, &s.resets_expiries, card_w - 32.)))
             } else {
                 meters
                     .child(codex_meter(&t, "Codex", s.session_pct, session_reset))

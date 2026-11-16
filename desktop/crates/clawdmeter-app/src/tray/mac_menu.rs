@@ -58,6 +58,10 @@ const RESETS_HEAD_H: f64 = 20.0;
 const TICKET: f64 = 12.0;
 const CHIP_H: f64 = 22.0;
 const CHIP_GAP: f64 = 6.0;
+/// The least chip left at each end of a chip's text, so it stays clear of
+/// the rounded ends: "+10 more" (about 52 pt) fits a chip, "+100 more"
+/// (about 59 pt) shortens to "+100".
+const CHIP_TEXT_INSET: f64 = 5.0;
 
 /// What a click in the panel asks the tray to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,6 +373,15 @@ fn label(mtm: MainThreadMarker, font: &NSFont, color: &NSColor) -> Retained<NSTe
     l.setTextColor(Some(color));
     l.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
     l
+}
+
+/// The width of `label`'s text in its font, without the field's padding.
+fn text_width(label: &NSTextField) -> f64 {
+    let text = label.attributedStringValue();
+    // SAFETY: NSAttributedString's `size` (AppKit's NSStringDrawing), called
+    // on the main thread like the rest of the panel.
+    let size: NSSize = unsafe { msg_send![&*text, size] };
+    size.width
 }
 
 /// A borderless rounded rectangle filled with `color`.
@@ -715,10 +728,11 @@ impl MenuHeader {
                 v.setHidden(false);
             }
         }
-        // A weekly-only Codex plan's resets take the second meter's place.
-        let slot = h.meters.len().min(1) as f64;
-        self.layout_resets(h.resets.as_ref(), METERS_Y + slot * (METER_H + METER_GAP), dark);
-        let n = (h.meters.len() + usize::from(h.resets.is_some())).min(2) as f64;
+        // A weekly-only Codex plan's resets take the second meter's place:
+        // they only come with its one meter (`StatusSnapshot::shown_resets`).
+        debug_assert!(h.resets.is_none() || h.meters.len() == 1, "resets beside {} meters", h.meters.len());
+        self.layout_resets(h.resets.as_ref(), METERS_Y + METER_H + METER_GAP, dark);
+        let n = if h.resets.is_some() { 2.0 } else { h.meters.len().min(2) as f64 };
         let meters_end = METERS_Y + n * METER_H + (n - 1.0).max(0.0) * METER_GAP;
         let height = self.layout_footer(h, meters_end + FOOT_GAP, dark);
         if (self.view.frame().size.height - height).abs() > 0.5 {
@@ -781,11 +795,8 @@ impl MenuHeader {
             let is_more = more.is_some() && i == cells.len() - 1;
             text.setStringValue(&NSString::from_str(cell));
             // "+N more" shortens to "+N" where it doesn't fit, as on the device.
-            if is_more {
-                text.sizeToFit();
-                if text.frame().size.width > chip_w {
-                    text.setStringValue(&NSString::from_str(&format!("+{}", data.chips.more)));
-                }
+            if is_more && text_width(text) > chip_w - 2.0 * CHIP_TEXT_INSET {
+                text.setStringValue(&NSString::from_str(&format!("+{}", data.chips.more)));
             }
             text.setFrame(rect(x, row_y + (CHIP_H - 14.0) / 2.0, chip_w, 14.0));
             if soonest {
