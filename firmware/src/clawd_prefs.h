@@ -9,6 +9,8 @@
 //                    buttons do (button_action.h)
 //   palette          `th`  the UI colours (theme_palette.h)
 //   Fable colour     `fc`  the Fable overlay in the weekly bar (fable.h)
+//   rotation         `ro`  -1 = auto (the IMU), 0..3 = fixed quarter turns CW
+//                    (boards with BoardCaps::has_rotation)
 #include <stdint.h>
 #include "theme_palette.h"
 
@@ -25,3 +27,11 @@ void    button_action_set(ButtonSlot slot, int32_t action);   // apply; saved on
 int32_t button_action_get(ButtonSlot slot);
 void theme_set(const uint32_t p[TH_COUNT]);   // repaint live; saved only when it changes
 void fable_color_set(uint32_t rgb);           // repaint live; saved only when it changes
+
+// Display rotation. Boards that rotate (BoardCaps::has_rotation) read
+// display_rotation_quadrant() instead of imu_hal_rotation_quadrant(), in the
+// flush path and the touch mapping alike, so picture and touch always agree.
+#define ROTATION_AUTO (-1)
+void    rotation_set(int8_t ro);             // ROTATION_AUTO or 0..3; saved only when it changes
+int8_t  rotation_get(void);
+uint8_t display_rotation_quadrant(void);     // 0..3: the IMU's on auto, else the fixed one

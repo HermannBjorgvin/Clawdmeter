@@ -49,6 +49,7 @@ struct UsageData {
     int8_t   liveliness;     // `lv` 1-5 (clamped); -1 = absent (keep the saved level)
     int16_t  attn_anim_s;    // `aa` attention animation, seconds 0-120 (0 = off); -1 = absent
     int8_t   pace_marker;    // `pm` 1 = pace marker on the usage bars, 0 = off; -1 = absent
+    int8_t   rotation;       // `ro` -1 = auto, 0-3 = fixed quarter turns CW; -2 = absent or invalid
     int32_t  btn_primary;    // `k1` PRIMARY button action (button_action.h); -1 = absent
     int32_t  btn_secondary;  // `k2` the same for SECONDARY; -1 = absent
     int32_t  btn_pwr;        // `k3` the same for a PWR short press; -1 = absent

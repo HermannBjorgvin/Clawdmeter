@@ -8,8 +8,11 @@
 #include "performer.h"
 #include "button_action.h"
 #include "hal/board_caps.h"
+#include "hal/imu_hal.h"
 #include <Preferences.h>
 #include <Arduino.h>
+
+static void rotation_load(int8_t ro);
 
 // Per ButtonSlot: its NVS key and default (`k1`..`k3`).
 static const char* const BTN_KEYS[BTN_SLOT_COUNT] = { "btn_k1", "btn_k2", "btn_k3" };
@@ -26,15 +29,17 @@ void clawd_prefs_init(void) {
     const int lively = prefs.getUChar("lively", CLAWD_LIVELINESS_DEFAULT);
     const int attn = prefs.getUChar("attn_anim", CLAWD_ATTN_ANIM_DEFAULT_S);
     const bool pace = prefs.getUChar("pace_mark", 0) != 0;
+    const int8_t ro = prefs.getChar("rotation", ROTATION_AUTO);
     for (int i = 0; i < BTN_SLOT_COUNT; i++)
         btn_actions[i] = button_action_clamp(prefs.getInt(BTN_KEYS[i], BTN_DEFAULTS[i]), BTN_DEFAULTS[i]);
     prefs.end();
     director_set_liveliness(clawd_liveliness_clamp(lively));
     director_set_attn_anim(clawd_attn_anim_clamp(attn));
     pace_marker_set(pace);
+    rotation_load(ro);
     Serial.printf("Device prefs init: liveliness %d, attention animation %d s, pace marker %s, "
-                  "buttons 0x%lx 0x%lx 0x%lx\n",
-                  clawd_liveliness(), clawd_attn_anim(), pace ? "on" : "off",
+                  "rotation %d, buttons 0x%lx 0x%lx 0x%lx\n",
+                  clawd_liveliness(), clawd_attn_anim(), pace ? "on" : "off", (int)rotation_get(),
                   (unsigned long)btn_actions[0], (unsigned long)btn_actions[1], (unsigned long)btn_actions[2]);
 }
 
@@ -95,6 +100,40 @@ void pace_marker_set(bool on) {
 }
 
 bool pace_marker_get(void) { return pace_marker; }
+
+// Volatile: the flush and touch paths read it while the serial and payload
+// paths write it. A single byte, so no tearing.
+static volatile int8_t rotation = ROTATION_AUTO;
+
+static int8_t rotation_clamp(int8_t ro) {
+    if (ro != ROTATION_AUTO && (ro < 0 || ro > 3)) return -2;   // invalid
+    return board_caps().has_rotation ? ro : ROTATION_AUTO;     // nothing to fix
+}
+
+// Boot: apply the saved value without writing it back.
+static void rotation_load(int8_t ro) {
+    ro = rotation_clamp(ro);
+    rotation = ro == -2 ? ROTATION_AUTO : ro;
+}
+
+void rotation_set(int8_t ro) {
+    ro = rotation_clamp(ro);
+    if (ro == -2 || ro == rotation) return;
+    rotation = ro;
+    Preferences prefs;
+    prefs.begin("clawdmeter", false);
+    prefs.putChar("rotation", ro);
+    prefs.end();
+    if (ro == ROTATION_AUTO) Serial.println("Rotation: auto");
+    else Serial.printf("Rotation: fixed %d deg\n", ro * 90);
+}
+
+int8_t rotation_get(void) { return rotation; }
+
+uint8_t display_rotation_quadrant(void) {
+    const int8_t ro = rotation;
+    return ro == ROTATION_AUTO ? (uint8_t)(imu_hal_rotation_quadrant() & 3) : (uint8_t)ro;
+}
 
 void button_action_set(ButtonSlot slot, int32_t action) {
     if (slot < 0 || slot >= BTN_SLOT_COUNT) return;

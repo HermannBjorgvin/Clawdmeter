@@ -1,3 +1,4 @@
+#include "../../clawd_prefs.h"
 #include "../../hal/touch_hal.h"
 #include "board.h"
 #include "../../hal/imu_hal.h"
@@ -38,7 +39,7 @@ void touch_hal_init(void) {
 static void to_display_frame(uint16_t* x, uint16_t* y) {
     const uint16_t N = LCD_WIDTH - 1;   // square panel
     const uint16_t tx = *x > N ? N : *x, ty = *y > N ? N : *y;
-    switch (imu_hal_rotation_quadrant()) {
+    switch (display_rotation_quadrant()) {
     case 1: *x = ty;     *y = N - tx; break;   // drawn (x,y) -> (N-y, x)
     case 2: *x = N - tx; *y = N - ty; break;   // drawn (x,y) -> (N-x, N-y)
     case 3: *x = N - ty; *y = tx;     break;   // drawn (x,y) -> (y, N-x)

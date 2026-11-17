@@ -1,3 +1,4 @@
+#include "../../clawd_prefs.h"
 #include "../../hal/display_hal.h"
 #include "../../hal/imu_hal.h"
 #include "../../brightness.h"
@@ -90,7 +91,7 @@ void display_hal_tick(void) {
     static uint8_t  ramp_step = 0;     // 0=idle, 1..4=ramping
     static uint32_t ramp_last = 0;
 
-    uint8_t rot = imu_hal_rotation_quadrant();
+    uint8_t rot = display_rotation_quadrant();
     if (rot != last_rotation) {
         display_hal_set_brightness(0);
         last_rotation = rot;

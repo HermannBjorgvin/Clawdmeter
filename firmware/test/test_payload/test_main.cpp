@@ -130,6 +130,26 @@ static void test_liveliness(void) {
     TEST_ASSERT_EQUAL_INT(1, d.liveliness);
 }
 
+static void test_rotation(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-2, d.rotation);          // absent: keep the saved setting
+    TEST_ASSERT_TRUE(payload_parse("{\"ro\":-1}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.rotation);          // auto
+    for (int q = 0; q <= 3; q++) {
+        char json[16];
+        snprintf(json, sizeof json, "{\"ro\":%d}", q);
+        TEST_ASSERT_TRUE(payload_parse(json, &d, nullptr));
+        TEST_ASSERT_EQUAL_INT(q, d.rotation);
+    }
+    TEST_ASSERT_TRUE(payload_parse("{\"ro\":4}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-2, d.rotation);          // out of range: ignored
+    TEST_ASSERT_TRUE(payload_parse("{\"ro\":-2}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-2, d.rotation);
+    TEST_ASSERT_TRUE(payload_parse("{\"ro\":\"auto\"}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-2, d.rotation);          // not a number: ignored
+}
+
 static void test_pace_marker(void) {
     UsageData d;
     TEST_ASSERT_TRUE(payload_parse("{\"ok\":true}", &d, nullptr));
@@ -325,6 +345,7 @@ int main(void) {
     RUN_TEST(test_liveliness);
     RUN_TEST(test_attention_animation);
     RUN_TEST(test_pace_marker);
+    RUN_TEST(test_rotation);
     RUN_TEST(test_button_actions);
     RUN_TEST(test_theme);
     RUN_TEST(test_fable_weekly);
