@@ -50,4 +50,4 @@
 #define BOARD_HAS_IMU              0   // BMI270 populated but unused (v1)
 #define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      0
-#define BOARD_HAS_SOUND            1
+#define M5STICKS3_SPEAKER          1    // 0 builds it silent (no-op sound HAL in sound.cpp)

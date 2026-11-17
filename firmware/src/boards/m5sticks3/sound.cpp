@@ -1,7 +1,7 @@
 #include "../../hal/sound_hal.h"
 #include "board.h"
 
-#if BOARD_HAS_SOUND
+#if M5STICKS3_SPEAKER
 
 #include <Arduino.h>
 #include "../../chime.h"
@@ -35,11 +35,11 @@ void sound_hal_chime(void)                  { chime_play(); }
 void sound_hal_tune(float gain, int volume) { chime_tune(gain, volume); }
 void sound_hal_tick(void)                   { chime_tick(); }
 
-#else   // !BOARD_HAS_SOUND
+#else   // !M5STICKS3_SPEAKER
 
 void sound_hal_init(void)                   {}
 void sound_hal_tick(void)                   {}
 void sound_hal_chime(void)                  {}
 void sound_hal_tune(float gain, int volume) { (void)gain; (void)volume; }
 
-#endif  // BOARD_HAS_SOUND
+#endif  // M5STICKS3_SPEAKER

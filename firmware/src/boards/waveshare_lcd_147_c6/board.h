@@ -76,4 +76,3 @@
 #define BOARD_HAS_IMU              1    // QMI8658: bus health only, no rotation
 #define BOARD_HAS_BATTERY          0    // off by default, see the battery note above
 #define BOARD_HAS_IO_EXPANDER      0
-#define BOARD_HAS_SOUND            0    // no codec, no buzzer

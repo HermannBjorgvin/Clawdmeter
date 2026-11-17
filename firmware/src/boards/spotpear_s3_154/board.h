@@ -58,4 +58,3 @@
 #define BOARD_HAS_IMU              0   // QMI8658 present but unused for now
 #define BOARD_HAS_BATTERY          0   // simple charger + ADC; no PMU. Stubbed.
 #define BOARD_HAS_IO_EXPANDER      0
-#define BOARD_HAS_SOUND            0   // sound.cpp is a no-op
