@@ -22,7 +22,8 @@ use crate::manifest::{BoardImage, Manifest};
 /// Asset name CI publishes.
 pub const MANIFEST_ASSET: &str = "manifest.json";
 /// Update checks run at most this often. Releases often come hours apart (a
-/// fix soon after a release), so a day was too long to hear of one.
+/// fix soon after a release), so a day was too long to hear of one. Settings
+/// (`ui/settings.rs`) and the docs say "every 6 hours": change them with it.
 pub const CHECK_INTERVAL_SECS: i64 = 6 * 3600;
 /// A check that couldn't reach GitHub is tried again after this long
 /// instead of a whole interval, so one offline moment doesn't hide a
@@ -40,7 +41,7 @@ pub enum ReleaseError {
     Offline(String),
     /// GitHub's API rate limit (HTTP 403/429).
     RateLimited,
-    /// Any other HTTP failure.
+    /// Any other HTTP failure, or an API reply that isn't GitHub's JSON.
     Http(String),
     /// The release has no `manifest.json`, or it doesn't parse.
     Manifest(String),
@@ -351,7 +352,10 @@ fn release_from_api(
     api_json: &str,
     fetch: impl Fn(&str) -> Result<String, ReleaseError>,
 ) -> Result<Release, ReleaseError> {
-    let gh: GhRelease = serde_json::from_str(api_json).map_err(|e| ReleaseError::Manifest(e.to_string()))?;
+    // A reply that isn't GitHub's JSON (a proxy's block page, say) says
+    // nothing about the release, so it's an HTTP failure, not a bad manifest.
+    let gh: GhRelease =
+        serde_json::from_str(api_json).map_err(|e| ReleaseError::Http(format!("releases API reply: {e}")))?;
     let assets: HashMap<String, String> = gh.assets.into_iter().map(|a| (a.name, a.browser_download_url)).collect();
     let url = assets.get(MANIFEST_ASSET).ok_or_else(|| ReleaseError::MissingAsset(MANIFEST_ASSET.into()))?;
     let manifest = Manifest::parse(&fetch(url)?).map_err(|e| ReleaseError::Manifest(e.to_string()))?;
@@ -805,11 +809,6 @@ impl UpdateCheck {
         })
     }
 
-    /// Record a successful check.
-    pub fn mark(&self, now: i64) -> io::Result<()> {
-        self.record(now, None)
-    }
-
     /// Record a check and how it ended. One that couldn't reach GitHub
     /// ([`ReleaseError::is_transient`]) is tried again in
     /// [`CHECK_RETRY_SECS`]; an answer, even "no release", waits a whole
@@ -848,6 +847,10 @@ mod tests {
         assert_eq!(r.assets["a-v1.9.0.bin"], "https://x/a.bin");
         let no_manifest = r#"{"tag_name":"v1","assets":[]}"#;
         assert!(matches!(release_from_api(no_manifest, |_| unreachable!()), Err(ReleaseError::MissingAsset(_))));
+        // A proxy's HTML instead of GitHub's JSON is retried soon, like any
+        // other failed request.
+        let html = release_from_api("<html>Blocked</html>", |_| unreachable!());
+        assert!(matches!(&html, Err(e @ ReleaseError::Http(_)) if e.is_transient()));
     }
 
     fn api(tag: &str) -> String {
@@ -1085,7 +1088,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let u = UpdateCheck::new(&dir);
         assert!(u.due(1000));
-        u.mark(1000).unwrap();
+        u.record(1000, None).unwrap();
         assert!(!u.due(1000 + 3600));
         assert!(!u.due(1000 + CHECK_INTERVAL_SECS - 1));
         assert!(u.due(1000 + CHECK_INTERVAL_SECS));
@@ -1100,7 +1103,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cm-upd-retry-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let u = UpdateCheck::new(&dir);
-        u.mark(1000).unwrap();
+        u.record(1000, None).unwrap();
         let t = 1000 + CHECK_INTERVAL_SECS;
         assert!(u.due(t));
         u.record(t, Some(&ReleaseError::Offline("down".into()))).unwrap();

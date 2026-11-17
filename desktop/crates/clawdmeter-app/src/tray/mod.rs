@@ -794,11 +794,17 @@ fn spawn_update_checker(paths: Paths, latest: Arc<Mutex<Option<String>>>, now_fl
                             *l = Some(r.manifest.version.clone());
                         }
                     }
-                    Err(e) if e.is_transient() => log::info!(
-                        "update check: {e} ({}); trying again in {} min",
-                        e.detail().unwrap_or_default(),
-                        clawdmeter_flash::release::CHECK_RETRY_SECS / 60
-                    ),
+                    Err(e) if e.is_transient() => {
+                        // `due` is looked at once per UPDATE_POLL, so the retry
+                        // comes up to one poll after CHECK_RETRY_SECS.
+                        let retry = clawdmeter_flash::release::CHECK_RETRY_SECS as u64;
+                        log::info!(
+                            "update check: {e} ({}); trying again in {} to {} min",
+                            e.detail().unwrap_or_default(),
+                            retry / 60,
+                            (retry + UPDATE_POLL.as_secs()) / 60
+                        )
+                    }
                     Err(e) => log::info!("update check: {e} ({})", e.detail().unwrap_or_default()),
                 }
                 let _ = check.record(unix_now(), result.as_ref().err());
