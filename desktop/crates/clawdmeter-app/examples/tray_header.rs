@@ -67,6 +67,34 @@ fn main() {
             },
         ),
         (
+            // Fable at 40 % of its own limit: a fifth of the bar, short of
+            // the weekly fill, with a straight right end.
+            "fable",
+            false,
+            StatusSnapshot {
+                session_pct: Some(34),
+                window_started: true,
+                session_resets_at: Some(now + 9000),
+                week_pct: Some(62),
+                week_resets_at: Some(now + (5 * 24 + 11) * 3600),
+                fable_pct: Some(40),
+                ..base.clone()
+            },
+        ),
+        (
+            // A week spent only on Fable (31 % and 61 %, rounded apart): the
+            // strip is the whole fill.
+            "fable-whole-week",
+            false,
+            StatusSnapshot {
+                no_session_limit: true,
+                week_pct: Some(31),
+                week_resets_at: Some(now + (3 * 24 + 4) * 3600),
+                fable_pct: Some(61),
+                ..base.clone()
+            },
+        ),
+        (
             "near-limit",
             false,
             StatusSnapshot {
@@ -267,6 +295,7 @@ fn main() {
                 session_resets_at: Some(now + 2 * 3600 + 30 * 60),
                 week_pct: Some(62),
                 week_resets_at: Some(now + (5 * 24 + 11) * 3600),
+                fable_pct: Some(40),
                 read_at: Some(now - 120),
                 ..base.clone()
             },

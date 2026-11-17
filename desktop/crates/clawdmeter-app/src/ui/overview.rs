@@ -228,8 +228,9 @@ fn fable_frac(fable_pct: Option<u32>) -> Option<f32> {
 /// The overlay's width (0..1 of the bar) on a weekly fill at `week_pct`, and
 /// whether it reaches the fill's end. It never runs past the fill, and runs
 /// to its end by the device's rule ([`fable_reaches_week`]: within 1.5
-/// points of it, since Fable usage is part of the week's).
-fn fable_extent(fable_pct: Option<u32>, week_pct: u32) -> Option<(f32, bool)> {
+/// points of it, since Fable usage is part of the week's). The macOS tray
+/// panel's Weekly meter draws the same strip (`tray::header::Meter::fable`).
+pub fn fable_extent(fable_pct: Option<u32>, week_pct: u32) -> Option<(f32, bool)> {
     let f = fable_frac(fable_pct)?;
     let fable_pct = fable_pct?;
     let fill = week_pct.min(100) as f32 / 100.;
@@ -237,8 +238,9 @@ fn fable_extent(fable_pct: Option<u32>, week_pct: u32) -> Option<(f32, bool)> {
 }
 
 /// The overlay's colour: the device's Dark or Light violet, as the meters
-/// here follow the device's Dark and Light palettes.
-fn fable_color(t: &Theme) -> u32 {
+/// here follow the device's Dark and Light palettes. The tray panel uses it
+/// too.
+pub fn fable_color(t: &Theme) -> u32 {
     let preset = if t.dark { themes::default_preset() } else { themes::light() };
     preset.colors.get(ColorToken::Fable)
 }

@@ -178,9 +178,10 @@ mark the weekly reset. Firmware older than this change keeps showing the
 session as not started; update it from the Flash page.
 
 Accounts with a Fable weekly limit get a purple strip at the left end of
-the **Weekly** bar, on the device and the Overview page. The device draws
-it in the chosen theme's own purple (**Fable** under **Custom +**); the
-Overview, like its other meters, uses the Dark or Light theme's. Fable's
+the **Weekly** bar, on the device, the Overview page and the macOS tray
+menu. The device draws it in the chosen theme's own purple (**Fable** under
+**Custom +**); the Overview and the tray, like their other meters, use the
+Dark or Light theme's. Fable's
 limit is half the weekly limit, so the strip grows to the middle of the
 bar as Fable is used: when it reaches the middle, Fable is used up for the
 week, while the rest of the bar still shows the overall weekly usage. Its

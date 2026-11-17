@@ -1,5 +1,6 @@
 //! The macOS tray menu's panel: the device's home screen drawn in AppKit
-//! (Clawd, the link, a meter per usage window, the reset countdowns, and a
+//! (Clawd, the link, a meter per usage window with the Overview's Fable strip
+//! in the weekly bar, the reset countdowns, and a
 //! weekly-only Codex plan's reset credits as the device's Resets card), with
 //! the Overview's reload button in its corner (the menu stays open while it
 //! checks, so the new numbers come in where you're looking) and a footer:
@@ -322,6 +323,10 @@ struct MeterViews {
     label: Retained<NSTextField>,
     track: Retained<NSBox>,
     fill: Retained<NSBox>,
+    /// The Fable strip: a box shaped like the fill (`fable_strip`) inside a
+    /// clipping view as wide as the overlay, as the Overview cuts it.
+    fable: Retained<NSView>,
+    fable_strip: Retained<NSBox>,
     tick: Retained<NSBox>,
     reset: Retained<NSTextField>,
 }
@@ -410,6 +415,22 @@ fn fill_color(tone: Option<Tone>, dark: bool) -> Retained<NSColor> {
         None => crate::ui::overview::codex_fill(&theme),
     };
     rgba_color(c)
+}
+
+/// The Fable strip's colour, the Overview's (`overview::fable_color`), for
+/// the view's appearance.
+fn fable_color(dark: bool) -> Retained<NSColor> {
+    let theme = if dark { Theme::dark() } else { Theme::light() };
+    srgb(crate::ui::overview::fable_color(&theme))
+}
+
+/// A view that clips its subviews to its frame. Views stopped clipping by
+/// default with the macOS 14 SDK, so it's asked for (the property is there
+/// from macOS 10.9).
+fn clip_view(mtm: MainThreadMarker) -> Retained<NSView> {
+    let v = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 1.0, 1.0));
+    v.setClipsToBounds(true);
+    v
 }
 
 /// The theme's dim colour, opaque: the pace marker on a neutral (Codex)
@@ -554,16 +575,22 @@ impl MenuHeader {
                 label: label(mtm, &NSFont::systemFontOfSize_weight(11.0, regular), &secondary),
                 track: bar(mtm, 3.0, &NSColor::quaternaryLabelColor()),
                 fill: bar(mtm, 3.0, &fill_color(Some(Tone::Ok), true)),
+                fable: clip_view(mtm),
+                fable_strip: bar(mtm, 3.0, &fable_color(true)),
                 tick: bar(mtm, 1.0, &primary),
                 reset: label(mtm, &small, &secondary),
             };
             m.label.setAlignment(NSTextAlignment::Right);
+            m.fable.addSubview(&m.fable_strip);
             for v in [&*m.value, &*m.label, &*m.reset] {
                 view.addSubview(v);
             }
-            for b in [&m.track, &m.fill, &m.tick] {
-                view.addSubview(b);
-            }
+            // Bottom to top: the track, the fill, the Fable strip over it, and
+            // the pace marker over both.
+            view.addSubview(&m.track);
+            view.addSubview(&m.fill);
+            view.addSubview(&m.fable);
+            view.addSubview(&m.tick);
             m
         };
         let meters = [meter(), meter()];
@@ -698,6 +725,7 @@ impl MenuHeader {
                 for v in [&**m.value, &**m.label, &**m.reset, &**m.track, &**m.fill, &**m.tick] {
                     v.setHidden(true);
                 }
+                m.fable.setHidden(true);
                 continue;
             };
             let y = METERS_Y + i as f64 * (METER_H + METER_GAP);
@@ -711,6 +739,19 @@ impl MenuHeader {
             m.fill.setFrame(rect(PAD, y + 31.0, fill_w, 6.0));
             m.fill.setFillColor(&fill_color(data.fill, dark));
             m.fill.setHidden(fill_w == 0.0);
+            // Fable's share of the week, as the Overview draws it: the fill's
+            // shape cut to the strip's width (`Meter::fable_width`), so its
+            // left end is the fill's rounded end and its right end straight;
+            // where it reaches the fill's end, the fill itself.
+            match data.fable_width(bar_w, fill_w) {
+                Some(w) => {
+                    m.fable.setFrame(rect(PAD, y + 31.0, w, 6.0));
+                    m.fable_strip.setFrame(rect(0.0, 0.0, fill_w, 6.0));
+                    m.fable_strip.setFillColor(&fable_color(dark));
+                    m.fable.setHidden(false);
+                }
+                None => m.fable.setHidden(true),
+            }
             // On a neutral (Codex) bar the marker is the opaque dim colour so
             // it shows on the fill, as the device's does.
             let tick = if data.fill.is_some() { NSColor::labelColor() } else { dim_color(dark) };
