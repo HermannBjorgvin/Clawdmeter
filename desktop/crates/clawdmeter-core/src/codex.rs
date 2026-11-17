@@ -459,10 +459,14 @@ impl CodexCache {
     }
 
     /// What the last good poll said, for a session-log reading (which has
-    /// no credits) while it is within the TTL.
+    /// no credits) while it is within the TTL. Its count is the endpoint's
+    /// when it last answered, so credits that expired since are taken off,
+    /// as `ResetCredits::at` takes them off a kept reading.
     fn last_known(&self, dir: &Path, now: i64) -> Option<ResetCredits> {
         let e = self.details(dir, now)?;
-        Some(ResetCredits { held: e.held, expiries: ahead(&e.expiries, now) })
+        let since = self.endpoint_ok.get(dir).map_or(e.fetched_at, |t| t.timestamp());
+        let gone = e.expiries.iter().filter(|t| t.timestamp() > since && t.timestamp() <= now).count() as u32;
+        Some(ResetCredits { held: e.held.saturating_sub(gone), expiries: ahead(&e.expiries, now) })
     }
 }
 
@@ -841,6 +845,39 @@ mod tests {
         // TTL it is fetched again.
         assert!(cache.refresh(dir, 1, t + 120, &mut ok).expiries.is_empty(), "within the TTL, cached");
         assert_eq!(cache.refresh(dir, 1, t + 60 + CREDITS_TTL_SECS, &mut ok).expiries.len(), 2);
+    }
+
+    #[test]
+    fn a_log_reading_drops_credits_expired_since_the_endpoint_answered() {
+        // 08:30: the endpoint answers, two credits (Nov 27 09:00, Dec 10).
+        let t0 = at("2026-11-27T08:30:00Z");
+        let dir = home_with_token("log-expired-credit", t0.timestamp() + 86_400);
+        let mut cache = CodexCache::default();
+        let usage = fixture("usage-pro-weekly.json");
+        let mut ok = |url: &str, _: &Auth| -> Result<Answer, UsageError> {
+            Ok(match url {
+                USAGE_URL => (200, None, usage.clone()),
+                CREDITS_URL => (200, None, fixture("reset-credits.json")),
+                _ => panic!("unexpected call {url}"),
+            })
+        };
+        let mut no_logs = |_: &Path, _: DateTime<Utc>, _: Option<DateTime<Utc>>| -> Option<UsageReading> { None };
+        let r0 = poll_with(&dir, t0, &mut cache, &mut ok, &mut no_logs).result.unwrap();
+        assert_eq!(r0.resets.as_ref().map(|c| (c.held, c.expiries.len())), Some((2, 2)));
+        // 09:10: a 429, and a session-log reading stands in. The Nov 27 credit
+        // expired after the endpoint's count, so it's gone from both.
+        let t1 = at("2026-11-27T09:10:00Z");
+        let mut throttled =
+            |_: &str, _: &Auth| -> Result<Answer, UsageError> { Ok((429, Some("3600".into()), String::new())) };
+        let mut logs = |_: &Path, _: DateTime<Utc>, _: Option<DateTime<Utc>>| -> Option<UsageReading> {
+            Some(reading(None, Some(Window { pct: 40, resets_at: None }), None))
+        };
+        let r1 = poll_with(&dir, t1, &mut cache, &mut throttled, &mut logs).result.unwrap();
+        assert_eq!(r1.resets, Some(ResetCredits { held: 1, expiries: vec![at("2026-12-10T18:30:00Z")] }));
+        // And the device is sent one credit, not the endpoint's old two.
+        let p = crate::Payload::from_reading_in(&r1, at("2026-11-27T09:15:00Z"), &Utc);
+        assert_eq!((p.rc, p.rx), (Some(1), Some(vec!["Dec 10".to_owned()])));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

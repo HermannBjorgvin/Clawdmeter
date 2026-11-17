@@ -96,5 +96,3 @@
 #define BOARD_HAS_IMU              0
 #define BOARD_HAS_BATTERY          0   // USB-powered only, no battery circuit
 #define BOARD_HAS_IO_EXPANDER      0
-#define BOARD_HAS_SOUND            0   // GPIO 26 drives an amplified speaker, but
-                                       // chime.cpp is an ES8311/I2S engine — see sound.cpp

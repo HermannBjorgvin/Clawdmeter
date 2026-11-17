@@ -68,4 +68,3 @@
 #define BOARD_HAS_IMU              0    // no IMU populated
 #define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      0
-#define BOARD_HAS_SOUND            0    // no codec, no buzzer

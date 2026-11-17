@@ -95,8 +95,7 @@ impl MenuShape {
         MenuShape {
             session: snap.spend || !snap.no_session_limit,
             weekly: !snap.spend,
-            // As the device and the Overview: a weekly-only Codex plan's.
-            resets: snap.codex && snap.no_session_limit && snap.resets_held.is_some(),
+            resets: snap.shown_resets().is_some(),
             update: offer.is_some(),
         }
     }
@@ -297,7 +296,7 @@ impl Items {
         });
         let pace = pace(snap.week_pct, snap.week_resets_at, pace::WEEK_WINDOW_SECS);
         self.weekly.set_text(meter_row(weekly, snap.week_pct, true, snap.week_resets_at, pace, now));
-        if let Some(held) = snap.resets_held.filter(|_| snap.codex && snap.no_session_limit) {
+        if let Some(held) = snap.shown_resets() {
             self.resets.set_text(resets_row(held, &snap.resets_expiries, &chrono::Local));
         }
         let (refresh, can_refresh) = refresh_item(snap, pressed, now);

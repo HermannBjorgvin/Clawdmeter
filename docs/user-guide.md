@@ -203,10 +203,12 @@ device then draws white bars with a **Codex** pill and, on a weekly-only plan
 such as the $100 Pro plan, a **Resets expire** card: the count of reset
 credits still held beside a ticket, and each one's expiry date, soonest
 first and highlighted (up to six on the largest panels; past that, "+N
-more"). Clawd stays as he is: his reactions follow Claude Code's
-hooks, and Codex numbers don't touch his mood or the reset chime. With no
-Codex folder, nothing about Codex is polled or shown beyond the trial note on
-the Accounts page.
+more"). The Overview shows the same card, the macOS menu-bar panel a row of
+up to four dates under the meter, and the Linux and Windows tray menus one
+line, such as "3 resets · next expires Nov 30". Clawd stays as he is: his
+reactions follow Claude Code's hooks, and Codex numbers don't touch his mood
+or the reset chime. With no Codex folder, nothing about Codex is polled or
+shown beyond the trial note on the Accounts page.
 
 The device boots to the meters. Clawd performs his shows right on them,
 in front of the panels. Tap a show or the screensaver to send him back to
@@ -222,7 +224,7 @@ A tap or the device's two-minute timeout dismisses the alert on the device
 and tells the app to clear it from the tray too. Answering also clears the
 alert through hooks. Uncleared app alerts expire after 2 minutes too; test
 alerts expire after 30 seconds. C6 boards show the message without the
-full-size Clawd. Optional alert and reset chimes work on boards with an implemented audio output; those boards also ding once when they start.
+full-size Clawd. Optional alert and reset chimes work on boards with an implemented audio output; boards with a speaker also ding once when they start. Boards with a plain on/off buzzer (LCD-4 V4.0, LCD-2.1, LCD-2.8C) can't play the ding: they beep three times instead, and once when they start.
 Boards with the **minimal display** capability keep the meters and a still
 Clawd, with no animated scenes. This is a board capability, not a user setting.
 C6 boards have no room for the full-size Clawd: their shows are acts in his
@@ -306,8 +308,8 @@ seconds and preserves comments and unknown keys when saving.
 | Key | Default | Effect |
 | --- | --- | --- |
 | `config_dirs` | `~/.claude` | Comma-separated Claude Code config folders. The app selects the account whose usage increased most recently (session usage, or weekly usage on an account with no 5-hour limit); before any rise, the one with the highest percentage. `CLAUDE_CONFIG_DIR` supplies the default when this key is absent. |
-| `reset_chime` | `off` | Chime on the device when the session usage resets (boards with a speaker). The older `chime` key still works. |
-| `alert_chime` | `off` | Chime on the device when Claude needs you (boards with a speaker). The older `beep` key still works. |
+| `reset_chime` | `off` | Play a chime or buzzer on devices with supported hardware, when the session usage resets. The older `chime` key still works. |
+| `alert_chime` | `off` | Play a chime or buzzer on devices with supported hardware, when Claude needs you. The older `beep` key still works. |
 | `desktop_chime` | `off` | Play the same chime on this computer when Claude needs you. Follows `alert_on`. |
 | `clock` | `off` | `auto`, `12`, or `24` replaces the device's Usage title with a clock. |
 | `liveliness` | `3` | How lively Clawd is, `1` (No-nonsense) to `5` (All-nonsense). Set with **Animation silliness** on the Device page. |

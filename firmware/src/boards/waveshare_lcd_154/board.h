@@ -63,4 +63,3 @@
 #define BOARD_HAS_IMU              0    // QMI8658 present but unused
 #define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      0
-#define BOARD_HAS_SOUND            1

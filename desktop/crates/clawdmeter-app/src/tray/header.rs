@@ -4,7 +4,7 @@
 
 use super::pace::{self, Level, SESSION_WINDOW_SECS, WEEK_WINDOW_SECS};
 use crate::ipc::StatusSnapshot;
-use crate::ui::overview::{reset_text, state_title, wait_text, RefreshState};
+use crate::ui::overview::{reset_chips, reset_text, state_title, wait_text, RefreshState, ResetChips};
 use crate::ui::widgets::{usage_tone, Tone};
 use crate::{ago, tilde};
 use clawdmeter_core::usage::Provider;
@@ -33,6 +33,22 @@ pub struct Meter {
     pub pace: Option<f64>,
 }
 
+/// A weekly-only Codex plan's reset credits, in the second meter's place as
+/// on the device and the Overview: "Resets expire", the count beside a
+/// ticket, and a chip per held credit's expiry date in one row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Resets {
+    /// Credits held (the ticket's count; dim at 0).
+    pub held: u32,
+    /// The row: up to [`RESET_CHIPS`] cells, soonest first, the last one
+    /// "+N more" when they don't all fit; or the line in their place.
+    pub chips: ResetChips,
+}
+
+/// The panel's chips: one row of four across it ("+10 more" fits a chip;
+/// a wider "+N more" shortens to "+N", as on the device).
+pub const RESET_CHIPS: usize = 4;
+
 /// The header's content.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Header {
@@ -46,6 +62,9 @@ pub struct Header {
     /// Session and Weekly; Weekly alone on an account with no 5-hour limit;
     /// Spend alone on a spend-capped account.
     pub meters: Vec<Meter>,
+    /// A weekly-only Codex plan's reset credits, under its one meter, while
+    /// their count is known (the Linux/Windows menu's `tray::resets_row`).
+    pub resets: Option<Resets>,
     /// What the reload button in the corner can do.
     pub refresh: RefreshState,
     /// The footer's speaker: the chime on this computer is on
@@ -122,6 +141,7 @@ impl Header {
             detail,
             age,
             meters,
+            resets: resets(s, &chrono::Local),
             refresh,
             chime: desktop_chime,
             update: None,
@@ -144,6 +164,16 @@ impl Header {
             .to_owned(),
         }
     }
+}
+
+/// The reset credits the panel shows (`StatusSnapshot::shown_resets`, the
+/// rule every surface uses), dated in `tz`.
+fn resets<Tz: chrono::TimeZone>(s: &StatusSnapshot, tz: &Tz) -> Option<Resets>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let held = s.shown_resets()?;
+    Some(Resets { held, chips: reset_chips(held, &s.resets_expiries, RESET_CHIPS, tz) })
 }
 
 /// "14:20", local time: when a pause ends (`usage::paused_clock`).
@@ -317,5 +347,48 @@ mod tests {
         // A pause names OpenAI.
         let paused = Header::new(&five, Path::new("/home/u"), false, false, RefreshState::Paused(NOW + 600), NOW);
         assert!(paused.refresh_tip().starts_with("Usage paused by OpenAI until "));
+    }
+
+    #[test]
+    fn a_weekly_only_codex_plan_lists_its_resets() {
+        let utc = chrono::Utc;
+        let day = |m: u32, d: u32| {
+            chrono::NaiveDate::from_ymd_opt(2026, m, d).unwrap().and_hms_opt(12, 0, 0).unwrap().and_utc().timestamp()
+        };
+        let week = StatusSnapshot {
+            codex: true,
+            account: Some("/home/u/.codex".into()),
+            no_session_limit: true,
+            week_pct: Some(20),
+            resets_held: Some(3),
+            resets_expiries: vec![day(11, 30), day(12, 1), day(12, 12)],
+            ..snap()
+        };
+        // Three held: a chip each, soonest first as sent.
+        let r = resets(&week, &utc).expect("a weekly-only Codex plan with a count");
+        assert_eq!((r.held, r.chips.dates.len(), r.chips.more, r.chips.note), (3, 3, 0, None));
+        assert_eq!(r.chips.dates[0], "Nov 30");
+        // Ten held: one row of RESET_CHIPS cells, the last "+7 more".
+        let ten = StatusSnapshot {
+            resets_held: Some(10),
+            resets_expiries: (17..27).map(|d| day(11, d)).collect(),
+            ..week.clone()
+        };
+        let r = resets(&ten, &utc).unwrap();
+        assert_eq!((r.chips.dates.len(), r.chips.more), (RESET_CHIPS - 1, 7));
+        // None held, and a count with no dates: the line in the chips' place.
+        let none = StatusSnapshot { resets_held: Some(0), resets_expiries: vec![], ..week.clone() };
+        assert_eq!(resets(&none, &utc).unwrap().chips.note, Some("No resets available"));
+        let undated = StatusSnapshot { resets_expiries: vec![], ..week.clone() };
+        assert_eq!(resets(&undated, &utc).unwrap().chips.note, Some("Expiry dates unknown"));
+        // Only where the device and the Linux/Windows menu show them: an
+        // unknown count, a 5-hour plan (the week takes that place) or a
+        // Claude account has none.
+        assert_eq!(resets(&StatusSnapshot { resets_held: None, ..week.clone() }, &utc), None);
+        assert_eq!(resets(&StatusSnapshot { no_session_limit: false, ..week.clone() }, &utc), None);
+        assert_eq!(resets(&StatusSnapshot { codex: false, ..week.clone() }, &utc), None);
+        // Header::new carries them beside the one Codex meter.
+        let h = Header::new(&week, Path::new("/home/u"), true, false, RefreshState::Ready, NOW);
+        assert_eq!((h.meters.len(), h.resets.map(|r| r.held)), (1, Some(3)));
     }
 }

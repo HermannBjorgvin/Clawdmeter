@@ -1,8 +1,6 @@
 #include "../../hal/sound_hal.h"
 #include "board.h"
 
-#if BOARD_HAS_SOUND
-
 #include <Arduino.h>
 #include "../../chime.h"
 
@@ -22,5 +20,3 @@ void sound_hal_init(void) {
 void sound_hal_tick(void) { chime_tick(); }
 void sound_hal_chime(void) { chime_play(); }
 void sound_hal_tune(float gain, int volume) { chime_tune(gain, volume); }
-
-#endif  // BOARD_HAS_SOUND

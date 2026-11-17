@@ -308,7 +308,7 @@ impl Payload {
         };
         if r.provider == Provider::Codex {
             p.pv = Some("codex".to_owned());
-            if let Some(c) = &r.resets {
+            if let Some(c) = r.resets.as_ref().map(|c| c.at(now)) {
                 p.rc = Some(c.held);
                 if !c.expiries.is_empty() {
                     let day = |t: &DateTime<Utc>| {
@@ -609,6 +609,11 @@ mod tests {
             Payload::from_reading(&partial, now).to_json(),
             r#"{"s":0,"sr":-1,"w":34,"wr":8478,"st":"allowed","acct":"week","pv":"codex","rc":2,"ok":true}"#
         );
+        // A reading kept past its soonest credit's expiry (a parked or offline
+        // account): that credit is gone from `rc` and `rx` until the next poll.
+        let later = at("2026-11-28T00:00:00Z");
+        let p = Payload::from_reading_in(&r, later, &chrono::Utc);
+        assert_eq!((p.rc, p.rx), (Some(2), Some(vec!["Dec 10".to_owned(), "Dec 31".to_owned()])));
         let no_resets = UsageReading { resets: None, ..r.clone() };
         assert!(!Payload::from_reading(&no_resets, now).to_json().contains("\"rc\""));
         let five_hour = UsageReading {
