@@ -557,7 +557,8 @@ impl TrayApp {
             snap.device_firmware = Some("0.0.1".into());
         }
         // Debug builds only: `CLAWDMETER_DEMO_USAGE=1` shows made-up usage
-        // (connected, Session 34 % and Weekly 62 %), the same on every OS,
+        // (connected, Session 34 %, Weekly 62 % with Fable at 40 % of its
+        // own limit), the same on every OS,
         // for screenshots and for trying the menu without an account or a
         // board.
         #[cfg(debug_assertions)]
@@ -572,6 +573,7 @@ impl TrayApp {
                 session_resets_at: Some(now + 2 * 3600 + 30 * 60),
                 week_pct: Some(62),
                 week_resets_at: Some(now + (5 * 24 + 11) * 3600),
+                fable_pct: Some(40),
                 no_session_limit: false,
                 spend: false,
                 codex: false,

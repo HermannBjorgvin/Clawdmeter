@@ -4,7 +4,7 @@
 
 use super::pace::{self, Level, SESSION_WINDOW_SECS, WEEK_WINDOW_SECS};
 use crate::ipc::StatusSnapshot;
-use crate::ui::overview::{reset_chips, reset_text, state_title, wait_text, RefreshState, ResetChips};
+use crate::ui::overview::{fable_extent, reset_chips, reset_text, state_title, wait_text, RefreshState, ResetChips};
 use crate::ui::widgets::{usage_tone, Tone};
 use crate::{ago, tilde};
 use clawdmeter_core::usage::Provider;
@@ -31,6 +31,12 @@ pub struct Meter {
     /// Where the pace marker sits, 0..=1, when it's on and the reset time
     /// is known.
     pub pace: Option<f64>,
+    /// The Fable overlay on a Claude account's Weekly meter, as the Overview
+    /// and the device draw it (`overview::fable_extent`): its width, 0..=1
+    /// of the bar, and whether it runs to the fill's end (then it's the
+    /// fill's own shape). `None`: nothing to draw (no Fable window, Fable at
+    /// 0 %, no weekly reading, or any other meter).
+    pub fable: Option<(f64, bool)>,
 }
 
 /// A weekly-only Codex plan's reset credits, in the second meter's place as
@@ -77,6 +83,24 @@ pub struct Header {
     pub provider: Provider,
 }
 
+impl Meter {
+    /// The Fable strip's width on a bar `bar_w` wide whose fill is drawn
+    /// `fill_w` wide (wider than the fraction where a sliver is widened to
+    /// show): the whole fill where the strip reaches its end, else its own
+    /// width, never past the fill as drawn. `None`: no strip, or no fill to
+    /// put it on.
+    pub fn fable_width(&self, bar_w: f64, fill_w: f64) -> Option<f64> {
+        if fill_w <= 0.0 {
+            return None;
+        }
+        let (f, end) = self.fable?;
+        // `f` is already inside the fill's fraction (`fable_extent`); the
+        // clamp holds the strip to the width the caller drew, however it
+        // widens or rounds the fill.
+        Some(if end { fill_w } else { (bar_w * f).min(fill_w) })
+    }
+}
+
 impl Header {
     /// Build from the tray's snapshot. `pace_marker` mirrors the device
     /// setting of that name; `desktop_chime` is the chime on this computer
@@ -121,13 +145,17 @@ impl Header {
                     now,
                 ));
             }
-            meters.push(meter(
+            let mut week = meter(
                 weekly,
                 s.week_pct,
                 reset_text(s.week_resets_at, now, "---"),
                 pace_marker.then_some((s.week_resets_at, WEEK_WINDOW_SECS)),
                 now,
-            ));
+            );
+            // Fable's share of the week, inside the weekly bar under the
+            // Overview's rule (`StatusSnapshot::shown_fable`).
+            week.fable = fable_extent(s.shown_fable(), s.week_pct.unwrap_or(0)).map(|(f, end)| (f64::from(f), end));
+            meters.push(week);
             // A Codex account's bars are neutral, as on the device; the pace
             // marker still shows where the window's time is.
             if s.codex {
@@ -201,6 +229,7 @@ fn meter(label: &'static str, pct: Option<u32>, reset: String, pace: Option<(Opt
         // With no reading there's no window to describe either.
         reset: if pct.is_some() { reset } else { "---".into() },
         pace: pace.map(|(at, _)| at),
+        fable: None,
     }
 }
 
@@ -249,6 +278,48 @@ mod tests {
         let h = Header::new(&s, Path::new("/home/u"), true, false, RefreshState::Ready, NOW);
         assert_eq!((h.detail.as_str(), h.age.as_deref()), ("No usage data yet", None));
         assert!(h.meters.iter().all(|m| m.value == "--%" && m.frac == 0.0 && m.pace.is_none() && m.reset == "---"));
+    }
+
+    #[test]
+    fn fable_rides_in_the_weekly_bar_as_on_the_overview() {
+        let h = |s: &StatusSnapshot, pace| Header::new(s, Path::new("/home/u"), pace, false, RefreshState::Ready, NOW);
+        // Week 62 %, Fable 40 % of its own limit: a fifth of the bar, short
+        // of the fill's end.
+        let s = StatusSnapshot { fable_pct: Some(40), ..snap() };
+        let [session, week] = h(&s, false).meters.try_into().expect("two meters");
+        assert_eq!(session.fable, None, "only the weekly bar");
+        let (f, end) = week.fable.expect("a strip");
+        assert!((f - 0.2).abs() < 1e-6 && !end, "{f} {end}");
+        // With the pace marker on, both show.
+        let week = h(&s, true).meters[1].clone();
+        assert!(week.fable.is_some() && week.pace.is_some());
+        // A week spent only on Fable (31 % and 61 %, rounded apart): the
+        // strip is the whole fill.
+        let all = StatusSnapshot { week_pct: Some(31), fable_pct: Some(61), ..snap() };
+        assert_eq!(h(&all, false).meters[1].fable.map(|(_, end)| end), Some(true));
+        // No 5-hour limit: the week alone, with its strip.
+        let ultra = StatusSnapshot { session_pct: None, no_session_limit: true, fable_pct: Some(40), ..snap() };
+        assert!(h(&ultra, false).meters[0].fable.is_some());
+        // On the panel's bar (272 pt): its own width short of the fill, the
+        // whole fill where it reaches the end, including the 6 pt sliver a
+        // 1 % week is widened to (Fable at 2 % is a 2.7 pt strip on its own).
+        let width = |s: &StatusSnapshot, fill_w| h(s, false).meters[1].fable_width(272.0, fill_w);
+        assert!(width(&s, 272.0 * 0.62).is_some_and(|w| (w - 54.4).abs() < 1e-3));
+        assert_eq!(width(&all, 272.0 * 0.31), Some(272.0 * 0.31));
+        let sliver = StatusSnapshot { week_pct: Some(1), fable_pct: Some(2), ..snap() };
+        assert_eq!(width(&sliver, 6.0), Some(6.0), "the sliver's own shape, not a straight end beside it");
+        assert_eq!(width(&s, 0.0), None, "no fill, no strip");
+        assert_eq!(h(&s, false).meters[0].fable_width(272.0, 100.0), None, "not on the Session bar");
+        // Nothing to draw, as on the Overview.
+        for (why, s) in [
+            ("no Fable window", StatusSnapshot { fable_pct: None, ..snap() }),
+            ("Fable at 0 %", StatusSnapshot { fable_pct: Some(0), ..snap() }),
+            ("no weekly reading", StatusSnapshot { week_pct: None, fable_pct: Some(40), ..snap() }),
+            ("a Codex account", StatusSnapshot { codex: true, fable_pct: Some(40), ..snap() }),
+            ("a spend-capped account", StatusSnapshot { spend: true, fable_pct: Some(40), ..snap() }),
+        ] {
+            assert!(h(&s, false).meters.iter().all(|m| m.fable.is_none()), "{why}");
+        }
     }
 
     #[test]
