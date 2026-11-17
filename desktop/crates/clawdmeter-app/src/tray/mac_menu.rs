@@ -420,8 +420,7 @@ fn fill_color(tone: Option<Tone>, dark: bool) -> Retained<NSColor> {
 /// The Fable strip's colour, the Overview's (`overview::fable_color`), for
 /// the view's appearance.
 fn fable_color(dark: bool) -> Retained<NSColor> {
-    let theme = if dark { Theme::dark() } else { Theme::light() };
-    srgb(crate::ui::overview::fable_color(&theme))
+    srgb(crate::ui::overview::fable_color(dark))
 }
 
 /// A view that clips its subviews to its frame. Views stopped clipping by

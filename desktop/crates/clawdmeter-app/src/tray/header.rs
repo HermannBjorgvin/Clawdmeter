@@ -87,9 +87,16 @@ impl Meter {
     /// The Fable strip's width on a bar `bar_w` wide whose fill is drawn
     /// `fill_w` wide (wider than the fraction where a sliver is widened to
     /// show): the whole fill where the strip reaches its end, else its own
-    /// width, never past the fill. `None`: no strip, or no fill to put it on.
+    /// width, never past the fill as drawn. `None`: no strip, or no fill to
+    /// put it on.
     pub fn fable_width(&self, bar_w: f64, fill_w: f64) -> Option<f64> {
-        let (f, end) = self.fable.filter(|_| fill_w > 0.0)?;
+        if fill_w <= 0.0 {
+            return None;
+        }
+        let (f, end) = self.fable?;
+        // `f` is already inside the fill's fraction (`fable_extent`); the
+        // clamp holds the strip to the width the caller drew, however it
+        // widens or rounds the fill.
         Some(if end { fill_w } else { (bar_w * f).min(fill_w) })
     }
 }
@@ -145,11 +152,9 @@ impl Header {
                 pace_marker.then_some((s.week_resets_at, WEEK_WINDOW_SECS)),
                 now,
             );
-            // Fable's share of the week, inside the weekly bar as on the
-            // Overview; never on a Codex account's (Fable is Claude's).
-            if !s.codex {
-                week.fable = fable_extent(s.fable_pct, s.week_pct.unwrap_or(0)).map(|(f, end)| (f64::from(f), end));
-            }
+            // Fable's share of the week, inside the weekly bar under the
+            // Overview's rule (`StatusSnapshot::shown_fable`).
+            week.fable = fable_extent(s.shown_fable(), s.week_pct.unwrap_or(0)).map(|(f, end)| (f64::from(f), end));
             meters.push(week);
             // A Codex account's bars are neutral, as on the device; the pace
             // marker still shows where the window's time is.

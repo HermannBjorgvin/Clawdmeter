@@ -238,10 +238,10 @@ pub fn fable_extent(fable_pct: Option<u32>, week_pct: u32) -> Option<(f32, bool)
 }
 
 /// The overlay's colour: the device's Dark or Light violet, as the meters
-/// here follow the device's Dark and Light palettes. The tray panel uses it
-/// too.
-pub fn fable_color(t: &Theme) -> u32 {
-    let preset = if t.dark { themes::default_preset() } else { themes::light() };
+/// here follow the device's Dark and Light palettes (`dark`: the theme's
+/// `dark`). The tray panel uses it too.
+pub fn fable_color(dark: bool) -> u32 {
+    let preset = if dark { themes::default_preset() } else { themes::light() };
     preset.colors.get(ColorToken::Fable)
 }
 
@@ -280,7 +280,7 @@ fn meter_in(
     let value = pct.map_or_else(|| "--%".to_owned(), |p| format!("{p}%"));
     let frac = pct.unwrap_or(0).min(100) as f32 / 100.;
     let fable = fable_extent(fable, pct.unwrap_or(0)).map(|(f, _)| {
-        let strip = div().h_full().w(relative(frac / f)).rounded(px(4.)).bg(rgb(fable_color(t)));
+        let strip = div().h_full().w(relative(frac / f)).rounded(px(4.)).bg(rgb(fable_color(t.dark)));
         div().absolute().top_0().left_0().h_full().w(relative(f)).overflow_hidden().child(strip)
     });
     div()
@@ -536,7 +536,7 @@ impl Render for OverviewView {
                 });
                 session
                     .into_iter()
-                    .chain([meter(&t, "Weekly", s.week_pct, s.fable_pct, reset_text(s.week_resets_at, now, "---"))])
+                    .chain([meter(&t, "Weekly", s.week_pct, s.shown_fable(), reset_text(s.week_resets_at, now, "---"))])
                     .collect()
             };
             page = page.child(div().flex().flex_col().gap(px(12.)).children(meters));

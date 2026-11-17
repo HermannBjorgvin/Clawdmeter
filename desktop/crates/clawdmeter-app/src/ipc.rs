@@ -229,6 +229,14 @@ impl StatusSnapshot {
         self.resets_held.filter(|_| self.codex && self.no_session_limit)
     }
 
+    /// Fable's % for the strip inside the Weekly bar, where the Overview and
+    /// the macOS tray panel draw it (as the device does): a Claude account's
+    /// weekly meter, never a Codex account's (Fable is Claude's) or a
+    /// spend-capped one's (no weekly bar).
+    pub fn shown_fable(&self) -> Option<u32> {
+        self.fable_pct.filter(|_| !self.codex && !self.spend)
+    }
+
     /// Seconds since the numbers were read.
     pub fn age(&self, now: i64) -> Option<i64> {
         self.read_at.map(|t| (now - t).max(0))
@@ -593,6 +601,11 @@ mod tests {
         ];
         let snap = StatusSnapshot::from_status(&s, 1_000);
         assert_eq!(snap.fable_pct, Some(40));
+        assert_eq!(snap.shown_fable(), Some(40), "drawn in the Weekly bar");
+        // Never on a Codex account's bar or a spend-capped one's, whatever
+        // the snapshot carries.
+        assert_eq!(StatusSnapshot { codex: true, ..snap.clone() }.shown_fable(), None);
+        assert_eq!(StatusSnapshot { spend: true, ..snap.clone() }.shown_fable(), None);
         // A status file from before the field reads as unknown.
         let mut old = serde_json::to_value(&snap).unwrap();
         old.as_object_mut().unwrap().remove("fable_pct");
