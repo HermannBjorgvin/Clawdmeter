@@ -685,6 +685,12 @@ mod tests {
         let json = pl.to_json();
         assert!(json.len() < 500, "{} bytes: {json}", json.len());
         assert_eq!(pl.encode(500), json.into_bytes());
+        // The widest Claude payload: `wf` and `fc`, no Codex keys.
+        let claude =
+            Payload { wf: Some(999), pv: None, rc: None, rx: None, fc: Some(Palette::default().fable()), ..pl };
+        let json = claude.to_json();
+        assert!(json.len() < 500, "{} bytes: {json}", json.len());
+        assert_eq!(claude.encode(500), json.into_bytes());
     }
 
     #[test]

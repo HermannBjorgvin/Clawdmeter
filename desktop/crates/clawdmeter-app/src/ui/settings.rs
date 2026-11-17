@@ -560,7 +560,9 @@ impl SettingsView {
         let rotation = self.settings.rotation;
         let fixed = rotation != Rotation::Auto;
         let help: SharedString = match rotation {
-            Rotation::Auto => "Turns with the board. Fix it to keep one orientation.".into(),
+            Rotation::Auto => {
+                "Turns with the board (AMOLED 1.32: with its BOOT button). Fix it to keep one orientation.".into()
+            }
             Rotation::Fixed(q) => format!("Fixed at {}°. The arrow turns it a quarter turn.", u32::from(q) * 90).into(),
         };
         let (me1, me2) = (cx.entity().downgrade(), cx.entity().downgrade());

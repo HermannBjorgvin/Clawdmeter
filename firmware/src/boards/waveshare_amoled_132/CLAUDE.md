@@ -6,5 +6,5 @@ Waveshare ESP32-S3-Touch-AMOLED-1.32 (CO5300 466×466 **round** AMOLED over QSPI
 
 - **No PMU, no IMU.** The battery is a 2:1 divider into GPIO 4 (ADC1_CH3), and `BAT_EN` (GPIO 18) is the power-hold latch, driven HIGH in `board_init()` (same shape as the LCD-1.54). No charge-status pin.
 - The CO5300's 466-wide viewport starts at GRAM column 6: `CO5300_COL_OFFSET 6`. Like every CO5300 it cannot rotate in hardware and needs even-aligned flush regions.
-- **BOOT (GPIO 0) rotates the UI 90° CW per press** instead of HID Space: the quadrant is persisted to NVS and applied by the 2.16-style CPU strip rotation in `display.cpp`; touch coordinates map back through `rotation_map.h` (host-tested in `test/test_amoled_132_rotation`). So there is no push to talk. `has_rotation` is true but button-driven, not IMU-driven.
+- **BOOT (GPIO 0) rotates the UI 90° CW per press** instead of HID Space: the quadrant is persisted to NVS and applied by the 2.16-style CPU strip rotation in `display.cpp`; touch coordinates map back through `rotation_map.h` (host-tested in `test/test_amoled_132_rotation`). So there is no push to talk. `has_rotation` is true but button-driven, not IMU-driven. With a fixed `ro` (the app's Fixed rotation) BOOT does nothing; `auto` gives it back.
 - PWR (GPIO 17, active LOW) keeps the shared role: short → brightness, hold ~3 s and release → pair.

@@ -157,7 +157,7 @@ those colours, and spend-capped accounts are unchanged.
 
 **Fixed rotation** shows on boards that turn their screen (AMOLED 1.32,
 AMOLED 2.16, AMOLED 2.16 C6, LCD 1.54). Off (the default), the picture turns
-with the board. On, it stays in one orientation: the arrow beside the switch
+with the board (on the AMOLED 1.32, with its BOOT button). On, it stays in one orientation: the arrow beside the switch
 turns it a quarter turn clockwise each time. Touch follows the picture.
 
 **Colors** sets the board's palette. **System theme**, the default, follows
@@ -320,7 +320,7 @@ seconds and preserves comments and unknown keys when saving.
 | `liveliness` | `3` | How lively Clawd is, `1` (No-nonsense) to `5` (All-nonsense). Set with **Animation silliness** on the Device page. |
 | `attention_anim` | `2m` | How long Clawd points and waves for an alert: `off`, `10s`, `30s` or `2m`. The alert itself is unchanged. Set with **Attention animation** on the Device page. |
 | `pace_marker` | `off` | `on` marks the elapsed share of each usage window on the device's bars and colours them by pace. Set with **Pace marker** on the Device page. |
-| `rotation` | `auto` | `auto` turns the picture with the board; `0`–`3` fixes it at that many quarter turns clockwise. Only boards that rotate use it. Set with **Fixed rotation** on the Device page. |
+| `rotation` | `auto` | `auto` turns the picture with the board (on the AMOLED 1.32, with its BOOT button); `0`–`3` fixes it at that many quarter turns clockwise. Only boards that rotate use it. Set with **Fixed rotation** on the Device page. |
 | `menu_bar_usage` | `off` | macOS: `on` shows the higher of the session and weekly percentages beside the menu bar icon (spend, on a spend-capped account), so the limit closest to stopping you. Set with **Show usage in the menu bar** on the Settings page. |
 | `theme` | `system` | The device's colours, Clawd's included: `system` (Dark or Light, following this computer's light or dark mode, and switching when it does; `clawd`, the old default, means the same), `dark` (the board's own palette), `light`, `catppuccin_mocha`, `dracula`, `gruvbox`, `monokai`, `nord`, `one_dark`, `solarized` (Solarized Dark or Light, following the mode like `system`), `solarized_dark`, `solarized_light`, `tokyo_night`, or `custom` for the `color_*` keys below. Set with **Colors** on the Device page. |
 | `color_<name>` | the default palette | The custom theme's colours as `rrggbb` (no `#`, which starts a comment): `color_bg`, `color_panel`, `color_text`, `color_dim`, `color_accent`, `color_green`, `color_amber`, `color_red`, `color_bar_bg`, `color_clawd`, `color_eye`, `color_fable` (the Fable strip in the weekly bar). Used only with `theme = custom` and kept while a preset is chosen. Set with **Custom +** under **Colors** on the Device page (a swatch or a typed hex code). The first time, Custom starts from the theme you're on and writes all twelve keys; from then on it keeps its own colours. A custom theme saved before `color_fable` existed starts it at the Dark theme's violet. |

@@ -10,14 +10,15 @@ uint8_t lcd_applied_rotation(void);
 
 // Board-private: the target panel rotation (0..3, Arduino_GFX convention) that
 // display.cpp applies via MADCTL and touch.cpp mirrors for the CST816T.
-// LCD_ROTATION is the base orientation; the IMU quadrant is added on top
-// (or subtracted, with IMU_ROT_REVERSE): the IMU's on auto, the fixed one
-// otherwise (`ro`, clawd_prefs.h).
+// LCD_ROTATION is the base orientation; the quadrant is added on top. On
+// auto it is the IMU's (subtracted instead with IMU_ROT_REVERSE, which only
+// corrects the sensor's turning direction); a fixed `ro` (clawd_prefs.h) is
+// always quarter turns clockwise, so it skips that correction.
 static inline uint8_t lcd_effective_rotation(void) {
 #if LCD_AUTO_ROTATE
     uint8_t q = display_rotation_quadrant() & 3;
 #if IMU_ROT_REVERSE
-    q = (4 - q) & 3;
+    if (rotation_get() == ROTATION_AUTO) q = (4 - q) & 3;
 #endif
     return (uint8_t)((LCD_ROTATION + q) & 3);
 #else
