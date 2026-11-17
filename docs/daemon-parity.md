@@ -72,7 +72,7 @@ saves it; the window edits it in place, keeping comments and unknown keys.
 | `reset_chime` | L, M, W (as `chime`) | Yes (`c:1`; `chime` is read when `reset_chime` is absent) | |
 | `alert_chime` | L, M (as `beep`) | Yes (`b:1` with an alert; `beep` is read when `alert_chime` is absent) | |
 | `clock` (`off`/`auto`/`12`/`24`) | L, M, W | Yes (`t`, `tf`) | `auto`: macOS `AppleICUForce24HourTime`/`12HourTime`, else `locale -k LC_TIME`; Windows `iTime` (`clawdmeter-core/src/platform.rs`). |
-| `desktop_chime`, `alert_on`, `release_repo`, `claude_path`, `update_check`, `onboarding_done` | — | New | The ding on this computer, which alert kinds get through, flasher source, CLI location override, daily firmware check, setup-wizard completion. |
+| `desktop_chime`, `alert_on`, `release_repo`, `claude_path`, `update_check`, `onboarding_done` | — | New | The ding on this computer, which alert kinds get through, flasher source, CLI location override, firmware and app update check (every 6 hours), setup-wizard completion. |
 
 ## Environment
 

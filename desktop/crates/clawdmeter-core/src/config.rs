@@ -493,7 +493,7 @@ pub struct Settings {
     pub release_repo: String,
     /// Explicit path to the `claude` CLI, if the user set one.
     pub claude_path: Option<PathBuf>,
-    /// Daily firmware update check (default on).
+    /// Firmware and app update check, every 6 hours (default on).
     pub update_check: bool,
     /// The app release the user chose not to be told about (`skipped_update`,
     /// a tag like `v2.5.0`); a later release is announced again.

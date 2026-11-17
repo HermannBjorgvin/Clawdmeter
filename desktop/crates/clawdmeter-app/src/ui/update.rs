@@ -106,7 +106,8 @@ pub struct UpdateView {
 
 /// With the page off screen and no download running, the status and config
 /// are re-read on every this many refresh ticks (5 s): the answer changes
-/// once a day, and the overview already reads both files twice a second.
+/// every few hours at most, and the overview already reads both files twice
+/// a second.
 const IDLE_TICKS: u32 = 10;
 
 impl EventEmitter<Navigate> for UpdateView {}
@@ -728,7 +729,7 @@ impl Render for UpdateView {
             } else if !self.checks {
                 "\"Check for updates\" is off in Settings, so the app doesn't look for releases.".to_owned()
             } else {
-                format!("The daily check has found no release newer than {}.", crate::version())
+                format!("The update check has found no release newer than {}.", crate::version())
             };
             return page.child(
                 div()

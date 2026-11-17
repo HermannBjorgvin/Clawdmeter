@@ -104,7 +104,7 @@ pub struct StatusSnapshot {
     pub claude: Option<String>,
     /// Last successful device write.
     pub last_write_at: Option<i64>,
-    /// Latest firmware release, when the daily check found one.
+    /// Latest firmware release, when the update check found one.
     pub latest_firmware: Option<String>,
     /// Firmware the device last reported (flash or `info`).
     pub device_firmware: Option<String>,
