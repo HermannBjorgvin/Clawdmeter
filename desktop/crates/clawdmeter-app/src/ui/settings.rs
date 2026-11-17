@@ -554,33 +554,44 @@ impl SettingsView {
 
     // ---------------------------------------------------------------- panes
 
-    /// Rotation, on boards that turn their screen: "Fixed" off follows the
-    /// board's own sensor; on, the rotate button turns it a quarter turn.
+    /// Display rotation, on boards that turn their screen: Auto follows the
+    /// board's own sensor; Fixed keeps one orientation, which the rotate
+    /// button turns a quarter turn.
     fn rotation_field(&mut self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let rotation = self.settings.rotation;
         let fixed = rotation != Rotation::Auto;
         let help: SharedString = match rotation {
-            Rotation::Auto => {
-                "Turns with the board (AMOLED 1.32: with its BOOT button). Fix it to keep one orientation.".into()
-            }
-            Rotation::Fixed(q) => format!("Fixed at {}°. The arrow turns it a quarter turn.", u32::from(q) * 90).into(),
+            Rotation::Auto => "Turns with the board (AMOLED 1.32: its BOOT button).".into(),
+            Rotation::Fixed(q) => format!("Fixed at {}°. The arrow turns it clockwise.", u32::from(q) * 90).into(),
         };
         let (me1, me2) = (cx.entity().downgrade(), cx.entity().downgrade());
-        let turn =
-            icon_button(t, "rotation-turn", "rotate-cw", "Turn a quarter turn", fixed, false, move |_, _, cx| {
-                let _ = me1.update(cx, |v, cx| {
-                    v.save(|s, _| s.rotation = rotation.turned());
-                    cx.notify();
-                });
+        let turn = icon_button(t, "rotation-turn", "rotate-cw", "Turn a quarter turn", true, false, move |_, _, cx| {
+            let _ = me1.update(cx, |v, cx| {
+                v.save(|s, _| s.rotation = rotation.turned());
+                cx.notify();
             });
-        let switch = toggle(t, "rotation-fixed", fixed, true, move |_, _, cx| {
-            let next = if fixed { Rotation::Auto } else { Rotation::Fixed(0) };
+        });
+        let mode = segmented(t, "rotation-mode", &[(false, "Auto"), (true, "Fixed")], &fixed, true, move |f, _, cx| {
+            if f == fixed {
+                return;
+            }
+            let next = if f { Rotation::Fixed(0) } else { Rotation::Auto };
             let _ = me2.update(cx, |v, cx| {
                 v.save(|s, _| s.rotation = next);
                 cx.notify();
             });
         });
-        field(t, "Fixed rotation", help, div().flex().items_center().gap(px(10.)).child(turn).child(switch))
+        field(
+            t,
+            "Display rotation",
+            help,
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .child(div().size(px(30.)).when(fixed, |d| d.child(turn)))
+                .child(mode),
+        )
     }
 
     fn device_pane(&mut self, t: &Theme, cx: &mut Context<Self>) -> gpui::Div {

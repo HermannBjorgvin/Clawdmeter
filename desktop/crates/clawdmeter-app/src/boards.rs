@@ -36,7 +36,7 @@ pub struct BoardInfo {
     /// [`Self::pwr_button`].
     pub buttons: &'static [(Button, &'static str)],
     /// Turns its screen (`BoardCaps::has_rotation`): the Device page offers
-    /// the Fixed rotation field (`ro`) only here.
+    /// the Display rotation field (`ro`) only here.
     pub rotation: bool,
 }
 
