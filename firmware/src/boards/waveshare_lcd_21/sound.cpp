@@ -10,8 +10,7 @@
 // once at boot where the speaker boards ding, timed by the buzzer module
 // without blocking; a failed "off" is retried until it lands (buzzer.h).
 // board_init() clears the I2C bus and io_expander_init() writes the latch
-// with the buzzer off, so a reset mid-beep comes back silent. sound_hal_tune()
-// has nothing to tune.
+// with the buzzer off, so a reset mid-beep comes back silent.
 
 static bool set_buzzer(bool on) { return io_expander_set(IOX_BIT_BUZZER, on); }
 
@@ -19,4 +18,10 @@ void sound_hal_init(void)  { buzzer_init(set_buzzer, millis()); }
 void sound_hal_tick(void)  { buzzer_tick(millis()); }
 void sound_hal_chime(void) { buzzer_start(millis(), BUZZER_BEEPS); }
 
-void sound_hal_tune(float gain, int volume) { (void)gain; (void)volume; }
+// Nothing to tune (no pitch or volume): `chime <gain> [volume]` beeps like
+// a bare `chime`, so the command still gives feedback.
+void sound_hal_tune(float gain, int volume) {
+    (void)gain;
+    (void)volume;
+    buzzer_start(millis(), BUZZER_BEEPS);
+}

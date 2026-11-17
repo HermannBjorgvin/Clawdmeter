@@ -58,16 +58,29 @@ static bool iox_probe(void) {
     return Wire.endTransmission() == 0;
 }
 
+// Writes run from loop() too (buzzer edges, and a failed "off" retried every
+// 200 ms), so a failing expander logs its first failure and its recovery,
+// not every attempt.
+static uint32_t write_failures = 0;
+
 static bool iox_write(uint8_t reg, uint8_t val) {
     Wire.beginTransmission(IO_EXPANDER_ADDR);
     Wire.write(reg);
     Wire.write(val);
     uint8_t err = Wire.endTransmission();
     if (err != 0) {
-        Serial.printf(BOARD_LOG_TAG " IO expander write reg 0x%02X=0x%02X failed (%u)\n",
-                      reg, val, err);
+        if (write_failures++ == 0) {
+            Serial.printf(BOARD_LOG_TAG " IO expander write reg 0x%02X=0x%02X failed (%u)\n",
+                          reg, val, err);
+        }
+        return false;
     }
-    return err == 0;
+    if (write_failures > 0) {
+        Serial.printf(BOARD_LOG_TAG " IO expander writes OK again after %lu failed\n",
+                      (unsigned long)write_failures);
+        write_failures = 0;
+    }
+    return true;
 }
 
 void io_expander_init(void) {
@@ -86,9 +99,14 @@ void io_expander_init(void) {
 
 // No expander means nothing to drive (the pins stay at their power-on state),
 // so that reports success: a buzzer "off" isn't retried forever.
+// The shadow latch changes only when the write lands, so it always matches
+// the chip: a failed buzzer "on" can't ride along on a later write for
+// another pin.
 bool io_expander_set(uint8_t bit, bool high) {
     if (!expander_ok) return true;
-    if (high) output_latch |= (uint8_t)(1u << bit);
-    else      output_latch &= (uint8_t)~(1u << bit);
-    return iox_write(IOX_REG_OUTPUT, output_latch);
+    const uint8_t next = high ? (uint8_t)(output_latch | (1u << bit))
+                              : (uint8_t)(output_latch & ~(1u << bit));
+    if (!iox_write(IOX_REG_OUTPUT, next)) return false;
+    output_latch = next;
+    return true;
 }

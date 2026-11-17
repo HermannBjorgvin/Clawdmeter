@@ -76,7 +76,8 @@ is a plain on/off switch (no pitch) can't play the ding: its `sound.cpp`
 passes a `bool set(bool on)` for the pin to `buzzer.h`, which plays
 three short beeps per chime and one at boot (in place of the boot ding)
 without blocking, and retries a failed "off", to avoid leaving the buzzer on.
-Such boards keep `BOARD_HAS_SOUND 0` since that flag indicates the board plays the ding
+Its `sound_hal_tune` has nothing to tune and beeps like a bare `chime`.
+Such boards keep `BOARD_HAS_SOUND 0` since that flag indicates the board plays the ding.
 
 ## `imu_hal.h`
 
