@@ -52,4 +52,3 @@
 #define BOARD_HAS_IMU              0    // MPU6886 populated but unused
 #define BOARD_HAS_BATTERY          1    // via IP5306
 #define BOARD_HAS_IO_EXPANDER      0
-#define BOARD_HAS_SOUND            0    // speaker is a DAC path, not the I2S chime engine

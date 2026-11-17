@@ -745,7 +745,7 @@ impl SettingsView {
             .child(field(
                 t,
                 "Alert chime",
-                "Chimes when Claude needs you, on boards with a speaker.",
+                "Chimes when Claude needs you, on boards with a speaker or buzzer.",
                 toggle(t, "alert-chime", alert, true, move |_, _, cx| {
                     let _ = me1.update(cx, |v, cx| {
                         v.save(|s, _| s.alert_chime = !alert);
@@ -756,8 +756,8 @@ impl SettingsView {
             .child(field(
                 t,
                 "Session reset chime",
-                "Chimes when your session usage resets (weekly usage, on accounts with no 5-hour limit), \
-                 on boards with a speaker.",
+                "Chimes when your session usage resets, on boards with a speaker or buzzer. \
+                 On accounts with no 5-hour limit, that's the weekly usage.",
                 toggle(t, "reset-chime", reset, true, move |_, _, cx| {
                     let _ = me2.update(cx, |v, cx| {
                         v.save(|s, _| s.reset_chime = !reset);

@@ -66,4 +66,3 @@
 #define BOARD_HAS_IMU               0
 #define BOARD_HAS_BATTERY           0
 #define BOARD_HAS_IO_EXPANDER       0
-#define BOARD_HAS_SOUND             0
