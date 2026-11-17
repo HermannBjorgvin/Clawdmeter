@@ -233,6 +233,52 @@ impl AttentionAnim {
     }
 }
 
+/// `rotation`: how a board that rotates its screen
+/// (`BoardCaps::has_rotation`) turns it. Sent as `ro`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Rotation {
+    /// The board's own sensor (the IMU, or the AMOLED 1.32's button) turns
+    /// it (default).
+    #[default]
+    Auto,
+    /// Fixed at this many quarter turns clockwise, 0-3.
+    Fixed(u8),
+}
+
+impl Rotation {
+    /// Parse a config value: `auto` or 0-3; anything else is the default.
+    pub fn parse(v: &str) -> Self {
+        match v.trim().parse::<u8>() {
+            Ok(q) if q <= 3 => Rotation::Fixed(q),
+            _ => Rotation::Auto,
+        }
+    }
+
+    /// The config-file spelling.
+    pub fn as_config(self) -> String {
+        match self {
+            Rotation::Auto => "auto".to_owned(),
+            Rotation::Fixed(q) => q.to_string(),
+        }
+    }
+
+    /// The payload's `ro`: -1 = auto, else the quarter turns.
+    pub fn code(self) -> i8 {
+        match self {
+            Rotation::Auto => -1,
+            Rotation::Fixed(q) => (q & 3) as i8,
+        }
+    }
+
+    /// A quarter turn further clockwise (Auto stays Auto).
+    pub fn turned(self) -> Self {
+        match self {
+            Rotation::Auto => Rotation::Auto,
+            Rotation::Fixed(q) => Rotation::Fixed((q + 1) & 3),
+        }
+    }
+}
+
 /// One of the device's UI colours: the eleven the payload's `th` carries, in
 /// its order (`firmware/src/theme_palette.h`), then the Fable overlay's,
 /// which goes out on its own as `fc` so `th` stays the length older firmware
@@ -509,6 +555,9 @@ pub struct Settings {
     pub attention_anim: AttentionAnim,
     /// Pace marker on the device's usage bars (`pm`, default off).
     pub pace_marker: bool,
+    /// Screen rotation on boards that rotate (`rotation`, sent as `ro`,
+    /// default auto).
+    pub rotation: Rotation,
     /// The main meter's percentage beside the macOS menu bar icon
     /// (`menu_bar_usage`, default off).
     pub menu_bar_usage: bool,
@@ -681,6 +730,7 @@ impl Settings {
             liveliness: cfg.get("liveliness").map(parse_liveliness).unwrap_or(DEFAULT_LIVELINESS),
             attention_anim: cfg.get("attention_anim").map(AttentionAnim::parse).unwrap_or_default(),
             pace_marker: on_off(cfg.get("pace_marker"), false),
+            rotation: cfg.get("rotation").map(Rotation::parse).unwrap_or_default(),
             menu_bar_usage: on_off(cfg.get("menu_bar_usage"), false),
             buttons: Button::ALL.map(|b| {
                 cfg.get(b.config_key()).map_or(b.default_action(), |v| ButtonAction::parse(v, b.default_action()))
@@ -827,6 +877,9 @@ impl Settings {
         }
         if current.attention_anim != self.attention_anim {
             cfg.set("attention_anim", self.attention_anim.as_str());
+        }
+        if current.rotation != self.rotation {
+            cfg.set("rotation", &self.rotation.as_config());
         }
         for b in Button::ALL {
             let a = self.buttons[b.index()];
@@ -1299,6 +1352,51 @@ mod tests {
         s.pace_marker = true;
         s.apply_to(&mut cfg, &paths());
         assert_eq!(cfg.get("pace_marker"), Some("on"));
+    }
+
+    #[test]
+    fn rotation() {
+        assert_eq!(settings("").rotation, Rotation::Auto, "auto by default");
+        assert_eq!(
+            settings(
+                "rotation = 2
+"
+            )
+            .rotation,
+            Rotation::Fixed(2)
+        );
+        assert_eq!(
+            settings(
+                "rotation = auto
+"
+            )
+            .rotation,
+            Rotation::Auto
+        );
+        assert_eq!(
+            settings(
+                "rotation = 4
+"
+            )
+            .rotation,
+            Rotation::Auto,
+            "out of range"
+        );
+        assert_eq!(Rotation::Auto.code(), -1);
+        assert_eq!(Rotation::Fixed(3).code(), 3);
+        assert_eq!(Rotation::Fixed(3).turned(), Rotation::Fixed(0));
+        assert_eq!(Rotation::Auto.turned(), Rotation::Auto);
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("rotation").is_none(), "the default stays out of the file");
+        s.rotation = Rotation::Fixed(1);
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("rotation"), Some("1"));
+        s.rotation = Rotation::Auto;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("rotation"), Some("auto"));
     }
 
     #[test]
