@@ -1,5 +1,5 @@
-//! The tray process: the daemon, the tray icon and menu, the daily
-//! firmware update check, and the app window process it launches.
+//! The tray process: the daemon, the tray icon and menu, the firmware
+//! update check, and the app window process it launches.
 //!
 //! The tray icon needs a platform event loop on the main thread (a Win32
 //! message loop, NSApplication on macOS); on Linux it's a StatusNotifierItem
@@ -767,8 +767,10 @@ impl TrayApp {
     }
 }
 
-/// Daily firmware update check on its own thread (network I/O never blocks
-/// the tray). Writes the latest tag to the shared slot and the cache file.
+/// Firmware update check on its own thread (network I/O never blocks the
+/// tray), every `CHECK_INTERVAL_SECS`, or `CHECK_RETRY_SECS` after one that
+/// couldn't reach GitHub (`UpdateCheck::record`). Writes the latest tag to
+/// the shared slot and the cache file.
 fn spawn_update_checker(paths: Paths, latest: Arc<Mutex<Option<String>>>, now_flag: Arc<AtomicBool>) {
     let _ = std::thread::Builder::new().name("clawdmeter-update-check".into()).spawn(move || {
         let check = clawdmeter_flash::UpdateCheck::new(&paths.cache_dir);
@@ -782,18 +784,24 @@ fn spawn_update_checker(paths: Paths, latest: Arc<Mutex<Option<String>>>, now_fl
             if forced || (enabled && check.due(unix_now())) {
                 let repo =
                     settings.map(|s| s.release_repo).unwrap_or_else(|| clawdmeter_flash::DEFAULT_RELEASE_REPO.into());
-                match clawdmeter_flash::release::release_for_app(&repo, crate::version()) {
+                let result = clawdmeter_flash::release::release_for_app(&repo, crate::version());
+                match &result {
                     Ok(r) => {
                         log::info!("latest firmware release: {}", r.manifest.version);
                         let _ = std::fs::create_dir_all(&paths.cache_dir);
                         let _ = std::fs::write(ipc::latest_release_file(&paths), &r.manifest.version);
                         if let Ok(mut l) = latest.lock() {
-                            *l = Some(r.manifest.version);
+                            *l = Some(r.manifest.version.clone());
                         }
                     }
+                    Err(e) if e.is_transient() => log::info!(
+                        "update check: {e} ({}); trying again in {} min",
+                        e.detail().unwrap_or_default(),
+                        clawdmeter_flash::release::CHECK_RETRY_SECS / 60
+                    ),
                     Err(e) => log::info!("update check: {e} ({})", e.detail().unwrap_or_default()),
                 }
-                let _ = check.mark(unix_now());
+                let _ = check.record(unix_now(), result.as_ref().err());
             }
             // Wake early when a window asks for a check.
             for _ in 0..(UPDATE_POLL.as_secs() / 2) {

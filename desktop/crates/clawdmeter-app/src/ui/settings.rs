@@ -770,7 +770,7 @@ impl SettingsView {
         pane = pane.child(field(
             t,
             "Check for updates",
-            "Checks GitHub daily. Firmware updates appear here and in the tray, app updates in the sidebar.",
+            "Checks GitHub every 6 hours. Firmware updates appear here and in the tray, app updates in the sidebar.",
             toggle(t, "update-check", on, true, move |_, _, cx| {
                 let _ = me.update(cx, |v, cx| {
                     v.save(|s, _| s.update_check = !on);

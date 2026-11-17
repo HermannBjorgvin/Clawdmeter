@@ -1,6 +1,6 @@
 //! GitHub Releases: find the release this app should flash and its
 //! `manifest.json`, download and verify images, and remember when we last
-//! checked (once a day).
+//! checked (every 6 hours; an hour after a check that couldn't reach GitHub).
 //!
 //! `releases/latest` never returns a prerelease, so a stable app is only
 //! offered stable firmware. An app that is itself a prerelease (its version
@@ -21,8 +21,13 @@ use crate::manifest::{BoardImage, Manifest};
 
 /// Asset name CI publishes.
 pub const MANIFEST_ASSET: &str = "manifest.json";
-/// Update checks run at most this often.
-pub const CHECK_INTERVAL_SECS: i64 = 24 * 3600;
+/// Update checks run at most this often. Releases often come hours apart (a
+/// fix soon after a release), so a day was too long to hear of one.
+pub const CHECK_INTERVAL_SECS: i64 = 6 * 3600;
+/// A check that couldn't reach GitHub is tried again after this long
+/// instead of a whole interval, so one offline moment doesn't hide a
+/// release for hours.
+pub const CHECK_RETRY_SECS: i64 = 3600;
 
 /// Errors from the release side. `Display` is written for people; the
 /// technical detail, where there is one, is in [`ReleaseError::detail`].
@@ -55,6 +60,19 @@ pub enum ReleaseError {
 }
 
 impl ReleaseError {
+    /// The request didn't get an answer (offline, rate limited, another
+    /// HTTP failure, local I/O), so asking again soon may work. The rest are
+    /// answers about the release itself.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            ReleaseError::Offline(_) | ReleaseError::RateLimited | ReleaseError::Http(_) | ReleaseError::Io(_) => true,
+            ReleaseError::NoRelease
+            | ReleaseError::Manifest(_)
+            | ReleaseError::MissingAsset(_)
+            | ReleaseError::HashMismatch { .. } => false,
+        }
+    }
+
     /// The technical detail behind the message, for logs.
     pub fn detail(&self) -> Option<String> {
         match self {
@@ -750,7 +768,9 @@ fn fetch_app_package_with(
     Ok(path)
 }
 
-/// Remembers the last update check in `<cache>/last-update-check`.
+/// Remembers the last update check in `<cache>/last-update-check`: its Unix
+/// time, then ` failed` when it couldn't reach GitHub. The failure is kept
+/// on disk so a restart, or a crash loop, waits for the retry too.
 #[derive(Debug, Clone)]
 pub struct UpdateCheck {
     stamp: PathBuf,
@@ -762,22 +782,47 @@ impl UpdateCheck {
         UpdateCheck { stamp: cache_dir.join("last-update-check") }
     }
 
-    /// Unix time of the last check.
+    /// The last check's Unix time, and whether it failed.
+    fn read(&self) -> Option<(i64, bool)> {
+        let text = fs::read_to_string(&self.stamp).ok()?;
+        let mut words = text.split_whitespace();
+        let at = words.next()?.parse().ok()?;
+        Some((at, words.next() == Some("failed")))
+    }
+
+    /// Unix time of the last check, failed or not.
     pub fn last(&self) -> Option<i64> {
-        fs::read_to_string(&self.stamp).ok()?.trim().parse().ok()
+        self.read().map(|(at, _)| at)
     }
 
-    /// A day has passed (or we never checked).
+    /// [`CHECK_INTERVAL_SECS`] have passed since the last check, or
+    /// [`CHECK_RETRY_SECS`] since one that failed (or there never was one).
+    /// A clock that went backwards makes it due.
     pub fn due(&self, now: i64) -> bool {
-        self.last().is_none_or(|t| now - t >= CHECK_INTERVAL_SECS || t > now)
+        self.read().is_none_or(|(at, failed)| {
+            let wait = if failed { CHECK_RETRY_SECS } else { CHECK_INTERVAL_SECS };
+            now - at >= wait || at > now
+        })
     }
 
-    /// Record a check.
+    /// Record a successful check.
     pub fn mark(&self, now: i64) -> io::Result<()> {
+        self.record(now, None)
+    }
+
+    /// Record a check and how it ended. One that couldn't reach GitHub
+    /// ([`ReleaseError::is_transient`]) is tried again in
+    /// [`CHECK_RETRY_SECS`]; an answer, even "no release", waits a whole
+    /// interval.
+    pub fn record(&self, now: i64, error: Option<&ReleaseError>) -> io::Result<()> {
         if let Some(d) = self.stamp.parent() {
             fs::create_dir_all(d)?;
         }
-        fs::write(&self.stamp, now.to_string())
+        let text = match error {
+            Some(e) if e.is_transient() => format!("{now} failed"),
+            _ => now.to_string(),
+        };
+        fs::write(&self.stamp, text)
     }
 }
 
@@ -1035,15 +1080,77 @@ mod tests {
     }
 
     #[test]
-    fn daily_check() {
+    fn check_interval() {
         let dir = std::env::temp_dir().join(format!("cm-upd-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let u = UpdateCheck::new(&dir);
         assert!(u.due(1000));
         u.mark(1000).unwrap();
         assert!(!u.due(1000 + 3600));
+        assert!(!u.due(1000 + CHECK_INTERVAL_SECS - 1));
         assert!(u.due(1000 + CHECK_INTERVAL_SECS));
         assert!(u.due(10), "clock went backwards");
+        // A stamp an older version wrote (just the time) reads the same.
+        assert_eq!(fs::read_to_string(dir.join("last-update-check")).unwrap(), "1000");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_check_is_retried_sooner() {
+        let dir = std::env::temp_dir().join(format!("cm-upd-retry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let u = UpdateCheck::new(&dir);
+        u.mark(1000).unwrap();
+        let t = 1000 + CHECK_INTERVAL_SECS;
+        assert!(u.due(t));
+        u.record(t, Some(&ReleaseError::Offline("down".into()))).unwrap();
+        assert_eq!(u.last(), Some(t));
+        assert!(!u.due(t + CHECK_RETRY_SECS - 1));
+        assert!(u.due(t + CHECK_RETRY_SECS));
+        assert!(u.due(t - 10), "clock went backwards");
+        // The failure is on disk: a restart, or a crash loop, waits too.
+        assert!(!UpdateCheck::new(&dir).due(t + 1));
+        // Success ends the retry: the next check is a whole interval away.
+        let ok = t + CHECK_RETRY_SECS;
+        u.record(ok, None).unwrap();
+        assert!(!u.due(ok + CHECK_RETRY_SECS));
+        assert!(u.due(ok + CHECK_INTERVAL_SECS));
+        // A first check that fails waits for its retry too.
+        let first = UpdateCheck::new(&dir.join("never-checked"));
+        assert!(first.due(5));
+        first.record(5, Some(&ReleaseError::RateLimited)).unwrap();
+        assert!(!first.due(6));
+        assert!(first.due(5 + CHECK_RETRY_SECS));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_check_that_got_no_answer_is_retried_sooner() {
+        let dir = std::env::temp_dir().join(format!("cm-upd-answer-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let u = UpdateCheck::new(&dir);
+        let unanswered = [
+            ReleaseError::Offline("dns".into()),
+            ReleaseError::RateLimited,
+            ReleaseError::Http("502".into()),
+            ReleaseError::Io(io::Error::other("disk")),
+        ];
+        for e in &unanswered {
+            u.record(1000, Some(e)).unwrap();
+            assert!(u.due(1000 + CHECK_RETRY_SECS), "{e:?}");
+        }
+        // "No release", a manifest that doesn't parse and so on are answers:
+        // asking again in an hour would get the same one.
+        let answers = [
+            ReleaseError::NoRelease,
+            ReleaseError::Manifest("bad".into()),
+            ReleaseError::MissingAsset(MANIFEST_ASSET.into()),
+        ];
+        for e in &answers {
+            u.record(1000, Some(e)).unwrap();
+            assert!(!u.due(1000 + CHECK_RETRY_SECS), "{e:?}");
+            assert!(u.due(1000 + CHECK_INTERVAL_SECS), "{e:?}");
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 

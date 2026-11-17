@@ -341,8 +341,10 @@ runs or shows (bar the Accounts page's trial note).
 - Nothing competes for the serial port: the flasher (`ui/flasher.rs`) touches
   USB only while on screen (`set_active`), the Device page probes only while
   shown, and the sidebar locks while a board is being written.
-- App updates (`ui/update.rs`, `Page::Update`): when the daily check's tag
-  (`StatusSnapshot::app_update`, or the check's cache file with no tray) is
+- App updates (`ui/update.rs`, `Page::Update`): when the update check's tag
+  (every 6 h, an hour after one that couldn't reach GitHub:
+  `release::UpdateCheck`;
+  `StatusSnapshot::app_update`, or the check's cache file with no tray) is
   newer than a release build's version, the sidebar footer shows "Update
   available" until that release is skipped (`skipped_update`; a later one
   is announced again). It opens the Update page, which the same pill
