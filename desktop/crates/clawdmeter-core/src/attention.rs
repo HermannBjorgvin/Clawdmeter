@@ -1,7 +1,7 @@
 //! Attention alerts from the hook (`clawdmeter hook alert|clear`).
 //!
 //! The hook writes `<state>/attention` (`{"m": message, "s": session id,
-//! "k": kind}`, see [`AlertKind`])
+//! "k": kind, "p": project}`, see [`AlertKind`] and [`Alert::project`])
 //! when a session needs the user and touches `<state>/clear-<session id>` when
 //! that session moves on. Each tick the daemon consumes both:
 //!
@@ -35,6 +35,8 @@ pub const TEST_ALERT_TTL: Duration = Duration::from_secs(30);
 pub const TEST_SESSION: &str = "clawdmeter-test";
 /// Device fonts are ASCII and the status line holds this many characters.
 pub const MESSAGE_LIMIT: usize = 120;
+/// A project name on the device is cut to this many characters.
+pub const PROJECT_LIMIT: usize = 40;
 
 /// What a session is waiting for. The hook records it (`k`) from Claude
 /// Code's hook input; which kinds alert is the `alert_on` setting.
@@ -89,6 +91,17 @@ impl AlertKind {
         }
     }
 
+    /// The word before the project name when the device names the waiting
+    /// session ([`Alert::device_message`]): `Permission: my-project`.
+    pub fn device_label(self) -> &'static str {
+        match self {
+            AlertKind::Question => "Question",
+            AlertKind::Permission | AlertKind::Other => "Permission",
+            AlertKind::Idle => "Waiting",
+            AlertKind::Elicitation => "MCP",
+        }
+    }
+
     /// The fixed line the device shows for this kind, in place of Claude
     /// Code's own (often long) notification text.
     pub fn device_text(self) -> &'static str {
@@ -110,18 +123,26 @@ pub struct Alert {
     pub session: String,
     /// What the session waits for.
     pub kind: AlertKind,
+    /// The session's project: the name of its working directory, ASCII-folded
+    /// (`p` in the attention file). Empty when the hook didn't record one or
+    /// `alert_project` is off; the device then shows the kind's fixed line.
+    pub project: String,
     /// The file's mtime.
     pub at: SystemTime,
 }
 
 impl Alert {
-    /// What the device shows: the kind's [`AlertKind::device_text`], or the
-    /// test alert's own text.
-    pub fn device_message(&self) -> &str {
+    /// What the device shows: the test alert's own text; else the kind and
+    /// the project that waits (`Permission: my-project`), so you know which
+    /// session to go to; else, with no project, the kind's
+    /// [`AlertKind::device_text`].
+    pub fn device_message(&self) -> String {
         if self.session == TEST_SESSION && !self.message.is_empty() {
-            &self.message
+            self.message.clone()
+        } else if !self.project.is_empty() {
+            format!("{}: {}", self.kind.device_label(), self.project)
         } else {
-            self.kind.device_text()
+            self.kind.device_text().to_owned()
         }
     }
 }
@@ -177,7 +198,13 @@ impl AttentionInbox {
             Some(other) => other.to_string(),
         };
         let kind = AlertKind::parse(v.get("k").and_then(|k| k.as_str()));
-        Some(Alert { message: to_ascii(&field("m"), MESSAGE_LIMIT), session: field("s"), kind, at: mtime })
+        Some(Alert {
+            message: to_ascii(&field("m"), MESSAGE_LIMIT),
+            session: field("s"),
+            kind,
+            project: to_ascii(&field("p"), PROJECT_LIMIT),
+            at: mtime,
+        })
     }
 
     /// Consume every `clear-<sid>` file: `{sid: mtime}`.
@@ -296,7 +323,7 @@ impl AttentionState {
         let mut f = AttentionFields::default();
         if self.alert_unsent {
             f.beep = beep_on;
-            f.message = self.alert.as_ref().map(|a| a.device_message().to_owned());
+            f.message = self.alert.as_ref().map(Alert::device_message);
         }
         f.clear = self.clear_unsent;
         f
@@ -358,7 +385,13 @@ mod tests {
     }
 
     fn raised(session: &str, at: SystemTime) -> Alert {
-        Alert { message: "Approve?".into(), session: session.into(), kind: AlertKind::Permission, at }
+        Alert {
+            message: "Approve?".into(),
+            session: session.into(),
+            kind: AlertKind::Permission,
+            project: String::new(),
+            at,
+        }
     }
 
     #[test]
@@ -428,7 +461,7 @@ mod tests {
     }
 
     fn alert(sid: &str, msg: &str, at: SystemTime) -> Alert {
-        Alert { message: msg.into(), session: sid.into(), kind: AlertKind::Permission, at }
+        Alert { message: msg.into(), session: sid.into(), kind: AlertKind::Permission, project: String::new(), at }
     }
 
     #[test]
@@ -490,11 +523,54 @@ mod tests {
     }
 
     #[test]
+    fn device_names_the_waiting_project() {
+        let at = SystemTime::now();
+        let line = |kind, session: &str, project: &str| {
+            let mut st = AttentionState::default();
+            let alert =
+                Alert { message: "hook text".into(), session: session.into(), kind, project: project.into(), at };
+            st.ingest(Some(alert), &HashMap::new());
+            st.fields(false).message.unwrap()
+        };
+        assert_eq!(line(AlertKind::Permission, "a", "my-project"), "Permission: my-project");
+        assert_eq!(line(AlertKind::Other, "a", "my-project"), "Permission: my-project");
+        assert_eq!(line(AlertKind::Question, "a", "api"), "Question: api");
+        assert_eq!(line(AlertKind::Idle, "a", "api"), "Waiting: api");
+        assert_eq!(line(AlertKind::Elicitation, "a", "api"), "MCP: api");
+        // No project recorded (older hooks, or `alert_project = off`): the fixed line.
+        assert_eq!(line(AlertKind::Permission, "a", ""), "Permission needed!");
+        // The test alert keeps its own text.
+        assert_eq!(line(AlertKind::Permission, TEST_SESSION, "my-project"), "hook text");
+    }
+
+    #[test]
+    fn project_is_read_folded_and_capped() {
+        let d = tmpdir("project");
+        let inbox = AttentionInbox::new(&d);
+        let take = |body: &str| {
+            fs::write(d.join("attention"), body).unwrap();
+            inbox.take_alert(SystemTime::now()).unwrap()
+        };
+        let a = take(r#"{"k":"question","m":"Which?","s":"s1","p":"Café  déjà"}"#);
+        assert_eq!((a.kind, a.project.as_str()), (AlertKind::Question, "Cafe deja"));
+        let long = format!(r#"{{"k":"permission","m":"","s":"s1","p":"{}"}}"#, "x".repeat(60));
+        let a = take(&long);
+        assert_eq!(a.project.len(), PROJECT_LIMIT);
+        assert!(a.project.ends_with("..."));
+        // An attention file from before `p` existed.
+        assert_eq!(take(r#"{"k":"permission","m":"hi","s":"s1"}"#).project, "");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn device_shows_a_fixed_line_per_kind() {
         let at = SystemTime::now();
         let line = |kind, session: &str, message: &str| {
             let mut st = AttentionState::default();
-            st.ingest(Some(Alert { message: message.into(), session: session.into(), kind, at }), &HashMap::new());
+            st.ingest(
+                Some(Alert { message: message.into(), session: session.into(), kind, project: String::new(), at }),
+                &HashMap::new(),
+            );
             st.fields(false).message.unwrap()
         };
         let hook_text = "Claude needs your permission to use Bash";

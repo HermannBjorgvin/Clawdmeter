@@ -1,0 +1,5 @@
+# A weekly-only account with a Fable reading: the Fable card in the second slot.
+{"name":"week 98, Fable 44","hold_ms":4000,"s":0,"sr":-1,"w":98.0,"wr":6100,"wf":44,"acct":"week","st":"allowed","ok":true,"t":1785474000,"tf":24,"a":0,"e":"s","es":1,"n":1}
+{"name":"week 40, no Fable reading","hold_ms":4000,"s":0,"sr":-1,"w":40.0,"wr":6099,"acct":"week","st":"allowed","ok":true,"t":1785474004,"tf":24,"a":0,"e":"s","es":1,"n":1}
+{"name":"Fable past its limit","hold_ms":4000,"s":0,"sr":-1,"w":70.0,"wr":6098,"wf":112,"acct":"week","st":"allowed","ok":true,"t":1785474008,"tf":24,"a":0,"e":"s","es":1,"n":1}
+{"name":"5-hour account: strip stays","hold_ms":4000,"s":20,"sr":200,"w":60.0,"wr":6097,"wf":44,"st":"allowed","ok":true,"t":1785474012,"tf":24,"a":0,"e":"s","es":1,"n":1}

@@ -1,0 +1,16 @@
+# Pet build tour: seat, peek with stats and species taps, two alerts named
+# after their project, a show, the screensaver, 100 %, a reset. About 110 s:
+#   SIM_FAST=1 SIM_SCENARIO=sim/pets-tour.jsonl \
+#   SIM_TAPS="6500@240,240;10500@440,400;12500@440,400;14500@40,400;17500@240,240" \
+#   .pio/build/sim_pets/program
+{"name":"idle in the seat","hold_ms":5000,"s":22.0,"sr":240,"w":12.0,"wr":9000,"st":"allowed","ok":true,"t":1785474000,"tf":24,"a":0,"e":"s","es":1,"n":1}
+{"name":"tap: peek, stats, species","hold_ms":17000,"s":23.0,"sr":239,"w":12.0,"wr":8999,"st":"allowed","ok":true,"a":1,"e":"p","es":2,"n":1,"t":1785474005,"tf":24}
+{"name":"permission alert","hold_ms":8000,"s":24.0,"sr":238,"w":12.0,"wr":8998,"st":"allowed","ok":true,"a":1,"e":"p","es":2,"n":2,"m":"Permission: Clawdmeter","b":true,"t":1785474022,"tf":24}
+{"name":"answered in the terminal","hold_ms":4000,"s":24.0,"sr":238,"w":12.0,"wr":8997,"st":"allowed","ok":true,"a":1,"e":"p","es":2,"n":2,"x":true,"t":1785474030,"tf":24}
+{"name":"question alert","hold_ms":8000,"s":25.0,"sr":237,"w":12.0,"wr":8996,"st":"allowed","ok":true,"a":1,"e":"p","es":2,"n":2,"m":"Question: claude-desktop-buddy","b":true,"t":1785474034,"tf":24}
+{"name":"answered in the terminal","hold_ms":4000,"s":25.0,"sr":237,"w":12.0,"wr":8995,"st":"allowed","ok":true,"a":1,"e":"p","es":2,"n":2,"x":true,"t":1785474042,"tf":24}
+{"name":"busy stretch: a show","hold_ms":14000,"s":31.0,"sr":235,"w":13.0,"wr":8994,"st":"allowed","ok":true,"a":3,"e":"p","es":3,"n":2,"t":1785474046,"tf":24}
+{"name":"quiet: wave, then screensaver","hold_ms":30000,"s":34.0,"sr":233,"w":14.0,"wr":8993,"st":"allowed","ok":true,"a":0,"e":"s","es":4,"n":0,"t":1785474060,"tf":24}
+{"name":"prompt: wakes the screensaver","hold_ms":6000,"s":34.0,"sr":230,"w":14.0,"wr":8992,"st":"allowed","ok":true,"a":1,"e":"p","es":5,"n":1,"t":1785474090,"tf":24}
+{"name":"limit reached: dizzy","hold_ms":6000,"s":100.0,"sr":1,"w":40.0,"wr":8000,"st":"allowed","ok":true,"a":1,"e":"p","es":5,"n":1,"t":1785474096,"tf":24}
+{"name":"fresh window: celebrate","hold_ms":8000,"s":0.0,"sr":300,"w":40.0,"wr":7999,"st":"allowed","ok":true,"c":true,"a":0,"e":"s","es":6,"n":1,"t":1785474102,"tf":24}

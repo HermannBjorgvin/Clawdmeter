@@ -760,6 +760,16 @@ static bool codex_resets_card(const UsageData* d) {
     return d->codex && d->weekly_only && d->resets_held >= 0;
 }
 
+// An account with no 5-hour limit and a Fable reading: the second card,
+// otherwise hidden, is Fable's own meter (its % of its own limit, in the
+// Fable colour, over the week's reset countdown: Fable's window is the
+// week). The strip in the weekly bar goes while the card shows. Not on a
+// 1-bit panel, which draws no Fable colour.
+static bool fable_card(const UsageData* d) {
+    return d->weekly_only && !d->codex && !d->enterprise && d->fable_pct >= 0
+        && !board_caps().mono_panel;
+}
+
 // The first of `texts` that fits `w` in `font`, else the last.
 static const char* first_fitting(const lv_font_t* font, const char* const* texts, int n, int w) {
     for (int i = 0; i < n - 1; i++)
@@ -901,13 +911,19 @@ static void apply_bar_colors(const UsageData* data) {
         return;
     }
     if (data->weekly_only) {
-        // No 5-hour limit: the first card is the week, the second is hidden.
+        // No 5-hour limit: the first card is the week, the second is hidden,
+        // or Fable's (fable_card), which takes the strip's place.
         lv_obj_set_style_bg_color(bar_session,
             bar_color(data->session_pct, data->session_reset_mins, PACE_WEEK_MINS), LV_PART_INDICATOR);
         place_pace_tick(tick_session, pace_elapsed_pct(data->session_reset_mins, PACE_WEEK_MINS));
         place_pace_tick(tick_weekly, -1.0f);
-        place_fable(fable_session, data->fable_pct, (int)(data->session_pct + 0.5f));
         hide_fable(fable_weekly);
+        if (fable_card(data)) {
+            hide_fable(fable_session);
+            lv_obj_set_style_bg_color(bar_weekly, lv_color_hex(theme_fable_hex()), LV_PART_INDICATOR);
+        } else {
+            place_fable(fable_session, data->fable_pct, (int)(data->session_pct + 0.5f));
+        }
         return;
     }
     hide_fable(fable_session);
@@ -980,7 +996,8 @@ void ui_update(const UsageData* data) {
     const bool resets_card = codex_resets_card(data);
     // No 5-hour limit: the one card left sits in the middle of the space the
     // two cards take, unless a Codex account's Resets card takes the second.
-    const bool lone = data->weekly_only && !resets_card;
+    const bool fable = fable_card(data);
+    const bool lone = data->weekly_only && !resets_card && !fable;
 
     // LVGL skips the set when the position hasn't changed.
     if (panel_session)
@@ -1035,6 +1052,14 @@ void ui_update(const UsageData* data) {
         apply_period_colors(data);
     } else if (resets_card) {
         draw_resets_card(data);
+    } else if (fable) {
+        const int f_pct = data->fable_pct;
+        lv_label_set_text(lbl_weekly_label, "Fable");
+        lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", f_pct);
+        lv_bar_set_value(bar_weekly, f_pct > 100 ? 100 : f_pct, LV_ANIM_ON);
+        format_reset_time(data->session_reset_mins, buf, sizeof(buf), "---");
+        lv_obj_set_style_text_font(lbl_weekly_reset, L.reset_font, 0);
+        lv_label_set_text(lbl_weekly_reset, buf);
     } else {
         int w_pct = (int)(data->weekly_pct + 0.5f);
         lv_label_set_text(lbl_weekly_label, L.pills[1]);

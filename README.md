@@ -9,6 +9,93 @@
 
 Clawdmeter shows your Claude Code usage limits on an [ESP32 development board](#supported-boards) on your desk. Clawd lives on the device. He reacts to prompts, cheers you on, and alerts you when a session needs your attention.
 
+## This fork: ASCII pets on the 4-inch Waveshare screen
+
+This is a fork of [HermannBjorgvin/Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter).
+It adds a pet build of the firmware for the Waveshare ESP32-S3-Touch-LCD-4
+and a few changes for an account with no 5-hour limit. Everything below this
+section is the original README; the stock firmware and app still build from
+this tree unchanged.
+
+### What it changes
+
+- **ASCII pets in place of Clawd.** The 18 pets from
+  [claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy)
+  (MIT) sit in Clawd's corner of the meters and follow what Claude Code is
+  doing: idle, busy, attention on an alert, celebrate on a reset, dizzy at
+  100 %.
+- **Pet screensaver and peek.** The screensaver is the pet, large and asleep
+  on black. A tap on the meters brings it up awake with its stats; a tap in
+  the left or right third of the screen changes the species.
+- **Pet stats.** Level and "fed" grow as the usage meter rises (on an account
+  with no 5-hour limit: a level per full week, a pip per 10 %). Mood follows
+  how quickly alerts are answered, energy follows naps on the screensaver.
+- **Alerts name the session.** The alert line reads `Permission: my-project`
+  or `Question: my-project`, using the name of the session's working
+  directory, so you know which terminal is waiting. `alert_project = off` in
+  the app's config restores the fixed lines.
+- **A Fable card.** On an account with no 5-hour limit, the free second card
+  shows Fable's weekly limit as its own meter, in place of the strip inside
+  the Weekly bar.
+
+The pet build is a compile-time option (`-DPET_ASCII`, environments
+`waveshare_lcd_4_pets` and `sim_pets`). Design, states and the stats rules
+are in [docs/pets.md](docs/pets.md).
+
+### Materials
+
+- **Screen:** Waveshare ESP32-S3-Touch-LCD-4, 480×480, tested on the V4.0
+  revision. Pinout, schematic and revisions are on the
+  [Waveshare wiki](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-4).
+- **Case:** [Clawdmeter case for the 4-inch screen](https://makerworld.com/en/models/3367042-clawdmeter-case-4-inch-screen#profileId-3829075)
+  on MakerWorld, to 3D-print.
+- A USB-C data cable. The board is meant to stay on USB power.
+
+### Install (macOS, from source)
+
+The fork publishes no releases, so both halves are built here. You need
+[PlatformIO](https://platformio.org/install/cli), Rust (the toolchain in
+`desktop/rust-toolchain.toml` installs itself) and Xcode with its Metal
+Toolchain (`xcodebuild -runFirstLaunch`, then
+`xcodebuild -downloadComponent MetalToolchain`).
+
+1. **Flash the board.** Plug it in by its USB port, then:
+
+   ```bash
+   pio run -d firmware -e waveshare_lcd_4_pets -t upload
+   ```
+
+   If the upload can't connect, hold **BOOT**, press and release **PWR**
+   (the reset key on this board), release **BOOT**, and run it again; press
+   **PWR** afterwards to start the firmware.
+
+2. **Build and install the app.**
+
+   ```bash
+   tools/packaging/local-mac-app.sh
+   cp -R desktop/target/dist/Clawdmeter.app /Applications/
+   ```
+
+   Open it from Applications. The first launch is blocked (the app is only
+   ad-hoc signed): **System Settings → Privacy & Security → Open Anyway**,
+   then allow Bluetooth access.
+
+3. **Skip the firmware step in setup and don't use the Flash page.** The app
+   sees the board as a stock `waveshare_lcd_4` and would replace the pet
+   build with the official firmware. Add `update_check = off` to
+   `~/.config/clawdmeter/config` to stop the update prompts.
+
+4. **Pair.** System Settings → Bluetooth → **Connect** next to
+   **Clawdmeter**.
+
+5. **Install the hooks.** Open **Hooks** in the app, review the changes to
+   Claude Code's `settings.json` and save. Sessions already running pick the
+   hooks up after a restart.
+
+To try the pet build without a board:
+`pio run -d firmware -e sim_pets && (cd firmware && .pio/build/sim_pets/program)`.
+`firmware/sim/pets-tour.jsonl` is a two-minute tour of everything above.
+
 ## Supported boards
 
 ### Flagship
@@ -121,6 +208,7 @@ Stable.
 - [Add a board](docs/porting/adding-a-board.md): hardware ports and app integration.
 - [BLE protocol](docs/protocol.md): payload fields and notifications.
 - [Clawd's director](docs/clawd-director.md): behavior and character rules.
+- [ASCII pets](docs/pets.md): the pet build of the firmware.
 - [Legacy daemon parity](docs/daemon-parity.md): upgrade steps and implementation differences.
 
 ## Licensing gray area warning

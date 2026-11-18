@@ -9,6 +9,9 @@
 #include "minimal_mode.h"
 #include "hal/board_caps.h"
 #include "usage_rate.h"
+#ifdef PET_ASCII
+#include "pet/pet_face.h"
+#endif
 #include <Arduino.h>
 #include <lvgl.h>
 #include <string.h>
@@ -255,6 +258,14 @@ void director_tap(int x) {
         return;
     }
     if (beat == B_PEEK) {
+#ifdef PET_ASCII
+        // A pet build: a tap at either side of the peek changes the species
+        // and the pet stays up.
+        if (pet_face_tap(x)) {
+            Serial.printf("[%lu] director: tap at x %d -> species\n", (unsigned long)now_ms(), x);
+            return;
+        }
+#endif
         // The face is up (or coming up) looking at you: he blinks and drops
         // right away. Before it shows (hop, ducking out) the tap is
         // absorbed: nothing queues.

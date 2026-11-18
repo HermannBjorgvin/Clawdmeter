@@ -503,6 +503,10 @@ pub struct Settings {
     pub skipped_firmware: Option<String>,
     /// Which kinds of "Claude needs you" alert reach the device and tray.
     pub alert_on: AlertOn,
+    /// Name the waiting session's project in the device's alert line
+    /// (`alert_project`, default on): `Permission: my-project` in place of
+    /// `Permission needed!`.
+    pub alert_project: bool,
     /// How lively Clawd is on the device (`lv`, 1-5, default 3).
     pub liveliness: u8,
     /// How long Clawd points and waves for an alert (`aa`, default 2m).
@@ -678,6 +682,7 @@ impl Settings {
             skipped_update: cfg.get("skipped_update").filter(|s| !s.is_empty()).map(str::to_owned),
             skipped_firmware: cfg.get("skipped_firmware").filter(|s| !s.is_empty()).map(str::to_owned),
             alert_on: cfg.get("alert_on").map(AlertOn::parse).unwrap_or_default(),
+            alert_project: on_off(cfg.get("alert_project"), true),
             liveliness: cfg.get("liveliness").map(parse_liveliness).unwrap_or(DEFAULT_LIVELINESS),
             attention_anim: cfg.get("attention_anim").map(AttentionAnim::parse).unwrap_or_default(),
             pace_marker: on_off(cfg.get("pace_marker"), false),
@@ -783,6 +788,7 @@ impl Settings {
             ("alert_chime", "beep", self.alert_chime, current.alert_chime),
             ("desktop_chime", "", self.desktop_chime, current.desktop_chime),
             ("pace_marker", "", self.pace_marker, current.pace_marker),
+            ("alert_project", "", self.alert_project, current.alert_project),
             ("menu_bar_usage", "", self.menu_bar_usage, current.menu_bar_usage),
         ] {
             if now != was {
@@ -1299,6 +1305,20 @@ mod tests {
         s.pace_marker = true;
         s.apply_to(&mut cfg, &paths());
         assert_eq!(cfg.get("pace_marker"), Some("on"));
+    }
+
+    #[test]
+    fn alert_project() {
+        assert!(settings("").alert_project, "on by default");
+        assert!(!settings("alert_project = off\n").alert_project);
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("alert_project").is_none(), "the default stays out of the file");
+        s.alert_project = false;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("alert_project"), Some("off"));
     }
 
     #[test]

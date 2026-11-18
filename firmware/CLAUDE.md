@@ -32,6 +32,10 @@ pins and hardware gotchas, which loads when you work in that folder.
   rather than checking the level elsewhere. The module map, every beat, the
   tunables and the C6 differences are in `docs/clawd-director.md`: read it
   before changing what Clawd does, and update it with the change.
+- **ASCII pets** (`-DPET_ASCII`, envs `sim_pets` and `waveshare_lcd_4_pets`):
+  `src/pet/` stands in for `mascot.cpp`, `performer.cpp` and `face.cpp`, which
+  those envs leave out. Read `docs/pets.md` before changing `mascot.h`,
+  `performer.h` or `face.h`: the pet modules implement them too.
 - **Meters**: `ui.cpp` draws only the meters, where `layout.cpp` says.
   `layout_compute()` derives every position and font from `BoardCaps`'
   width, height and `round_panel`: the largest of three tuned designs that

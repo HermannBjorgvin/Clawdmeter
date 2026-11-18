@@ -118,8 +118,9 @@ hooks or Start at login; on Windows, extract it from the zip first.
 Hooks let Clawd react to activity and show alerts. The local event log
 contains timestamps, event types, and session IDs. Alerts also store the
 notification message or the first question from `AskUserQuestion`, which
-is sent to the device. Prompt text and full tool-call payloads are not
-written to the event log.
+is sent to the device, and the name of the session's working directory,
+which the device shows so you know which session is waiting (`alert_project`).
+Prompt text and full tool-call payloads are not written to the event log.
 
 Usage meters work without hooks. Use **Send a test alert** to check the
 app-to-device alert path; it does not test whether Claude Code invoked a hook.
@@ -194,6 +195,12 @@ fill until the next full usage reading, near the end of that window at the
 latest. With no Fable reading yet there's no strip. The e-paper board
 doesn't draw it.
 
+On an account with no 5-hour limit, the second card is free, so Fable gets
+it in place of the strip: a **Fable** card with Fable's percentage of its
+own limit, a bar in the Fable colour (full at 100 % and past it) and the
+week's reset countdown. With no Fable reading the Weekly card sits alone,
+as before.
+
 **Codex accounts (a trial).** With the Codex CLI signed in to ChatGPT, its
 folder (`~/.codex`, or `$CODEX_HOME`) is picked up as an account on its own;
 the Accounts page's **Add account folder…** takes other Codex folders too (a
@@ -217,9 +224,11 @@ his seat.
 Tap the meters to bring Clawd's face up to the glass; tap again to send him
 back. A tap that wakes a sleeping panel only wakes it.
 
-The device names what the session is waiting for in one short line:
-**Question for you**, **Permission needed!**, **Waiting for you!** (an idle
-prompt) or **MCP request!**. The test alert says **Clawdmeter test alert**.
+The device names what the session is waiting for, and which project it is
+in, in one short line: **Question: my-project**, **Permission: my-project**,
+**Waiting: my-project** (an idle prompt) or **MCP: my-project**. Without a
+project (or with `alert_project = off`) it reads **Question for you**,
+**Permission needed!**, **Waiting for you!** or **MCP request!**. The test alert says **Clawdmeter test alert**.
 
 A tap or the device's two-minute timeout dismisses the alert on the device
 and tells the app to clear it from the tray too. Answering also clears the
@@ -326,6 +335,7 @@ seconds and preserves comments and unknown keys when saving.
 | `update_check` | `on` | Check for firmware and app releases daily. |
 | `skipped_update` | unset | The app release you chose to skip, such as `v2.5.0`. The sidebar stops mentioning it; a later release is announced again. |
 | `skipped_firmware` | unset | The firmware release you skipped on the Overview, such as `v2.5.0`. The Overview and the Flash item stop mentioning it; the Device page and the tray menu still offer it, and a later release is announced again. |
+| `alert_project` | `on` | Name the session that is waiting in the device's alert line: `Permission: my-project` (the name of the session's working directory) in place of `Permission needed!`. `off` keeps the fixed lines. Alerts raised by hooks from before this setting carry no project and show the fixed line. |
 | `alert_on` | `permission, question, elicitation` | Which waits alert on the device and tray: `permission`, `question`, `idle`, `elicitation` (MCP input), or `none`. Set on the Hooks page. Other notification types follow `permission`. |
 | `release_repo` | `HermannBjorgvin/Clawdmeter` | GitHub repository used for firmware releases. |
 | `onboarding_done` | unset | `true` after setup is finished or skipped. |

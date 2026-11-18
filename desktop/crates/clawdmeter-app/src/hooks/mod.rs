@@ -6,8 +6,10 @@
 //! (`~/.config/clawdmeter`, `%LOCALAPPDATA%\Clawdmeter` on Windows):
 //!
 //! * `alert` writes `attention` (`{"k": kind, "m": message, "s": session
-//!   id}`, one line; the kind lets the daemon drop alert types the user
-//!   turned off, see [`clawdmeter_core::attention::AlertKind`]);
+//!   id, "p": project}`, one line; the kind lets the daemon drop alert types
+//!   the user turned off, see [`clawdmeter_core::attention::AlertKind`]; the
+//!   project is the name of the session's working directory, present only
+//!   when the hook input has one, so the device can say which session waits);
 //! * `clear` touches `clear-<session id>`;
 //! * `event` appends `<unix_ts> <hook_event_name> <session_id>` to
 //!   `events.log`, rolling it to `events.log.1` past 256 KB.
@@ -16,7 +18,7 @@
 //! event name and session id are recorded, never the prompt or the tool call.
 //! Hook stdout can reach the model, so the hook prints nothing and always
 //! exits 0. The file formats match the legacy `attention-hook.sh` byte for
-//! byte apart from the alert's `k`, which older readers ignore.
+//! byte apart from the alert's `k` and `p`, which older readers ignore.
 
 pub mod install;
 
@@ -148,6 +150,15 @@ fn log_event(v: &Value, dir: &Path, now_unix: u64) -> io::Result<()> {
     OpenOptions::new().create(true).append(true).open(&f)?.write_all(line.as_bytes())
 }
 
+/// The project a hook input comes from: the last component of the session's
+/// working directory (`cwd`), which is what tells two waiting sessions apart
+/// on the device. `None` without a usable `cwd` (the alert then has no `p`,
+/// exactly as before).
+fn project_of(cwd: Option<&Value>) -> Option<String> {
+    let name = Path::new(cwd?.as_str()?).file_name()?.to_str()?;
+    (!name.is_empty() && !name.chars().any(char::is_control)).then(|| name.to_owned())
+}
+
 /// The attention file's text: jq -c '{m: (.message // .tool_input.questions[0].question // ""), s: .session_id}',
 /// plus `k`, the alert kind.
 pub fn alert_json(v: &Value) -> Option<String> {
@@ -167,6 +178,9 @@ pub fn alert_json(v: &Value) -> Option<String> {
     out.insert("k".into(), Value::String(kind.as_str().into()));
     out.insert("m".into(), m);
     out.insert("s".into(), s);
+    if let Some(p) = project_of(obj.get("cwd")) {
+        out.insert("p".into(), Value::String(p));
+    }
     // jq escapes DEL; serde_json writes it raw. DEL only occurs inside strings.
     Some(Value::Object(out).to_string().replace('\u{7f}', "\\u007f") + "\n")
 }
@@ -304,6 +318,17 @@ mod tests {
             alert_json(&json!({"tool_input": {"questions": []}})).unwrap(),
             "{\"k\":\"permission\",\"m\":\"\",\"s\":null}\n"
         );
+        // The session's working directory adds its last component as `p`.
+        let in_project = json!({"message": "Approve?", "session_id": "s3", "cwd": "/home/me/code/my-project"});
+        assert_eq!(
+            alert_json(&in_project).unwrap(),
+            "{\"k\":\"permission\",\"m\":\"Approve?\",\"s\":\"s3\",\"p\":\"my-project\"}\n"
+        );
+        // No usable directory name: no `p`, the body as it always was.
+        for cwd in [json!("/"), json!(""), json!(7), json!(null), json!("/home/me/bad\nname")] {
+            let v = json!({"message": "Approve?", "session_id": "s3", "cwd": cwd});
+            assert_eq!(alert_json(&v).unwrap(), "{\"k\":\"permission\",\"m\":\"Approve?\",\"s\":\"s3\"}\n");
+        }
         // jq errors on these, so the script writes nothing.
         assert_eq!(alert_json(&json!({"tool_input": "x"})), None);
         assert_eq!(alert_json(&json!({"tool_input": {"questions": {"a": 1}}})), None);

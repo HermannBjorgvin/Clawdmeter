@@ -22,6 +22,7 @@
 #include "clawd_prefs.h"
 #include "perf.h"
 #include "pair_hold.h"
+#include "pet/pet_hooks.h"
 
 #include "hal/board_caps.h"
 #include "hal/display_hal.h"
@@ -472,7 +473,10 @@ void loop() {
     performer_tick();
     mascot_tick();
     director_tick();
-    if (director_take_dismissed()) ble_send_dismiss();
+    if (director_take_dismissed()) {
+        ble_send_dismiss();
+        pet_on_alert_dismissed();
+    }
     // Rotation transition (blank + ramp) would fight the idle fade — skip
     // ticks while the panel is dark. A rotation that happens during sleep
     // is detected by the next tick after wake and ramped in then.
@@ -617,12 +621,17 @@ void loop() {
             if (usage.liveliness > 0) liveliness_set(usage.liveliness);
             if (usage.attn_anim_s >= 0) attn_anim_set(usage.attn_anim_s);
             director_on_payload(&usage, &sig);
+            pet_on_payload(&usage, &sig);
             if (usage.alert_msg[0]) {
                 Serial.println("attention — mascot");
                 idle_note_activity();
                 director_alert(usage.alert_msg);
+                pet_on_alert();
             }
-            if (usage.alert_clear) director_alert_clear();
+            if (usage.alert_clear) {
+                director_alert_clear();
+                pet_on_alert_cleared();
+            }
             if (g_after != g_before)
                 Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
                     g_before, g_after, usage.session_pct);
