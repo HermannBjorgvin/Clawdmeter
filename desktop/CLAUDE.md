@@ -104,6 +104,25 @@ is faked behind `FlashHardware`.
   state and locks.
 - Config keys: `config_dirs`, `codex_dirs` (Codex homes; absent = the
   discovered default, empty = none: `Settings::apply_codex_default`),
+  `device_account` (the account the device shows, from the Accounts page's
+  Show on device / Switch automatically; absent or `auto` = the selector's
+  pick. `Engine::shown_choice` uses it while it's a listed folder with a
+  reading (a dead Codex sign-in drops it) whose last 3 polls didn't all
+  miss, else the selector's pick (which
+  keeps running underneath, and can be the chosen account itself). A miss
+  or two never moves it, as a miss never moves the automatic choice. A switch
+  to numbers read earlier goes out at once as an `rp:1` replay, even while
+  stale (once, so the board shows the app's account), and so does a
+  reconnect's resend of an account the board last had only as a replay
+  (`polled_account`); a switch made by that account's own fresh poll is a
+  poll, as automatic switches always were. The app's rate tracker starts
+  over on another Claude account's numbers (`rate_account`). The board can't
+  tell accounts apart: another Claude account's next real poll reaches its
+  rate ring, so a drop over 5 points reads as a reset there (chime if on, and
+  Clawd's reaction) and a rise as heavy use, as automatic switches always
+  did. Known gap: the shown account's cadence follows every account's
+  prompts, so a chosen account with a window running is probed as often as
+  every 2 min while another account works),
   `poll_interval`, `heartbeat_interval`,
   `reset_chime` and `alert_chime` (device chimes; the old `chime` / `beep`
   keys are read when these are absent), `desktop_chime` (the same ding on
@@ -270,7 +289,7 @@ runs or shows (bar the Accounts page's trial note).
   never see a Codex dir. The results join `PlanSelector`, but through
   `choose_preferring`: before any rise a Claude account is shown over a
   Codex one whatever the %, so Codex takes the device only when its own
-  meter rises. Codex readings never feed the rate tracker (the mood is
+  meter rises (or it's the `device_account`). Codex readings never feed the rate tracker (the mood is
   Claude's). A Codex sign-in failure (none, expired, refused) drops that
   account's reading, so it leaves the choice, and counts toward "every
   account logged out" (`codex_signed_out`).

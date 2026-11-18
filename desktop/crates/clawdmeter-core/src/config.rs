@@ -472,6 +472,12 @@ pub struct Settings {
     /// with an `auth.json`): what no `codex_dirs` key means, so saving an
     /// unchanged list doesn't pin it into the file.
     pub codex_default: Option<PathBuf>,
+    /// The account the device shows, chosen on the Accounts page
+    /// (`device_account`, a folder from `config_dirs` or `codex_dirs`).
+    /// `None` (no key, or `auto`): the account whose usage rose most
+    /// recently. The engine falls back to that choice while this one isn't
+    /// listed or can't be read ([`crate::engine::Engine`]).
+    pub device_account: Option<PathBuf>,
     /// `/usage` poll interval while a session is working (s, >= 10).
     pub poll_interval: u64,
     /// True when `poll_interval` came from the file or the env var, in which
@@ -659,6 +665,11 @@ impl Settings {
                 v
             },
             codex_default: None,
+            device_account: cfg
+                .get("device_account")
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto"))
+                .map(|s| paths.expand_tilde(s)),
             poll_interval,
             poll_interval_explicit: file_poll.is_some() || env_default.is_some(),
             heartbeat_interval,
@@ -768,6 +779,13 @@ impl Settings {
         // removed default from coming back.
         if current.codex_dirs != self.codex_dirs {
             cfg.set("codex_dirs", &list(&self.codex_dirs));
+        }
+        // Automatic is the default, so it leaves no key behind.
+        if current.device_account != self.device_account {
+            match &self.device_account {
+                Some(d) => cfg.set("device_account", &list(std::slice::from_ref(d))),
+                None => cfg.remove("device_account"),
+            }
         }
         if current.poll_interval != self.poll_interval {
             cfg.set("poll_interval", &self.poll_interval.to_string());
@@ -1008,6 +1026,32 @@ mod tests {
         let two = Settings { codex_dirs: vec![codex, PathBuf::from("/srv/codex")], ..s };
         two.apply_to(&mut cfg, &p);
         assert_eq!(cfg.get("codex_dirs"), Some("~/.codex, /srv/codex"));
+    }
+
+    // The account the device shows: a folder, or automatic (no key, `auto`
+    // or empty). Saving writes it like the folder lists and drops it for
+    // automatic.
+    #[test]
+    fn device_account() {
+        let p = paths();
+        assert_eq!(settings("").device_account, None);
+        assert_eq!(settings("device_account = auto\n").device_account, None);
+        assert_eq!(settings("device_account = Auto\n").device_account, None);
+        assert_eq!(settings("device_account =\n").device_account, None);
+        assert_eq!(settings("device_account = ~/.codex\n").device_account, Some(PathBuf::from("/home/u/.codex")));
+        assert_eq!(settings("device_account = /srv/claude\n").device_account, Some(PathBuf::from("/srv/claude")));
+
+        let mut cfg = ConfigFile::parse("clock = auto\n");
+        let mut s = Settings::from_config(&cfg, &p, None);
+        s.apply_to(&mut cfg, &p);
+        assert_eq!(cfg.get("device_account"), None, "automatic stays out of the file");
+        s.device_account = Some(PathBuf::from("/home/u/.claude-work"));
+        s.apply_to(&mut cfg, &p);
+        assert_eq!(cfg.get("device_account"), Some("~/.claude-work"));
+        assert_eq!(Settings::from_config(&cfg, &p, None).device_account, s.device_account);
+        s.device_account = None;
+        s.apply_to(&mut cfg, &p);
+        assert_eq!(cfg.get("device_account"), None, "back to automatic removes it");
     }
 
     // The Windows daemon read the token from $CLAUDE_CONFIG_DIR when set

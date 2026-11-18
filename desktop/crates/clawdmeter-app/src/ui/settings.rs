@@ -1447,8 +1447,7 @@ impl SettingsView {
             .child(para(
                 t,
                 "The default Claude Code folder is ~/.claude. Add a config folder for each other account you want \
-                 to monitor. The device follows the account whose usage increased most recently (weekly usage, on \
-                 accounts with no 5-hour limit).",
+                 to monitor.",
             ))
             .child(caption(
                 t,
@@ -1474,19 +1473,62 @@ impl SettingsView {
         let rows = self.settings.config_dirs.iter().map(|d| (d.clone(), false));
         let rows: Vec<(PathBuf, bool)> =
             rows.chain(self.settings.codex_dirs.iter().map(|d| (d.clone(), true))).collect();
+        // The account chosen for the device, from the settings so a click
+        // shows at once (the status follows within a second). One that
+        // isn't listed counts as automatic, as it does in the daemon.
+        let chosen = self.settings.device_account.clone().filter(|c| rows.iter().any(|(d, _)| d == c));
+        let auto = chosen.is_none();
+        let several = rows.len() > 1;
+        if several {
+            // Turning automatic off keeps the account on the device now.
+            let keep = rows
+                .iter()
+                .map(|(d, _)| d)
+                .find(|d| active.as_deref() == Some(d.display().to_string().as_str()))
+                .or(rows.first().map(|(d, _)| d))
+                .cloned();
+            let me = cx.entity().downgrade();
+            pane = pane.child(field(
+                t,
+                "Switch automatically",
+                "The device shows the account whose usage increased most recently. Turn off to keep the account \
+                 you choose below.",
+                toggle(t, "device-auto", auto, true, move |_, _, cx| {
+                    let keep = keep.clone();
+                    let _ = me.update(cx, |v, cx| {
+                        v.save(|s, _| s.device_account = if auto { keep } else { None });
+                        cx.notify();
+                    });
+                }),
+            ));
+        }
         for (i, (d, codex)) in rows.into_iter().enumerate() {
             let ds = d.display().to_string();
             let err = errors.iter().find(|e| e.dir == ds).cloned();
             let is_active = active.as_deref() == Some(ds.as_str());
+            let is_chosen = chosen.as_ref() == Some(&d);
             let (meta, chip) = match (&err, is_active) {
                 // Transient errors retry on their own; the rest need the user.
                 (Some(e), _) if e.retrying => (e.message.clone(), Some(pill(t, "Retrying", Tone::Warn))),
                 (Some(e), _) => (e.message.clone(), Some(pill(t, "Needs attention", Tone::Bad))),
                 (None, true) => (String::new(), Some(pill(t, "On device", Tone::Ok))),
+                (None, false) if is_chosen => (String::new(), None),
                 (None, false) if self.snap.is_some() => ("Not selected for the device".to_string(), None),
                 (None, false) => ("Start Clawdmeter to check usage.".to_string(), None),
             };
+            // The chosen account says so, whatever else its row reports
+            // (with an error, another account is on the device meanwhile).
+            let meta = match (is_chosen, meta.is_empty()) {
+                (false, _) => meta,
+                (true, true) => "Chosen for the device".to_string(),
+                (true, false) => format!("Chosen for the device. {meta}"),
+            };
+            // Any other account can be chosen; automatic already shows the
+            // one on the device.
+            let can_choose = several && !is_chosen && !(auto && is_active);
             let me = cx.entity().downgrade();
+            let show_me = me.clone();
+            let show_dir = d.clone();
             let dir = d.clone();
             list = list.child(
                 div()
@@ -1532,6 +1574,22 @@ impl SettingsView {
                             }),
                     )
                     .when_some(chip, |r, c| r.child(c))
+                    .when(can_choose, |r| {
+                        r.child(button(
+                            t,
+                            SharedString::from(format!("show-{i}")),
+                            "Show on device",
+                            ButtonKind::Small,
+                            true,
+                            move |_, _, cx| {
+                                let dir = show_dir.clone();
+                                let _ = show_me.update(cx, |v, cx| {
+                                    v.save(|s, _| s.device_account = Some(dir));
+                                    cx.notify();
+                                });
+                            },
+                        ))
+                    })
                     .child(button(
                         t,
                         SharedString::from(format!("rm-{i}")),
@@ -1544,6 +1602,10 @@ impl SettingsView {
                                 v.save(|s, _| {
                                     s.config_dirs.retain(|x| *x != dir);
                                     s.codex_dirs.retain(|x| *x != dir);
+                                    // A removed account can't stay chosen.
+                                    if s.device_account.as_ref() == Some(&dir) {
+                                        s.device_account = None;
+                                    }
                                 });
                                 cx.notify();
                             });
@@ -2783,6 +2845,32 @@ mod tests {
         click(cx, "alert-permission");
         let text = std::fs::read_to_string(&paths.config_file).unwrap();
         assert!(text.contains("alert_on = question, idle, elicitation"), "{text}");
+        let _ = std::fs::remove_dir_all(&paths.home);
+    }
+
+    // Choosing the device's account: a row's button picks it, the switch
+    // goes back to automatic or keeps one (with Clawdmeter not running, the
+    // first), and removing the chosen account goes back to automatic.
+    #[gpui::test]
+    fn the_device_account_can_be_chosen(cx: &mut TestAppContext) {
+        let paths = home("device-account");
+        let (a, b) = (paths.home.join("acct"), paths.home.join("acct2"));
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(&paths.config_file, format!("config_dirs = {}, {}\n", a.display(), b.display())).unwrap();
+        let p = paths.clone();
+        let (view, cx) = cx.add_window_view(move |_, cx| SettingsView::with_usb(p, Page::Accounts, false, cx));
+        let config = || std::fs::read_to_string(&paths.config_file).unwrap();
+        let chosen = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.settings.device_account.clone());
+        click(cx, "show-1");
+        assert!(config().contains("device_account = ~/acct2\n"), "{}", config());
+        assert_eq!(chosen(cx), Some(b.clone()));
+        click(cx, "device-auto");
+        assert!(!config().contains("device_account"), "automatic: {}", config());
+        click(cx, "device-auto");
+        assert!(config().contains("device_account = ~/acct\n"), "{}", config());
+        assert_eq!(chosen(cx), Some(a));
+        click(cx, "rm-0");
+        assert!(!config().contains("device_account"), "removed with its account: {}", config());
         let _ = std::fs::remove_dir_all(&paths.home);
     }
 
