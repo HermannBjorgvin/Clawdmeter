@@ -199,7 +199,7 @@ device shows one at a time. By default it's the latest active account: the
 one whose usage increased most recently (weekly usage, on an account with no
 5-hour limit). To keep one account on the device, pick it in the drop-down
 at the top right of the Overview, or under **Show on device** in the tray
-menu; the device switches within a couple of seconds and stays on it. Pick
+menu (its title names the current choice); the device switches within a couple of seconds and stays on it. Pick
 **Latest active account** to go back. With a single account neither shows. While the
 chosen account can't be read (not checked yet, its last three checks
 failed, or a Codex account's sign-in has ended), the device shows the automatic choice

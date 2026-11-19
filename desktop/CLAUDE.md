@@ -75,13 +75,16 @@ is faked behind `FlashHardware`.
   set but builds a new menu when `tray::MenuShape` changes; their ids are
   fixed strings (`"open"`, `"quit"`, …), so a click still matches after a
   rebuild. `Items` is per platform: on macOS the menu and the panel, plus
-  the one native part, the "Show on device" submenu appended after the
-  panel (only appended: muda counts positions without the panel, so a
-  change in the accounts builds the whole menu again). That submenu
-  (`device_menu`, `device_choices`, ids `device-auto` / `device-<index>`
-  into `Settings::accounts`) is on every platform with two or more accounts
-  (`MenuShape::device_accounts` on Linux/Windows); a pick saves
-  `device_account` through `write_settings`, like the chime.
+  the one native part, the "Show on device" submenu between the panel's
+  body and its footer (muda appends it, then `MenuHeader::install` puts the
+  body at index 0 and the footer at the end; muda never inserts or removes
+  there, since it counts positions without the panel, so a change in the
+  accounts builds the whole menu again). That submenu (`device_menu`,
+  `device_choices`, ids `device-auto` / `device-<index>` into
+  `Settings::accounts`, title "Show on device: <choice>") is on every
+  platform with two or more accounts (`MenuShape::device_accounts` on
+  Linux/Windows); a pick saves `device_account` through `write_settings`,
+  like the chime.
   `StatusSnapshot::spend` marks a spend-capped account, drawn as one Spend
   meter in the panel, the rows and the Overview),
   window (`ui/`), `daemon.rs` (drives the engine on its own thread: 0.5 s

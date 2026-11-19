@@ -164,12 +164,23 @@ fn device_menu(count: usize) -> Option<(Submenu, Vec<CheckMenuItem>)> {
     Some((menu, items))
 }
 
-/// Label and tick the submenu's items ([`device_choices`]). muda ticks a
-/// clicked item by itself; this puts the saved choice back.
-fn set_device_items(items: &[CheckMenuItem], settings: &Settings, home: &Path) {
-    for (item, (_, label, ticked)) in items.iter().zip(device_choices(settings, home)) {
+/// Title, label and tick the submenu ([`device_choices`]): its title names
+/// the choice, so the menu shows it closed. muda ticks a clicked item by
+/// itself; this puts the saved choice back.
+fn set_device_items(menu: &Submenu, items: &[CheckMenuItem], settings: &Settings, home: &Path) {
+    let choices = device_choices(settings, home);
+    menu.set_text(device_title(&choices));
+    for (item, (_, label, ticked)) in items.iter().zip(choices) {
         item.set_text(label);
         item.set_checked(ticked);
+    }
+}
+
+/// The submenu's title: "Show on device: " and the ticked choice.
+fn device_title(choices: &[(String, String, bool)]) -> String {
+    match choices.iter().find(|c| c.2) {
+        Some((_, label, _)) => format!("Show on device: {label}"),
+        None => "Show on device".to_owned(),
     }
 }
 
@@ -234,15 +245,16 @@ fn update_offer(snap: &StatusSnapshot, settings: &Settings, release_build: bool,
 
 /// The macOS menu: the drawn panel (`mac_menu`), whose footer holds the
 /// actions, and with two or more accounts a native "Show on device"
-/// submenu under it. Native items are only ever appended after the panel,
-/// never inserted or removed: muda counts positions without it. A change in
-/// the accounts builds the menu again.
+/// submenu between the panel's body and its footer. muda only appends the
+/// native items, before the panel goes in around them, and never inserts or
+/// removes one (it counts positions without the panel): a change in the
+/// accounts builds the menu again.
 #[cfg(target_os = "macos")]
 struct Items {
     menu: Menu,
     header: std::cell::RefCell<mac_menu::MenuHeader>,
-    /// The submenu's items ([`device_menu`]).
-    device: Vec<CheckMenuItem>,
+    /// The submenu and its items ([`device_menu`]).
+    device: Option<(Submenu, Vec<CheckMenuItem>)>,
     /// The accounts it was built with ([`device_accounts`]).
     device_accounts: usize,
 }
@@ -251,14 +263,13 @@ struct Items {
 impl Items {
     fn new(device_accounts: usize) -> Self {
         let menu = Menu::new();
-        let header = std::cell::RefCell::new(mac_menu::MenuHeader::install(&menu));
-        let mut device = Vec::new();
-        if let Some((submenu, items)) = device_menu(device_accounts) {
-            if let Err(e) = menu.append_items(&[&PredefinedMenuItem::separator(), &submenu]) {
+        let device = device_menu(device_accounts);
+        if let Some((submenu, _)) = &device {
+            if let Err(e) = menu.append_items(&[&PredefinedMenuItem::separator(), submenu]) {
                 log::warn!("tray menu: {e}");
             }
-            device = items;
         }
+        let header = std::cell::RefCell::new(mac_menu::MenuHeader::install(&menu));
         Items { menu, header, device, device_accounts }
     }
 
@@ -277,7 +288,9 @@ impl Items {
         let mut h = header::Header::new(snap, &paths.home, settings.pace_marker, settings.desktop_chime, refresh, now);
         h.update = offer.cloned();
         self.header.borrow_mut().update(&h);
-        set_device_items(&self.device, settings, &paths.home);
+        if let Some((submenu, items)) = &self.device {
+            set_device_items(submenu, items, settings, &paths.home);
+        }
     }
 }
 
@@ -402,8 +415,8 @@ impl Items {
         if let Some(u) = offer {
             self.update.set_text(format!("{}…", u.label()));
         }
-        if let Some((_, items)) = &self.device {
-            set_device_items(items, settings, &paths.home);
+        if let Some((submenu, items)) = &self.device {
+            set_device_items(submenu, items, settings, &paths.home);
         }
     }
 
@@ -1166,6 +1179,8 @@ mod tests {
         assert_eq!(chosen.iter().map(|c| c.2).collect::<Vec<_>>(), vec![false, false, true]);
         let elsewhere = device_choices(&settings(&format!("{two}device_account = ~/gone\n")), home);
         assert!(elsewhere[0].2, "a folder that isn't listed is the latest active account");
+        assert_eq!(device_title(&device_choices(&settings(two), home)), "Show on device: Latest active account");
+        assert_eq!(device_title(&chosen), "Show on device: ~/.codex (Codex)", "the choice shows with the menu closed");
         assert_eq!(device_accounts(&settings(two)), 2);
         assert_eq!(device_pick("device-auto"), Some(None));
         assert_eq!(device_pick("device-12"), Some(Some(12)));
