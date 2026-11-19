@@ -2,12 +2,13 @@
 //! buttons, pills, toggles, segmented choices, a stepped slider, setting
 //! rows, icons and Clawd.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    canvas, div, fill, percentage, point, prelude::*, px, relative, rgb, size, svg, Animation, AnimationExt as _,
-    AnyView, App, Bounds, ClickEvent, Div, ElementId, Hsla, MouseButton, Rgba, SharedString, Stateful, Svg,
-    Transformation, Window,
+    anchored, canvas, deferred, div, fill, percentage, point, prelude::*, px, relative, rgb, size, svg, Animation,
+    AnimationExt as _, AnyElement, AnyView, App, Bounds, ClickEvent, Corner, Div, ElementId, FocusHandle, Hsla,
+    KeyDownEvent, MouseButton, Pixels, Rgba, SharedString, Size, Stateful, Svg, Transformation, Window,
 };
 
 use super::theme::{Theme, FONT_BODY, FONT_DISPLAY, FONT_MONO, R_ITEM, R_M, R_PILL, R_S};
@@ -54,6 +55,101 @@ pub fn menu_button(
     button_with(t, id, Some(lead), label, kind, enabled, on_click)
 }
 
+/// The open menu of a [`menu_button`], drawn over the page: a clear layer
+/// over the window that closes it on any click (so that click doesn't also
+/// land on what is under it), and the panel of `rows`, which closes on
+/// Escape too (it tracks `focus`: focus it when the menu opens). The panel
+/// hangs from where these elements are laid out by its `corner`: put them
+/// right after the button, in a column that lines them up with the button's
+/// left edge (`Corner::TopLeft`) or right edge (`Corner::TopRight`, with
+/// `items_end`).
+pub fn popover_menu(
+    t: &Theme,
+    id: &str,
+    focus: &FocusHandle,
+    viewport: Size<Pixels>,
+    corner: Corner,
+    rows: impl IntoIterator<Item = AnyElement>,
+    on_close: impl Fn(&mut Window, &mut App) + 'static,
+) -> [AnyElement; 2] {
+    let close = Rc::new(on_close);
+    let on_down = close.clone();
+    let backdrop_id = SharedString::from(format!("{id}-backdrop"));
+    let backdrop_selector = backdrop_id.to_string();
+    let backdrop = deferred(
+        anchored().position(point(px(0.), px(0.))).child(
+            div()
+                .id(backdrop_id)
+                .debug_selector(move || backdrop_selector)
+                .w(viewport.width)
+                .h(viewport.height)
+                .occlude()
+                .on_any_mouse_down(move |_, window, cx| on_down(window, cx)),
+        ),
+    )
+    .with_priority(1);
+    let panel_id = SharedString::from(id.to_owned());
+    let panel_selector = id.to_owned();
+    let menu = deferred(
+        // Laid out after the button, so this is the gap under it.
+        anchored().anchor(corner).offset(point(px(0.), px(4.))).snap_to_window_with_margin(px(8.)).child(
+            div()
+                .id(panel_id)
+                .debug_selector(move || panel_selector)
+                .track_focus(focus)
+                .on_key_down(move |e: &KeyDownEvent, window, cx| {
+                    if e.keystroke.key == "escape" {
+                        close(window, cx);
+                    }
+                })
+                .occlude()
+                .flex()
+                .flex_col()
+                .min_w(px(260.))
+                .p(px(4.))
+                .rounded(px(R_M))
+                .border_1()
+                .border_color(t.line)
+                .bg(t.surface)
+                .shadow_lg()
+                .children(rows),
+        ),
+    )
+    .with_priority(2);
+    // The anchored panel is positioned absolutely: this empty box, laid out
+    // in flow after the button, is the point it hangs from.
+    [backdrop.into_any_element(), div().child(menu).into_any_element()]
+}
+
+/// One row of a [`popover_menu`]: `name` on the left, `hint` on the right.
+pub fn menu_row(
+    t: &Theme,
+    id: impl Into<SharedString>,
+    name: impl IntoElement,
+    hint: impl Into<SharedString>,
+    hint_color: impl Into<Hsla>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let id: SharedString = id.into();
+    let selector = id.to_string();
+    let hover = t.hover;
+    div()
+        .id(id)
+        .debug_selector(move || selector)
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(24.))
+        .h(px(34.))
+        .px(px(10.))
+        .rounded(px(R_S))
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .child(name)
+        .child(div().flex_shrink_0().text_size(px(12.5)).text_color(hint_color).child(hint.into()))
+        .on_click(on_click)
+}
+
 /// [`button`], or with `menu` a [`menu_button`] with that leading icon.
 fn button_with(
     t: &Theme,
@@ -92,9 +188,14 @@ fn button_with(
         .text_color(fg)
         .text_size(px(size))
         .whitespace_nowrap()
-        .when_some(menu.flatten(), |el, lead| el.child(icon(lead, 18., fg).ml(px(-2.)).mr(px(7.))))
-        .child(label.into())
-        .when(menu.is_some(), |el| el.child(icon("chevron-down", 15., fg).ml(px(6.)).mr(px(-4.))));
+        .when_some(menu.flatten(), |el, lead| el.child(icon(lead, 18., fg).flex_shrink_0().ml(px(-2.)).mr(px(7.))))
+        // A menu button's label (a choice, which can be long) truncates
+        // when its row is short of room; other buttons keep their size.
+        .map(|el| match menu {
+            Some(_) => el.flex_shrink().min_w_0().child(div().min_w_0().truncate().child(label.into())),
+            None => el.child(label.into()),
+        })
+        .when(menu.is_some(), |el| el.child(icon("chevron-down", 15., fg).flex_shrink_0().ml(px(6.)).mr(px(-4.))));
     if enabled {
         let handler: Handler = Box::new(on_click);
         el.cursor_pointer().hover(move |s| s.bg(hover_bg)).on_click(move |e, w, cx| handler(e, w, cx))

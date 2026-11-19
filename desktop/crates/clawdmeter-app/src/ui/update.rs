@@ -16,14 +16,13 @@ use std::sync::Arc;
 
 use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::release::{self, AppPackage, ReleaseNotes};
-use gpui::{
-    anchored, deferred, div, point, prelude::*, px, AnyElement, Context, Corner, EventEmitter, FocusHandle,
-    KeyDownEvent, SharedString, Window,
-};
+use gpui::{div, prelude::*, px, AnyElement, Context, Corner, EventEmitter, FocusHandle, SharedString, Window};
 
 use super::settings::write_settings;
-use super::theme::{Theme, R_M, R_S};
-use super::widgets::{bar, button, card, heading, menu_button, notice, para, subheading, ButtonKind, Tone};
+use super::theme::Theme;
+use super::widgets::{
+    bar, button, card, heading, menu_button, menu_row, notice, para, popover_menu, subheading, ButtonKind, Tone,
+};
 use super::{live_status, run_blocking, Navigate, REFRESH};
 use crate::{ipc, Page};
 
@@ -514,23 +513,7 @@ impl UpdateView {
     /// packages, the one this install came from marked. A click outside it
     /// or Escape closes it.
     fn package_menu(&self, t: &Theme, tag: &str, window: &Window, cx: &mut Context<Self>) -> [AnyElement; 2] {
-        // A clear layer over the window takes the click that closes the
-        // menu, so that click doesn't also land on what is under it.
-        let viewport = window.viewport_size();
-        let backdrop = deferred(
-            anchored().position(point(px(0.), px(0.))).child(
-                div()
-                    .id("update-menu-backdrop")
-                    .debug_selector(|| "update-menu-backdrop".into())
-                    .w(viewport.width)
-                    .h(viewport.height)
-                    .occlude()
-                    .on_any_mouse_down(cx.listener(|v, _, _, cx| v.close_menu(cx))),
-            ),
-        )
-        .with_priority(1);
-        let hover = t.hover;
-        let items = self.choices.iter().map(|&p| {
+        let rows = self.choices.iter().map(|&p| {
             let (id, name, hint) = match p {
                 AppPackage::Deb => ("update-menu-deb", ".deb", "Debian, Ubuntu"),
                 AppPackage::AppImage => ("update-menu-appimage", "AppImage", "Any distribution"),
@@ -539,48 +522,14 @@ impl UpdateView {
             };
             let (hint, hint_color) = if self.detected == Some(p) { ("This install", t.accent) } else { (hint, t.mute) };
             let owned = tag.to_owned();
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(24.))
-                .h(px(34.))
-                .px(px(10.))
-                .rounded(px(R_S))
-                .cursor_pointer()
-                .hover(move |s| s.bg(hover))
-                .child(div().text_size(px(13.5)).text_color(t.text).child(name))
-                .child(div().text_size(px(12.5)).text_color(hint_color).child(hint))
-                .on_click(cx.listener(move |v, _, _, cx| v.pick(p, owned.clone(), cx)))
+            let name = div().text_size(px(13.5)).text_color(t.text).child(name);
+            menu_row(t, id, name, hint, hint_color, cx.listener(move |v, _, _, cx| v.pick(p, owned.clone(), cx)))
+                .into_any_element()
         });
-        let menu = deferred(
-            // Laid out after the button, so this is the gap under it.
-            anchored().anchor(Corner::TopLeft).offset(point(px(0.), px(4.))).snap_to_window_with_margin(px(8.)).child(
-                div()
-                    .id("update-menu")
-                    .track_focus(&self.menu_focus)
-                    .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                        if e.keystroke.key == "escape" {
-                            v.close_menu(cx);
-                        }
-                    }))
-                    .occlude()
-                    .flex()
-                    .flex_col()
-                    .min_w(px(260.))
-                    .p(px(4.))
-                    .rounded(px(R_M))
-                    .border_1()
-                    .border_color(t.line)
-                    .bg(t.surface)
-                    .shadow_lg()
-                    .children(items),
-            ),
-        )
-        .with_priority(2);
-        [backdrop.into_any_element(), menu.into_any_element()]
+        let me = cx.entity().downgrade();
+        popover_menu(t, "update-menu", &self.menu_focus, window.viewport_size(), Corner::TopLeft, rows, move |_, cx| {
+            let _ = me.update(cx, |v, cx| v.close_menu(cx));
+        })
     }
 
     /// The release notes, one card per release.

@@ -22,16 +22,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use std::path::Path;
+
 use clawdmeter_core::{unix_now, Paths, Settings};
 #[cfg(not(target_os = "macos"))]
-use tray_icon::menu::{CheckMenuItem, MenuItem, PredefinedMenuItem};
-use tray_icon::menu::{Menu, MenuEvent};
+use tray_icon::menu::MenuItem;
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::art::{tray_icon_rgba, TrayState};
 use crate::daemon::{self, Command, DaemonHandle};
 use crate::ipc::{self, AppCommand, StatusSnapshot};
-use crate::ui::overview::{refresh_settled, refresh_state};
+use crate::ui::overview::{refresh_settled, refresh_state, LATEST_ACCOUNT};
 use crate::Page;
 
 /// Status file refresh even when nothing changed (windows use it as a
@@ -87,6 +89,9 @@ struct MenuShape {
     /// ([`update_offer`]). Flashing by hand otherwise is rare, and the
     /// window's Flash page has it.
     update: bool,
+    /// The accounts the "Show on device" submenu lists ([`device_accounts`]):
+    /// none with fewer than two.
+    device_accounts: usize,
 }
 
 #[cfg(any(not(target_os = "macos"), test))]
@@ -97,7 +102,85 @@ impl MenuShape {
             weekly: !snap.spend,
             resets: snap.shown_resets().is_some(),
             update: offer.is_some(),
+            device_accounts: 0,
         }
+    }
+}
+
+/// How many accounts the "Show on device" submenu lists: every one
+/// ([`Settings::accounts`]) when there are two or more, else none (and no
+/// submenu).
+fn device_accounts(settings: &Settings) -> usize {
+    match settings.accounts().count() {
+        n if n >= 2 => n,
+        _ => 0,
+    }
+}
+
+/// The "Show on device" submenu's items on every platform, as `(id, label,
+/// ticked)`: the latest active account (the default), then each account
+/// ([`Settings::accounts`]), Codex ones marked; the Overview's drop-down
+/// lists the same. Empty with fewer than two accounts. The ids are fixed
+/// (`device-auto`, `device-<index>`, read back by [`device_pick`]), so a
+/// click still matches after a rebuild.
+fn device_choices(settings: &Settings, home: &Path) -> Vec<(String, String, bool)> {
+    if device_accounts(settings) == 0 {
+        return Vec::new();
+    }
+    let chosen = settings.chosen_account();
+    let mut choices = vec![("device-auto".to_owned(), LATEST_ACCOUNT.to_owned(), chosen.is_none())];
+    choices.extend(settings.accounts().enumerate().map(|(i, (d, codex))| {
+        let path = crate::tilde(&d.to_string_lossy(), home);
+        let label = if codex { format!("{path} (Codex)") } else { path };
+        (format!("device-{i}"), label, chosen == Some(d))
+    }));
+    choices
+}
+
+/// The account a "Show on device" item picks: `Some(None)` for the latest
+/// active one, `Some(Some(i))` for the `i`th of [`Settings::accounts`].
+fn device_pick(id: &str) -> Option<Option<usize>> {
+    match id.strip_prefix("device-")? {
+        "auto" => Some(None),
+        n => n.parse().ok().map(Some),
+    }
+}
+
+/// The "Show on device" submenu with `count` accounts and the latest active
+/// one, its labels and ticks set by [`set_device_items`]. `None` when there
+/// is nothing to pick.
+fn device_menu(count: usize) -> Option<(Submenu, Vec<CheckMenuItem>)> {
+    if count < 2 {
+        return None;
+    }
+    let menu = Submenu::with_id("device", "Show on device", true);
+    let ids = std::iter::once("device-auto".to_owned()).chain((0..count).map(|i| format!("device-{i}")));
+    let items: Vec<CheckMenuItem> = ids.map(|id| CheckMenuItem::with_id(id, "", true, false, None)).collect();
+    for item in &items {
+        if let Err(e) = menu.append(item) {
+            log::warn!("tray menu: {e}");
+        }
+    }
+    Some((menu, items))
+}
+
+/// Title, label and tick the submenu ([`device_choices`]): its title names
+/// the choice, so the menu shows it closed. muda ticks a clicked item by
+/// itself; this puts the saved choice back.
+fn set_device_items(menu: &Submenu, items: &[CheckMenuItem], settings: &Settings, home: &Path) {
+    let choices = device_choices(settings, home);
+    menu.set_text(device_title(&choices));
+    for (item, (_, label, ticked)) in items.iter().zip(choices) {
+        item.set_text(label);
+        item.set_checked(ticked);
+    }
+}
+
+/// The submenu's title: "Show on device: " and the ticked choice.
+fn device_title(choices: &[(String, String, bool)]) -> String {
+    match choices.iter().find(|c| c.2) {
+        Some((_, label, _)) => format!("Show on device: {label}"),
+        None => "Show on device".to_owned(),
     }
 }
 
@@ -142,6 +225,8 @@ enum Click {
     /// Switch the chime on this computer (`desktop_chime`), as the
     /// Overview's switch does.
     Chime,
+    /// Show this account on the device ([`device_pick`]).
+    DeviceAccount(Option<usize>),
 }
 
 /// What the tray offers, if anything. While a release build is behind the
@@ -158,20 +243,34 @@ fn update_offer(snap: &StatusSnapshot, settings: &Settings, release_build: bool,
     snap.update_available().map(|v| Update::Firmware(display_version(v)))
 }
 
-/// The macOS menu: the drawn panel alone (`mac_menu`), whose footer holds
-/// the actions.
+/// The macOS menu: the drawn panel (`mac_menu`), whose footer holds the
+/// actions, and with two or more accounts a native "Show on device"
+/// submenu between the panel's body and its footer. muda only appends the
+/// native items, before the panel goes in around them, and never inserts or
+/// removes one (it counts positions without the panel): a change in the
+/// accounts builds the menu again.
 #[cfg(target_os = "macos")]
 struct Items {
     menu: Menu,
     header: std::cell::RefCell<mac_menu::MenuHeader>,
+    /// The submenu and its items ([`device_menu`]).
+    device: Option<(Submenu, Vec<CheckMenuItem>)>,
+    /// The accounts it was built with ([`device_accounts`]).
+    device_accounts: usize,
 }
 
 #[cfg(target_os = "macos")]
 impl Items {
-    fn new() -> Self {
+    fn new(device_accounts: usize) -> Self {
         let menu = Menu::new();
+        let device = device_menu(device_accounts);
+        if let Some((submenu, _)) = &device {
+            if let Err(e) = menu.append_items(&[&PredefinedMenuItem::separator(), submenu]) {
+                log::warn!("tray menu: {e}");
+            }
+        }
         let header = std::cell::RefCell::new(mac_menu::MenuHeader::install(&menu));
-        Items { menu, header }
+        Items { menu, header, device, device_accounts }
     }
 
     /// `pressed`: a refresh asked for and not yet served (the panel shows it
@@ -189,6 +288,9 @@ impl Items {
         let mut h = header::Header::new(snap, &paths.home, settings.pace_marker, settings.desktop_chime, refresh, now);
         h.update = offer.cloned();
         self.header.borrow_mut().update(&h);
+        if let Some((submenu, items)) = &self.device {
+            set_device_items(submenu, items, settings, &paths.home);
+        }
     }
 }
 
@@ -208,6 +310,8 @@ struct Items {
     /// The chime on this computer (`desktop_chime`): the Overview's switch.
     chime: CheckMenuItem,
     update: MenuItem,
+    /// "Show on device", with two or more accounts ([`device_menu`]).
+    device: Option<(Submenu, Vec<CheckMenuItem>)>,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -227,13 +331,18 @@ impl Items {
             refresh: MenuItem::with_id("refresh", "Refresh usage", true, None),
             chime: CheckMenuItem::with_id("chime", "Chime on this computer", true, false, None),
             update: MenuItem::with_id("update", "Update firmware…", true, None),
+            device: device_menu(shape.device_accounts),
         };
         let open = MenuItem::with_id("open", "Open Clawdmeter", true, None);
         let settings = MenuItem::with_id("settings", "Settings…", true, None);
         let quit = MenuItem::with_id("quit", "Quit Clawdmeter", true, None);
         let separator = PredefinedMenuItem::separator;
         let (sep1, sep2, sep3, sep4) = (separator(), separator(), separator(), separator());
-        let mut list: Vec<&dyn tray_icon::menu::IsMenuItem> = vec![&it.status, &it.account, &sep1];
+        let mut list: Vec<&dyn tray_icon::menu::IsMenuItem> = vec![&it.status, &it.account];
+        if let Some((submenu, _)) = &it.device {
+            list.push(submenu);
+        }
+        list.push(&sep1);
         if shape.session {
             list.push(&it.session);
         }
@@ -306,6 +415,9 @@ impl Items {
         if let Some(u) = offer {
             self.update.set_text(format!("{}…", u.label()));
         }
+        if let Some((submenu, items)) = &self.device {
+            set_device_items(submenu, items, settings, &paths.home);
+        }
     }
 
     /// What a click on item `id` asks for.
@@ -319,7 +431,7 @@ impl Items {
             "chime" => Click::Chime,
             "update" => open(update_page),
             "quit" => Click::App(AppCommand::Quit),
-            _ => return None,
+            other => return device_pick(other).map(Click::DeviceAccount),
         })
     }
 }
@@ -467,6 +579,9 @@ struct TrayApp {
     check_now: Arc<AtomicBool>,
     settings: Settings,
     settings_at: i64,
+    /// The accounts the "Show on device" items were last labelled with, so a
+    /// click picks the account it named even if the list changed since.
+    device_paths: Vec<std::path::PathBuf>,
 }
 
 impl TrayApp {
@@ -502,6 +617,26 @@ impl TrayApp {
         }
         // Show the new state at once.
         self.menu_at = 0;
+    }
+
+    /// Show `pick` on the device (`None`: the latest active account; else the
+    /// `i`th account the menu listed), as the Overview's drop-down does:
+    /// saved, so the daemon takes it at once.
+    fn choose_device_account(&mut self, pick: Option<usize>) {
+        // Put the tick where it belongs at once (muda moved it already).
+        self.menu_at = 0;
+        let choice = match pick {
+            None => None,
+            Some(i) => match self.device_paths.get(i) {
+                Some(d) => Some(d.clone()),
+                None => return,
+            },
+        };
+        let saved = choice.clone();
+        match crate::ui::settings::write_settings(&self.paths, move |s, _| s.device_account = saved) {
+            Ok(()) => self.settings.device_account = choice,
+            Err(e) => log::warn!("couldn't save device_account: {e}"),
+        }
     }
 
     /// Where the update icon or item leads: the Update page for the app,
@@ -600,7 +735,8 @@ impl TrayApp {
             self.create_tray();
         }
 
-        // Menu clicks (Linux, Windows: macOS has no native items).
+        // Menu clicks (Linux, Windows; on macOS only the "Show on device"
+        // submenu is native).
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             #[cfg(not(target_os = "macos"))]
             match Items::command(&ev.id, self.offer_page()) {
@@ -610,10 +746,13 @@ impl TrayApp {
                     }
                 }
                 Some(Click::Chime) => self.toggle_desktop_chime(),
+                Some(Click::DeviceAccount(pick)) => self.choose_device_account(pick),
                 None => {}
             }
             #[cfg(target_os = "macos")]
-            let _ = ev;
+            if let Some(pick) = device_pick(&ev.id.0) {
+                self.choose_device_account(pick);
+            }
         }
 
         // Clicks in the macOS panel.
@@ -687,7 +826,10 @@ impl TrayApp {
             // row gone or back: build the Linux/Windows menu again.
             #[cfg(not(target_os = "macos"))]
             {
-                let shape = MenuShape::of(&snap, self.offer.as_ref());
+                let shape = MenuShape {
+                    device_accounts: device_accounts(&self.settings),
+                    ..MenuShape::of(&snap, self.offer.as_ref())
+                };
                 if let (Some(t), Some(items)) = (&self.tray, &self.items) {
                     if items.shape != shape {
                         let items = Items::new(shape);
@@ -696,6 +838,20 @@ impl TrayApp {
                     }
                 }
             }
+            // An account added or removed: the macOS menu again, with or
+            // without its submenu (native items can't be removed there).
+            #[cfg(target_os = "macos")]
+            {
+                let count = device_accounts(&self.settings);
+                if let (Some(t), Some(items)) = (&self.tray, &self.items) {
+                    if items.device_accounts != count {
+                        let items = Items::new(count);
+                        t.set_menu(Some(Box::new(items.menu.clone())));
+                        self.items = Some(items);
+                    }
+                }
+            }
+            self.device_paths = self.settings.accounts().map(|(d, _)| d.clone()).collect();
             if let Some(items) = &self.items {
                 items.update(
                     &snap,
@@ -734,7 +890,7 @@ impl TrayApp {
         #[cfg(not(target_os = "macos"))]
         let items = Items::new(MenuShape::default());
         #[cfg(target_os = "macos")]
-        let items = Items::new();
+        let items = Items::new(device_accounts(&self.settings));
         let built = TrayIconBuilder::new()
             .with_id("clawdmeter")
             .with_menu(Box::new(items.menu.clone()))
@@ -907,6 +1063,7 @@ fn run_locked(paths: Paths, _lock: Option<std::fs::File>) -> i32 {
         check_now,
         settings,
         settings_at: unix_now(),
+        device_paths: Vec::new(),
     };
     // First run opens the setup wizard; without a tray the window is the app.
     if crate::onboarding::needed(&app.paths) {
@@ -995,7 +1152,39 @@ mod tests {
         assert_eq!(Items::command(&id("update"), Page::Update), open(Page::Update));
         assert_eq!(Items::command(&id("chime"), Page::Flash), Some(Click::Chime), "the Overview's switch");
         assert_eq!(Items::command(&id("quit"), Page::Flash), Some(Click::App(AppCommand::Quit)));
+        assert_eq!(Items::command(&id("device-auto"), Page::Flash), Some(Click::DeviceAccount(None)));
+        assert_eq!(Items::command(&id("device-1"), Page::Flash), Some(Click::DeviceAccount(Some(1))));
         assert_eq!(Items::command(&id("12"), Page::Flash), None);
+    }
+
+    // "Show on device": the latest active account, then every account,
+    // Codex ones marked, the saved choice ticked; nothing with one account.
+    #[test]
+    fn show_on_device_lists_every_account() {
+        let home = std::path::Path::new("/h");
+        let settings =
+            |text: &str| Settings::from_config(&clawdmeter_core::ConfigFile::parse(text), &Paths::under(home), None);
+        assert!(device_choices(&settings("config_dirs = ~/.claude\n"), home).is_empty());
+        assert_eq!(device_accounts(&settings("config_dirs = ~/.claude\n")), 0);
+        let two = "config_dirs = ~/.claude\ncodex_dirs = ~/.codex\n";
+        assert_eq!(
+            device_choices(&settings(two), home),
+            vec![
+                ("device-auto".into(), LATEST_ACCOUNT.into(), true),
+                ("device-0".into(), "~/.claude".into(), false),
+                ("device-1".into(), "~/.codex (Codex)".into(), false),
+            ]
+        );
+        let chosen = device_choices(&settings(&format!("{two}device_account = ~/.codex/\n")), home);
+        assert_eq!(chosen.iter().map(|c| c.2).collect::<Vec<_>>(), vec![false, false, true]);
+        let elsewhere = device_choices(&settings(&format!("{two}device_account = ~/gone\n")), home);
+        assert!(elsewhere[0].2, "a folder that isn't listed is the latest active account");
+        assert_eq!(device_title(&device_choices(&settings(two), home)), "Show on device: Latest active account");
+        assert_eq!(device_title(&chosen), "Show on device: ~/.codex (Codex)", "the choice shows with the menu closed");
+        assert_eq!(device_accounts(&settings(two)), 2);
+        assert_eq!(device_pick("device-auto"), Some(None));
+        assert_eq!(device_pick("device-12"), Some(Some(12)));
+        assert_eq!((device_pick("device-x"), device_pick("chime")), (None, None));
     }
 
     #[test]

@@ -7,12 +7,14 @@
 //! Open Clawdmeter on the left; on the right, an update icon (while the app
 //! or the board is behind the latest release, `tray::update_offer`), the chime on this computer (the Overview's switch),
 //! Settings, and Quit as icons, Quit at the far end and red only under the
-//! pointer. The panel is the whole macOS menu; Linux and
-//! Windows keep the native list.
+//! pointer. The panel is the macOS menu, bar the native items muda put in
+//! (a "Show on device" submenu with two or more accounts), which sit
+//! between its body and its footer; Linux and Windows keep the native list.
 //!
 //! muda has no API for an item with a view, so the panel goes into muda's
-//! NSMenu (`ContextMenu::ns_menu`) directly, at index 0. Clicks set flags
-//! the tray's tick takes ([`take_actions`]).
+//! NSMenu (`ContextMenu::ns_menu`) directly as two items: the body at index
+//! 0 and the footer at the end. With no native items they meet and read as
+//! one. Clicks set flags the tray's tick takes ([`take_actions`]).
 //!
 //! Text uses the system label colours, so it follows light and dark mode and
 //! the menu's vibrancy by itself; the bar fills are the Overview's (the
@@ -343,10 +345,14 @@ struct ResetViews {
     note: Retained<NSTextField>,
 }
 
-/// The header item and the views it updates.
+/// The panel's two items (body and footer) and the views it updates.
 pub struct MenuHeader {
     item: Retained<NSMenuItem>,
     view: Retained<HeaderView>,
+    /// The footer's item, last in the menu, and its view (its buttons'
+    /// target is the body view).
+    foot_item: Retained<NSMenuItem>,
+    foot_view: Retained<HeaderView>,
     title: Retained<NSTextField>,
     detail: Retained<NSTextField>,
     age: Retained<NSTextField>,
@@ -523,8 +529,10 @@ pub fn ns_menu(menu: &tray_icon::menu::Menu) -> Retained<NSMenu> {
 }
 
 impl MenuHeader {
-    /// Build the panel and put it at the top of muda's `menu`. Call before
-    /// appending any items, on the main thread.
+    /// Build the panel and put it in muda's `menu`: its body first, its
+    /// footer last, any items muda appended between them. Call after
+    /// appending them (muda only appends, and counts positions without the
+    /// panel), on the main thread.
     pub fn install(menu: &tray_icon::menu::Menu) -> Self {
         let mtm = MainThreadMarker::new().expect("the tray menu is built on the main thread");
         Self::install_in(mtm, &ns_menu(menu))
@@ -532,6 +540,7 @@ impl MenuHeader {
 
     fn install_in(mtm: MainThreadMarker, menu: &NSMenu) -> Self {
         let view = HeaderView::new(mtm, rect(0.0, 0.0, W, 100.0));
+        let foot_view = HeaderView::new(mtm, rect(0.0, 0.0, W, 1.0 + 2.0 * FOOT_PAD + FOOT_ROW));
         // SAFETY: AppKit's font weight constants, read on the main thread.
         let (regular, medium, semibold) = unsafe { (NSFontWeightRegular, NSFontWeightMedium, NSFontWeightSemibold) };
         let primary = NSColor::labelColor();
@@ -650,19 +659,24 @@ impl MenuHeader {
         let settings = HoverButton::new(mtm, "settings", "Settings", target, sel!(settings:));
         let quit = HoverButton::new(mtm, "power", "Quit Clawdmeter", target, sel!(quit:));
         quit.ivars().danger.set(true);
-        view.addSubview(&line);
-        view.addSubview(&open);
+        foot_view.addSubview(&line);
+        foot_view.addSubview(&open);
         for b in [&update, &chime, &settings, &quit] {
-            view.addSubview(b);
+            foot_view.addSubview(b);
         }
-        view.addSubview(&update_dot);
+        foot_view.addSubview(&update_dot);
 
         let item = NSMenuItem::new(mtm);
         item.setView(Some(&view));
         menu.insertItem_atIndex(&item, 0);
+        let foot_item = NSMenuItem::new(mtm);
+        foot_item.setView(Some(&foot_view));
+        menu.addItem(&foot_item);
         MenuHeader {
             item,
             view,
+            foot_item,
+            foot_view,
             title,
             detail,
             age,
@@ -774,13 +788,16 @@ impl MenuHeader {
         self.layout_resets(h.resets.as_ref(), METERS_Y + METER_H + METER_GAP, dark);
         let n = if h.resets.is_some() { 2.0 } else { h.meters.len().min(2) as f64 };
         let meters_end = METERS_Y + n * METER_H + (n - 1.0).max(0.0) * METER_GAP;
-        let height = self.layout_footer(h, meters_end + FOOT_GAP, dark);
-        if (self.view.frame().size.height - height).abs() > 0.5 {
-            self.view.setFrameSize(NSSize::new(W, height));
-            // Have an open menu re-measure the item (setting the same view
-            // again may be ignored).
-            self.item.setView(None);
-            self.item.setView(Some(&self.view));
+        let height = meters_end + FOOT_GAP;
+        let foot_height = self.layout_footer(h, 0.0, dark);
+        for (item, view, h) in [(&self.item, &self.view, height), (&self.foot_item, &self.foot_view, foot_height)] {
+            if (view.frame().size.height - h).abs() > 0.5 {
+                view.setFrameSize(NSSize::new(W, h));
+                // Have an open menu re-measure the item (setting the same
+                // view again may be ignored).
+                item.setView(None);
+                item.setView(Some(view));
+            }
         }
         self.shown = Some((h.clone(), dark));
     }
@@ -860,7 +877,7 @@ impl MenuHeader {
         }
     }
 
-    /// Lay out the footer from `top` (its line); the panel's height.
+    /// Lay out the footer from `top` (its line); its bottom.
     fn layout_footer(&self, h: &Header, top: f64, dark: bool) -> f64 {
         self.line.setFrame(rect(PAD, top, W - 2.0 * PAD, 1.0));
         let row = top + 1.0 + FOOT_PAD;
@@ -904,10 +921,11 @@ impl MenuHeader {
         row + FOOT_ROW + FOOT_PAD
     }
 
-    /// Render the header as a PNG on a menu-like background, in light or dark
-    /// mode (the `tray_header` example; reviews without opening the menu).
-    /// It takes the view out of its menu item, so it consumes the header:
-    /// never for the one in the tray.
+    /// Render the panel (body over footer, as with no native items between
+    /// them) as a PNG on a menu-like background, in light or dark mode (the
+    /// `tray_header` example; reviews without opening the menu). It takes
+    /// the views out of their menu items, so it consumes the header: never
+    /// for the one in the tray.
     pub fn preview_png(mut self, h: &Header, dark: bool) -> Option<Vec<u8>> {
         // SAFETY: AppKit's appearance name constants, read on the main thread.
         let name = unsafe {
@@ -919,16 +937,23 @@ impl MenuHeader {
         };
         let appearance = NSAppearance::appearanceNamed(name)?;
         self.view.setAppearance(Some(&appearance));
+        self.foot_view.setAppearance(Some(&appearance));
         self.shown = None;
         self.update(h);
-        let size = self.view.frame().size;
+        let (body, foot) = (self.view.frame().size.height, self.foot_view.frame().size.height);
         let mtm = MainThreadMarker::from(&*self.view);
         let back = bar(mtm, 0.0, &srgb(if dark { 0x2b2b2d } else { 0xececec }));
         back.setContentViewMargins(NSSize::new(0.0, 0.0));
-        back.setFrame(rect(0.0, 0.0, size.width, size.height));
+        back.setFrame(rect(0.0, 0.0, W, body + foot));
         back.setAppearance(Some(&appearance));
+        let panel = HeaderView::new(mtm, rect(0.0, 0.0, W, body + foot));
+        self.item.setView(None);
+        self.foot_item.setView(None);
         self.view.setFrameOrigin(NSPoint::new(0.0, 0.0));
-        back.setContentView(Some(&self.view));
+        self.foot_view.setFrameOrigin(NSPoint::new(0.0, body));
+        panel.addSubview(&self.view);
+        panel.addSubview(&self.foot_view);
+        back.setContentView(Some(&panel));
         let bounds = back.bounds();
         let rep = back.bitmapImageRepForCachingDisplayInRect(bounds)?;
         back.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);

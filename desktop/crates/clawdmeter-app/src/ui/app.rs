@@ -155,6 +155,14 @@ impl AppView {
         if self.flasher.read(cx).flashing() && page != self.page() {
             return;
         }
+        // An open account drop-down closes with any page switch (the tray's
+        // `show <page>` included), as the Update page's menu does.
+        self.overview.update(cx, |o, cx| {
+            if o.account_menu_open() {
+                o.set_account_menu_open(false);
+                cx.notify();
+            }
+        });
         if page == Page::Setup {
             self.setup = true;
             self.wizard.update(cx, |w, cx| w.restart(cx));
@@ -496,6 +504,107 @@ mod tests {
         view.update(cx, |v, cx| v.go(Page::Settings, cx));
         click(cx, "settings-app-update");
         view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Update));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The app window on the Overview, under `root`, with `config` and a
+    /// status showing `shown`.
+    fn overview_window<'a>(
+        cx: &'a mut TestAppContext,
+        root: &std::path::Path,
+        config: &str,
+        shown: &std::path::Path,
+    ) -> (Paths, Entity<AppView>, Entity<OverviewView>, &'a mut VisualTestContext) {
+        let _ = std::fs::remove_dir_all(root);
+        let paths = Paths::under(root);
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        std::fs::write(&paths.config_file, config).unwrap();
+        let snap = ipc::StatusSnapshot {
+            updated_at: clawdmeter_core::unix_now(),
+            account: Some(shown.display().to_string()),
+            ..Default::default()
+        };
+        ipc::write_status(&paths, &snap).unwrap();
+        let p = paths.clone();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));
+            let settings = cx.new(|cx| SettingsView::with_usb(p.clone(), Page::Device, false, cx));
+            let flasher = cx.new(|cx| FlasherView::with_hardware(p.clone(), None, Arc::new(FakeBoard::default()), cx));
+            AppView::build(p, Page::Overview, overview, settings, flasher, window, cx)
+        });
+        let overview = view.read_with(cx, |v, _| v.overview.clone());
+        (paths, view, overview, cx)
+    }
+
+    // With two or more accounts, the Overview's drop-down picks the one the
+    // device shows: a folder, or back to the latest active one. Escape or a
+    // click outside closes it.
+    #[gpui::test]
+    fn the_overview_picks_the_device_account(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("cm-app-device-account-{}", std::process::id()));
+        let (claude, codex) = (root.join("acct"), root.join("cx"));
+        let config = format!("config_dirs = {}\ncodex_dirs = {}\n", claude.display(), codex.display());
+        let (paths, view, overview, cx) = overview_window(cx, &root, &config, &claude);
+        let saved = || clawdmeter_core::Settings::load(&paths).unwrap().device_account;
+        let open = |cx: &mut VisualTestContext| overview.read_with(cx, |o, _| o.account_menu_open());
+
+        click(cx, "device-account");
+        assert!(open(cx));
+        click(cx, "device-account-1");
+        assert!(!open(cx), "a pick closes it");
+        assert_eq!(saved(), Some(codex.clone()));
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("device_account = ~/cx\n"));
+        click(cx, "device-account");
+        click(cx, "device-account-auto");
+        assert_eq!(saved(), None);
+        assert!(!std::fs::read_to_string(&paths.config_file).unwrap().contains("device_account"));
+
+        click(cx, "device-account");
+        cx.simulate_keystrokes("escape");
+        assert!(!open(cx), "Escape closes it");
+        click(cx, "device-account");
+        click(cx, "nav-accounts");
+        assert!(!open(cx), "a click outside closes it");
+        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Overview, "and doesn't land on what's under it"));
+        click(cx, "device-account");
+        view.update(cx, |v, cx| v.go(Page::Settings, cx));
+        assert!(!open(cx), "a page switch (the tray's `show settings`) closes it");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // In the narrowest window, with a long folder chosen, the drop-down's
+    // label gives way: the title keeps its room (Clawd, then at least 150
+    // px) and the refresh button stays in the window.
+    #[gpui::test]
+    fn a_long_choice_truncates_in_a_narrow_window(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("cm-app-narrow-{}", std::process::id()));
+        let (claude, long) = (root.join("acct"), root.join(".claude-work-account-with-a-long-name"));
+        let config = format!(
+            "config_dirs = {}, {}\ncodex_dirs =\ndevice_account = {}\n",
+            claude.display(),
+            long.display(),
+            long.display()
+        );
+        let (_paths, _view, _overview, cx) = overview_window(cx, &root, &config, &claude);
+        cx.simulate_resize(gpui::size(px(720.), px(640.)));
+        cx.run_until_parked();
+        let menu = cx.debug_bounds("device-account").expect("the drop-down");
+        let refresh = cx.debug_bounds("refresh").expect("the refresh button");
+        let page_left = cx.debug_bounds("nav-overview").expect("the sidebar").right() + px(32.);
+        assert!(menu.left() >= page_left + px(96. + 20. + 150.), "{menu:?} runs into the title");
+        assert!(refresh.right() <= px(720.), "{refresh:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // With one account there's nothing to pick: no drop-down.
+    #[gpui::test]
+    fn one_account_has_no_drop_down(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("cm-app-one-account-{}", std::process::id()));
+        let claude = root.join("acct");
+        let config = format!("config_dirs = {}\ncodex_dirs =\n", claude.display());
+        let (_paths, _view, _overview, cx) = overview_window(cx, &root, &config, &claude);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("device-account").is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 
