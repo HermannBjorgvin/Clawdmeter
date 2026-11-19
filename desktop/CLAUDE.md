@@ -58,7 +58,7 @@ is faked behind `FlashHardware`.
 - `clawdmeter-flash`: downloads the release `manifest.json`, matches boards by
   chip + flash size, writes with espflash.
 - `clawdmeter-app`: the `clawdmeter` binary. Tray (`tray/`, ksni on Linux;
-  on macOS the whole menu is one AppKit panel, `tray/mac_menu.rs`, put into
+  on macOS the menu is one AppKit panel, `tray/mac_menu.rs`, put into
   muda's NSMenu: the device's home screen, a reload button in its corner,
   and a footer with Open Clawdmeter and icons for an update (`tray::
   update_offer`: while the app is behind, its update, to the Update page,
@@ -74,7 +74,14 @@ is faked behind `FlashHardware`.
   muda inserts and removes by position, so the tray never edits the item
   set but builds a new menu when `tray::MenuShape` changes; their ids are
   fixed strings (`"open"`, `"quit"`, …), so a click still matches after a
-  rebuild. `Items` is per platform: on macOS just the menu and the panel.
+  rebuild. `Items` is per platform: on macOS the menu and the panel, plus
+  the one native part, the "Show on device" submenu appended after the
+  panel (only appended: muda counts positions without the panel, so a
+  change in the accounts builds the whole menu again). That submenu
+  (`device_menu`, `device_choices`, ids `device-auto` / `device-<index>`
+  into `Settings::accounts`) is on every platform with two or more accounts
+  (`MenuShape::device_accounts` on Linux/Windows); a pick saves
+  `device_account` through `write_settings`, like the chime.
   `StatusSnapshot::spend` marks a spend-capped account, drawn as one Spend
   meter in the panel, the rows and the Overview),
   window (`ui/`), `daemon.rs` (drives the engine on its own thread: 0.5 s
@@ -104,9 +111,11 @@ is faked behind `FlashHardware`.
   state and locks.
 - Config keys: `config_dirs`, `codex_dirs` (Codex homes; absent = the
   discovered default, empty = none: `Settings::apply_codex_default`),
-  `device_account` (the account the device shows, from the Accounts page's
-  Show on device / Switch automatically; absent or `auto` = the selector's
-  pick. `Engine::shown_choice` uses it while it's a listed folder with a
+  `device_account` (the account the device shows, from the Overview's
+  drop-down, `ui/overview.rs` `account_control`, or the tray's "Show on
+  device" submenu; both list `Settings::accounts` and show with two or
+  more; absent or `auto` = the selector's pick, "Latest active account".
+  Removing the account on the Accounts page clears it. `Engine::shown_choice` uses it while it's a listed folder with a
   reading (a dead Codex sign-in drops it) whose last 3 polls didn't all
   miss, else the selector's pick (which
   keeps running underneath, and can be the chosen account itself). A miss

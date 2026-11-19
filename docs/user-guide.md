@@ -195,11 +195,12 @@ latest. With no Fable reading yet there's no strip. The e-paper board
 doesn't draw it.
 
 **Several accounts.** With more than one account on the Accounts page, the
-device shows one at a time. By default it's the account whose usage
-increased most recently (weekly usage, on an account with no 5-hour limit).
-To keep one account on the device, press **Show on device** on its row; the
-device switches within a couple of seconds and stays on it. Turning
-**Switch automatically** back on returns to the automatic choice. While the
+device shows one at a time. By default it's the latest active account: the
+one whose usage increased most recently (weekly usage, on an account with no
+5-hour limit). To keep one account on the device, pick it in the drop-down
+at the top right of the Overview, or under **Show on device** in the tray
+menu; the device switches within a couple of seconds and stays on it. Pick
+**Latest active account** to go back. With a single account neither shows. While the
 chosen account can't be read (not checked yet, its last three checks
 failed, or a Codex account's sign-in has ended), the device shows the automatic choice
 instead, and goes back to the chosen account once it reads. The board can't
@@ -214,7 +215,7 @@ the Accounts page's **Add account folder…** takes other Codex folders too (a
 folder with an `auth.json` is Codex, anything else Claude Code). A Codex
 account is shown once its own usage rises and stays until another account's
 does; until then a Claude account comes first, whatever the percentages
-(**Show on device** picks one yourself). The
+(the Overview's drop-down picks one yourself). The
 device then draws white bars with a **Codex** pill and, on a weekly-only plan
 such as the $100 Pro plan, a **Resets expire** card: the count of reset
 credits still held beside a ticket, and each one's expiry date, soonest
@@ -335,7 +336,7 @@ seconds and preserves comments and unknown keys when saving.
 | `theme` | `system` | The device's colours, Clawd's included: `system` (Dark or Light, following this computer's light or dark mode, and switching when it does; `clawd`, the old default, means the same), `dark` (the board's own palette), `light`, `catppuccin_mocha`, `dracula`, `gruvbox`, `monokai`, `nord`, `one_dark`, `solarized` (Solarized Dark or Light, following the mode like `system`), `solarized_dark`, `solarized_light`, `tokyo_night`, or `custom` for the `color_*` keys below. Set with **Colors** on the Device page. |
 | `color_<name>` | the default palette | The custom theme's colours as `rrggbb` (no `#`, which starts a comment): `color_bg`, `color_panel`, `color_text`, `color_dim`, `color_accent`, `color_green`, `color_amber`, `color_red`, `color_bar_bg`, `color_clawd`, `color_eye`, `color_fable` (the Fable strip in the weekly bar). Used only with `theme = custom` and kept while a preset is chosen. Set with **Custom +** under **Colors** on the Device page (a swatch or a typed hex code). The first time, Custom starts from the theme you're on and writes all twelve keys; from then on it keeps its own colours. A custom theme saved before `color_fable` existed starts it at the Dark theme's violet. |
 | `codex_dirs` | `~/.codex` when signed in | Comma-separated Codex folders (a trial). Absent: the Codex CLI's folder (`$CODEX_HOME`, else `~/.codex`) when it has an `auth.json`; empty: none. |
-| `device_account` | `auto` | The account the device shows: one of the `config_dirs` or `codex_dirs` folders, or `auto` (the same as no key) for the account whose usage increased most recently. A folder that isn't listed is ignored, and while the chosen account can't be read (not checked yet, its last three checks failed, or a Codex account's sign-in has ended) the device shows the automatic choice. Set with **Show on device** and **Switch automatically** on the Accounts page. |
+| `device_account` | `auto` | The account the device shows: one of the `config_dirs` or `codex_dirs` folders, or `auto` (the same as no key) for the account whose usage increased most recently. A folder that isn't listed is ignored, and while the chosen account can't be read (not checked yet, its last three checks failed, or a Codex account's sign-in has ended) the device shows the automatic choice. Set with the drop-down at the top of the Overview or the tray's **Show on device** menu; removing the account from the Accounts page clears it. |
 | `poll_interval` | automatic | Override working and no-hooks polling intervals, in seconds. The scheduler enforces at least 120 seconds per account. Quiet and other-account schedules still apply. |
 | `heartbeat_interval` | `60` | Resend cached readings between usage checks. This does not fetch usage. Keep the default unless diagnosing the connection. |
 | `claude_path` | found on `PATH` | Full path to the Claude Code executable, if detection fails. |

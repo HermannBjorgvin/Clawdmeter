@@ -472,7 +472,7 @@ pub struct Settings {
     /// with an `auth.json`): what no `codex_dirs` key means, so saving an
     /// unchanged list doesn't pin it into the file.
     pub codex_default: Option<PathBuf>,
-    /// The account the device shows, chosen on the Accounts page
+    /// The account the device shows, picked on the Overview or in the tray
     /// (`device_account`, a folder from `config_dirs` or `codex_dirs`).
     /// `None` (no key, or `auto`): the account whose usage rose most
     /// recently. The engine falls back to that choice while this one isn't
@@ -626,6 +626,19 @@ fn on_off(v: Option<&str>, default: bool) -> bool {
 }
 
 impl Settings {
+    /// Every account: the Claude Code folders, then the Codex ones (`true`).
+    pub fn accounts(&self) -> impl Iterator<Item = (&PathBuf, bool)> {
+        self.config_dirs.iter().map(|d| (d, false)).chain(self.codex_dirs.iter().map(|d| (d, true)))
+    }
+
+    /// The account chosen for the device (`device_account`) as the lists
+    /// spell it (`~/b/` names `~/b`), while it's one of them; `None` is
+    /// automatic.
+    pub fn chosen_account(&self) -> Option<&PathBuf> {
+        let chosen = self.device_account.as_ref()?;
+        self.accounts().map(|(d, _)| d).find(|d| *d == chosen)
+    }
+
     /// The palette the device gets (`th`): for System (Dark or Light) and
     /// Solarized (its Dark or Light), the one the OS's `appearance` picks;
     /// the chosen preset's; or the custom colours.
@@ -1052,6 +1065,15 @@ mod tests {
         s.device_account = None;
         s.apply_to(&mut cfg, &p);
         assert_eq!(cfg.get("device_account"), None, "back to automatic removes it");
+
+        // The listed account it names, Claude Code folders first.
+        let s = settings("config_dirs = ~/.claude, ~/b\ncodex_dirs = ~/.codex\ndevice_account = ~/b/\n");
+        let accounts: Vec<(&PathBuf, bool)> = s.accounts().collect();
+        let (claude, b, codex) =
+            (PathBuf::from("/home/u/.claude"), PathBuf::from("/home/u/b"), PathBuf::from("/home/u/.codex"));
+        assert_eq!(accounts, vec![(&claude, false), (&b, false), (&codex, true)]);
+        assert_eq!(s.chosen_account().map(|d| d.to_string_lossy().into_owned()), Some("/home/u/b".into()));
+        assert_eq!(settings("device_account = ~/elsewhere\n").chosen_account(), None, "not listed: automatic");
     }
 
     // The Windows daemon read the token from $CLAUDE_CONFIG_DIR when set

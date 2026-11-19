@@ -7,8 +7,9 @@
 //! Open Clawdmeter on the left; on the right, an update icon (while the app
 //! or the board is behind the latest release, `tray::update_offer`), the chime on this computer (the Overview's switch),
 //! Settings, and Quit as icons, Quit at the far end and red only under the
-//! pointer. The panel is the whole macOS menu; Linux and
-//! Windows keep the native list.
+//! pointer. The panel is the macOS menu, bar a native "Show on device"
+//! submenu appended under it with two or more accounts; Linux and Windows
+//! keep the native list.
 //!
 //! muda has no API for an item with a view, so the panel goes into muda's
 //! NSMenu (`ContextMenu::ns_menu`) directly, at index 0. Clicks set flags

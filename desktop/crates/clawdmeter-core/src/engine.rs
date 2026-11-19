@@ -139,8 +139,8 @@ pub struct Engine {
     active: Option<PathBuf>,
     /// The selector's pick: the account whose usage rose most recently.
     auto_active: Option<PathBuf>,
-    /// The shown account changed to numbers read earlier (a choice on the
-    /// Accounts page, an account removed, the shown one dropping out), or
+    /// The shown account changed to numbers read earlier (a new choice for
+    /// the device, an account removed, the shown one dropping out), or
     /// a reconnect resends an account the device never had as a poll: the
     /// next write sends them as a replay.
     shown_changed: bool,
@@ -267,7 +267,7 @@ impl Engine {
         if accounts_changed {
             self.auto_active = self.pick_auto();
         }
-        // A new choice on the Accounts page, or the shown account removed,
+        // A new choice on the Overview or in the tray, or the shown account removed,
         // shows at once with the numbers already read for that account. They
         // go out as a replay: they aren't a new reading.
         let shown = self.shown_choice();
@@ -669,8 +669,8 @@ impl Engine {
         self.selector.choose_preferring(&sessions, |k| !codex.contains(k))
     }
 
-    /// The account to show: the one chosen on the Accounts page
-    /// (`device_account`) while it is listed and readable, else the
+    /// The account to show: the one chosen for the device
+    /// ([`Settings::chosen_account`]) while it is readable, else the
     /// selector's pick, which is what the device would show with no choice
     /// (it can be the chosen account itself). Readable: it has a reading,
     /// and its last [`STALE_AFTER_MISSES`] polls didn't all miss (signed
@@ -681,13 +681,7 @@ impl Engine {
         let s = &self.settings;
         let readable =
             |d: &PathBuf| self.accounts.get(d).is_some_and(|a| a.last.is_some() && a.misses < STALE_AFTER_MISSES);
-        // The listed folder, as the lists spell it (`~/b/` names `~/b`).
-        s.device_account
-            .as_ref()
-            .and_then(|c| s.config_dirs.iter().chain(&s.codex_dirs).find(|d| *d == c))
-            .filter(|d| readable(d))
-            .cloned()
-            .or_else(|| self.auto_active.clone())
+        s.chosen_account().filter(|d| readable(d)).cloned().or_else(|| self.auto_active.clone())
     }
 
     fn active_state(&self) -> Option<&AccountState> {
@@ -1746,7 +1740,7 @@ mod tests {
         (PathBuf::from("/h/.claude"), PathBuf::from("/h/b"))
     }
 
-    // An account chosen on the Accounts page stays on the device whatever
+    // An account picked for the device stays on it whatever
     // the other accounts' meters do. The switch goes out at once as a
     // replay (numbers read earlier aren't a new reading), and going back to
     // automatic picks up from the latest rise.
