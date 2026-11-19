@@ -14,3 +14,5 @@ Waveshare ESP32-C6-Touch-AMOLED-2.16 (CO5300, 480×480, CST9217 touch). Build en
 
 - QMI8658 (0x6B) quadrants map to CO5300 MADCTL values in `display.cpp`. The base, upright on the desk stand, is quadrant 3 (MADCTL 0x30, written at init). `imu.cpp`, `display_hal_tick` and `touch.cpp` all start from quadrant 3, so a board whose IMU fails to init stays upright with touch lined up.
 - The accelerometer runs at 28 Hz in normal mode (polled at 10 Hz): SensorLib 0.5's `configAccel()` has no low-power rates. Same trade-off as the S3 2.16.
+
+A fixed `ro` counts from upright, which is quadrant 3 here: `imu.cpp`'s `imu_hal_fixed_quadrant` maps it (n → n + 3). The orientation change runs through the shared `rotation_transition.h`.

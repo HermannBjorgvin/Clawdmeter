@@ -34,4 +34,5 @@ void fable_color_set(uint32_t rgb);           // repaint live; saved only when i
 #define ROTATION_AUTO (-1)
 void    rotation_set(int8_t ro);             // ROTATION_AUTO or 0..3; saved only when it changes
 int8_t  rotation_get(void);
-uint8_t display_rotation_quadrant(void);     // 0..3: the IMU's on auto, else the fixed one
+uint8_t display_rotation_quadrant(void);     // 0..3, the board's quadrant: the IMU's on auto,
+                                             // else imu_hal_fixed_quadrant(ro)

@@ -2,6 +2,7 @@
 #include "../../brightness.h"
 #include "board.h"
 #include "rotation.h"
+#include "../../rotation_transition.h"
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
@@ -13,9 +14,8 @@
 
 static Arduino_DataBus* bus = nullptr;
 static Arduino_ST7789*  gfx = nullptr;
-static volatile uint8_t applied_rotation = LCD_ROTATION & 3;  // MADCTL state
 
-uint8_t lcd_applied_rotation(void) { return applied_rotation; }
+uint8_t lcd_applied_rotation(void) { return rotation_transition_shown(); }
 
 void display_hal_init(void) {
     bus = new Arduino_ESP32SPI(LCD_DC, LCD_CS, LCD_SCLK, LCD_MOSI,
@@ -53,31 +53,10 @@ void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
 // flight while MADCTL changes.
 void display_hal_tick(void) {
 #if LCD_AUTO_ROTATE
-    static uint8_t  ramp_step = 0;                  // 0=idle, 1..4=ramping
-    static uint32_t ramp_last = 0;
     if (!gfx) return;
-
-    uint8_t rot = lcd_effective_rotation();
-    if (rot != applied_rotation) {
-        display_hal_set_brightness(0);
-        gfx->setRotation(rot);
-        applied_rotation = rot;
-        lv_obj_invalidate(lv_screen_active());
-        ramp_step = 1;
-        ramp_last = millis();
-        return;
-    }
-
-    if (ramp_step == 0) return;
-    uint32_t now = millis();
-    if (now - ramp_last < 25) return;
-    ramp_last = now;
-
-    static const uint8_t pct[] = {30, 60, 85, 100};
-    uint8_t target = brightness_get();
-    display_hal_set_brightness((uint8_t)(((uint16_t)target * pct[ramp_step - 1]) / 100));
-    if (ramp_step >= 4) ramp_step = 0;
-    else                ramp_step++;
+    static bool begun = (rotation_transition_begin(LCD_ROTATION & 3), true);   // the constructor's
+    (void)begun;
+    rotation_transition_tick(lcd_effective_rotation(), [](uint8_t r) { gfx->setRotation(r); });
 #endif
 }
 

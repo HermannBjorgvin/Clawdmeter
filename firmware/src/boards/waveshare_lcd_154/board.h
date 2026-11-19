@@ -19,11 +19,15 @@
 // 0 = factory orientation, 1 = 90° clockwise, 2 = 180°, 3 = 270° (90° CCW).
 // The panel is square, so LVGL keeps seeing 240x240; touch.cpp remaps the
 // CST816T coordinates to match. Override with -DLCD_ROTATION=<n> in build_flags.
-// With LCD_AUTO_ROTATE=0 this is the fixed orientation. With auto-rotation
-// on, it is the calibration offset: the orientation used while the IMU
-// reports quadrant 0 (see rotation.h).
+// LCD_ROTATION is the orientation with LCD_AUTO_ROTATE=0 (and at boot),
+// unchanged from earlier firmware. LCD_IMU_OFFSET calibrates auto-rotation:
+// the panel rotation while the IMU reports quadrant 0 (buttons on the right; upright, buttons on top, is quadrant 3 = MADCTL 0); a
+// fixed `ro` counts from there too (see rotation.h).
 #ifndef LCD_ROTATION
-#define LCD_ROTATION         3
+#define LCD_ROTATION         0
+#endif
+#ifndef LCD_IMU_OFFSET
+#define LCD_IMU_OFFSET       3
 #endif
 
 // ---- IMU auto-rotation (QMI8658 accelerometer) ----

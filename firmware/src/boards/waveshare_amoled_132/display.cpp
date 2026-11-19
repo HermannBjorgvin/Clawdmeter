@@ -2,6 +2,7 @@
 #include "../../hal/display_hal.h"
 #include "../../hal/imu_hal.h"
 #include "../../brightness.h"
+#include "../../rotation_transition.h"
 #include "board.h"
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
@@ -85,7 +86,7 @@ static void rotate_strip(const uint16_t* src, int32_t w, int32_t h,
 void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
                              const uint16_t* pixels) {
     if (!gfx) return;
-    uint8_t r = display_rotation_quadrant();
+    uint8_t r = rotation_transition_shown();
     if (r == 0 || !rot_buf) {
         gfx->draw16bitRGBBitmap(x, y, (uint16_t*)pixels, w, h);
         return;
@@ -99,31 +100,7 @@ void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
 // orientation, then ramp brightness back up over ~125ms so the transition
 // reads as deliberate.
 void display_hal_tick(void) {
-    static uint8_t  last_rotation = 0;
-    static uint8_t  ramp_step = 0;     // 0=idle, 1..4=ramping
-    static uint32_t ramp_last = 0;
-
-    uint8_t rot = display_rotation_quadrant();
-    if (rot != last_rotation) {
-        display_hal_set_brightness(0);
-        last_rotation = rot;
-        lv_obj_invalidate(lv_screen_active());
-        ramp_step = 1;
-        return;
-    }
-
-    if (ramp_step == 0) return;
-    uint32_t now = millis();
-    if (now - ramp_last < 25) return;
-    ramp_last = now;
-
-    // Ramp back to the user's chosen brightness (not a hardcoded level), so a
-    // physical rotation doesn't reset what they set via PWR-short-press.
-    static const uint8_t pct[] = {30, 60, 85, 100};
-    uint8_t target = brightness_get();
-    display_hal_set_brightness((uint8_t)(((uint16_t)target * pct[ramp_step - 1]) / 100));
-    if (ramp_step >= 4) ramp_step = 0;
-    else                ramp_step++;
+    rotation_transition_tick(display_rotation_quadrant(), nullptr);
 }
 
 // CO5300 requires even-aligned flush regions.

@@ -567,7 +567,7 @@ impl SettingsView {
         let (me1, me2) = (cx.entity().downgrade(), cx.entity().downgrade());
         let turn = icon_button(t, "rotation-turn", "rotate-cw", "Turn a quarter turn", true, false, move |_, _, cx| {
             let _ = me1.update(cx, |v, cx| {
-                v.save(|s, _| s.rotation = rotation.turned());
+                v.save(|s, _| s.rotation = s.rotation.turned());
                 cx.notify();
             });
         });

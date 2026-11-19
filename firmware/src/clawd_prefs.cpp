@@ -105,20 +105,17 @@ bool pace_marker_get(void) { return pace_marker; }
 // paths write it. A single byte, so no tearing.
 static volatile int8_t rotation = ROTATION_AUTO;
 
+// Anything but 0..3, or a board that can't turn, is auto.
 static int8_t rotation_clamp(int8_t ro) {
-    if (ro != ROTATION_AUTO && (ro < 0 || ro > 3)) return -2;   // invalid
-    return board_caps().has_rotation ? ro : ROTATION_AUTO;     // nothing to fix
+    return board_caps().has_rotation && ro >= 0 && ro <= 3 ? ro : ROTATION_AUTO;
 }
 
 // Boot: apply the saved value without writing it back.
-static void rotation_load(int8_t ro) {
-    ro = rotation_clamp(ro);
-    rotation = ro == -2 ? ROTATION_AUTO : ro;
-}
+static void rotation_load(int8_t ro) { rotation = rotation_clamp(ro); }
 
 void rotation_set(int8_t ro) {
     ro = rotation_clamp(ro);
-    if (ro == -2 || ro == rotation) return;
+    if (ro == rotation) return;
     rotation = ro;
     Preferences prefs;
     prefs.begin("clawdmeter", false);
@@ -132,8 +129,12 @@ int8_t rotation_get(void) { return rotation; }
 
 uint8_t display_rotation_quadrant(void) {
     const int8_t ro = rotation;
-    return ro == ROTATION_AUTO ? (uint8_t)(imu_hal_rotation_quadrant() & 3) : (uint8_t)ro;
+    return ro == ROTATION_AUTO ? (uint8_t)(imu_hal_rotation_quadrant() & 3)
+                               : (uint8_t)(imu_hal_fixed_quadrant((uint8_t)ro) & 3);
 }
+
+// Boards whose quadrant 0 is upright and whose quadrants count clockwise.
+__attribute__((weak)) uint8_t imu_hal_fixed_quadrant(uint8_t turns_cw) { return turns_cw; }
 
 void button_action_set(ButtonSlot slot, int32_t action) {
     if (slot < 0 || slot >= BTN_SLOT_COUNT) return;

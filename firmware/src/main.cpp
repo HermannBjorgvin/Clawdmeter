@@ -235,8 +235,14 @@ static void check_serial_cmd() {
             }
             else if (strcmp(cmd_buf, "rotation") == 0 || strncmp(cmd_buf, "rotation ", 9) == 0) {
                 // QA: `rotation [auto|0-3]`, the `ro` setting (until the app sends its own).
-                if (cmd_buf[8] == ' ')
-                    rotation_set(strcmp(cmd_buf + 9, "auto") == 0 ? ROTATION_AUTO : (int8_t)atoi(cmd_buf + 9));
+                if (cmd_buf[8] == ' ') {
+                    const char* arg = cmd_buf + 9;
+                    char* end = nullptr;
+                    const long v = strtol(arg, &end, 10);
+                    if (strcasecmp(arg, "auto") == 0) rotation_set(ROTATION_AUTO);
+                    else if (end != arg && *end == '\0' && v >= 0 && v <= 3) rotation_set((int8_t)v);
+                    else Serial.println("usage: rotation [auto|0-3]");
+                }
                 Serial.printf("{\"rotation\":%d,\"quadrant\":%u}\n",
                               (int)rotation_get(), (unsigned)display_rotation_quadrant());
             }

@@ -94,3 +94,7 @@ void imu_hal_tick(void) {
 }
 
 uint8_t imu_hal_rotation_quadrant(void) { return current_rotation; }
+
+// Upright is quadrant 3 here, and q0 is 90 degrees CW from it (display.cpp),
+// so a fixed `ro` of n clockwise quarter turns is quadrant n + 3.
+uint8_t imu_hal_fixed_quadrant(uint8_t turns_cw) { return (uint8_t)((turns_cw + 3) & 3); }

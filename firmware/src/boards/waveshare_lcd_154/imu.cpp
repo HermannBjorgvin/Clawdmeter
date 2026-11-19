@@ -76,7 +76,7 @@ void imu_hal_init(void) {
     imu_ok = true;
     Serial.println("QMI8658 init OK");
 
-    // No boot snap (see read_accel): start at quadrant 0 = LCD_ROTATION and
+    // No boot snap (see read_accel): start at quadrant 0 = LCD_IMU_OFFSET and
     // let the first stable tick reading rotate into place.
 }
 
@@ -99,7 +99,7 @@ void imu_hal_tick(void) {
         candidate_since = now;
     } else if (now - candidate_since >= STABLE_TIME_MS) {
         current_rotation = target;
-        // Raw axes logged so the mounting (LCD_ROTATION / IMU_ROT_REVERSE)
+        // Raw axes logged so the mounting (LCD_IMU_OFFSET / IMU_ROT_REVERSE)
         // can be calibrated from the serial monitor.
         Serial.printf("Rotation: %d (ax=%.2f ay=%.2f az=%.2f)\n", current_rotation,
                       ax, ay, az);
@@ -116,3 +116,17 @@ void    imu_hal_tick(void) {}
 uint8_t imu_hal_rotation_quadrant(void) { return 0; }
 
 #endif
+
+// A fixed `ro` is clockwise quarter turns from upright (buttons on top). On
+// this board the IMU reports quadrant 3 upright (measured: ay ≈ +1 g), which
+// with LCD_IMU_OFFSET 3 and IMU_ROT_REVERSE is MADCTL 0, so the quadrant that
+// shows `ro` is the one giving MADCTL `ro`: rotation.h reverses it, so
+// reverse it here first.
+uint8_t imu_hal_fixed_quadrant(uint8_t turns_cw) {
+    const uint8_t q = (uint8_t)((turns_cw - LCD_IMU_OFFSET) & 3);   // before reversal
+#if IMU_ROT_REVERSE
+    return (uint8_t)((4 - q) & 3);
+#else
+    return q;
+#endif
+}
