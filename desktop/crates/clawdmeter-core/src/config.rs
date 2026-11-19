@@ -1072,7 +1072,8 @@ mod tests {
         let (claude, b, codex) =
             (PathBuf::from("/home/u/.claude"), PathBuf::from("/home/u/b"), PathBuf::from("/home/u/.codex"));
         assert_eq!(accounts, vec![(&claude, false), (&b, false), (&codex, true)]);
-        assert_eq!(s.chosen_account().map(|d| d.to_string_lossy().into_owned()), Some("/home/u/b".into()));
+        // As the list spells it (`~/b`, not `~/b/`), whatever the OS's separator.
+        assert_eq!(s.chosen_account().map(|d| d.as_os_str()), Some(s.config_dirs[1].as_os_str()));
         assert_eq!(settings("device_account = ~/elsewhere\n").chosen_account(), None, "not listed: automatic");
     }
 
