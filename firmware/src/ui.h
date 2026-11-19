@@ -32,3 +32,9 @@ void ui_set_pair_hint(PairHint hint);
 // Attention message on the status line (scrolls when long); NULL clears it
 // and the whimsical status line resumes.
 void ui_set_alert_text(const char* message);
+
+// The account on the device (`an`, "" for none) and whether it's the latest
+// active one (`al`), from every payload. `announce` (a switch) names it on
+// the status line for a few seconds, below an alert and the waiting/stale
+// states; it also shows there every few verbs as a reminder.
+void ui_set_account(const char* name, bool auto_mode, bool announce);

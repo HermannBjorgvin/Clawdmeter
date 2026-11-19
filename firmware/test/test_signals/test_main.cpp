@@ -176,8 +176,83 @@ static void test_codex_numbers_never_reach_clawd(void) {
     TEST_ASSERT_TRUE(signals_ingest_at(&fresh, 4 * MIN).session_reset);
 }
 
+// Another account's numbers (`an` changed, a button or the app's choice) are
+// a new baseline, not a reset or a rise. A Codex account between two
+// readings of the same Claude account changes nothing; an app that sends no
+// name never counts as a change.
+static void test_account_change_is_not_a_reset(void) {
+    UsageData a60 = parse("{\"s\":60,\"sr\":90,\"acct\":\"pro\",\"an\":\"~/.claude\",\"ok\":true}");
+    UsageData b8 = parse("{\"s\":8,\"sr\":200,\"acct\":\"pro\",\"an\":\"~/work\",\"ok\":true}");
+    SignalsUpdate u = signals_ingest_at(&a60, 1 * MIN);
+    TEST_ASSERT_FALSE(u.meter_kind_changed);                 // first sight
+    TEST_ASSERT_FALSE(u.account_switched);
+    u = signals_ingest_at(&b8, 5 * MIN);                     // 60 -> 8 on another account
+    TEST_ASSERT_FALSE(u.session_reset);
+    TEST_ASSERT_TRUE(u.meter_kind_changed);
+    TEST_ASSERT_TRUE(u.account_switched);
+    u = signals_ingest_at(&a60, 6 * MIN);                    // and back: 8 -> 60 is no rise
+    TEST_ASSERT_TRUE(u.meter_kind_changed);
+    TEST_ASSERT_EQUAL_INT(RATE_IDLE, usage_rate_base_group_at(6 * MIN));
+    // Codex in between: named (switched), but A's history stays.
+    UsageData cx = parse("{\"s\":0,\"sr\":-1,\"w\":2,\"wr\":8000,\"acct\":\"week\",\"pv\":\"codex\","
+                         "\"an\":\"~/.codex\",\"ok\":true}");
+    u = signals_ingest_at(&cx, 7 * MIN);
+    TEST_ASSERT_TRUE(u.account_switched);
+    TEST_ASSERT_FALSE(u.meter_kind_changed);
+    u = signals_ingest_at(&a60, 8 * MIN);
+    TEST_ASSERT_TRUE(u.account_switched);
+    TEST_ASSERT_FALSE(u.meter_kind_changed);                 // A's last real sample was A's
+    // A replay naming another account names it, but isn't a sample.
+    UsageData b_rp = parse("{\"s\":8,\"acct\":\"pro\",\"an\":\"~/work\",\"rp\":1,\"ok\":true}");
+    u = signals_ingest_at(&b_rp, 9 * MIN);
+    TEST_ASSERT_TRUE(u.account_switched);
+    TEST_ASSERT_FALSE(u.session_reset);
+    TEST_ASSERT_FALSE(u.meter_kind_changed);
+    // The same account picked another way (`al`: the latest active one, then
+    // chosen) is named again, but its numbers stay comparable.
+    UsageData b_auto = parse("{\"s\":9,\"sr\":190,\"acct\":\"pro\",\"an\":\"~/work\",\"al\":1,\"ok\":true}");
+    u = signals_ingest_at(&b_auto, 9 * MIN + 30000);
+    TEST_ASSERT_TRUE(u.account_switched);
+    TEST_ASSERT_TRUE(u.meter_kind_changed);                  // ~/.claude's last real sample before it
+    UsageData b_pin = parse("{\"s\":9,\"sr\":190,\"acct\":\"pro\",\"an\":\"~/work\",\"ok\":true}");
+    u = signals_ingest_at(&b_pin, 9 * MIN + 40000);
+    TEST_ASSERT_TRUE(u.account_switched);
+    TEST_ASSERT_FALSE(u.meter_kind_changed);                 // same account's numbers
+    u = signals_ingest_at(&b_pin, 9 * MIN + 50000);
+    TEST_ASSERT_FALSE(u.account_switched);
+    // Down to one account (the app names none): another account's numbers,
+    // a new baseline, not named. Its own reset then fires as ever.
+    UsageData plain = parse("{\"s\":1,\"sr\":299,\"acct\":\"pro\",\"ok\":true}");
+    u = signals_ingest_at(&plain, 10 * MIN);
+    TEST_ASSERT_FALSE(u.account_switched);
+    TEST_ASSERT_TRUE(u.meter_kind_changed);
+    TEST_ASSERT_FALSE(u.session_reset);                      // 9 -> 1, but ~/work's 9
+    UsageData plain60 = parse("{\"s\":60,\"sr\":200,\"acct\":\"pro\",\"ok\":true}");
+    UsageData plain0 = parse("{\"s\":0,\"sr\":299,\"acct\":\"pro\",\"ok\":true}");
+    signals_ingest_at(&plain60, 11 * MIN);
+    u = signals_ingest_at(&plain0, 12 * MIN);
+    TEST_ASSERT_TRUE(u.session_reset);
+    TEST_ASSERT_FALSE(u.meter_kind_changed);
+}
+
+// A second account added: the app starts naming accounts, so the first named
+// sample is a new baseline even when it's another account's (60 -> 5 is no
+// reset). An older app never names one, so its resets fire as ever
+// (test_session_reset_through_signals).
+static void test_adding_an_account_is_not_a_reset(void) {
+    UsageData one = parse("{\"s\":60,\"sr\":90,\"acct\":\"pro\",\"ok\":true}");
+    UsageData other = parse("{\"s\":5,\"sr\":290,\"acct\":\"pro\",\"an\":\"~/b\",\"ok\":true}");
+    signals_ingest_at(&one, 1 * MIN);
+    SignalsUpdate u = signals_ingest_at(&other, 5 * MIN);
+    TEST_ASSERT_FALSE(u.session_reset);
+    TEST_ASSERT_TRUE(u.meter_kind_changed);
+    TEST_ASSERT_FALSE(u.account_switched);                   // the first name is a baseline
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_account_change_is_not_a_reset);
+    RUN_TEST(test_adding_an_account_is_not_a_reset);
     RUN_TEST(test_codex_numbers_never_reach_clawd);
     RUN_TEST(test_old_daemon_payload_fires_nothing);
     RUN_TEST(test_first_seq_is_baseline_then_fires_once);

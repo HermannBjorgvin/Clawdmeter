@@ -116,9 +116,14 @@ is faked behind `FlashHardware`.
   discovered default, empty = none: `Settings::apply_codex_default`),
   `device_account` (the account the device shows, from the Overview's
   drop-down, `ui/overview.rs` `account_control`, or the tray's "Show on
-  device" submenu; both list `Settings::accounts` and show with two or
-  more; absent or `auto` = the selector's pick, "Latest active account".
-  Removing the account on the Accounts page clears it. `Engine::shown_choice` uses it while it's a listed folder with a
+  device" submenu, or a board button set to `next-account`; both menus
+  list `Settings::accounts` and show with two or more; absent or `auto` =
+  the selector's pick, "Latest active account". Removing the account on
+  the Accounts page clears it. With two or more accounts every data
+  payload names the shown account as `an` (`payload::account_name`, `~/…`
+  under `Engine::set_home`) and marks the latest active one `al:1`, so the
+  board shows it ("Auto: …") after a switch and every few verbs, and
+  starts its rate math over on another account's real numbers. `Engine::shown_choice` uses it while it's a listed folder with a
   reading (a dead Codex sign-in drops it) whose last 3 polls didn't all
   miss, else the selector's pick (which
   keeps running underneath, and can be the chosen account itself). A miss
@@ -128,11 +133,10 @@ is faked behind `FlashHardware`.
   reconnect's resend of an account the board last had only as a replay
   (`polled_account`); a switch made by that account's own fresh poll is a
   poll, as automatic switches always were. The app's rate tracker starts
-  over on another Claude account's numbers (`rate_account`). The board can't
-  tell accounts apart: another Claude account's next real poll reaches its
-  rate ring, so a drop over 5 points reads as a reset there (chime if on, and
-  Clawd's reaction) and a rise as heavy use, as automatic switches always
-  did. Known gap: the shown account's cadence follows every account's
+  over on another Claude account's numbers (`rate_account`), and the board
+  does the same from `an`; firmware without `an` still reads another Claude
+  account's next real poll as a reset (a drop over 5 points) or heavy use,
+  as automatic switches always did there. Known gap: the shown account's cadence follows every account's
   prompts, so a chosen account with a window running is probed as often as
   every 2 min while another account works),
   `poll_interval`, `heartbeat_interval`,
@@ -146,7 +150,12 @@ is faked behind `FlashHardware`.
   percentages as the status item's title, `tray::menu_bar_title`), `button_primary`
   (default `space`), `button_secondary` (default `shift-tab`) and
   `button_pwr` (default `brightness`): `none`, `space`, `shift-tab`, `tab`,
-  `enter`, `escape`, `brightness`, a media key (`play-pause`,
+  `enter`, `escape`, `brightness`, `next-account` (code 7: the board sends
+  `{"next":true}` on TX, `DeviceEvent::NextAccount`; the daemon reads the
+  config, saves `Engine::next_device_account` (the next of the drop-down's
+  choices, latest active first, passing over an unreadable account and one
+  the device would show the same, `an` and `al`) through `write_settings`
+  and reloads at once, so it works headless too), a media key (`play-pause`,
   `previous-track`, `next-track`, `volume-down`, `volume-up`, `mute`) or a
   shortcut, modifiers and a key joined by `+` with an optional `hold`
   (`ctrl+shift+m`, `super+alt+k`, `ctrl+space hold`; `tap` marks one

@@ -438,6 +438,10 @@ static void button_run_press(ButtonSlot slot, ButtonRun* r, int32_t action, bool
     case BTN_KIND_BRIGHTNESS:
         brightness_cycle();
         break;
+    case BTN_KIND_NEXT_ACCOUNT:
+        // The app picks the account and sends its numbers (and name, `an`).
+        ble_send_next_account();
+        break;
     default:
         break;
     }
@@ -582,6 +586,9 @@ void loop() {
             // Fast + slow clock bookkeeping: rate sample (replays skipped),
             // hook activity lift, event dedupe. See signals.h.
             const SignalsUpdate sig = signals_ingest(&usage);
+            // The account on the device; another one (a button, the app's
+            // choice, its latest active account changing) is named for a moment.
+            ui_set_account(usage.account, usage.account_auto, sig.account_switched);
             const bool session_reset = sig.session_reset;
             const int g_before = sig.group_before;
             const int g_after  = sig.group_after;

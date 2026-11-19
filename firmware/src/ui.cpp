@@ -140,6 +140,66 @@ static uint8_t anim_msg_idx = 0;    // counts verb changes (the stale line alter
 static uint8_t anim_verb_idx = 0;   // the verb shown: the next one that fits the line
 static uint32_t anim_msg_start = 0;
 static const char* frozen_shown = nullptr;   // spinner held still: the word on screen
+// The account on the device (`an`, `al`; ui_set_account), named on the
+// status line for ACCOUNT_SHOW_MS after a switch and, as a reminder, in
+// place of every ACCOUNT_EVERY_VERBS-th verb. `account_gen` counts the
+// moments shown, so a new one redraws the line where the text pointer alone
+// wouldn't change.
+static char     account_name[25] = "";
+static bool     account_auto = false;
+static uint32_t account_at_ms = 0;
+static uint32_t account_gen = 0;
+static uint32_t account_drawn_gen = 0;
+static uint8_t  account_verbs = 0;          // verb changes since the name last showed
+static const uint32_t ACCOUNT_SHOW_MS = 3000;
+static const uint8_t  ACCOUNT_EVERY_VERBS = 3;
+
+static void account_moment(uint32_t now) {
+    account_at_ms = now;
+    account_gen++;
+    account_verbs = 0;
+}
+
+void ui_set_account(const char* name, bool auto_mode, bool announce) {
+    snprintf(account_name, sizeof(account_name), "%s", name ? name : "");
+    account_auto = auto_mode;
+    if (announce && account_name[0]) account_moment(lv_tick_get());
+}
+
+// The name is on the status line now: connected, live, within its moment.
+// Never in minimal mode, whose status line changes only with the state.
+static bool account_showing(uint32_t now) {
+    return account_name[0] && !minimal_mode() && s_ble_connected && view_state != 1
+        && now - account_at_ms < ACCOUNT_SHOW_MS;
+}
+
+// "<glyph> <mode><name>" as it fits the panel: the whole name, or its end
+// after an ellipsis (the end tells accounts apart: "~/.claude-work" and
+// "~/.claude-home"). How much of the name is left goes in `kept`.
+static const char* fit_account(const char* glyph, const char* mode, size_t* kept) {
+    static char out[56];
+    const size_t n = strlen(account_name);
+    snprintf(out, sizeof(out), "%s %s%s", glyph, mode, account_name);
+    *kept = n;
+    if (layout_text_width(L.status_font, out) <= L.status_w) return out;
+    for (size_t cut = 1; cut < n; cut++) {
+        snprintf(out, sizeof(out), "%s %s\xE2\x80\xA6%s", glyph, mode, account_name + cut);
+        *kept = n - cut;
+        if (layout_text_width(L.status_font, out) <= L.status_w) return out;
+    }
+    return out;
+}
+
+// The status line for the name: "<glyph> <name>", or "<glyph> Auto: <name>"
+// for the latest active account. Where "Auto: " would leave fewer than six
+// characters of the name (the narrowest panels), the name alone.
+static const char* account_line(const char* glyph) {
+    size_t kept = 0;
+    const char* line = fit_account(glyph, account_auto ? "Auto: " : "", &kept);
+    const size_t want = strlen(account_name) < 6 ? strlen(account_name) : 6;
+    if (account_auto && kept < want) line = fit_account(glyph, "", &kept);
+    return line;
+}
 
 static const char* const spinner_frames[] = {
     "\xC2\xB7", "\xE2\x9C\xBB", "\xE2\x9C\xBD",
@@ -1132,6 +1192,14 @@ void ui_tick_anim(void) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
         anim_verb_idx = fitting_verb((anim_verb_idx + 1) % ANIM_MSG_COUNT);
         anim_msg_start = now;
+        // A reminder of whose numbers these are, in a verb's place, at the
+        // pace the verbs already keep (liveliness). The next verb waits
+        // for the moment to end, so the one picked now doesn't flash in
+        // for the rest of its slot.
+        if (account_name[0] && ++account_verbs >= ACCOUNT_EVERY_VERBS) {
+            account_moment(now);
+            if (tune.verb_ms > ACCOUNT_SHOW_MS) anim_msg_start = now - (tune.verb_ms - ACCOUNT_SHOW_MS);
+        }
     }
 
     if (tune.spinner) {
@@ -1147,12 +1215,15 @@ void ui_tick_anim(void) {
 
     // Status text by priority. Whimsical messages only when connected & settled.
     const char* text;
+    const bool named = account_showing(now);
     if (!s_ble_connected) {
         text = "Waiting";              // advertising / waiting for a host connection
     } else if (view_state == 1) {      // stale — alternate so it reads as alive AND not live
         // A mono panel doesn't dim stale meters, so the word is the only cue: hold it.
         const char* stale = data_received ? "Stale" : "No data";
         text = (board_caps().mono_panel || (anim_msg_idx & 1)) ? stale : "Listening";
+    } else if (named) {
+        text = account_name;           // the account a switch just put on the device
     } else if (now - connected_at_ms < 5000) {
         text = "Connected";
     } else {
@@ -1160,14 +1231,19 @@ void ui_tick_anim(void) {
     }
 
     if (!tune.spinner) {
-        if (text == frozen_shown) return;
+        if (text == frozen_shown && !(named && account_drawn_gen != account_gen)) return;
         frozen_shown = text;
     }
+    if (named) account_drawn_gen = account_gen;
 
-    // All states share the whimsical style: "<glyph> <Title-case word>…"
+    // All states share the whimsical style: "<glyph> <Title-case word>…";
+    // an account's name is shown as it is (account_line).
+    if (named) {
+        lv_label_set_text(lbl_anim, account_line(spinner_frames[anim_spinner_idx]));
+        return;
+    }
     static char buf[80];
-    snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6",
-             spinner_frames[anim_spinner_idx], text);
+    snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6", spinner_frames[anim_spinner_idx], text);
     lv_label_set_text(lbl_anim, buf);
 }
 

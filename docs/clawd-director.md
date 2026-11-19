@@ -72,7 +72,12 @@ Continuity rules, as the code enforces them:
 - The normal status line rotates Claude Code's whimsical thinking verbs as
   the all-is-well indicator. This is the owner's chosen behavior, not an
   activity report. Keep the spinner and ellipsis. Disconnected is "Waiting";
-  minimal mode uses fixed status text instead of rotating verbs.
+  minimal mode uses fixed status text instead of rotating verbs. With two or
+  more accounts (`an`), for 3 s after the app puts another account on the
+  device or picks it another way (`al`), and in place of every third verb,
+  the line names it instead ("<glyph> ~/.codex", "<glyph> Auto: ~/.codex"
+  for the latest active one, no ellipsis; a long name keeps its end), below
+  an alert and the waiting and stale states; minimal mode doesn't.
 - Stale data keeps the one-Clawd rule. When the link is up but no fresh usage
   has landed for `DATA_FRESH_MS` (90 s), or the daemon sent `{"ok":false}`,
   the meters stay where they are at 40 % opacity (LVGL `opa`, which scales the
@@ -139,8 +144,9 @@ Small reactions on the meters, from `home` or `corner`:
 - **Fresh window**: `session_reset` from signals (real samples only, so never
   on a replay). For a `week` account (no 5-hour limit) the main meter is
   the week, so this is the weekly reset. A change in what the meter
-  measures (session, week or spend: `usage_meter_kind`) restarts the slow
-  clock and is never a reset or a rise. He jumps happy twice, in the same
+  measures (session, week or spend: `usage_meter_kind`), or a real sample
+  from another account than the last one (`an`, the app switched accounts),
+  restarts the slow clock and is never a reset or a rise. He jumps happy twice, in the same
   loop iteration as the chime.
   If he's out on a trip he hurries back for it; if he's in another room it
   waits up to 5 min for him to sit down. It outranks the wave.

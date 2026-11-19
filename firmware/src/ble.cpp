@@ -210,16 +210,18 @@ static void start_advertising() {
         server ? (unsigned)server->getConnectedCount() : 0);
 }
 
-// Who gets an HID input report: the peers that subscribed to it over an
-// encrypted link, so a central in the spare connection slot that never paired
-// gets no keystrokes. NimBLE reports a bonded host's stored subscriptions when
-// it reconnects as well as new ones. Each report goes out with its own bytes:
-// a bare notify() only queues an update and NimBLE reads the characteristic
-// when it sends, so reports set in quick succession (modifiers, key, release)
-// would all go out as the last.
-class HidReportSubscribers : public NimBLECharacteristicCallbacks {
+// Who gets a notification sent with its own bytes. HID input reports go to
+// the peers that subscribed over an encrypted link (`encrypted_only`), so a
+// central in the spare connection slot that never paired gets no keystrokes;
+// the TX device events ({"dismiss":true}, {"next":true}) to any subscriber.
+// NimBLE reports a bonded host's stored subscriptions when it reconnects as
+// well as new ones. Each notification goes out with its own bytes: a bare
+// notify() only queues an update and NimBLE reads the characteristic when it
+// sends, so values set in quick succession (modifiers, key, release; an
+// event, then a write's ack) would all go out as the last.
+class NotifySubscribers : public NimBLECharacteristicCallbacks {
 public:
-    HidReportSubscribers() {
+    explicit NotifySubscribers(bool encrypted_only = true) : encrypted_only(encrypted_only) {
         for (uint16_t& h : handles) h = CONN_HANDLE_NONE;
     }
 
@@ -245,17 +247,20 @@ public:
     bool send(NimBLECharacteristic* chr, const uint8_t* report, size_t len) const {
         bool ok = true;
         for (uint16_t h : handles) {
-            if (h == CONN_HANDLE_NONE || !server->getPeerInfoByHandle(h).isEncrypted()) continue;
+            if (h == CONN_HANDLE_NONE) continue;
+            if (encrypted_only && !server->getPeerInfoByHandle(h).isEncrypted()) continue;
             ok = chr->notify(report, len, h) && ok;
         }
         return ok;
     }
 
 private:
+    bool encrypted_only;
     uint16_t handles[CONFIG_BT_NIMBLE_MAX_CONNECTIONS];
 };
 
-static HidReportSubscribers kbd_subscribers, consumer_subscribers;
+static NotifySubscribers kbd_subscribers, consumer_subscribers;
+static NotifySubscribers tx_subscribers(false);
 
 // The last report of each kind that a subscriber didn't take; ble_tick()
 // sends it again. A report is the whole state, so a resend can't reorder.
@@ -304,6 +309,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         if (param_fix_spent  == info.getConnHandle()) param_fix_spent  = CONN_HANDLE_NONE;
         kbd_subscribers.drop(info.getConnHandle());
         consumer_subscribers.drop(info.getConnHandle());
+        tx_subscribers.drop(info.getConnHandle());
         Serial.printf("BLE: disconnected (reason=%d, remaining=%u)\n",
             reason, (unsigned)s->getConnectedCount());
     }
@@ -499,6 +505,7 @@ void ble_init(void) {
         TX_CHAR_UUID,
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
     );
+    tx_char->setCallbacks(&tx_subscribers);
 
     req_char = svc->createCharacteristic(
         REQ_CHAR_UUID,
@@ -616,25 +623,44 @@ const char* ble_get_data(void) {
     return parse_buf;
 }
 
+// Acks go out like the events (tx_send_event, below): a bare notify()
+// reads TX when NimBLE sends, so a later event could go out twice.
+static void tx_send_event(void);
+
 void ble_send_ack(void) {
     if (state == BLE_STATE_CONNECTED && tx_char) {
         tx_char->setValue("{\"ack\":true}");
-        tx_char->notify();
+        tx_send_event();
     }
 }
 
 void ble_send_nack(void) {
     if (state == BLE_STATE_CONNECTED && tx_char) {
         tx_char->setValue("{\"err\":true}");
-        tx_char->notify();
+        tx_send_event();
     }
+}
+
+// The TX value just set, to each subscriber with its own bytes, so an ack
+// set later in the same loop pass can't replace an event before it's sent.
+static void tx_send_event(void) {
+    const NimBLEAttValue v = tx_char->getValue();
+    tx_subscribers.send(tx_char, v.data(), v.size());
 }
 
 void ble_send_dismiss(void) {
     if (state == BLE_STATE_CONNECTED && tx_char) {
         tx_char->setValue("{\"dismiss\":true}");
-        tx_char->notify();
+        tx_send_event();
         Serial.println("BLE: alert dismissed on the device");
+    }
+}
+
+void ble_send_next_account(void) {
+    if (state == BLE_STATE_CONNECTED && tx_char) {
+        tx_char->setValue("{\"next\":true}");
+        tx_send_event();
+        Serial.println("BLE: next account asked for");
     }
 }
 
