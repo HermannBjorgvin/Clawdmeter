@@ -50,7 +50,36 @@ float ding_value(uint32_t n, uint32_t rate) {
 }
 
 int16_t ding_sample(uint32_t n, uint32_t rate, float gain) {
+    return ding_sample_style(n, rate, gain, DING_STRIKE);
+}
+
+// DING_SOFT: see ding.h.
+static const float SOFT_ATTACK_S = 0.015f;
+static const float SOFT_TAU      = 0.32f;
+static const float SOFT_FADE_S   = 0.25f;
+static const float SOFT_LEVEL    = 0.93f;   // peak about -0.7 dBFS, like the strike
+
+static float ding_value_soft(uint32_t n, uint32_t rate) {
+    if (rate == 0 || n >= ding_frames(rate)) return 0.0f;
+    const float t = (float)n / (float)rate;
+    const float ph = TWO_PI_F * F0 * t;
+    const float tone = sinf(ph) + P3 * sinf(3.0f * ph) + P2 * sinf(2.0f * ph);
+    float env = expf(-t / SOFT_TAU);
+    if (t < SOFT_ATTACK_S) env *= 0.5f - 0.5f * cosf(TWO_PI_F * 0.5f * t / SOFT_ATTACK_S);
+    const float left = DING_LENGTH_S - t;
+    if (left < SOFT_FADE_S) env *= 0.5f - 0.5f * cosf(TWO_PI_F * 0.5f * left / SOFT_FADE_S);
+    float y = SOFT_LEVEL * env * tone;
+    if (y > 1.0f) y = 1.0f;
+    if (y < -1.0f) y = -1.0f;
+    return y;
+}
+
+float ding_value_style(uint32_t n, uint32_t rate, DingStyle style) {
+    return style == DING_SOFT ? ding_value_soft(n, rate) : ding_value(n, rate);
+}
+
+int16_t ding_sample_style(uint32_t n, uint32_t rate, float gain, DingStyle style) {
     if (gain < 0.0f) gain = 0.0f;
     if (gain > 1.0f) gain = 1.0f;
-    return (int16_t)lrintf(ding_value(n, rate) * gain * 32767.0f);
+    return (int16_t)lrintf(ding_value_style(n, rate, style) * gain * 32767.0f);
 }

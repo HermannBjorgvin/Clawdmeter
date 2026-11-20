@@ -11,15 +11,20 @@
 // amp_enable is the only part that differs structurally between boards: the
 // 2.16 toggles a GPIO, the 1.8 drives an XCA9554 expander line. May be null
 // (an amp with no enable line): the codec's DAC is then muted between dings.
+//
+// es8311_addr 0 is an I2S amplifier that needs no setup (the M5Stack Core2's
+// NS4168): no codec is driven and `volume` scales the rendered samples.
 
 typedef void (*amp_enable_fn)(bool on);
 
 struct ChimeConfig {
     int          mclk, bclk, ws, dout, din;  // I2S GPIOs
     int          sample_rate;                // I2S rate the ding is synthesized at
-    uint8_t      es8311_addr;                // codec I2C address (0x18)
-    uint8_t      volume;                     // 0..100
+    uint8_t      es8311_addr;                // codec I2C address (0x18); 0 = no codec
+    uint8_t      volume;                     // 0..100 (codec volume, or a digital
+                                             // scale on the samples without one)
     amp_enable_fn amp_enable;                // power-amp on/off hook (nullable)
+    uint8_t      style;                      // DingStyle (ding.h); 0 = DING_STRIKE
 };
 
 // Bring up I2S + the ES8311 codec. Returns true on success; false leaves the

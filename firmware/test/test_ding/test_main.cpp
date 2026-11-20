@@ -68,6 +68,35 @@ static void test_samples_scale_and_clamp(void) {
     TEST_ASSERT_INT_WITHIN(1, full / 2, ding_sample(n, RATE, 0.5f));
 }
 
+static float peak_soft(uint32_t a, uint32_t b) {
+    float p = 0;
+    for (uint32_t n = a; n < b; n++) p = fmaxf(p, fabsf(ding_value_style(n, RATE, DING_SOFT)));
+    return p;
+}
+
+static void test_soft_envelope(void) {
+    // The strike style is the plain ding.
+    TEST_ASSERT_EQUAL_FLOAT(ding_value(100, RATE), ding_value_style(100, RATE, DING_STRIKE));
+    // Fades in: near silent in the first millisecond, full by 20 ms.
+    TEST_ASSERT_TRUE(peak_soft(0, RATE / 1000) < 0.02f);
+    const float p = peak_soft(0, RATE / 10);
+    TEST_ASSERT_TRUE(p > 0.85f && p < 1.0f);
+    TEST_ASSERT_TRUE(peak_soft(RATE / 50, RATE / 50 + 100) > 0.85f);
+    // No click: no sample-to-sample jump bigger than the tone's own slope.
+    float jump = 0;
+    for (uint32_t n = 1; n < RATE / 10; n++)
+        jump = fmaxf(jump, fabsf(ding_value_style(n, RATE, DING_SOFT) - ding_value_style(n - 1, RATE, DING_SOFT)));
+    TEST_ASSERT_TRUE(jump < 0.1f);
+    // Fades out to silence by the end, same length as the strike.
+    TEST_ASSERT_TRUE(peak_soft(ding_frames(RATE) - 200, ding_frames(RATE)) < 0.0005f);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ding_value_style(ding_frames(RATE), RATE, DING_SOFT));
+    // Same note.
+    int rising = 0;
+    for (uint32_t n = RATE / 50; n < RATE / 50 + RATE / 2; n++)
+        if (ding_value_style(n - 1, RATE, DING_SOFT) < 0 && ding_value_style(n, RATE, DING_SOFT) >= 0) rising++;
+    TEST_ASSERT_INT_WITHIN(2, 277, rising);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_length);
@@ -76,5 +105,6 @@ int main(int, char**) {
     RUN_TEST(test_rings_at_c_sharp_5);
     RUN_TEST(test_golden_frames);
     RUN_TEST(test_samples_scale_and_clamp);
+    RUN_TEST(test_soft_envelope);
     return UNITY_END();
 }
