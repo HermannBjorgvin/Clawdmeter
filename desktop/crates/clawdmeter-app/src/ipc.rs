@@ -104,7 +104,7 @@ pub struct StatusSnapshot {
     pub claude: Option<String>,
     /// Last successful device write.
     pub last_write_at: Option<i64>,
-    /// Latest firmware release, when the daily check found one.
+    /// Latest firmware release, when the update check found one.
     pub latest_firmware: Option<String>,
     /// Firmware the device last reported (flash or `info`).
     pub device_firmware: Option<String>,
@@ -227,6 +227,14 @@ impl StatusSnapshot {
     /// whose count is known. With a 5-hour window the week takes that place.
     pub fn shown_resets(&self) -> Option<u32> {
         self.resets_held.filter(|_| self.codex && self.no_session_limit)
+    }
+
+    /// Fable's % for the strip inside the Weekly bar, where the Overview and
+    /// the macOS tray panel draw it (as the device does): a Claude account's
+    /// weekly meter, never a Codex account's (Fable is Claude's) or a
+    /// spend-capped one's (no weekly bar).
+    pub fn shown_fable(&self) -> Option<u32> {
+        self.fable_pct.filter(|_| !self.codex && !self.spend)
     }
 
     /// Seconds since the numbers were read.
@@ -593,6 +601,11 @@ mod tests {
         ];
         let snap = StatusSnapshot::from_status(&s, 1_000);
         assert_eq!(snap.fable_pct, Some(40));
+        assert_eq!(snap.shown_fable(), Some(40), "drawn in the Weekly bar");
+        // Never on a Codex account's bar or a spend-capped one's, whatever
+        // the snapshot carries.
+        assert_eq!(StatusSnapshot { codex: true, ..snap.clone() }.shown_fable(), None);
+        assert_eq!(StatusSnapshot { spend: true, ..snap.clone() }.shown_fable(), None);
         // A status file from before the field reads as unknown.
         let mut old = serde_json::to_value(&snap).unwrap();
         old.as_object_mut().unwrap().remove("fable_pct");

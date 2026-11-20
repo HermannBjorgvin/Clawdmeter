@@ -33,22 +33,32 @@ is faked behind `FlashHardware`.
   machine: `next_write` / `mark_written`), `autostart` (systemd / XDG /
   LaunchAgent / Run key, legacy-daemon detection + `disable_legacy`),
   `launch`, `platform`.
-- `clawdmeter-ble`: btleplug link. Adapters come from one `Bluetooth` handle
-  per runtime: on Linux every btleplug `Manager` is a D-Bus connection that
-  is never closed, so never make one per attempt. On a failed `adapters()`
-  a throwaway connection checks whether a new one would fare better; only
-  then, and if a retry on the same connection fails too (bluetoothd may
-  just have come back), is the manager replaced and the loss counted. The
-  watcher reopens on a bump, and dead streams are leaked, not dropped
-  (`MessageStream::drop` unwraps a `RemoveMatch`, which panics on a dead
-  connection and aborts release builds). Connects only to OS-known
+- `clawdmeter-ble`: btleplug link. The manager and adapter come from one
+  `Bluetooth` handle per runtime (`bluetooth.rs`), kept for good: on Linux
+  every btleplug `Manager` is a D-Bus connection that is never closed, on
+  macOS every `adapters()` call a CoreBluetooth thread that never exits.
+  On a failed `adapters()` a throwaway connection checks whether a new one
+  would fare better; only then, and if a retry on the same connection fails
+  too (bluetoothd may just have come back), is the manager replaced and the
+  loss counted. An adapter reading off is relisted on Linux/Windows and
+  replaced only by a different one. The watcher reopens on either. A
+  finished BlueZ stream (the watcher's, a dropped link's notifications) is
+  dropped once its connection answers a listing and leaked once it is known
+  dead; while bluetoothd doesn't answer over a live bus it asks again every
+  5 s (`MessageStream::drop` unwraps a `RemoveMatch`, which panics on a dead
+  connection and aborts release builds; upstream fixes in #271). Each
+  link's notification forwarder stops when its `DeviceLink` drops (each
+  holds a match rule, capped at 512 per connection). Windows clears the
+  adapter's peripherals before each attempt; macOS never does (its clear
+  cancels every tracked connection). Connects only to OS-known
   devices (custom service, or HID + exact name); address cache, REQ
-  subscription, zombie-write breaker, BlueZ trust, macOS stale-bond unpair via `blueutil`,
+  subscription, zombie-write breaker (a zombie link is disconnected before
+  it's dropped), BlueZ trust, macOS stale-bond unpair via `blueutil`,
   Windows bonded-address fallback (PnP / `CLAWDMETER_BLE_ADDRESS`).
 - `clawdmeter-flash`: downloads the release `manifest.json`, matches boards by
   chip + flash size, writes with espflash.
 - `clawdmeter-app`: the `clawdmeter` binary. Tray (`tray/`, ksni on Linux;
-  on macOS the whole menu is one AppKit panel, `tray/mac_menu.rs`, put into
+  on macOS the menu is one AppKit panel, `tray/mac_menu.rs`, put into
   muda's NSMenu: the device's home screen, a reload button in its corner,
   and a footer with Open Clawdmeter and icons for an update (`tray::
   update_offer`: while the app is behind, its update, to the Update page,
@@ -64,7 +74,17 @@ is faked behind `FlashHardware`.
   muda inserts and removes by position, so the tray never edits the item
   set but builds a new menu when `tray::MenuShape` changes; their ids are
   fixed strings (`"open"`, `"quit"`, …), so a click still matches after a
-  rebuild. `Items` is per platform: on macOS just the menu and the panel.
+  rebuild. `Items` is per platform: on macOS the menu and the panel, plus
+  the one native part, the "Show on device" submenu between the panel's
+  body and its footer (muda appends it, then `MenuHeader::install` puts the
+  body at index 0 and the footer at the end; muda never inserts or removes
+  there, since it counts positions without the panel, so a change in the
+  accounts builds the whole menu again). That submenu (`device_menu`,
+  `device_choices`, ids `device-auto` / `device-<index>` into
+  `Settings::accounts`, title "Show on device: <choice>") is on every
+  platform with two or more accounts (`MenuShape::device_accounts` on
+  Linux/Windows); a pick saves `device_account` through `write_settings`,
+  like the chime.
   `StatusSnapshot::spend` marks a spend-capped account, drawn as one Spend
   meter in the panel, the rows and the Overview),
   window (`ui/`), `daemon.rs` (drives the engine on its own thread: 0.5 s
@@ -94,6 +114,27 @@ is faked behind `FlashHardware`.
   state and locks.
 - Config keys: `config_dirs`, `codex_dirs` (Codex homes; absent = the
   discovered default, empty = none: `Settings::apply_codex_default`),
+  `device_account` (the account the device shows, from the Overview's
+  drop-down, `ui/overview.rs` `account_control`, or the tray's "Show on
+  device" submenu; both list `Settings::accounts` and show with two or
+  more; absent or `auto` = the selector's pick, "Latest active account".
+  Removing the account on the Accounts page clears it. `Engine::shown_choice` uses it while it's a listed folder with a
+  reading (a dead Codex sign-in drops it) whose last 3 polls didn't all
+  miss, else the selector's pick (which
+  keeps running underneath, and can be the chosen account itself). A miss
+  or two never moves it, as a miss never moves the automatic choice. A switch
+  to numbers read earlier goes out at once as an `rp:1` replay, even while
+  stale (once, so the board shows the app's account), and so does a
+  reconnect's resend of an account the board last had only as a replay
+  (`polled_account`); a switch made by that account's own fresh poll is a
+  poll, as automatic switches always were. The app's rate tracker starts
+  over on another Claude account's numbers (`rate_account`). The board can't
+  tell accounts apart: another Claude account's next real poll reaches its
+  rate ring, so a drop over 5 points reads as a reset there (chime if on, and
+  Clawd's reaction) and a rise as heavy use, as automatic switches always
+  did. Known gap: the shown account's cadence follows every account's
+  prompts, so a chosen account with a window running is probed as often as
+  every 2 min while another account works),
   `poll_interval`, `heartbeat_interval`,
   `reset_chime` and `alert_chime` (device chimes; the old `chime` / `beep`
   keys are read when these are absent), `desktop_chime` (the same ding on
@@ -262,7 +303,7 @@ runs or shows (bar the Accounts page's trial note).
   never see a Codex dir. The results join `PlanSelector`, but through
   `choose_preferring`: before any rise a Claude account is shown over a
   Codex one whatever the %, so Codex takes the device only when its own
-  meter rises. Codex readings never feed the rate tracker (the mood is
+  meter rises (or it's the `device_account`). Codex readings never feed the rate tracker (the mood is
   Claude's). A Codex sign-in failure (none, expired, refused) drops that
   account's reading, so it leaves the choice, and counts toward "every
   account logged out" (`codex_signed_out`).
@@ -333,8 +374,10 @@ runs or shows (bar the Accounts page's trial note).
 - Nothing competes for the serial port: the flasher (`ui/flasher.rs`) touches
   USB only while on screen (`set_active`), the Device page probes only while
   shown, and the sidebar locks while a board is being written.
-- App updates (`ui/update.rs`, `Page::Update`): when the daily check's tag
-  (`StatusSnapshot::app_update`, or the check's cache file with no tray) is
+- App updates (`ui/update.rs`, `Page::Update`): when the update check's tag
+  (every 6 h, an hour after one that couldn't reach GitHub:
+  `release::UpdateCheck`;
+  `StatusSnapshot::app_update`, or the check's cache file with no tray) is
   newer than a release build's version, the sidebar footer shows "Update
   available" until that release is skipped (`skipped_update`; a later one
   is announced again). It opens the Update page, which the same pill

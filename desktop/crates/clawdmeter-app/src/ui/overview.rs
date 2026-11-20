@@ -6,11 +6,17 @@ use clawdmeter_core::themes;
 use clawdmeter_core::usage::{fable_reaches_week, FABLE_WEEKLY_SHARE_PCT};
 use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::release::release_tag;
-use gpui::{div, prelude::*, px, relative, rgb, Context, EventEmitter, Rgba, SharedString, Window};
+use std::path::PathBuf;
 
-use super::theme::{Theme, FONT_BODY, FONT_DISPLAY, R_M, R_PILL};
+use gpui::{
+    div, prelude::*, px, relative, rgb, AnyElement, Context, Corner, EventEmitter, FocusHandle, Rgba, SharedString,
+    Window,
+};
+
+use super::theme::{Theme, FONT_BODY, FONT_DISPLAY, FONT_MONO, R_M, R_PILL};
 use super::widgets::{
-    button, clawd, dot, field, icon, icon_button, notice, toggle, tone_color, usage_tone, ButtonKind, Tone,
+    button, clawd, dot, field, icon, icon_button, menu_button, menu_row, notice, popover_menu, toggle, tone_color,
+    usage_tone, ButtonKind, Tone,
 };
 use super::{command, live_status, not_running_text, Navigate, REFRESH};
 use crate::art::TrayState;
@@ -30,6 +36,16 @@ pub struct OverviewView {
     skipped_firmware: Option<String>,
     /// "Skip this update" couldn't be saved.
     skip_failed: bool,
+    /// Every account ([`Settings::accounts`]): with two or more, the header
+    /// has the drop-down that picks the one the device shows.
+    accounts: Vec<(PathBuf, bool)>,
+    /// The account chosen for the device ([`Settings::chosen_account`]);
+    /// `None`: the latest active one.
+    device_account: Option<PathBuf>,
+    /// The account drop-down is open.
+    account_menu_open: bool,
+    /// The open drop-down's focus, for Escape.
+    account_menu_focus: FocusHandle,
 }
 
 impl EventEmitter<Navigate> for OverviewView {}
@@ -51,6 +67,10 @@ impl OverviewView {
             desktop_chime: false,
             skipped_firmware: None,
             skip_failed: false,
+            accounts: Vec::new(),
+            device_account: None,
+            account_menu_open: false,
+            account_menu_focus: cx.focus_handle(),
         };
         v.reload(clawdmeter_core::unix_now());
         v
@@ -60,6 +80,10 @@ impl OverviewView {
         self.snap = live_status(&self.paths);
         if let Ok(s) = Settings::load(&self.paths) {
             self.desktop_chime = s.desktop_chime;
+            self.accounts = s.accounts().map(|(d, codex)| (d.clone(), codex)).collect();
+            // Nothing left to pick: the drop-down is gone, so its menu is too.
+            self.account_menu_open &= self.accounts.len() > 1;
+            self.device_account = s.chosen_account().cloned();
             self.skipped_firmware = s.skipped_firmware;
         }
         if let Some(at) = self.refreshing {
@@ -228,8 +252,9 @@ fn fable_frac(fable_pct: Option<u32>) -> Option<f32> {
 /// The overlay's width (0..1 of the bar) on a weekly fill at `week_pct`, and
 /// whether it reaches the fill's end. It never runs past the fill, and runs
 /// to its end by the device's rule ([`fable_reaches_week`]: within 1.5
-/// points of it, since Fable usage is part of the week's).
-fn fable_extent(fable_pct: Option<u32>, week_pct: u32) -> Option<(f32, bool)> {
+/// points of it, since Fable usage is part of the week's). The macOS tray
+/// panel's Weekly meter draws the same strip (`tray::header::Meter::fable`).
+pub fn fable_extent(fable_pct: Option<u32>, week_pct: u32) -> Option<(f32, bool)> {
     let f = fable_frac(fable_pct)?;
     let fable_pct = fable_pct?;
     let fill = week_pct.min(100) as f32 / 100.;
@@ -237,9 +262,10 @@ fn fable_extent(fable_pct: Option<u32>, week_pct: u32) -> Option<(f32, bool)> {
 }
 
 /// The overlay's colour: the device's Dark or Light violet, as the meters
-/// here follow the device's Dark and Light palettes.
-fn fable_color(t: &Theme) -> u32 {
-    let preset = if t.dark { themes::default_preset() } else { themes::light() };
+/// here follow the device's Dark and Light palettes (`dark`: the theme's
+/// `dark`). The tray panel uses it too.
+pub fn fable_color(dark: bool) -> u32 {
+    let preset = if dark { themes::default_preset() } else { themes::light() };
     preset.colors.get(ColorToken::Fable)
 }
 
@@ -278,7 +304,7 @@ fn meter_in(
     let value = pct.map_or_else(|| "--%".to_owned(), |p| format!("{p}%"));
     let frac = pct.unwrap_or(0).min(100) as f32 / 100.;
     let fable = fable_extent(fable, pct.unwrap_or(0)).map(|(f, _)| {
-        let strip = div().h_full().w(relative(frac / f)).rounded(px(4.)).bg(rgb(fable_color(t)));
+        let strip = div().h_full().w(relative(frac / f)).rounded(px(4.)).bg(rgb(fable_color(t.dark)));
         div().absolute().top_0().left_0().h_full().w(relative(f)).overflow_hidden().child(strip)
     });
     div()
@@ -443,6 +469,42 @@ impl Render for OverviewView {
             }
         };
         let refresh = self.snap.as_ref().map(|s| self.refresh_control(&t, s, now, cx));
+        let several = self.accounts.len() > 1;
+        // The top right: the refresh button, its note before it. With
+        // several accounts the account drop-down comes first and the note
+        // goes under them both; that side gives way (the drop-down's label
+        // truncates) before the title does.
+        let mute = t.mute;
+        let note_el = move |n: SharedString| div().text_size(px(12.5)).text_color(mute).truncate().child(n);
+        let controls = match (several, refresh) {
+            (false, refresh) => {
+                div().flex().flex_shrink_0().items_center().gap(px(8.)).children(refresh.map(|(note, button)| {
+                    div().flex().items_center().gap(px(8.)).children(note.map(note_el)).child(button)
+                }))
+            }
+            (true, refresh) => {
+                let (note, button) = refresh.map_or((None, None), |(n, b)| (n, Some(b)));
+                // Rows stretched to the column's width and their contents
+                // pushed right: a right-aligned row wider than the column
+                // would spill to the left, over Clawd and the title.
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap(px(8.))
+                            .min_w_0()
+                            .child(self.account_control(&t, window, cx))
+                            .children(button),
+                    )
+                    .children(note.map(|n| div().flex().justify_end().min_w_0().child(note_el(n))))
+            }
+        };
         let header = div()
             .flex()
             .items_start()
@@ -454,6 +516,7 @@ impl Render for OverviewView {
                     .flex_col()
                     .flex_1()
                     .min_w_0()
+                    .when(several, |d| d.min_w(px(150.)))
                     .gap(px(6.))
                     .child(
                         div()
@@ -465,7 +528,7 @@ impl Render for OverviewView {
                     )
                     .child(div().text_size(px(13.)).text_color(t.mute).truncate().child(sub)),
             )
-            .children(refresh);
+            .child(controls);
         // The setup guide link sits at the foot of the page, bottom right.
         let text = t.text;
         let setup = div().flex_1().flex().items_end().justify_end().pt(px(16.)).child(
@@ -534,7 +597,7 @@ impl Render for OverviewView {
                 });
                 session
                     .into_iter()
-                    .chain([meter(&t, "Weekly", s.week_pct, s.fable_pct, reset_text(s.week_resets_at, now, "---"))])
+                    .chain([meter(&t, "Weekly", s.week_pct, s.shown_fable(), reset_text(s.week_resets_at, now, "---"))])
                     .collect()
             };
             page = page.child(div().flex().flex_col().gap(px(12.)).children(meters));
@@ -576,7 +639,15 @@ impl Render for OverviewView {
 impl OverviewView {
     /// The refresh icon at the top right, with a quiet note when a press
     /// can't check right away.
-    fn refresh_control(&self, t: &Theme, s: &StatusSnapshot, now: i64, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The refresh button and the note that goes with it (checking, how long
+    /// until it can check again, or the usage endpoint's pause).
+    fn refresh_control(
+        &self,
+        t: &Theme,
+        s: &StatusSnapshot,
+        now: i64,
+        cx: &mut Context<Self>,
+    ) -> (Option<SharedString>, AnyElement) {
         let state = refresh_state(s, self.refreshing.is_some(), now);
         let note: Option<SharedString> = match &state {
             RefreshState::Checking => Some("Checking…".into()),
@@ -598,15 +669,121 @@ impl OverviewView {
                     cx.notify();
                 })
             });
-        div()
-            .flex()
-            .flex_shrink_0()
-            .items_center()
-            .gap(px(8.))
-            .when_some(note, |d, n| d.child(div().text_size(px(12.5)).text_color(t.mute).child(n)))
-            .child(button)
+        (note, button.into_any_element())
+    }
+
+    /// The drop-down that picks the account the device shows: the latest
+    /// active one (the default) or one of them (`device_account`). Its menu
+    /// hangs under it, right edges lined up.
+    fn account_control(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let label = match &self.device_account {
+            Some(d) => tilde(&d.to_string_lossy(), &self.paths.home),
+            None => LATEST_ACCOUNT.to_owned(),
+        };
+        let trigger = menu_button(
+            t,
+            "device-account",
+            Some("users"),
+            label,
+            ButtonKind::Small,
+            true,
+            cx.listener(|v, _, window, cx| {
+                if v.account_menu_open {
+                    v.close_account_menu(cx);
+                } else {
+                    v.account_menu_open = true;
+                    window.focus(&v.account_menu_focus);
+                    cx.notify();
+                }
+            }),
+        );
+        div().flex().flex_col().min_w_0().child(trigger).when(self.account_menu_open, |d| {
+            d.child(div().flex().justify_end().children(self.account_menu(t, window, cx)))
+        })
+    }
+
+    /// The drop-down's choices, the chosen one ticked. The latest active
+    /// account names the one it shows now; Codex folders say so.
+    fn account_menu(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> [AnyElement; 2] {
+        let home = &self.paths.home;
+        let row = |id: String,
+                   label: String,
+                   mono: bool,
+                   hint: String,
+                   choice: Option<PathBuf>,
+                   cx: &mut Context<Self>| {
+            let ticked = self.device_account == choice;
+            let name = div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .min_w_0()
+                .child(div().w(px(14.)).flex_shrink_0().when(ticked, |d| d.child(icon("check", 14., t.text))))
+                .child(
+                    div()
+                        .text_size(px(13.5))
+                        .text_color(t.text)
+                        .truncate()
+                        .when(mono, |d| d.font_family(FONT_MONO).text_size(px(13.)))
+                        .child(label),
+                );
+            menu_row(t, id, name, hint, t.mute, cx.listener(move |v, _, _, cx| v.choose_account(choice.clone(), cx)))
+                .into_any_element()
+        };
+        let shown = match (&self.device_account, self.snap.as_ref().and_then(|s| s.account.as_deref())) {
+            (None, Some(a)) => tilde(a, home),
+            _ => String::new(),
+        };
+        let mut rows = vec![row("device-account-auto".into(), LATEST_ACCOUNT.into(), false, shown, None, cx)];
+        for (i, (d, codex)) in self.accounts.iter().enumerate() {
+            let label = tilde(&d.to_string_lossy(), home);
+            let hint = if *codex { "Codex" } else { "" }.to_owned();
+            rows.push(row(format!("device-account-{i}"), label, true, hint, Some(d.clone()), cx));
+        }
+        let me = cx.entity().downgrade();
+        popover_menu(
+            t,
+            "device-account-menu",
+            &self.account_menu_focus,
+            window.viewport_size(),
+            Corner::TopRight,
+            rows,
+            move |_, cx| {
+                let _ = me.update(cx, |v, cx| v.close_account_menu(cx));
+            },
+        )
+    }
+
+    fn close_account_menu(&mut self, cx: &mut Context<Self>) {
+        self.account_menu_open = false;
+        cx.notify();
+    }
+
+    /// Save the account the device shows (`None`: the latest active one).
+    /// The tray hands it to the daemon at once.
+    fn choose_account(&mut self, choice: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.account_menu_open = false;
+        let saved = choice.clone();
+        match super::settings::write_settings(&self.paths, move |s, _| s.device_account = saved) {
+            Ok(()) => self.device_account = choice,
+            Err(e) => log::warn!("couldn't save the device account: {e}"),
+        }
+        cx.notify();
+    }
+
+    /// Open or close the account drop-down (tests and the demo).
+    pub fn set_account_menu_open(&mut self, open: bool) {
+        self.account_menu_open = open;
+    }
+
+    /// Whether the account drop-down is open (tests).
+    pub fn account_menu_open(&self) -> bool {
+        self.account_menu_open
     }
 }
+
+/// The drop-down's default: the account whose usage rose most recently.
+pub(crate) const LATEST_ACCOUNT: &str = "Latest active account";
 
 #[cfg(test)]
 mod tests {

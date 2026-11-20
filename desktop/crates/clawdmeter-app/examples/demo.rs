@@ -11,7 +11,7 @@
 //!   [--app-update download|downloading|ready|failed|none|linux|linux-menu]
 //!   [--advanced] [--session idle|week] [--buttons custom] [--edit primary|secondary|pwr] [--record]
 //!   [--firmware-skipped] [--codex week|5h|listed] [--resets N] [--fable PCT] [--week PCT]
-//!   [--width PX] [--height PX]
+//!   [--account-menu] [--width PX] [--height PX]
 //! ```
 //!
 //! `--codex` adds a Codex account (`~/.codex` with an `auth.json`, found as
@@ -33,6 +33,9 @@
 //! `--firmware-skipped` skips the fake firmware release, as the Overview's
 //! "Skip this update" does: no nudge on the Overview and no Flash badge,
 //! while the Device page still offers it.
+//!
+//! `--account-menu` opens the Overview's drop-down that picks the account
+//! the device shows (it needs two or more accounts, e.g. `--codex week`).
 //!
 //! `--accounts retrying` adds a second account that is being rate-limited;
 //! `--refresh` shows the Overview's refresh button waiting out the
@@ -297,6 +300,7 @@ fn main() {
     let app_update = arg(&args, "--app-update");
     let height = arg(&args, "--height").and_then(|h| h.parse::<f32>().ok());
     let width = arg(&args, "--width").and_then(|w| w.parse::<f32>().ok());
+    let account_menu = args.iter().any(|a| a == "--account-menu");
 
     clawdmeter_app::ui::open_with_size(width, height, move |window, cx| {
         let p = paths.clone();
@@ -304,7 +308,10 @@ fn main() {
         let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));
         let settings = cx.new(|cx| SettingsView::with_usb(p.clone(), Page::Device, false, cx));
         let flasher = cx.new(|cx| FlasherView::with_hardware(p.clone(), Some(manifest), hw, cx));
-        let app = AppView::build(p, page, overview, settings.clone(), flasher.clone(), window, cx);
+        let app = AppView::build(p, page, overview.clone(), settings.clone(), flasher.clone(), window, cx);
+        if account_menu {
+            overview.update(cx, |o, _| o.set_account_menu_open(true));
+        }
         // `--app-update` offers the fake release as an app update too, with
         // made-up notes and the download in the given state (`none`: an
         // install with no package to download).

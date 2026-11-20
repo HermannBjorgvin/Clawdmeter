@@ -813,7 +813,7 @@ impl SettingsView {
         pane = pane.child(field(
             t,
             "Check for updates",
-            "Checks GitHub daily. Firmware updates appear here and in the tray, app updates in the sidebar.",
+            "Checks GitHub every 6 hours. Firmware updates appear here and in the tray, app updates in the sidebar.",
             toggle(t, "update-check", on, true, move |_, _, cx| {
                 let _ = me.update(cx, |v, cx| {
                     v.save(|s, _| s.update_check = !on);
@@ -1491,7 +1491,7 @@ impl SettingsView {
                 t,
                 "The default Claude Code folder is ~/.claude. Add a config folder for each other account you want \
                  to monitor. The device follows the account whose usage increased most recently (weekly usage, on \
-                 accounts with no 5-hour limit).",
+                 accounts with no 5-hour limit), unless you pick one at the top of the Overview.",
             ))
             .child(caption(
                 t,
@@ -1587,6 +1587,10 @@ impl SettingsView {
                                 v.save(|s, _| {
                                     s.config_dirs.retain(|x| *x != dir);
                                     s.codex_dirs.retain(|x| *x != dir);
+                                    // A removed account can't stay on the device.
+                                    if s.device_account.as_ref() == Some(&dir) {
+                                        s.device_account = None;
+                                    }
                                 });
                                 cx.notify();
                             });
@@ -2826,6 +2830,26 @@ mod tests {
         click(cx, "alert-permission");
         let text = std::fs::read_to_string(&paths.config_file).unwrap();
         assert!(text.contains("alert_on = question, idle, elicitation"), "{text}");
+        let _ = std::fs::remove_dir_all(&paths.home);
+    }
+
+    // Removing the account chosen for the device goes back to the latest
+    // active one; removing another keeps the choice.
+    #[gpui::test]
+    fn removing_the_chosen_account_clears_the_choice(cx: &mut TestAppContext) {
+        let paths = home("device-account");
+        let (a, b, c) = (paths.home.join("acct"), paths.home.join("acct2"), paths.home.join("acct3"));
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::create_dir_all(&c).unwrap();
+        let dirs = format!("config_dirs = {}, {}, {}\n", a.display(), b.display(), c.display());
+        std::fs::write(&paths.config_file, format!("{dirs}device_account = ~/acct2\n")).unwrap();
+        let p = paths.clone();
+        let (_view, cx) = cx.add_window_view(move |_, cx| SettingsView::with_usb(p, Page::Accounts, false, cx));
+        let config = || std::fs::read_to_string(&paths.config_file).unwrap();
+        click(cx, "rm-2");
+        assert!(config().contains("device_account = ~/acct2\n"), "{}", config());
+        click(cx, "rm-1");
+        assert!(!config().contains("device_account"), "{}", config());
         let _ = std::fs::remove_dir_all(&paths.home);
     }
 

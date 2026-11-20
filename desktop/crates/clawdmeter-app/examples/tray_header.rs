@@ -1,8 +1,9 @@
 //! Renders the macOS tray menu's header for a few made-up states, in light
 //! and dark mode, as PNGs (the header is drawn by AppKit, so this is the way
-//! to review it without opening the menu). First it puts the panel into a
-//! muda menu the way the tray does, appends a few items after it, and checks
-//! the NSMenu came out as the panel, then those items.
+//! to review it without opening the menu). First it builds a muda menu the
+//! way the tray does: a few native items and a submenu (like "Show on
+//! device") appended, then the panel put in around them, and checks the
+//! NSMenu came out as the panel's body, those items, then its footer.
 //!
 //! `cargo run -p clawdmeter-app --example tray_header -- <out dir>`
 
@@ -17,22 +18,29 @@ fn main() {
     let mtm = objc2::MainThreadMarker::new().expect("main thread");
     let _app = objc2_app_kit::NSApplication::sharedApplication(mtm);
     {
-        use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+        use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
         let menu = Menu::new();
-        let _header = MenuHeader::install(&menu);
         let (a, b, c) = (
             MenuItem::new("Refresh usage", true, None),
             CheckMenuItem::new("Chime on this computer", true, false, None),
             MenuItem::new("Quit Clawdmeter", true, None),
         );
-        menu.append_items(&[&a, &b, &PredefinedMenuItem::separator(), &c]).expect("append");
+        let device = Submenu::with_id("device", "Show on device", true);
+        let auto = CheckMenuItem::with_id("device-auto", "Latest active account", true, true, None);
+        let one = CheckMenuItem::with_id("device-0", "~/.claude", true, false, None);
+        device.append_items(&[&auto, &one]).expect("submenu");
+        menu.append_items(&[&a, &b, &PredefinedMenuItem::separator(), &c, &device]).expect("append");
+        let _header = MenuHeader::install(&menu);
         let ns = clawdmeter_app::tray::mac_menu::ns_menu(&menu);
         let item = |i| ns.itemAtIndex(i).expect("item");
-        assert_eq!(ns.numberOfItems(), 5, "the panel, then the four appended");
-        assert!(item(0).view().is_some(), "the header is the first item");
+        assert_eq!(ns.numberOfItems(), 7, "the panel's body, the five appended, its footer");
+        assert!(item(0).view().is_some(), "the body is the first item");
         assert_eq!(item(1).title().to_string(), "Refresh usage");
         assert_eq!(item(4).title().to_string(), "Quit Clawdmeter");
-        println!("menu: panel, then {} items", ns.numberOfItems() - 1);
+        assert_eq!(item(5).title().to_string(), "Show on device");
+        assert_eq!(item(5).submenu().expect("a submenu").numberOfItems(), 2);
+        assert!(item(6).view().is_some(), "the footer is the last item");
+        println!("menu: body, {} items, footer", ns.numberOfItems() - 2);
     }
     let home = std::path::Path::new("/Users/you");
     let now = clawdmeter_core::unix_now();
@@ -63,6 +71,34 @@ fn main() {
                 session_resets_at: Some(now + 9000),
                 week_pct: Some(62),
                 week_resets_at: Some(now + (5 * 24 + 11) * 3600),
+                ..base.clone()
+            },
+        ),
+        (
+            // Fable at 40 % of its own limit: a fifth of the bar, short of
+            // the weekly fill, with a straight right end.
+            "fable",
+            false,
+            StatusSnapshot {
+                session_pct: Some(34),
+                window_started: true,
+                session_resets_at: Some(now + 9000),
+                week_pct: Some(62),
+                week_resets_at: Some(now + (5 * 24 + 11) * 3600),
+                fable_pct: Some(40),
+                ..base.clone()
+            },
+        ),
+        (
+            // A week spent only on Fable (31 % and 61 %, rounded apart): the
+            // strip is the whole fill.
+            "fable-whole-week",
+            false,
+            StatusSnapshot {
+                no_session_limit: true,
+                week_pct: Some(31),
+                week_resets_at: Some(now + (3 * 24 + 4) * 3600),
+                fable_pct: Some(61),
                 ..base.clone()
             },
         ),
@@ -267,6 +303,7 @@ fn main() {
                 session_resets_at: Some(now + 2 * 3600 + 30 * 60),
                 week_pct: Some(62),
                 week_resets_at: Some(now + (5 * 24 + 11) * 3600),
+                fable_pct: Some(40),
                 read_at: Some(now - 120),
                 ..base.clone()
             },
