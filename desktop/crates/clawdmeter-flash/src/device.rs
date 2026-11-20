@@ -466,6 +466,25 @@ pub fn preserved_ranges(image: &[u8]) -> Vec<Range<usize>> {
     out
 }
 
+/// First byte of an ESP application image (`esp_image_header_t.magic`).
+const APP_IMAGE_MAGIC: u8 = 0xE9;
+
+/// The application image inside a merged image: everything from the first
+/// app partition in its partition table on, which is what an update over
+/// Bluetooth writes into the board's spare app slot. `None` for an image
+/// with no partition table, no app partition, or no app image there.
+pub fn app_image(image: &[u8]) -> Option<&[u8]> {
+    let table = image.get(PARTITION_TABLE..PARTITION_TABLE + 0xC00)?;
+    let off = table
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .take_while(|e| e[..2] == [0xAA, 0x50])
+        .find_map(|e| (e[2] == 0x00).then(|| u32::from_le_bytes([e[4], e[5], e[6], e[7]]) as usize))?;
+    let app = image.get(off..)?;
+    (app.first() == Some(&APP_IMAGE_MAGIC)).then_some(app)
+}
+
 /// The parts of `0..len` outside `preserved` (sorted), as write segments.
 pub fn write_segments(len: usize, preserved: &[Range<usize>]) -> Vec<Range<usize>> {
     let mut out = Vec::new();
@@ -639,6 +658,21 @@ mod tests {
         let keep = preserved_ranges(&image);
         assert_eq!(keep, vec![0x9000..0xE000]);
         assert_eq!(write_segments(image.len(), &keep), vec![0..0x9000, 0xE000..0x20000]);
+    }
+
+    #[test]
+    fn the_app_image_starts_at_the_first_app_partition() {
+        let mut image = vec![0xFF; 0x10000];
+        let table =
+            [entry(1, 2, 0x9000, 0x5000), entry(1, 0, 0xE000, 0x2000), entry(0, 0x10, 0x10000, 0x330000)].concat();
+        image[PARTITION_TABLE..PARTITION_TABLE + table.len()].copy_from_slice(&table);
+        assert_eq!(app_image(&image), None, "nothing past the table yet");
+        image.extend([APP_IMAGE_MAGIC, 7, 2, 0x20]);
+        assert_eq!(app_image(&image), Some(&[APP_IMAGE_MAGIC, 7, 2, 0x20][..]));
+        image[0x10000] = 0xFF;
+        assert_eq!(app_image(&image), None, "not an app image there");
+        assert_eq!(app_image(&[0xFF; 0x9000]), None, "no partition table");
+        assert_eq!(app_image(&[]), None);
     }
 
     #[test]

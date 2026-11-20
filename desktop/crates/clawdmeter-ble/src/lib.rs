@@ -39,10 +39,12 @@
 #![warn(missing_docs)]
 
 mod bluetooth;
+pub mod ota;
 pub mod reconnect;
 mod watch;
 
 pub use bluetooth::Bluetooth;
+pub use ota::DeviceInfo;
 pub use reconnect::Reconnect;
 pub use watch::{should_wake, spawn_watcher, Sighting, Wake, Wakeups};
 
@@ -50,8 +52,9 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use btleplug::api::{
     BDAddr, Central, Characteristic, Peripheral as _, RetrievePeripheralsOptions, ScanFilter, WriteType,
@@ -71,6 +74,10 @@ pub const RX_UUID: Uuid = Uuid::from_u128(0x4c41555a_4465_7669_6365_000000000002
 pub const TX_UUID: Uuid = Uuid::from_u128(0x4c41555a_4465_7669_6365_000000000003);
 /// Device-initiated refresh request (notify `0x01`).
 pub const REQ_UUID: Uuid = Uuid::from_u128(0x4c41555a_4465_7669_6365_000000000004);
+/// Read: the board's env, firmware version and update slot ([`DeviceInfo`]).
+pub const INFO_UUID: Uuid = Uuid::from_u128(0x4c41555a_4465_7669_6365_000000000005);
+/// Firmware update frames ([`ota`]); replies come back on TX.
+pub const OTA_UUID: Uuid = Uuid::from_u128(0x4c41555a_4465_7669_6365_000000000006);
 /// Standard HID service, which the device also exposes.
 pub const HID_SERVICE_UUID: Uuid = Uuid::from_u128(0x00001812_0000_1000_8000_00805f9b34fb);
 
@@ -420,9 +427,18 @@ pub struct DeviceLink {
     key: String,
     name: Option<String>,
     health: WriteHealth,
+    /// What INFO said (firmware older than INFO has none).
+    info: Option<DeviceInfo>,
+    /// The update characteristic, when the firmware has one.
+    ota: Option<Characteristic>,
+    /// Where the forwarder sends update replies while an update runs.
+    replies: ReplyTap,
     /// Dropping it stops the notification forwarder.
     _forwarder: Option<oneshot::Sender<()>>,
 }
+
+/// The running update's reply channel, if any.
+type ReplyTap = Arc<Mutex<Option<mpsc::UnboundedSender<ota::Reply>>>>;
 
 impl std::fmt::Debug for DeviceLink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -529,11 +545,14 @@ impl DeviceLink {
             .cloned()
             .collect();
         let mut forwarder = None;
+        let replies = ReplyTap::default();
         if !notifying.is_empty() {
             // Listen before subscribing: the device fires its REQ notify
             // inside the subscribe (it asks only when it has no data yet).
             match p.notifications().await {
-                Ok(stream) => forwarder = Some(spawn_event_forwarder(stream, tx, bluetooth.clone(), lost_at)),
+                Ok(stream) => {
+                    forwarder = Some(spawn_event_forwarder(stream, tx, replies.clone(), bluetooth.clone(), lost_at))
+                }
                 Err(e) => log::warn!("no notification stream: {e}"),
             }
         }
@@ -554,12 +573,31 @@ impl DeviceLink {
                 log::debug!("could not mark the device trusted: {e}");
             }
         }
+        let ours = |u: Uuid| chars.iter().find(|c| c.uuid == u && c.service_uuid == SERVICE_UUID).cloned();
+        let ota = ours(OTA_UUID);
+        let info = match ours(INFO_UUID) {
+            Some(c) => match tokio::time::timeout(opts.subscribe_timeout, p.read(&c)).await {
+                Ok(Ok(v)) => DeviceInfo::parse(&v),
+                Ok(Err(e)) => {
+                    log::warn!("couldn't read the board's info: {e}");
+                    None
+                }
+                Err(_) => {
+                    log::warn!("reading the board's info timed out");
+                    None
+                }
+            },
+            None => None,
+        };
         let link = DeviceLink {
             key: cand.key,
             name: cand.name,
             peripheral: p,
             rx,
             health: WriteHealth::default(),
+            info,
+            ota,
+            replies,
             _forwarder: forwarder,
         };
         Ok((link, events))
@@ -618,6 +656,330 @@ impl DeviceLink {
     /// Platform id string (BlueZ: `hci0/dev_AA_BB_...`).
     pub fn id(&self) -> String {
         self.peripheral.id().to_string()
+    }
+
+    /// What the board's INFO characteristic said on connect (`None`:
+    /// firmware from before INFO, or the read failed).
+    pub fn info(&self) -> Option<&DeviceInfo> {
+        self.info.as_ref()
+    }
+
+    /// A handle that sends a firmware update over this link, when the board
+    /// takes one ([`DeviceInfo::can_update`]). It shares the connection, so
+    /// it works only while this link is up.
+    pub fn updater(&self) -> Option<Updater> {
+        let ota = self.ota.clone()?;
+        let info = self.info.clone().filter(DeviceInfo::can_update)?;
+        Some(Updater {
+            peripheral: self.peripheral.clone(),
+            ota,
+            info,
+            replies: self.replies.clone(),
+            with_response: false,
+        })
+    }
+}
+
+/// How far a firmware update has got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateProgress {
+    /// Waiting for the board to accept BEGIN.
+    Starting,
+    /// The board asks on its screen; someone has `secs` seconds to tap it or
+    /// press a button.
+    Confirming {
+        /// How long the board waits.
+        secs: u8,
+    },
+    /// `done` of `total` bytes written to the board's flash.
+    Sending {
+        /// Bytes acknowledged.
+        done: u32,
+        /// Image size.
+        total: u32,
+    },
+    /// Every byte is in; the board is checking the image.
+    Verifying,
+}
+
+/// Why an update stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateError {
+    /// The board refused or stopped it (an `OtaErr` code).
+    Board(u8),
+    /// A write failed or the link dropped.
+    Link(String),
+    /// The board went quiet.
+    Timeout(&'static str),
+    /// The link dropped after END, before DONE: the board may well be
+    /// restarting into the new firmware. Check its version once it's back.
+    LostAfterEnd,
+    /// The image doesn't fit the protocol (empty, too large, or an env
+    /// BEGIN can't carry).
+    BadImage(&'static str),
+    /// [`Updater::run`]'s cancel flag was set.
+    Cancelled,
+}
+
+impl std::fmt::Display for UpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpdateError::Board(c) => f.write_str(ota::error_message(*c)),
+            UpdateError::Link(e) => write!(f, "The Bluetooth link failed: {e}"),
+            UpdateError::Timeout(what) => write!(f, "The board stopped answering while {what}."),
+            UpdateError::LostAfterEnd => f.write_str("The board disconnected before confirming the update."),
+            UpdateError::BadImage(why) => f.write_str(why),
+            UpdateError::Cancelled => f.write_str("The update was cancelled."),
+        }
+    }
+}
+
+impl std::error::Error for UpdateError {}
+
+/// How long BEGIN may take to be accepted.
+const READY_TIMEOUT: Duration = Duration::from_secs(20);
+/// No reply this long with frames unacknowledged: send them again.
+const QUIET_REWIND: Duration = Duration::from_millis(1500);
+/// No new byte acknowledged this long: give up.
+const NO_PROGRESS: Duration = Duration::from_secs(30);
+/// How long the board may take to check the image after END.
+const DONE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Sends a firmware image over a [`DeviceLink`] (from [`DeviceLink::updater`]).
+#[derive(Clone)]
+pub struct Updater {
+    peripheral: Peripheral,
+    ota: Characteristic,
+    info: DeviceInfo,
+    replies: ReplyTap,
+    with_response: bool,
+}
+
+impl std::fmt::Debug for Updater {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Updater").field("info", &self.info).finish()
+    }
+}
+
+/// Clears the reply tap when an update ends, however it ends.
+struct TapGuard(ReplyTap);
+
+impl Drop for TapGuard {
+    fn drop(&mut self) {
+        if let Ok(mut t) = self.0.lock() {
+            *t = None;
+        }
+    }
+}
+
+impl Updater {
+    /// What the board said about itself when the link opened.
+    pub fn info(&self) -> &DeviceInfo {
+        &self.info
+    }
+
+    /// Send every data frame with response from the start (slower; what a
+    /// stalled transfer falls back to anyway). For testing that path.
+    pub fn with_response(mut self) -> Self {
+        self.with_response = true;
+        self
+    }
+
+    /// Send `image` (an application image, not a merged one: see
+    /// `clawdmeter_flash::device::app_image`) built for `env`. Returns once
+    /// the board has checked it and is restarting into it. `cancel` stops it
+    /// before the board starts checking the image, and tells the board to
+    /// drop it. Any other failure with the link still up drops it too, so the
+    /// board doesn't sit on its update screen.
+    pub async fn run(
+        &self,
+        image: &[u8],
+        env: &str,
+        progress: impl FnMut(UpdateProgress),
+        cancel: &AtomicBool,
+    ) -> Result<(), UpdateError> {
+        let r = self.send(image, env, progress, cancel).await;
+        if matches!(r, Err(UpdateError::Timeout(_) | UpdateError::Link(_) | UpdateError::Cancelled))
+            && self.peripheral.is_connected().await.unwrap_or(false)
+        {
+            let abort = self.write(&ota::ABORT_FRAME, WriteType::WithResponse);
+            let _ = tokio::time::timeout(Duration::from_secs(3), abort).await;
+        }
+        r
+    }
+
+    async fn send(
+        &self,
+        image: &[u8],
+        env: &str,
+        mut progress: impl FnMut(UpdateProgress),
+        cancel: &AtomicBool,
+    ) -> Result<(), UpdateError> {
+        use sha2::{Digest, Sha256};
+        if image.is_empty() {
+            return Err(UpdateError::BadImage("The firmware image is empty."));
+        }
+        let size = u32::try_from(image.len()).map_err(|_| UpdateError::BadImage("The firmware image is too large."))?;
+        if env.is_empty() || env.len() > ota::ENV_MAX {
+            return Err(UpdateError::BadImage("The firmware names no board."));
+        }
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        *self.replies.lock().map_err(|_| UpdateError::Link("reply channel poisoned".into()))? = Some(tx);
+        let _guard = TapGuard(self.replies.clone());
+        progress(UpdateProgress::Starting);
+        if cancel.load(Ordering::Relaxed) {
+            return Err(UpdateError::Cancelled);
+        }
+        let sha: [u8; 32] = Sha256::digest(image).into();
+        self.write(&ota::begin_frame(size, &sha, env), WriteType::WithResponse).await?;
+        let mut wait = READY_TIMEOUT;
+        let (mtu, window) = loop {
+            match self.reply(&mut rx, wait, "starting the update", Some(cancel)).await? {
+                ota::Reply::Ready { mtu, window } => break (mtu, window),
+                ota::Reply::Error(c) => return Err(UpdateError::Board(c)),
+                // Someone has to allow it on the board; it says how long it
+                // waits (and refuses with an ERROR after that).
+                ota::Reply::Confirm { secs } => {
+                    progress(UpdateProgress::Confirming { secs });
+                    wait = Duration::from_secs(u64::from(secs) + 10);
+                }
+                _ => {}
+            }
+        };
+        let chunk = ota::chunk_size(mtu);
+        log::info!("update: board ready (mtu {mtu}, window {window}); sending {size} bytes in {chunk}-byte frames");
+        let mut sender = ota::Sender::new(size, chunk, window);
+        let mut data_write = if self.with_response { WriteType::WithResponse } else { WriteType::WithoutResponse };
+        let mut best = 0;
+        let mut moved_at = Instant::now();
+        let mut rewinds = 0u32;
+        progress(UpdateProgress::Sending { done: 0, total: size });
+        while !sender.complete() {
+            while let Ok(r) = rx.try_recv() {
+                Self::take(&mut sender, r)?;
+            }
+            if cancel.load(Ordering::Relaxed) {
+                return Err(UpdateError::Cancelled);
+            }
+            if sender.acked() > best {
+                best = sender.acked();
+                moved_at = Instant::now();
+                progress(UpdateProgress::Sending { done: best, total: size });
+            } else if moved_at.elapsed() > NO_PROGRESS {
+                return Err(UpdateError::Timeout("receiving the firmware"));
+            }
+            if sender.complete() {
+                break;
+            }
+            if let Some(r) = sender.next_chunk() {
+                match self.write(&ota::data_frame(r.start as u32, &image[r]), data_write).await {
+                    Ok(()) => {}
+                    // The host's write-without-response queue stalled (seen
+                    // on macOS: CoreBluetooth stops saying it may send again,
+                    // and every later frame waits too) but the link is up. Go
+                    // back to the last AT and send the rest with response,
+                    // which doesn't wait on that queue. NO_PROGRESS above ends
+                    // it if even that doesn't move.
+                    Err(UpdateError::Link(e)) if self.peripheral.is_connected().await.unwrap_or(false) => {
+                        if data_write == WriteType::WithoutResponse {
+                            log::warn!(
+                                "update: a write stalled ({e}); sending the rest with response from {}",
+                                sender.acked()
+                            );
+                            data_write = WriteType::WithResponse;
+                        } else {
+                            log::warn!("update: a write stalled ({e}); sending again from {}", sender.acked());
+                        }
+                        rewinds += 1;
+                        sender.rewind();
+                    }
+                    Err(e) => return Err(e),
+                }
+                continue;
+            }
+            // The window is full (or everything is out): wait for the board.
+            match tokio::time::timeout(QUIET_REWIND, rx.recv()).await {
+                Ok(Some(r)) => Self::take(&mut sender, r)?,
+                Ok(None) => return Err(UpdateError::Link("the reply channel closed".into())),
+                Err(_) => {
+                    if !self.peripheral.is_connected().await.unwrap_or(false) {
+                        return Err(UpdateError::Link("disconnected".into()));
+                    }
+                    rewinds += 1;
+                    log::debug!("update: no reply at {} of {size}; sending again from there", sender.acked());
+                    sender.rewind();
+                }
+            }
+        }
+        log::info!("update: all {size} bytes written ({rewinds} quiet rewinds); checking");
+        progress(UpdateProgress::Verifying);
+        if let Err(e) = self.write(&ota::END_FRAME, WriteType::WithResponse).await {
+            return Err(if self.peripheral.is_connected().await.unwrap_or(false) {
+                e
+            } else {
+                UpdateError::LostAfterEnd
+            });
+        }
+        loop {
+            // No cancelling now: the board is checking an image it has whole.
+            match self.reply(&mut rx, DONE_TIMEOUT, "checking the firmware", None).await {
+                Ok(ota::Reply::Done) => return Ok(()),
+                Ok(ota::Reply::Error(c)) => return Err(UpdateError::Board(c)),
+                Ok(_) => {}
+                Err(UpdateError::Link(_)) => return Err(UpdateError::LostAfterEnd),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    fn take(sender: &mut ota::Sender, r: ota::Reply) -> Result<(), UpdateError> {
+        match r {
+            ota::Reply::Error(c) => Err(UpdateError::Board(c)),
+            r => {
+                sender.on_reply(r);
+                Ok(())
+            }
+        }
+    }
+
+    /// The next reply, within `timeout`; a dropped link (or `cancel`) ends
+    /// the wait early.
+    async fn reply(
+        &self,
+        rx: &mut mpsc::UnboundedReceiver<ota::Reply>,
+        timeout: Duration,
+        what: &'static str,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<ota::Reply, UpdateError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                return Err(UpdateError::Cancelled);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(UpdateError::Timeout(what));
+            }
+            match tokio::time::timeout(left.min(Duration::from_millis(500)), rx.recv()).await {
+                Ok(Some(r)) => return Ok(r),
+                Ok(None) => return Err(UpdateError::Link("the reply channel closed".into())),
+                Err(_) if !self.peripheral.is_connected().await.unwrap_or(false) => {
+                    return Err(UpdateError::Link("disconnected".into()))
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    async fn write(&self, frame: &[u8], kind: WriteType) -> Result<(), UpdateError> {
+        // A frame without response only waits for the host's queue: when that
+        // takes seconds, it has stalled.
+        let limit = Duration::from_secs(if kind == WriteType::WithoutResponse { 5 } else { 10 });
+        match tokio::time::timeout(limit, self.peripheral.write(&self.ota, frame, kind)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(UpdateError::Link(e.to_string())),
+            Err(_) => Err(UpdateError::Link("a write timed out".into())),
+        }
     }
 }
 
@@ -737,6 +1099,7 @@ fn macos_unpair_stale_bond() {
 fn spawn_event_forwarder(
     mut stream: Pin<Box<dyn Stream<Item = btleplug::api::ValueNotification> + Send>>,
     tx: mpsc::UnboundedSender<DeviceEvent>,
+    replies: ReplyTap,
     bluetooth: Bluetooth,
     lost_at: u64,
 ) -> oneshot::Sender<()> {
@@ -748,6 +1111,16 @@ fn spawn_event_forwarder(
                 _ = &mut stopped => None,
             };
             let Some(n) = n else { break };
+            // Update replies share TX with the JSON acks; they go to the
+            // running update, if any.
+            if n.uuid == TX_UUID && ota::is_reply(&n.value) {
+                if let (Some(r), Ok(tap)) = (ota::Reply::parse(&n.value), replies.lock()) {
+                    if let Some(t) = tap.as_ref() {
+                        let _ = t.send(r);
+                    }
+                }
+                continue;
+            }
             if let Some(ev) = device_event(n.uuid, &n.value) {
                 if tx.send(ev).is_err() {
                     break;
@@ -880,11 +1253,13 @@ mod tests {
         assert_eq!(RX_UUID.to_string(), "4c41555a-4465-7669-6365-000000000002");
         assert_eq!(TX_UUID.to_string(), "4c41555a-4465-7669-6365-000000000003");
         assert_eq!(REQ_UUID.to_string(), "4c41555a-4465-7669-6365-000000000004");
+        assert_eq!(INFO_UUID.to_string(), "4c41555a-4465-7669-6365-000000000005");
+        assert_eq!(OTA_UUID.to_string(), "4c41555a-4465-7669-6365-000000000006");
         let src = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../firmware/src/ble.cpp"),
         );
         if let Ok(src) = src {
-            for u in [SERVICE_UUID, RX_UUID, TX_UUID, REQ_UUID] {
+            for u in [SERVICE_UUID, RX_UUID, TX_UUID, REQ_UUID, INFO_UUID, OTA_UUID] {
                 assert!(src.contains(&u.to_string()), "{u} not in firmware/src/ble.cpp");
             }
             assert!(src.contains("BLE_BUF_SIZE 512"), "RX buffer size changed; revisit MAX_WRITE");
