@@ -115,6 +115,15 @@ The app writes one complete JSON object per write to RX
   other length, or older firmware drops it) and `fc` (the Fable overlay's
   colour, 6 hex digits, `fable.h`). The device keeps them in NVS
   (`clawd_prefs.cpp`) so they apply from boot.
+- Firmware updates over Bluetooth: INFO (`…-0005`, read: JSON `env ver rev
+  ota otav`, `ota` the update slot's bytes, 0 = USB only) and OTA (`…-0006`,
+  binary frames, the owner only); replies go on TX with a first byte ≥ 0x80.
+  `docs/protocol.md` "Firmware updates", `firmware/src/ota*.cpp`,
+  `clawdmeter-ble`'s `ota.rs`. Nothing is written until someone taps the
+  board or double-presses a button (CONFIRM, 30 s, `OtaGate`: one
+  connection's question, a 1 s settle, a 30 s pause after an unanswered one;
+  pairing alone isn't trusted to install code). A new image stays pending until the owner reconnects and a
+  payload parses (or a minute passes); a reset before that rolls it back.
 - Device → app: `0x01` on REQ (`…-0004`) when it has no data yet;
   `{"dismiss":true}` on TX (`…-0003`) when a tap or the 2-minute timeout ends
   an alert. The app clears its own alert and doesn't echo a clear back. Alerts

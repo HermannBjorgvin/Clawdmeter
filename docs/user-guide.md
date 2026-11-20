@@ -91,6 +91,39 @@ For a browser-based flash, download the board's merged `<env>-<version>.bin`
 from the release. In Chrome or Edge, open [Espressif's web flasher](https://espressif.github.io/esptool-js/),
 connect the board, select the image at address `0x0`, and choose **Program**.
 
+### Update over Bluetooth
+
+Once a board runs firmware that supports it, later updates need no cable.
+With the board connected over Bluetooth, open **Flash** (or follow the
+update notice in the tray or on the Overview): the page leads with **Update
+over Bluetooth**, naming the board, the version it runs and the latest
+release, with connecting a USB cable as the other way. Choose **Update to
+…**, then **Install**. The board asks first ("Update firmware?"): tap its
+screen, or press one of its buttons twice, within 30 seconds. If it goes
+unanswered, wait half a minute before trying again. The app then sends
+the firmware over the existing Bluetooth link, the board shows a progress
+screen, checks the firmware, and restarts into it; the app then confirms the
+new version once the board reconnects. Expect a minute or a few, depending
+on the computer's Bluetooth. Pairing and settings are kept.
+
+- The **Device** page shows **Updates over Bluetooth** next to the
+  connection for a board that takes them; its **Update firmware** button
+  opens Flash.
+- The first firmware with Bluetooth updates has to be installed over USB.
+  Until then the Flash page says so under the USB prompt.
+- Boards with 4 MB of flash (the Sunton ESP32-2432S024C and ESP32-2432S028R)
+  have no room for a second copy of the firmware and update over USB only.
+- Keep the board on and near the computer. If the transfer stops partway
+  (the link drops, you choose **Cancel**, or the board loses power), the
+  board keeps the firmware it had.
+- The new firmware is kept once the board has reconnected to your computer
+  and taken the app's first update (or a minute after reconnecting). If it
+  can't get that far, turn the board off and on: it goes back to the
+  previous firmware. A USB flash always works as a fallback.
+- Only the computer the board is paired with can start an update, only with
+  firmware built for that board, and only after someone allows it on the
+  board itself. Nothing is installed without that tap or press.
+
 ## Pair over Bluetooth
 
 Pair **Clawdmeter** in your computer's Bluetooth settings. It appears as a
@@ -432,6 +465,9 @@ device address to try first.
   to use a window instead.
 - **Cannot write firmware:** check the USB data cable and follow the Flash
   page's serial-port permission instructions.
+- **A Bluetooth update stops or doesn't start:** keep the board close to the
+  computer and check that Clawdmeter is running in the menu bar or tray (the
+  update goes over its link), then retry. A USB flash always works.
 - **Cannot reconnect:** check pairing in your OS's Bluetooth settings.
   On the LCD-4, hold the pairing hint on the touchscreen for five seconds
   to clear pairing; its PWR key is a hardware reset.
