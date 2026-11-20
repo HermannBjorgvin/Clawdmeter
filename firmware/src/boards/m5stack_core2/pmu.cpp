@@ -62,6 +62,13 @@ static void axp192_init(void) {
     if (rd(0x28, &ldo)) wr(0x28, (uint8_t)((ldo & 0x0F) | (15 << 4)));   // LDO2 3.3 V
     wr(0x27, (uint8_t)((2800 - 700) / 25));    // DCDC3 2.8 V
     bits(0x12, 0x06, 0x08);                    // DCDC3 + LDO2 on, vibration off
+    // 5 V bus (M-Bus / speaker supply on battery), as M5Unified's Core2
+    // setExtOutput(true) and M5Core2's SetBusPowerMode(0) do: GPIO0 as a 3.3 V
+    // LDO, then EXTEN (0x12 b6). The v1.1's equivalent is BLDO2 (axp2101_init).
+    // Untested on v1.0 hardware.
+    bits(0x91, 0xF0, 0xF0);
+    wr(0x90, 0x02);
+    bits(0x12, 0x40, 0);
     wr(0x82, 0xFF);                            // ADCs on
     // GPIO2 (speaker amp enable) as an NMOS open-drain output, low = amp off.
     bits(0x93, 0, 0x07);

@@ -43,7 +43,9 @@ pins and hardware gotchas, which loads when you work in that folder.
   `draw_resets_card()`, its grid sized by `layout.cpp` `fit_resets()`. `signals` treats its numbers as a replay, so Clawd
   never reacts to them.
 - **Sound**: `ding.cpp` synthesizes the one sound (a C#5 ding, mirrored by
-  the desktop's `chime.rs`); `chime.cpp` streams it through the ES8311.
+  the desktop's `chime.rs`); `chime.cpp` streams it through the ES8311, or
+  straight to a plain I2S amp on a board with no codec (`es8311_addr` 0, the
+  Core2), which can also pick the softer `DING_SOFT` envelope.
 - **Generated, never hand-edited**: `splash_animations.h` (only
   `clawd_anim.cpp` includes it), `font_*.c`. Regenerate with the
   `regenerating-firmware-assets` skill.

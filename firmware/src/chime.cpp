@@ -7,8 +7,8 @@
 #include <soc/soc_caps.h>
 #include "ding.h"
 
-// Shared ES8311 chime engine. See chime.h. Every ES8311 board shares one copy
-// of the codec setup and the non-blocking playback task.
+// Shared chime engine. See chime.h. Every board with sound shares one copy of
+// the codec setup (ES8311 boards) and the non-blocking playback task.
 //
 // The ding is rendered once into a mono buffer and streamed from there, so
 // nothing is computed while the DMA waits: computing it live starved the DMA
@@ -118,8 +118,8 @@ static bool render(void) {
         if ((n & 2047) == 2047) vTaskDelay(1);  // let the idle task (and its watchdog) run
     }
     pcm_gain = g;
-    Serial.printf("chime: rendered %u frames at %d Hz, gain %.2f, in %lu ms (at %lu ms since boot)\n",
-                  (unsigned)frames, cfg.sample_rate, g, (unsigned long)(millis() - t0),
+    Serial.printf("chime: rendered %u frames at %d Hz, gain %.2f x volume %.2f, in %lu ms (at %lu ms since boot)\n",
+                  (unsigned)frames, cfg.sample_rate, gain, sample_vol, (unsigned long)(millis() - t0),
                   (unsigned long)millis());
     return true;
 }

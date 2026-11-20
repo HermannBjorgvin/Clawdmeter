@@ -1,10 +1,11 @@
 #pragma once
 #include <stdint.h>
 
-// Board-agnostic ES8311 + I2S chime engine. A board's sound.cpp fills in a
+// Board-agnostic I2S chime engine, with an ES8311 codec or (es8311_addr 0)
+// a plain I2S amp. A board's sound.cpp fills in a
 // ChimeConfig (its I2S pins, codec address, volume, and a power-amp enable
 // hook) and calls chime_init() once; the ding (ding.h) is rendered in the
-// background after setup and streamed to the codec by a one-shot FreeRTOS
+// background after setup and streamed over I2S by a one-shot FreeRTOS
 // task, so the LVGL loop never blocks. It plays once at boot. Any sample rate
 // the ES8311 table has works; 16-bit stereo out.
 //
@@ -27,7 +28,7 @@ struct ChimeConfig {
     uint8_t      style;                      // DingStyle (ding.h); 0 = DING_STRIKE
 };
 
-// Bring up I2S + the ES8311 codec. Returns true on success; false leaves the
+// Bring up I2S, and the ES8311 codec unless es8311_addr is 0. Returns true on success; false leaves the
 // engine inert (chime_play becomes a no-op). Wire/I2C must already be up.
 bool chime_init(const ChimeConfig& cfg);
 

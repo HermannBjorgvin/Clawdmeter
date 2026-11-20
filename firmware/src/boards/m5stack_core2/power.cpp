@@ -5,7 +5,7 @@
 #include <Arduino.h>
 
 // Battery and USB state from the power chip (pmu.cpp). The PWR role is touch
-// button B, with the same edge synthesis as the FIRE's button B:
+// button B (the zone touch.cpp latched), with the same edge synthesis as the FIRE's button B:
 //   short   - on release, if held less than PWR_LONG_MS
 //   long    - once, when a hold crosses PWR_LONG_MS (starts hold-to-pair)
 //   release - every release
@@ -37,7 +37,6 @@ void power_hal_tick(void) {
     }
     if (now - last_pwr_ms >= PWR_POLL_MS) {
         last_pwr_ms = now;
-        ft6336_poll();
         bool down = ft6336_zone() == TZ_BTN_B;
         if (down && !last_state) {
             press_ms = now;
