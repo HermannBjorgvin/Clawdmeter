@@ -20,6 +20,8 @@ The device advertises a custom GATT service next to the standard HID keyboard se
 | RX characteristic (write)      | `4c41555a-4465-7669-6365-000000000002` |
 | TX characteristic (notify)     | `4c41555a-4465-7669-6365-000000000003` |
 | REQ characteristic (notify)    | `4c41555a-4465-7669-6365-000000000004` |
+| INFO characteristic (read)     | `4c41555a-4465-7669-6365-000000000005` |
+| OTA characteristic (write)     | `4c41555a-4465-7669-6365-000000000006` |
 | **HID service**                | `00001812-0000-1000-8000-00805f9b34fb` |
 
 The host writes one complete JSON object to RX per write. The app limits
@@ -62,3 +64,101 @@ A Codex account (a $100 Pro plan: weekly window only, reset credits):
 | `k1`, `k2`, `k3` | What the primary, secondary and PWR buttons do (a PWR short press; its hold to pair is fixed). An integer: `0` nothing, `1` Space (held while the button is held: voice push to talk), `2` Shift+Tab, `3` Tab, `4` Enter, `5` Esc, `6` cycle brightness; `0x10000 \| hold << 12 \| mods << 8 \| usage` a keyboard shortcut, `usage` a HID keyboard usage `0x04`–`0x73` (A to F24), `mods` the HID modifier bits Ctrl `1`, Shift `2`, Alt `4`, GUI (Cmd/Win/Super) `8`, `hold` `1` = the keys stay down while the button is held, `0` = tapped; `0x20000 \| usage` a HID Consumer usage `1`–`0x3FF` (the app sends Play/Pause `0xCD`, Previous `0xB6`, Next `0xB5`, Volume down `0xEA`, Volume up `0xE9`, Mute `0xE2`; volume repeats while the button is held, the rest tap). Example: Ctrl+Shift+M tapped is `66320` (`0x10310`). Defaults `k1` = `1`, `k2` = `2`, `k3` = `6`; a value outside these fields, or not an integer, is ignored like an absent key (the device keeps its stored action; the app reads an unknown config value as the default). PWR always taps: its press registers on release. On touchless boards a primary press (or a PWR press, where PWR is the only button) first dismisses an alert whatever its action. Sent like `lv` and stored the same way; absent = keep the stored value. Boards ignore the value for a button they don't have; the T4-S3's long BOOT hold, which stands in for a PWR press there, stays brightness. |
 | `th` | Palette: 66 hex digits, eleven `rrggbb` colours run together in this order: background, cards, text, secondary text, accent, green, amber, red, bar track, Clawd, face eyes (`firmware/src/theme_palette.h`). The board repaints live and keeps it in NVS; a string of any other length or with a non-hex digit is ignored. The Clawd colour paints the screensaver face and the sprite: at draw time the official art's body orange and the shaded side of his body become that colour and the same shade of it, while his eyes, props and scenery keep their own colours (`theme_clawd_art`; the frames are never changed). The app sends a preset theme's palette (for the System theme, Dark or Light by the computer's appearance) or the user's own colours; the board doesn't know which. Boards with a 1-bit panel (`BoardCaps.mono_panel`, the e-paper board) ignore it and keep the default palette. Absent = keep the stored palette. Always eleven colours: older firmware drops any other length, so colours added later get keys of their own (`fc`). |
 | `fc` | The Fable overlay's colour (`wf`): six hex digits, `rrggbb`. Each app theme has its own: for the editor presets, the colour in the slot the scheme's published palette names purple (or mauve, violet), whatever it looks like (Catppuccin Mocha mauve `cba6f7`, Dracula `bd93f9`, Gruvbox `d3869b`, Monokai `ae81ff`, Nord nord15 `b48ead`, One Dark `c678dd`, Solarized violet `6c71c4`, Tokyo Night `9d7cd8`) and, since Anthropic's brand palette has no purple, a violet at the brand accents' saturation and lightness for Dark (`9775c7`) and a deeper one for Light (`644294`); Custom has its own (`color_fable`). Sent with `th` on every data payload but a Codex one (`pv`), and right away when it changes; the board repaints live and keeps it in NVS. Anything but six hex digits is ignored; absent = keep the stored colour, `9775c7` until one arrives. 1-bit panels ignore it. |
+
+## Firmware updates
+
+INFO and OTA let the app install firmware over the same link (`GATT_REVISION`
+4 added them). The firmware's half is `firmware/src/ota.cpp` and
+`ota_proto.h`, the app's `clawdmeter-ble`'s `ota.rs` and `Updater`.
+
+INFO reads as one JSON object:
+
+```json
+{"env":"waveshare_amoled_216","ver":"v1.10.0","rev":"","ota":3342336,"otav":1}
+```
+
+`env` and `ver` are what the serial `info` command reports, `ota` is the
+size in bytes of the app slot an update goes into (`0`: the board has a
+single app slot, as the 4 MB boards do, and updates over USB only), `otav`
+the update protocol below (`OTA_PROTO_VERSION`). On every connect the app
+records `env` and `ver` for its update nudge. Firmware without INFO predates
+Bluetooth updates.
+
+Only the owner, over an encrypted link, may write OTA: the characteristic
+requires encryption, and the firmware drops writes from anyone else. They
+never claim ownership the way a first RX write does. The owner is the
+bonded identity address and pairing is Just Works, and images aren't
+signed, so the board doesn't rely on either: every update also needs a tap
+or button press on the board itself (step 1).
+Frames are binary, integers little-endian, the first byte the op:
+
+| Frame | Layout | Written |
+| --- | --- | --- |
+| BEGIN | `0x01`, u32 image size, 32-byte SHA-256 of the image, env (ASCII, 1 to 40 bytes) | with response |
+| DATA | `0x02`, u32 offset, payload (up to ATT MTU − 3 − 5 bytes) | without response |
+| END | `0x03` | with response |
+| ABORT | `0x04` | with response |
+
+The board replies on TX with notifications whose first byte is `0x80` or
+above, so they never read as the JSON acks TX also carries:
+
+| Reply | Layout | Meaning |
+| --- | --- | --- |
+| CONFIRM | `0x86`, u8 seconds | BEGIN is valid; the board asks on its screen and waits this long for a tap or button press |
+| READY | `0x81`, u16 ATT MTU, u32 window | allowed on the board; at most `window` bytes may be unacknowledged |
+| AT | `0x82`, u32 offset | bytes written to flash so far (every 2 KB and at the end; again, at most every 0.5 s, when chunks arrive that are already written, in case the last AT was lost) |
+| RESEND | `0x83`, u32 offset | a chunk went missing or the buffer was full: send again from here (once per offset) |
+| DONE | `0x84` | image checked, boot slot switched; restarting about a second later |
+| ERROR | `0x85`, u8 code | stopped: 1 no update slot, 2 too large, 3 another board's image, 4 bad frame, 5 flash error, 6 checksum mismatch, 7 image rejected, 8 no update running, 9 incomplete, 10 out of memory, 11 no data for 30 s, 12 not allowed on the board in time, 13 busy (another connection's update or question, or within 30 s of an unanswered one) |
+
+The exchange:
+
+1. The app writes BEGIN with an application image (the merged release image
+   from its first app partition on, `clawdmeter_flash::device::app_image`).
+   The board refuses another env's image or one larger than its slot, then
+   answers CONFIRM and shows "Update firmware?" with a 30-second countdown.
+   Nothing is written until someone taps the screen or presses a button
+   twice in quick succession; then the board starts a sequential write into
+   the spare slot and answers READY. The question belongs to the connection
+   that asked: another one gets ERROR 13, and a repeat BEGIN from the same
+   one keeps the countdown. Taps and presses in its first second don't
+   count; after that every button press goes to it and does nothing else
+   (no keystroke reaches the computer). With no answer in time it answers
+   ERROR 12, and for 30 s after an unanswered or cancelled question every
+   BEGIN gets ERROR 13, so a question can't be kept up waiting for a press
+   out of habit. The serial `ota_allow` command allows it too (USB access can
+   flash the board anyway). This logic is `OtaGate` in `ota_proto.h`, covered
+   by `test_ota`.
+2. The app streams DATA frames while fewer than `window` bytes are
+   unacknowledged (written without response; after a write that stalls with
+   the link up, as macOS's queue sometimes does, the rest go with response,
+   which the board takes the same way). The BLE callback only appends in-order chunks to a
+   receive buffer (16 KB in PSRAM, else 8 KB); the loop task writes it to
+   flash, erasing each sector as the data reaches it, and hashes it. A chunk
+   past the expected offset means one was lost: the board drops it and asks
+   for a RESEND, and the app goes back there. Chunks before the expected
+   offset are duplicates and are dropped. With no reply for 1.5 s the app
+   goes back to the last AT (the lost chunk may be the last one sent).
+3. Once AT reaches the image size, the app writes END. The board compares
+   the SHA-256 with BEGIN's, has ESP-IDF check the image as the bootloader
+   will, switches the boot slot, answers DONE, stops advertising (so nothing
+   reconnects to the old firmware in its last second), drops its links and
+   restarts.
+4. The app waits for the board to reconnect and reads INFO. The new version
+   counts once a payload written to it has held for 20 s (or the link alone
+   for 30 s); the old version 20 s or more after DONE means the board went
+   back to its previous firmware; no INFO for 2 minutes is a failure.
+
+The app writes no usage payloads while an update streams. A new BEGIN
+starts over; ABORT (the app sends one on cancel and on any failure with the
+link up), a dropped link or 30 s without data drops the update, and the
+board keeps running the firmware it has.
+
+A new image boots in the bootloader's pending state (`verifyRollbackLater`
+returns true in `ota.cpp`, so Arduino doesn't confirm it at startup). The
+firmware confirms it once the owner's computer is connected over an
+encrypted link and a payload has parsed, or a minute after that link came up
+with none, or when another update is allowed on it (ESP-IDF won't write the
+other slot from an unconfirmed image); a reset before then (a crash, an image that crashes on its first
+payload, the power button) makes the bootloader boot the previous firmware.
+A USB flash leaves no pending state.

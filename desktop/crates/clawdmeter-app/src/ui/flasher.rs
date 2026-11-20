@@ -7,10 +7,17 @@
 //! left, shown at true aspect ratio. Images come from the latest GitHub
 //! Release (or a local release folder with a manifest.json) and are checked
 //! against the manifest's sha256 before anything is written.
+//!
+//! A board connected over Bluetooth whose firmware takes updates (its INFO
+//! characteristic, in the tray's status) can skip the cable: the Connect step
+//! offers "Update over Bluetooth", which goes straight to Firmware with the
+//! board's own env. Install then hands the application image to the tray
+//! (`ipc::save_firmware_request`, `AppCommand::FirmwareUpdate`), whose daemon
+//! sends it over its link, and the Flash step follows the status file.
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::device::{self, ChipInfo, DeviceError, FirmwareInfo, FlashProgress, Identification};
@@ -23,9 +30,25 @@ use super::theme::{Theme, FONT_DISPLAY, FONT_MONO, R_M, R_PILL, R_S};
 use super::widgets::{bar, button, caption, card, clawd, icon, kv, notice, para, pill, ButtonKind, Tone};
 use super::{command, live_status, run_blocking, Navigate, REFRESH};
 use crate::boards::{self, BoardInfo};
-use crate::ipc::{self, AppCommand, FirmwareRecord};
+use crate::daemon::FirmwareRequest;
+use crate::ipc::{self, AppCommand, FirmwareRecord, StatusSnapshot};
 use crate::Page;
 
+/// How long the tray gets to pick up a Bluetooth update before the page
+/// says it didn't.
+const BT_PICKUP: Duration = Duration::from_secs(15);
+/// How long the update may vanish from the tray's status once it showed
+/// (the tray quit or restarted) before the page gives up on it.
+const BT_LOST: Duration = Duration::from_secs(45);
+
+/// How the image reaches the board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Via {
+    /// Written over USB with espflash.
+    Usb,
+    /// Sent over the tray's Bluetooth link.
+    Bluetooth,
+}
 const STEPS: [&str; 5] = ["Connect", "Identify", "Firmware", "Flash", "Done"];
 
 /// Where images come from.
@@ -191,6 +214,16 @@ pub struct FlasherView {
     error: Option<String>,
     connected: bool,
     ticks: u32,
+    /// USB, or the Bluetooth path.
+    via: Via,
+    /// The tray's status, re-read each tick while on screen or updating.
+    live: Option<StatusSnapshot>,
+    /// The Bluetooth request in flight: its id and when it went out.
+    bt_request: Option<(u64, Instant)>,
+    /// The last update state the status showed for it.
+    bt_state: Option<String>,
+    /// When the status last showed it.
+    bt_seen_at: Option<Instant>,
 }
 
 impl EventEmitter<Navigate> for FlasherView {}
@@ -284,6 +317,11 @@ impl FlasherView {
             error: None,
             connected: false,
             ticks: 0,
+            via: Via::Usb,
+            live: None,
+            bt_request: None,
+            bt_state: None,
+            bt_seen_at: None,
         };
         if let Some(m) = manifest {
             v.source = Some(load_local(&m));
@@ -323,7 +361,15 @@ impl FlasherView {
 
     /// Write the fetched image (what the Flash button does).
     pub fn flash(&mut self, cx: &mut Context<Self>) {
-        self.start_flash(cx);
+        self.install(cx);
+    }
+
+    /// Install the fetched image the way this run reaches the board.
+    fn install(&mut self, cx: &mut Context<Self>) {
+        match self.via {
+            Via::Usb => self.start_flash(cx),
+            Via::Bluetooth => self.start_bluetooth(cx),
+        }
     }
 
     /// Open or close the "Don't have one?" board list.
@@ -415,8 +461,42 @@ impl FlasherView {
         .detach();
     }
 
+    /// How the image goes to the board.
+    pub fn via(&self) -> Via {
+        self.via
+    }
+
+    /// The connected board, when it takes updates over Bluetooth and this
+    /// release has an image for it: its env and the version it runs.
+    fn bluetooth_board(&self) -> Option<(String, String)> {
+        let live = self.live.as_ref().filter(|s| s.link == "connected" && s.device_ota == Some(true))?;
+        let env = live.device_env.clone()?;
+        let source = self.source.as_ref()?.as_ref().ok()?;
+        source.manifest().board(&env)?;
+        Some((env, live.device_ver.clone().unwrap_or_default()))
+    }
+
+    /// Take the Bluetooth path for the connected board: fetch its image.
+    pub fn update_over_bluetooth(&mut self, cx: &mut Context<Self>) {
+        let Some((env, _)) = self.bluetooth_board() else { return };
+        self.via = Via::Bluetooth;
+        self.pick = Some(env);
+        self.error = None;
+        self.start_download(cx);
+    }
+
     fn tick(&mut self, cx: &mut Context<Self>) {
         self.ticks += 1;
+        let bt_running = self.via == Via::Bluetooth && self.step == Step::Flash;
+        if self.active || bt_running {
+            self.live = live_status(&self.paths);
+        }
+        if !bt_running && self.active && self.mode == FlashMode::Page && self.step == Step::Connect {
+            self.adopt_running_update();
+        }
+        if self.via == Via::Bluetooth && self.step == Step::Flash {
+            self.follow_bluetooth(cx);
+        }
         if self.active && self.step == Step::Connect && !self.probing && self.ticks.is_multiple_of(2) {
             if let Some(p) = self.hw.ports().into_iter().next() {
                 self.port = Some(p);
@@ -623,11 +703,128 @@ impl FlasherView {
         .detach();
     }
 
+    /// Hand the application image to the tray to send over Bluetooth.
+    fn start_bluetooth(&mut self, cx: &mut Context<Self>) {
+        let (Some(Ok(data)), Some(board)) = (self.image.clone(), self.board_image()) else { return };
+        let version = self.source.as_ref().and_then(|s| s.as_ref().ok()).map(Source::version).unwrap_or_default();
+        self.step = Step::Flash;
+        self.progress = 0.;
+        self.error = None;
+        self.bt_state = None;
+        let Some(app) = device::app_image(&data) else {
+            self.error = Some(format!("{} has no application image to send over Bluetooth.", board.file));
+            return;
+        };
+        let dir = self.paths.cache_dir.join("firmware-update");
+        let image = dir.join(format!("{}-{version}.bin", board.env));
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or_default();
+        let req = FirmwareRequest {
+            image: image.clone(),
+            env: board.env.clone(),
+            version: version.clone(),
+            sha256: release::sha256_hex(app),
+            id,
+        };
+        let sent = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&image, app))
+            .and_then(|()| ipc::save_firmware_request(&self.paths, &req))
+            .and_then(|()| ipc::send_command(&self.paths, &AppCommand::FirmwareUpdate));
+        if let Err(e) = sent {
+            self.error = Some(format!("Couldn't hand the firmware to Clawdmeter. {}", crate::errors::io_message(&e)));
+            return;
+        }
+        self.flashing = true;
+        self.bt_request = Some((id, Instant::now()));
+        self.bt_seen_at = None;
+        let name = self.live.as_ref().and_then(|s| s.device_name.clone()).unwrap_or_else(|| "Clawdmeter".into());
+        self.log = vec![
+            format!("Bluetooth: {name}"),
+            format!("{} ({:.1} MB of firmware), checksum verified", board.file, app.len() as f32 / 1_048_576.),
+            "Asking the board to start…".into(),
+        ];
+        cx.notify();
+    }
+
+    /// A window opened while the tray is still on a Bluetooth update (the
+    /// last window was closed mid-way) follows that update instead of
+    /// offering another.
+    fn adopt_running_update(&mut self) {
+        let Some(u) = self.live.as_ref().and_then(|s| s.firmware_update.clone()).filter(|u| u.running()) else {
+            return;
+        };
+        self.via = Via::Bluetooth;
+        self.step = Step::Flash;
+        self.flashing = true;
+        self.error = None;
+        self.bt_request = Some((u.id, Instant::now()));
+        self.bt_state = None;
+        self.bt_seen_at = Some(Instant::now());
+        self.progress = u.fraction();
+        self.log = vec![format!("Installing {} over Bluetooth…", u.version)];
+    }
+
+    /// Follow the tray's progress on the Bluetooth update.
+    fn follow_bluetooth(&mut self, cx: &mut Context<Self>) {
+        let Some((id, sent)) = self.bt_request else { return };
+        if !self.flashing {
+            return;
+        }
+        let update = self.live.as_ref().and_then(|s| s.firmware_update.clone()).filter(|u| u.id == id);
+        let Some(u) = update else {
+            let error = match self.bt_seen_at {
+                None if sent.elapsed() > BT_PICKUP => {
+                    "Clawdmeter didn't start the update. Check that it's running and the board is connected, then \
+                     retry."
+                }
+                Some(t) if t.elapsed() > BT_LOST => {
+                    "Clawdmeter stopped reporting the update. Check that it's running. Unless the update finished, \
+                     the board keeps the firmware it had."
+                }
+                _ => return,
+            };
+            self.flashing = false;
+            self.error = Some(error.into());
+            self.log.push("Installation stopped.".into());
+            return;
+        };
+        self.bt_seen_at = Some(Instant::now());
+        self.progress = u.fraction();
+        if self.bt_state.as_deref() != Some(u.state.as_str()) {
+            match u.state.as_str() {
+                "confirming" => self.log.push("Waiting for the update to be allowed on the board…".into()),
+                "sending" => self.log.push("Sending firmware over Bluetooth…".into()),
+                "verifying" => self.log.push("Checking the firmware on the board…".into()),
+                "restarting" => self.log.push("Restarting the board…".into()),
+                _ => {}
+            }
+            self.bt_state = Some(u.state.clone());
+        }
+        match u.state.as_str() {
+            "done" => {
+                self.flashing = false;
+                self.progress = 1.;
+                self.log.push(format!("Firmware installed: the board runs {}", u.version));
+                self.step = Step::Done;
+                cx.emit(FlashEvent::Flashed);
+            }
+            "failed" => {
+                self.flashing = false;
+                self.log.push("Installation stopped.".into());
+                self.error = Some(u.error.unwrap_or_else(|| "The update stopped.".into()));
+            }
+            _ => {}
+        }
+    }
+
     /// One step back (the wizard's Back). False at the first step.
     pub fn back(&mut self) -> bool {
         match self.step {
             Step::Connect => return false,
             Step::Identify | Step::Done => self.restart(),
+            Step::Firmware if self.via == Via::Bluetooth => self.restart(),
             Step::Firmware => self.step = Step::Identify,
             Step::Flash if !self.flashing => self.step = Step::Firmware,
             Step::Flash => {}
@@ -648,6 +845,10 @@ impl FlasherView {
         self.log.clear();
         self.progress = 0.;
         self.ticks = 0;
+        self.via = Via::Usb;
+        self.bt_request = None;
+        self.bt_state = None;
+        self.bt_seen_at = None;
     }
 
     // --------------------------------------------------------------- views
@@ -711,6 +912,15 @@ impl FlasherView {
 
     fn connect_view(&mut self, t: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let shop_open = self.shop;
+        // A board on Bluetooth that takes updates needs no cable: the
+        // Bluetooth card leads, and USB is the other way. Plugging one in
+        // still takes over, as always.
+        let bluetooth = self.mode == FlashMode::Page && self.bluetooth_board().is_some();
+        let (title, usb) = if bluetooth {
+            ("Update your board", "Or connect the board with a USB data cable. A charge-only cable won't work.")
+        } else {
+            ("Connect your board", "Connect the board with a USB data cable. A charge-only cable won't work.")
+        };
         let mut d = div()
             .flex()
             .flex_col()
@@ -718,14 +928,17 @@ impl FlasherView {
             .gap(px(12.))
             .pt(px(18.))
             .child(clawd(4.))
-            .child(div().font_family(FONT_DISPLAY).text_size(px(22.)).child("Connect your board"))
-            .child(
-                div()
-                    .max_w(px(420.))
-                    .text_center()
-                    .child(para(t, "Connect the board with a USB data cable. A charge-only cable won't work.")),
-            )
-            .child(pill(t, "Waiting for USB", Tone::Accent))
+            .child(div().font_family(FONT_DISPLAY).text_size(px(22.)).child(title));
+        // Without Bluetooth, the line about it (older firmware, a one-slot
+        // board) goes under the USB prompt instead.
+        let card = if self.mode == FlashMode::Page { self.bluetooth_card(t, cx) } else { None };
+        let (card_first, card_last) = if bluetooth { (card, None) } else { (None, card) };
+        if let Some(c) = card_first {
+            d = d.child(div().w_full().pb(px(4.)).child(c));
+        }
+        d = d
+            .child(div().max_w(px(420.)).text_center().child(para(t, usb)))
+            .child(pill(t, "Waiting for USB", if bluetooth { Tone::Plain } else { Tone::Accent }))
             .child(
                 div()
                     .id("shop-toggle")
@@ -747,7 +960,78 @@ impl FlasherView {
         if let Some(p) = self.source_problem(t, cx) {
             d = d.child(div().w_full().pt(px(8.)).child(p));
         }
+        if let Some(c) = card_last {
+            d = d.child(div().w_full().pt(px(8.)).child(c));
+        }
         d
+    }
+
+    /// "Update over Bluetooth" for a connected board that takes updates;
+    /// a line saying why not for one that doesn't.
+    fn bluetooth_card(&self, t: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let live = self.live.as_ref().filter(|s| s.link == "connected")?;
+        let Some((env, have)) = self.bluetooth_board() else {
+            let why = match live.device_ota {
+                Some(false) if live.device_ota_slot.unwrap_or(0) > 0 => {
+                    "The board's firmware is newer than this app's Bluetooth updates. Update Clawdmeter on this \
+                     computer first, or install over USB."
+                }
+                Some(false) => "The connected board updates over USB only.",
+                // Firmware from before Bluetooth updates: no INFO.
+                None => "Install the latest firmware over USB once, and later updates can come over Bluetooth.",
+                Some(true) => return None,
+            };
+            return Some(div().flex().justify_center().child(caption(t, why)).into_any_element());
+        };
+        let latest = self.source.as_ref().and_then(|s| s.as_ref().ok()).map(Source::version).unwrap_or_default();
+        let newer = !have.trim_start_matches(['v', 'V']).starts_with(|c: char| c.is_ascii_digit())
+            || clawdmeter_flash::manifest::is_newer(&latest, &have);
+        let info = boards::board(&env);
+        let name = info.map(|b| b.name.to_owned()).unwrap_or_else(|| env.clone());
+        let text = if newer {
+            format!("{name} is connected over Bluetooth and runs {have}. {latest} can be installed without a cable.")
+        } else {
+            format!("{name} is connected over Bluetooth and already runs {have}.")
+        };
+        let (label, kind) = if newer {
+            (format!("Update to {latest}"), ButtonKind::Primary)
+        } else {
+            (format!("Reinstall {latest}"), ButtonKind::Small)
+        };
+        let me = cx.entity().downgrade();
+        Some(
+            card(t)
+                .flex_row()
+                .items_center()
+                .gap(px(16.))
+                .child(match info {
+                    Some(b) => board_art(b, 96., 84.).into_any_element(),
+                    None => clawd(3.).into_any_element(),
+                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        // Let the column shrink below its text's one-line
+                        // width, so the sentence wraps inside the card.
+                        .min_w_0()
+                        .gap(px(8.))
+                        .child(div().font_family(FONT_DISPLAY).text_size(px(17.)).child("Update over Bluetooth"))
+                        .child(para(t, text))
+                        .child(div().flex().child(button(
+                            t,
+                            "bluetooth-update",
+                            label,
+                            kind,
+                            true,
+                            move |_, _, cx| {
+                                let _ = me.update(cx, |v, cx| v.update_over_bluetooth(cx));
+                            },
+                        ))),
+                )
+                .into_any_element(),
+        )
     }
 
     fn identify_view(&mut self, t: &Theme, cx: &mut Context<Self>) -> gpui::Div {
@@ -980,7 +1264,10 @@ impl FlasherView {
                 vec![
                     ("File", board.as_ref().map(|b| b.file.clone()).unwrap_or_default().into()),
                     ("Source", from),
-                    ("USB", self.port.clone().unwrap_or_default().into()),
+                    match self.via {
+                        Via::Usb => ("USB", self.port.clone().unwrap_or_default().into()),
+                        Via::Bluetooth => ("Connection", "Bluetooth".into()),
+                    },
                 ],
             )));
         }
@@ -1004,14 +1291,17 @@ impl FlasherView {
                     }))
                 }))
                 .child(button(t, "flash", format!("Install {ver}"), ButtonKind::Primary, ready, move |_, _, cx| {
-                    let _ = me2.update(cx, |v, cx| v.start_flash(cx));
+                    let _ = me2.update(cx, |v, cx| v.install(cx));
                 })),
         )
     }
 
     fn flash_view(&mut self, t: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let confirming = self.via == Via::Bluetooth && self.bt_state.as_deref() == Some("confirming");
         let title = if self.error.is_some() {
             "Firmware installation failed"
+        } else if confirming {
+            "Allow the update on the board"
         } else if self.flashing {
             "Writing firmware"
         } else {
@@ -1047,8 +1337,42 @@ impl FlasherView {
             )
             .child(bar(t, self.progress, if self.step == Step::Done { t.ok } else { t.accent }))
             .child(log)
-            .child(caption(t, "Keep the USB cable connected until installation finishes."));
+            .child(caption(
+                t,
+                match self.via {
+                    Via::Usb => "Keep the USB cable connected until installation finishes.",
+                    // As short as the USB line: a caption that wraps here
+                    // leaves the progress bar above it unpainted (GPUI 0.2
+                    // resolves the bar's relative width against the column's
+                    // text-measuring pass).
+                    Via::Bluetooth => "Keep the board on and nearby until installation finishes.",
+                },
+            ));
+        if confirming && self.flashing {
+            d = d.child(notice(
+                t,
+                Tone::Accent,
+                "The board asks before installing anything: tap its screen, or press one of its buttons twice.",
+            ));
+        }
+        // Cancel stops the transfer; once the board has the whole image and
+        // checks it, there's nothing left to stop.
+        let checking = matches!(self.bt_state.as_deref(), Some("verifying" | "restarting"));
+        if self.via == Via::Bluetooth && self.flashing && !checking {
+            let paths = self.paths.clone();
+            d = d.child(div().flex().child(button(t, "cancel", "Cancel", ButtonKind::Small, true, move |_, _, _| {
+                if let Err(e) = ipc::send_command(&paths, &AppCommand::CancelFirmwareUpdate) {
+                    log::warn!("cancel-firmware-update: {e}");
+                }
+            })));
+        }
+        // Why it stopped (the page's own notice skips this step).
+        if let (Some(e), false) = (&self.error, self.flashing) {
+            d = d.child(notice(t, Tone::Bad, e.clone()));
+        }
         if self.error.is_some() && !self.flashing {
+            // A run picked up from the tray has no image here to send again.
+            let can_retry = self.via == Via::Usb || self.image_ready();
             let (me1, me2) = (cx.entity().downgrade(), cx.entity().downgrade());
             d = d.child(
                 div()
@@ -1061,9 +1385,11 @@ impl FlasherView {
                             cx.notify();
                         });
                     }))
-                    .child(button(t, "retry", "Retry", ButtonKind::Primary, true, move |_, _, cx| {
-                        let _ = me2.update(cx, |v, cx| v.start_flash(cx));
-                    })),
+                    .when(can_retry, |d| {
+                        d.child(button(t, "retry", "Retry", ButtonKind::Primary, true, move |_, _, cx| {
+                            let _ = me2.update(cx, |v, cx| v.install(cx));
+                        }))
+                    }),
             );
         }
         d
@@ -1261,6 +1587,203 @@ pub(crate) mod tests {
         );
         let rec = ipc::load_firmware_record(&paths).unwrap();
         assert_eq!((rec.env.as_str(), rec.ver.as_str()), ("waveshare_amoled_18", "1.9.0"));
+        let _ = std::fs::remove_dir_all(&paths.home);
+    }
+
+    /// A merged image: partition table at 0x8000 naming app0 at 0x10000,
+    /// and an app image there.
+    fn merged_image(app: &[u8]) -> Vec<u8> {
+        let mut image = vec![0xFF; 0x10000];
+        let mut entry = vec![0xAA, 0x50, 0x00, 0x10];
+        entry.extend(0x10000u32.to_le_bytes());
+        entry.extend(0x330000u32.to_le_bytes());
+        entry.resize(32, 0);
+        image[0x8000..0x8020].copy_from_slice(&entry);
+        image.extend(app);
+        image
+    }
+
+    fn write_live(paths: &Paths, update: Option<ipc::UpdateSnapshot>) {
+        let snap = StatusSnapshot {
+            updated_at: clawdmeter_core::unix_now(),
+            link: "connected".into(),
+            device_name: Some("Clawdmeter".into()),
+            device_env: Some("waveshare_amoled_18".into()),
+            device_ver: Some("v1.8.0".into()),
+            device_ota: Some(true),
+            firmware_update: update,
+            ..Default::default()
+        };
+        ipc::write_status(paths, &snap).unwrap();
+    }
+
+    #[gpui::test]
+    fn updates_a_connected_board_over_bluetooth(cx: &mut TestAppContext) {
+        let (manifest, paths) = release_dir("bluetooth");
+        let app: Vec<u8> = std::iter::once(0xE9).chain((0..5000u32).map(|i| i as u8)).collect();
+        let merged = merged_image(&app);
+        let rel = manifest.parent().unwrap();
+        std::fs::write(rel.join("waveshare_amoled_18-v1.9.0.bin"), &merged).unwrap();
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        let old_sha = release::sha256_hex(&vec![0xA5u8; 4096]);
+        std::fs::write(&manifest, text.replace(&old_sha, &release::sha256_hex(&merged))).unwrap();
+        write_live(&paths, None);
+
+        // No USB board on this fake: only the Bluetooth path can move on.
+        struct NoUsb;
+        impl FlashHardware for NoUsb {
+            fn ports(&self) -> Vec<String> {
+                Vec::new()
+            }
+            fn probe_info(&self, _: &str) -> Option<FirmwareInfo> {
+                None
+            }
+            fn probe_chip(&self, _: &str) -> Result<ChipInfo, DeviceError> {
+                Err(DeviceError::Disconnected)
+            }
+            fn flash(
+                &self,
+                _: &str,
+                _: &[u8],
+                _: &BoardImage,
+                _: &mut dyn FnMut(FlashProgress),
+            ) -> Result<(), DeviceError> {
+                panic!("nothing goes over USB here")
+            }
+        }
+        let p = paths.clone();
+        let (view, cx) = cx.add_window_view(move |_, cx| {
+            let mut v = FlasherView::with_hardware(p, Some(manifest.clone()), Arc::new(NoUsb), cx);
+            v.set_active(true, cx);
+            v
+        });
+        cx.executor().advance_clock(REFRESH * 2);
+        click(cx, "bluetooth-update");
+        view.read_with(cx, |v, _| {
+            assert!(v.step == Step::Firmware);
+            assert_eq!(v.via(), Via::Bluetooth);
+            assert_eq!(v.pick.as_deref(), Some("waveshare_amoled_18"));
+            assert!(
+                v.image_ready(),
+                "image read and checksum-verified: {:?}",
+                v.image.as_ref().map(|r| r.as_ref().err())
+            );
+        });
+
+        click(cx, "flash");
+        let req = ipc::load_firmware_request(&paths).expect("request left for the tray");
+        assert_eq!(std::fs::read(&req.image).unwrap(), app, "the app image, not the merged one");
+        assert_eq!(req.sha256, release::sha256_hex(&app));
+        assert_eq!((req.env.as_str(), req.version.as_str()), ("waveshare_amoled_18", "v1.9.0"));
+        assert_eq!(ipc::take_commands(&paths), vec![AppCommand::FirmwareUpdate]);
+        view.read_with(cx, |v, _| assert!(v.step == Step::Flash && v.flashing()));
+
+        // Another request's result doesn't count; this one's progress does.
+        let snap = |id: u64, state: &str, done: u32| ipc::UpdateSnapshot {
+            id,
+            state: state.into(),
+            version: "v1.9.0".into(),
+            done,
+            total: 100,
+            error: None,
+        };
+        write_live(&paths, Some(snap(req.id + 1, "done", 100)));
+        cx.executor().advance_clock(REFRESH * 2);
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| assert!(v.step == Step::Flash, "a stale result is ignored"));
+        write_live(&paths, Some(snap(req.id, "confirming", 0)));
+        cx.executor().advance_clock(REFRESH * 2);
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.bt_state.as_deref(), Some("confirming"));
+            assert!(v.log.iter().any(|l| l.contains("allowed on the board")), "log: {:?}", v.log);
+        });
+        write_live(&paths, Some(snap(req.id, "sending", 40)));
+        cx.executor().advance_clock(REFRESH * 2);
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| assert!((v.progress - 0.4).abs() < 1e-6, "progress {}", v.progress));
+        write_live(&paths, Some(snap(req.id, "done", 100)));
+        cx.executor().advance_clock(REFRESH * 2);
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            assert!(v.step == Step::Done, "log: {:?}, error: {:?}", v.log, v.error);
+            assert!(!v.flashing());
+        });
+        let _ = std::fs::remove_dir_all(&paths.home);
+    }
+
+    #[gpui::test]
+    fn a_reopened_window_follows_the_running_update(cx: &mut TestAppContext) {
+        let (manifest, paths) = release_dir("bluetooth-adopt");
+        let running = |state: &str, done: u32| ipc::UpdateSnapshot {
+            id: 77,
+            state: state.into(),
+            version: "v1.9.0".into(),
+            done,
+            total: 100,
+            error: None,
+        };
+        write_live(&paths, Some(running("sending", 30)));
+        let p = paths.clone();
+        let hw: Arc<dyn FlashHardware> = Arc::new(FakeBoard::default());
+        let (view, cx) = cx.add_window_view(move |_, cx| {
+            let mut v = FlasherView::with_hardware(p, Some(manifest.clone()), hw, cx);
+            v.set_active(true, cx);
+            v
+        });
+        cx.executor().advance_clock(REFRESH);
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            assert!(v.step == Step::Flash && v.flashing(), "follows it, doesn't offer another");
+            assert_eq!(v.via(), Via::Bluetooth);
+            assert!((v.progress - 0.3).abs() < 1e-6);
+        });
+        write_live(&paths, Some(running("done", 100)));
+        cx.executor().advance_clock(REFRESH * 2);
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| assert!(v.step == Step::Done));
+        let _ = std::fs::remove_dir_all(&paths.home);
+    }
+
+    #[gpui::test]
+    fn a_failed_bluetooth_update_says_why(cx: &mut TestAppContext) {
+        let (manifest, paths) = release_dir("bluetooth-fail");
+        let app = vec![0xE9u8, 1, 2, 3];
+        let merged = merged_image(&app);
+        let rel = manifest.parent().unwrap();
+        std::fs::write(rel.join("waveshare_amoled_18-v1.9.0.bin"), &merged).unwrap();
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        let old_sha = release::sha256_hex(&vec![0xA5u8; 4096]);
+        std::fs::write(&manifest, text.replace(&old_sha, &release::sha256_hex(&merged))).unwrap();
+        write_live(&paths, None);
+        let p = paths.clone();
+        let hw: Arc<dyn FlashHardware> = Arc::new(FakeBoard::default());
+        let (view, cx) = cx.add_window_view(move |_, cx| {
+            let mut v = FlasherView::with_hardware(p, Some(manifest.clone()), hw, cx);
+            v.set_active(true, cx);
+            v
+        });
+        // Tick once so the status is read, before the fake USB port shows up.
+        cx.executor().advance_clock(REFRESH);
+        click(cx, "bluetooth-update");
+        click(cx, "flash");
+        let req = ipc::load_firmware_request(&paths).unwrap();
+        write_live(
+            &paths,
+            Some(ipc::UpdateSnapshot {
+                id: req.id,
+                state: "failed".into(),
+                version: "v1.9.0".into(),
+                error: Some("The firmware arrived damaged (checksum mismatch).".into()),
+                ..Default::default()
+            }),
+        );
+        cx.executor().advance_clock(REFRESH * 2);
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            assert!(v.step == Step::Flash && !v.flashing());
+            assert_eq!(v.error.as_deref(), Some("The firmware arrived damaged (checksum mismatch)."));
+        });
         let _ = std::fs::remove_dir_all(&paths.home);
     }
 

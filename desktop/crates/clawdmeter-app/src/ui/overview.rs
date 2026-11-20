@@ -604,8 +604,15 @@ impl Render for OverviewView {
         }
         if let Some(tag) = self.firmware_nudge() {
             let v = tag.trim_start_matches('v').to_owned();
+            // A connected board whose firmware takes updates over Bluetooth
+            // needs no cable.
+            let how = if self.snap.as_ref().is_some_and(|s| s.link == "connected" && s.device_ota == Some(true)) {
+                "It can be installed over Bluetooth."
+            } else {
+                "Connect USB to update."
+            };
             page = page.child(
-                notice(&t, Tone::Accent, format!("Firmware v{v} is available. Connect USB to update.")).child(
+                notice(&t, Tone::Accent, format!("Firmware v{v} is available. {how}")).child(
                     div()
                         .flex()
                         .gap(px(10.))

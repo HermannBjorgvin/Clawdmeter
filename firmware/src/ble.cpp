@@ -9,6 +9,11 @@
 #endif
 #include <Preferences.h>
 
+#include "build_info.h"
+#include "hal/board_info_hal.h"
+#include "ota.h"
+#include "ota_proto.h"
+
 #define DEVICE_NAME "Clawdmeter"
 
 // Custom GATT UUIDs for data channel
@@ -16,6 +21,8 @@
 #define RX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000002"  // host writes here
 #define TX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000003"  // device ack/nack notifies
 #define REQ_CHAR_UUID       "4c41555a-4465-7669-6365-000000000004"  // device-initiated refresh request
+#define INFO_CHAR_UUID      "4c41555a-4465-7669-6365-000000000005"  // read: env, version, update slot
+#define OTA_CHAR_UUID       "4c41555a-4465-7669-6365-000000000006"  // firmware update frames (ota_proto.h)
 
 #define BLE_BUF_SIZE 512
 
@@ -80,7 +87,7 @@ static const uint8_t HID_REPORT_MAP[] = {
 // map). On the first boot with a new value the device sends Service Changed,
 // which NimBLE delivers to bonded hosts when they next connect, so they
 // rediscover instead of using a cached table.
-#define GATT_REVISION 3
+#define GATT_REVISION 4
 
 static NimBLEServer* server = nullptr;
 static NimBLEHIDDevice* hid_dev = nullptr;
@@ -89,9 +96,12 @@ static NimBLECharacteristic* input_consumer = nullptr;
 static NimBLECharacteristic* tx_char = nullptr;
 static NimBLECharacteristic* rx_char = nullptr;
 static NimBLECharacteristic* req_char = nullptr;
+static NimBLECharacteristic* info_char = nullptr;
+static NimBLECharacteristic* ota_char = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
+static volatile bool advertising_held = false;   // ble_hold_advertising
 
 // One-shot supervision-timeout pushback (see onConnParamsUpdate). Written by
 // NimBLE host-task callbacks, consumed by ble_tick() on the loop task.
@@ -304,6 +314,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         if (param_fix_spent  == info.getConnHandle()) param_fix_spent  = CONN_HANDLE_NONE;
         kbd_subscribers.drop(info.getConnHandle());
         consumer_subscribers.drop(info.getConnHandle());
+        ota_on_disconnect(info.getConnHandle());
         Serial.printf("BLE: disconnected (reason=%d, remaining=%u)\n",
             reason, (unsigned)s->getConnectedCount());
     }
@@ -352,7 +363,11 @@ class ServerCallbacks : public NimBLEServerCallbacks {
             Serial.printf("BLE: rejecting non-owner %s (owner=%s)\n", id.c_str(), owner_addr);
             NimBLEDevice::deleteBond(info.getIdAddress());
             server->disconnect(info);
+            return;
         }
+        // The owner is back over this firmware: a freshly updated image can
+        // be kept (ota.h).
+        if (info.isEncrypted()) ota_on_owner_link();
     }
 
 };
@@ -383,6 +398,20 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
         data_ready = true;
         portEXIT_CRITICAL(&rx_lock);
         has_received_data = true;
+    }
+};
+
+// Firmware update frames (ota_proto.h): only the owner, over an encrypted
+// link, and they never claim ownership the way a first RX write does.
+class OtaCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
+        std::string id = info.getIdAddress().toString();
+        if (!info.isEncrypted() || !owner_set || strcmp(id.c_str(), owner_addr) != 0) {
+            Serial.printf("BLE: dropping OTA write from %s (enc=%d)\n", id.c_str(), info.isEncrypted() ? 1 : 0);
+            return;
+        }
+        NimBLEAttValue v = chr->getValue();
+        ota_on_frame(v.data(), v.length(), info.getConnHandle(), info.getMTU());
     }
 };
 
@@ -507,6 +536,23 @@ void ble_init(void) {
     static ReqCallbacks reqCb;
     req_char->setCallbacks(&reqCb);
 
+    // Who this is, for the app: the env picks the update image, the version
+    // says whether one is due, `ota` is the update slot's size (0: USB only)
+    // and `otav` the update protocol (ota_proto.h).
+    info_char = svc->createCharacteristic(INFO_CHAR_UUID, NIMBLE_PROPERTY::READ);
+    char info[160];
+    snprintf(info, sizeof(info), "{\"env\":\"%s\",\"ver\":\"%s\",\"rev\":\"%s\",\"ota\":%lu,\"otav\":%d}",
+             CLAWD_ENV, CLAWD_VERSION, board_hal_rev(), (unsigned long)ota_slot_size(), OTA_PROTO_VERSION);
+    info_char->setValue((const uint8_t*)info, strlen(info));
+
+    // Encrypted writes only: on a link not yet encrypted the stack refuses
+    // the write (the host then pairs and retries) instead of the callback
+    // dropping it, which would leave the app waiting.
+    ota_char = svc->createCharacteristic(
+        OTA_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::WRITE_ENC);
+    static OtaCallbacks otaCb;
+    ota_char->setCallbacks(&otaCb);
+
     svc->start();
     server->start();
     gatt_revision_check();
@@ -518,7 +564,7 @@ void ble_init(void) {
 void ble_tick(void) {
     if (need_advertise) {
         need_advertise = false;
-        start_advertising();
+        if (!advertising_held) start_advertising();
     }
     if (state != BLE_STATE_CONNECTED) {
         kbd_retry_due = consumer_retry_due = false;
@@ -593,6 +639,11 @@ void ble_print_status(void) {
     }
 }
 
+void ble_hold_advertising(void) {
+    advertising_held = true;
+    NimBLEDevice::stopAdvertising();
+}
+
 void ble_disconnect_all(void) {
     if (!server) return;
     // Collect the handles first: each disconnect shrinks the peer list.
@@ -636,6 +687,12 @@ void ble_send_dismiss(void) {
         tx_char->notify();
         Serial.println("BLE: alert dismissed on the device");
     }
+}
+
+void ble_ota_reply(const uint8_t* data, size_t len, uint16_t conn) {
+    // With its own bytes, so a quick AT then RESEND can't both go out as the
+    // last value (see HidReportSubscribers).
+    if (state == BLE_STATE_CONNECTED && tx_char) tx_char->notify(data, len, conn);
 }
 
 void ble_set_battery_level(int pct) {

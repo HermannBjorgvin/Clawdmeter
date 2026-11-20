@@ -40,7 +40,8 @@ portable archives, and Nix setup.
 ## Quick start
 
 1. Launch Clawdmeter and follow setup. Connect the board with a USB data
-   cable, check the selected board, and install firmware.
+   cable, check the selected board, and install firmware. Later updates can
+   come over Bluetooth on boards with two app slots (all but the 4 MB ones).
 2. Pair **Clawdmeter** in your computer's Bluetooth settings. It appears as
    a keyboard because its buttons send key presses.
 3. Open **Hooks** to let Clawd react to Claude Code activity and alert when

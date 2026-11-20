@@ -11,8 +11,16 @@
 //!   [--app-update download|downloading|ready|failed|none|linux|linux-menu]
 //!   [--advanced] [--session idle|week] [--buttons custom] [--edit primary|secondary|pwr] [--record]
 //!   [--firmware-skipped] [--codex week|5h|listed] [--resets N] [--fable PCT] [--week PCT]
-//!   [--account-menu] [--width PX] [--height PX]
+//!   [--account-menu] [--bluetooth on|usb-only|old] [--width PX] [--height PX]
 //! ```
+//!
+//! `--bluetooth` gives the connected board an INFO characteristic: `on`, a
+//! board that takes firmware updates over Bluetooth (with `--board none` the
+//! Flash page offers it; Install plays out a made-up update in the status,
+//! about half a minute end to end: 1.5 s starting, then the board asking to
+//! be allowed until 6 s, then sending; `--flash-to` walks it); `usb-only`, a
+//! 4 MB board with one app slot; `old`, firmware from before Bluetooth
+//! updates.
 //!
 //! `--codex` adds a Codex account (`~/.codex` with an `auth.json`, found as
 //! the app finds it): `week` shows it on the device, weekly-only with reset
@@ -115,7 +123,16 @@ fn arg(args: &[String], name: &str) -> Option<String> {
 fn release(paths: &Paths) -> std::path::PathBuf {
     let dir = paths.cache_dir.join("demo-release");
     std::fs::create_dir_all(&dir).unwrap();
-    let image = vec![0xA5u8; 3 * 1024 * 1024 + 300 * 1024];
+    // Laid out like a merged image (partition table, app at 0x10000), so a
+    // Bluetooth update can cut its app image out.
+    let mut image = vec![0xA5u8; 3 * 1024 * 1024 + 300 * 1024];
+    let mut app0 = vec![0xAA, 0x50, 0x00, 0x10];
+    app0.extend(0x10000u32.to_le_bytes());
+    app0.extend(0x330000u32.to_le_bytes());
+    app0.resize(32, 0);
+    image[0x8000..0x8020].copy_from_slice(&app0);
+    image[0x8020..0x8040].fill(0xFF);
+    image[0x10000] = 0xE9;
     let file = format!("{ENV}-v{VERSION}.bin");
     std::fs::write(dir.join(&file), &image).unwrap();
     let sha = sha256_hex(&image);
@@ -144,10 +161,28 @@ struct FakeUsage {
     resets: u32,
     fable: Option<u32>,
     week_pct: Option<u32>,
+    bluetooth: Option<String>,
+}
+
+/// `--bluetooth on`: a made-up update for the window's request, by the
+/// seconds since it arrived.
+fn fake_update(req: &clawdmeter_app::daemon::FirmwareRequest, secs: f32) -> ipc::UpdateSnapshot {
+    let total = std::fs::metadata(&req.image).map(|m| m.len() as u32).unwrap_or(1_900_000);
+    // A few seconds for someone to allow it on the board, then about twenty
+    // to send it.
+    let (state, done) = match secs {
+        s if s < 1.5 => ("starting", 0),
+        s if s < 6.0 => ("confirming", 0),
+        s if s < 26.0 => ("sending", (total as f32 * (s - 6.0) / 20.) as u32),
+        s if s < 28.0 => ("verifying", total),
+        s if s < 33.0 => ("restarting", total),
+        _ => ("done", total),
+    };
+    ipc::UpdateSnapshot { id: req.id, state: state.into(), version: req.version.clone(), done, total, error: None }
 }
 
 fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, usage: FakeUsage) {
-    let FakeUsage { session, codex, resets, fable, week_pct } = usage;
+    let FakeUsage { session, codex, resets, fable, week_pct, bluetooth } = usage;
     // `idle`: session not started; `week`: no 5-hour limit (verified Ultra).
     let idle = session.as_deref() == Some("idle");
     let week = session.as_deref() == Some("week");
@@ -162,6 +197,7 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, usage: Fa
     let codex_shown = matches!(codex.as_deref(), Some("week" | "5h"));
     let codex_week = codex.as_deref() == Some("week");
     let started = unix_now();
+    let mut update_seen: Option<(u64, std::time::Instant)> = None;
     std::thread::spawn(move || loop {
         let now = unix_now();
         let errors = if retrying {
@@ -222,8 +258,33 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, usage: Fa
                 ..snap
             };
         }
+        match bluetooth.as_deref() {
+            Some("on") => {
+                snap.device_env = Some(ENV.into());
+                snap.device_ver = Some(format!("v{OLD_VERSION}"));
+                snap.device_ota = Some(true);
+                if let Some(req) = ipc::load_firmware_request(&paths) {
+                    if update_seen.is_none_or(|(id, _)| id != req.id) {
+                        update_seen = Some((req.id, std::time::Instant::now()));
+                    }
+                    let secs = update_seen.map_or(0., |(_, t)| t.elapsed().as_secs_f32());
+                    let u = fake_update(&req, secs);
+                    if u.state == "done" {
+                        snap.device_ver = Some(req.version.clone());
+                    }
+                    snap.firmware_update = Some(u);
+                }
+            }
+            Some("usb-only") => {
+                snap.device_env = Some("esp32_2432s028r".into());
+                snap.device_ver = Some(format!("v{OLD_VERSION}"));
+                snap.device_ota = Some(false);
+            }
+            _ => {}
+        }
         let _ = ipc::write_status(&paths, &snap);
-        std::thread::sleep(Duration::from_secs(2));
+        let every = if bluetooth.as_deref() == Some("on") { 500 } else { 2000 };
+        std::thread::sleep(Duration::from_millis(every));
     });
 }
 
@@ -263,6 +324,7 @@ fn main() {
                 resets: arg(&args, "--resets").and_then(|n| n.parse().ok()).unwrap_or(3),
                 fable: arg(&args, "--fable").and_then(|p| p.parse().ok()),
                 week_pct: arg(&args, "--week").and_then(|p| p.parse().ok()),
+                bluetooth: arg(&args, "--bluetooth"),
             },
         );
         let _ = ipc::save_firmware_record(&paths, &FirmwareRecord { env: ENV.into(), ver: OLD_VERSION.into() });
@@ -301,6 +363,7 @@ fn main() {
     let height = arg(&args, "--height").and_then(|h| h.parse::<f32>().ok());
     let width = arg(&args, "--width").and_then(|w| w.parse::<f32>().ok());
     let account_menu = args.iter().any(|a| a == "--account-menu");
+    let over_bluetooth = arg(&args, "--bluetooth").as_deref() == Some("on");
 
     clawdmeter_app::ui::open_with_size(width, height, move |window, cx| {
         let p = paths.clone();
@@ -365,6 +428,10 @@ fn main() {
                 let done = flasher.update(cx, |f, cx| {
                     let at = f.step();
                     match (target.as_str(), at) {
+                        (_, FlashStep::Connect) if over_bluetooth => {
+                            f.update_over_bluetooth(cx);
+                            false
+                        }
                         ("identify", FlashStep::Identify) => true,
                         (_, FlashStep::Identify) if !f.candidates().is_empty() => {
                             f.choose(ENV, cx);
