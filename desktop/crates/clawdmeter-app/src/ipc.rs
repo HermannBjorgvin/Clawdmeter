@@ -24,7 +24,7 @@ use clawdmeter_core::Paths;
 use serde::{Deserialize, Serialize};
 
 use crate::art::TrayState;
-use crate::daemon::{LinkState, Status};
+use crate::daemon::{FirmwareRequest, FirmwareUpdate, LinkState, Status};
 
 /// `DATA_FRESH_MS` in the firmware: no write for this long reads as stale.
 pub const DATA_FRESH_SECS: i64 = 90;
@@ -41,9 +41,87 @@ pub fn commands_file(paths: &Paths) -> PathBuf {
     paths.state_dir.join("app-commands")
 }
 
-/// `<cache>/device-firmware.json`: what the last flash or `info` probe saw.
+/// `<cache>/device-firmware.json`: what the last flash, `info` probe or
+/// Bluetooth connection saw.
 pub fn firmware_record_file(paths: &Paths) -> PathBuf {
     paths.cache_dir.join("device-firmware.json")
+}
+
+/// `<state>/firmware-update.json`: the image the window asks the tray to send
+/// over Bluetooth (with [`AppCommand::FirmwareUpdate`]).
+pub fn firmware_request_file(paths: &Paths) -> PathBuf {
+    paths.state_dir.join("firmware-update.json")
+}
+
+/// Leave a request for the tray (then send [`AppCommand::FirmwareUpdate`]).
+pub fn save_firmware_request(paths: &Paths, req: &FirmwareRequest) -> io::Result<()> {
+    fs::create_dir_all(&paths.state_dir)?;
+    fs::write(firmware_request_file(paths), serde_json::to_vec(req).map_err(io::Error::other)?)
+}
+
+/// The request the window left, if readable.
+pub fn load_firmware_request(paths: &Paths) -> Option<FirmwareRequest> {
+    serde_json::from_slice(&fs::read(firmware_request_file(paths)).ok()?).ok()
+}
+
+/// A firmware update over Bluetooth, for the window.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateSnapshot {
+    /// The request it belongs to (`FirmwareRequest::id`).
+    #[serde(default)]
+    pub id: u64,
+    /// `starting` | `confirming` | `sending` | `verifying` | `restarting` |
+    /// `done` | `failed`.
+    pub state: String,
+    /// The version being installed.
+    pub version: String,
+    /// Bytes written to the board (while sending).
+    #[serde(default)]
+    pub done: u32,
+    /// Image size (while sending).
+    #[serde(default)]
+    pub total: u32,
+    /// What went wrong (`failed`).
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl UpdateSnapshot {
+    fn from_update(id: u64, u: &FirmwareUpdate) -> Self {
+        let s = |state: &str, version: &str| UpdateSnapshot {
+            id,
+            state: state.into(),
+            version: version.into(),
+            ..Default::default()
+        };
+        match u {
+            FirmwareUpdate::Starting { version } => s("starting", version),
+            FirmwareUpdate::Confirming { version } => s("confirming", version),
+            FirmwareUpdate::Sending { version, done, total } => {
+                UpdateSnapshot { done: *done, total: *total, ..s("sending", version) }
+            }
+            FirmwareUpdate::Verifying { version } => s("verifying", version),
+            FirmwareUpdate::Restarting { version, .. } => s("restarting", version),
+            FirmwareUpdate::Done { version, .. } => s("done", version),
+            FirmwareUpdate::Failed { version, error, .. } => {
+                UpdateSnapshot { error: Some(error.clone()), ..s("failed", version) }
+            }
+        }
+    }
+
+    /// Still going.
+    pub fn running(&self) -> bool {
+        !matches!(self.state.as_str(), "done" | "failed")
+    }
+
+    /// Share of the way through, 0 to 1.
+    pub fn fraction(&self) -> f32 {
+        match self.state.as_str() {
+            "sending" if self.total > 0 => self.done as f32 / self.total as f32,
+            "verifying" | "restarting" | "done" => 1.,
+            _ => 0.,
+        }
+    }
 }
 
 /// One account's last poll error. A status file from an older build (errors
@@ -150,6 +228,25 @@ pub struct StatusSnapshot {
     /// `ResetCredits::MAX_EXPIRIES`); empty when unknown.
     #[serde(default)]
     pub resets_expiries: Vec<i64>,
+    /// The connected board's env, from its INFO characteristic (`None`: not
+    /// connected, or firmware from before Bluetooth updates).
+    #[serde(default)]
+    pub device_env: Option<String>,
+    /// The connected board's firmware version, from INFO.
+    #[serde(default)]
+    pub device_ver: Option<String>,
+    /// The connected board takes firmware updates over Bluetooth (`None`:
+    /// unknown, as for `device_env`).
+    #[serde(default)]
+    pub device_ota: Option<bool>,
+    /// Its update slot in bytes (0: one app slot, USB only). With a slot
+    /// and `device_ota` false, the board speaks a newer update protocol
+    /// than this app.
+    #[serde(default)]
+    pub device_ota_slot: Option<u32>,
+    /// A firmware update over Bluetooth, running or just finished.
+    #[serde(default)]
+    pub firmware_update: Option<UpdateSnapshot>,
 }
 
 impl StatusSnapshot {
@@ -219,6 +316,11 @@ impl StatusSnapshot {
             codex: reading.is_some_and(|r| r.provider == clawdmeter_core::usage::Provider::Codex),
             resets_held: resets.as_ref().map(|c| c.held),
             resets_expiries: resets.map(|c| c.expiries.iter().map(|t| t.timestamp()).collect()).unwrap_or_default(),
+            device_env: s.device.as_ref().map(|d| d.env.clone()),
+            device_ver: s.device.as_ref().map(|d| d.ver.clone()),
+            device_ota: s.device.as_ref().map(clawdmeter_ble::DeviceInfo::can_update),
+            device_ota_slot: s.device.as_ref().map(|d| d.ota_slot),
+            firmware_update: s.firmware_update.as_ref().map(|u| UpdateSnapshot::from_update(s.firmware_update_id, u)),
         }
     }
 
@@ -333,6 +435,11 @@ pub enum AppCommand {
     /// The config file changed: re-read it now, not at the next periodic
     /// re-read, so a device setting reaches the device at once.
     SettingsChanged,
+    /// Send the firmware in [`firmware_request_file`] to the board over
+    /// Bluetooth.
+    FirmwareUpdate,
+    /// Stop that update.
+    CancelFirmwareUpdate,
     /// Stop the daemon and exit.
     Quit,
 }
@@ -347,6 +454,8 @@ impl AppCommand {
             AppCommand::Open(w) => format!("open {w}"),
             AppCommand::CheckUpdate => "check-update".into(),
             AppCommand::SettingsChanged => "settings-changed".into(),
+            AppCommand::FirmwareUpdate => "firmware-update".into(),
+            AppCommand::CancelFirmwareUpdate => "cancel-firmware-update".into(),
             AppCommand::Quit => "quit".into(),
         }
     }
@@ -361,6 +470,8 @@ impl AppCommand {
             ("open", Some(w)) if crate::Page::parse(w).is_some() => AppCommand::Open(w.to_owned()),
             ("check-update", None) => AppCommand::CheckUpdate,
             ("settings-changed", None) => AppCommand::SettingsChanged,
+            ("firmware-update", None) => AppCommand::FirmwareUpdate,
+            ("cancel-firmware-update", None) => AppCommand::CancelFirmwareUpdate,
             ("quit", None) => AppCommand::Quit,
             _ => return None,
         })
@@ -515,7 +626,7 @@ mod tests {
                 ..Default::default()
             },
             last_write_at: last_write,
-            claude: None,
+            ..Default::default()
         }
     }
 
@@ -633,6 +744,46 @@ mod tests {
     }
 
     #[test]
+    fn a_bluetooth_update_reaches_the_window() {
+        let info = clawdmeter_ble::DeviceInfo::parse(
+            br#"{"env":"waveshare_amoled_216","ver":"v1.9.0","ota":3342336,"otav":1}"#,
+        );
+        let mut s = status(connected(), true, None);
+        s.device = info;
+        s.firmware_update = Some(FirmwareUpdate::Sending { version: "v1.10.0".into(), done: 512, total: 2048 });
+        s.firmware_update_id = 42;
+        let snap = StatusSnapshot::from_status(&s, 1000);
+        assert_eq!(snap.device_env.as_deref(), Some("waveshare_amoled_216"));
+        assert_eq!(snap.device_ver.as_deref(), Some("v1.9.0"));
+        assert_eq!(snap.device_ota, Some(true));
+        let u = snap.firmware_update.clone().unwrap();
+        assert_eq!((u.id, u.state.as_str(), u.fraction()), (42, "sending", 0.25));
+        assert!(u.running());
+        let back: StatusSnapshot = serde_json::from_slice(&serde_json::to_vec(&snap).unwrap()).unwrap();
+        assert_eq!(back, snap);
+
+        s.firmware_update = Some(FirmwareUpdate::Failed { version: "v1.10.0".into(), error: "nope".into(), at: 1 });
+        let u = StatusSnapshot::from_status(&s, 1000).firmware_update.unwrap();
+        assert_eq!((u.state.as_str(), u.error.as_deref(), u.running()), ("failed", Some("nope"), false));
+        s.device = None;
+        assert_eq!(StatusSnapshot::from_status(&s, 1000).device_ota, None, "unknown, not USB-only");
+
+        let dir = std::env::temp_dir().join(format!("clawdmeter-fwreq-{}", std::process::id()));
+        let paths = Paths::under(&dir);
+        assert_eq!(load_firmware_request(&paths), None);
+        let req = FirmwareRequest {
+            image: dir.join("a b/fw.bin"),
+            env: "waveshare_amoled_216".into(),
+            version: "v1.10.0".into(),
+            sha256: "00".into(),
+            id: 7,
+        };
+        save_firmware_request(&paths, &req).unwrap();
+        assert_eq!(load_firmware_request(&paths), Some(req), "a path with a space survives");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn commands_roundtrip_and_take() {
         let dir = std::env::temp_dir().join(format!("clawdmeter-cmd-{}", std::process::id()));
         let paths = Paths::under(&dir);
@@ -641,6 +792,8 @@ mod tests {
             AppCommand::Open("hooks".into()),
             AppCommand::Forget,
             AppCommand::SettingsChanged,
+            AppCommand::FirmwareUpdate,
+            AppCommand::CancelFirmwareUpdate,
             AppCommand::Quit,
         ];
         for c in &cmds {

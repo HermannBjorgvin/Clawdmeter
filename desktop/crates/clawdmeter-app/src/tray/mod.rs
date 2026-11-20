@@ -672,6 +672,14 @@ impl TrayApp {
                 self.settings_at = 0;
                 self.send(Command::ReloadSettings);
             }
+            AppCommand::FirmwareUpdate => match ipc::load_firmware_request(&self.paths) {
+                Some(req) => self.send(Command::UpdateFirmware(req)),
+                None => log::warn!(
+                    "firmware update asked for, but {} is unreadable",
+                    ipc::firmware_request_file(&self.paths).display()
+                ),
+            },
+            AppCommand::CancelFirmwareUpdate => self.send(Command::CancelFirmwareUpdate),
             AppCommand::Quit => return false,
         }
         true

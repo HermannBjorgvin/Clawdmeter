@@ -557,22 +557,34 @@ impl SettingsView {
     fn device_pane(&mut self, t: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let snap = self.snap.clone();
         let rec = ipc::load_firmware_record(&self.paths);
-        let env = self.device.info.as_ref().map(|i| i.env.clone()).or_else(|| rec.as_ref().map(|r| r.env.clone()));
+        // What the board says right now: over USB, else over Bluetooth (its
+        // INFO characteristic); else the last record.
+        let live = snap.as_ref().filter(|s| s.link == "connected" && s.device_env.is_some());
+        let env = self
+            .device
+            .info
+            .as_ref()
+            .map(|i| i.env.clone())
+            .or_else(|| live.and_then(|s| s.device_env.clone()))
+            .or_else(|| rec.as_ref().map(|r| r.env.clone()));
         let ver = self
             .device
             .info
             .as_ref()
             .map(|i| i.ver.clone())
+            .or_else(|| live.and_then(|s| s.device_ver.clone()))
             .or_else(|| rec.as_ref().map(|r| r.ver.clone()))
             .or_else(|| snap.as_ref().and_then(|s| s.device_firmware.clone()));
+        let over_bluetooth = live.is_some_and(|s| s.device_ota == Some(true));
         let board = env.as_deref().and_then(boards::board);
         let name: SharedString = match (board, &env) {
             (Some(b), _) => b.name.into(),
             (None, Some(e)) => e.clone().into(),
             (None, None) => "Board not identified".into(),
         };
-        // Without a live USB answer, the identity is what was last seen.
-        let cached = self.device.info.is_none() && env.is_some();
+        // Without a live answer (USB or Bluetooth), the identity is what was
+        // last seen.
+        let cached = self.device.info.is_none() && live.is_none() && env.is_some();
         let detail: Option<SharedString> = match (board, cached) {
             (Some(b), true) => Some(format!("{} · last detected", b.product).into()),
             (Some(b), false) => Some(b.product.into()),
@@ -625,7 +637,14 @@ impl SettingsView {
                         .child(div().font_family(FONT_DISPLAY).text_size(px(20.)).child(name))
                         .when_some(detail, |d, x| d.child(div().text_size(px(12.5)).text_color(t.mute).child(x))),
                 )
-                .child(div().flex().flex_wrap().gap(px(6.)).child(pill(t, link, link_tone)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(6.))
+                        .child(pill(t, link, link_tone))
+                        .when(over_bluetooth, |d| d.child(pill(t, "Updates over Bluetooth", Tone::Plain))),
+                )
                 .child(div().text_size(px(13.)).text_color(t.dim).child(firmware))
                 .child(div().text_size(px(13.)).text_color(t.mute).child(usb))
                 .child(div().flex().pt(px(4.)).child(button(

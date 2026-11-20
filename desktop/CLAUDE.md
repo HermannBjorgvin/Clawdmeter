@@ -55,8 +55,18 @@ is faked behind `FlashHardware`.
   subscription, zombie-write breaker (a zombie link is disconnected before
   it's dropped), BlueZ trust, macOS stale-bond unpair via `blueutil`,
   Windows bonded-address fallback (PnP / `CLAWDMETER_BLE_ADDRESS`).
+  Each connect reads INFO (`DeviceInfo`: env, version, update slot). `ota`
+  has the update frames, replies and the sender's window (`Sender`);
+  `Updater` (from `DeviceLink::updater`) sends an image over the link, its
+  replies routed from TX by the forwarder; a write without response that
+  stalls with the link up (CoreBluetooth stops signalling it may send) makes
+  it send the rest with response. `--example ota -- <image> [--with-response]`
+  pushes one without the app, for hardware testing. After BEGIN the board answers
+  CONFIRM and waits for a tap or press (`UpdateProgress::Confirming`,
+  status `confirming`, the Flash step says "Allow the update on the board").
 - `clawdmeter-flash`: downloads the release `manifest.json`, matches boards by
-  chip + flash size, writes with espflash.
+  chip + flash size, writes with espflash. `device::app_image` cuts the app
+  partition out of a merged image (what a Bluetooth update sends).
 - `clawdmeter-app`: the `clawdmeter` binary. Tray (`tray/`, ksni on Linux;
   on macOS the menu is one AppKit panel, `tray/mac_menu.rs`, put into
   muda's NSMenu: the device's home screen, a reload button in its corner,
@@ -88,7 +98,12 @@ is faked behind `FlashHardware`.
   `StatusSnapshot::spend` marks a spend-capped account, drawn as one Spend
   meter in the panel, the rows and the Overview),
   window (`ui/`), `daemon.rs` (drives the engine on its own thread: 0.5 s
-  tick, config re-read every 5 s and on `Command::ReloadSettings`),
+  tick, config re-read every 5 s and on `Command::ReloadSettings`; saves
+  the board's INFO as the firmware record on connect; runs a Bluetooth
+  update on `Command::UpdateFirmware`, with no payload writes while it
+  streams, then `restart_check` each tick: done once INFO shows the new
+  version and a payload written to it held 20 s (or the link 30 s); the old
+  version 20 s after DONE means it went back; no INFO in 2 min fails),
   `hooks/` (`clawdmeter hook alert|clear|event` and the settings.json
   installer), `ipc.rs` (single-instance lock, status file, command queues,
   window lock), `onboarding.rs`, `boards.rs` (names, buy links,
@@ -110,7 +125,8 @@ is faked behind `FlashHardware`.
   `compare` render matches it, for side-by-side screenshots).
 - State lives in one dir, `~/.config/clawdmeter/` (Windows:
   `%LOCALAPPDATA%\Clawdmeter\`): `config`, `events.log`, `attention`,
-  `clear-<sid>`, `ble-address`, `daemon.log`, `usage-blocks.json`, app
+  `clear-<sid>`, `ble-address`, `daemon.log`, `usage-blocks.json`,
+  `firmware-update.json` (the window's Bluetooth update request), app
   state and locks.
 - Config keys: `config_dirs`, `codex_dirs` (Codex homes; absent = the
   discovered default, empty = none: `Settings::apply_codex_default`),
@@ -405,6 +421,25 @@ runs or shows (bar the Accounts page's trial note).
   every 5 s, not every tick. The demo's `--app-update`
   shows each download state with made-up notes (`linux`, `linux-menu`: the
   Linux menu closed or open); clicking Download there fetches for real.
+- Bluetooth updates on the Flash page: with a connected board whose INFO
+  says it takes updates (`StatusSnapshot::device_ota`) and an image for its
+  env, the Connect step leads with "Update over Bluetooth" ("Update your
+  board", USB second; Page mode only).
+  It goes to Firmware with `Via::Bluetooth`; Install writes the app image to
+  `<cache>/firmware-update/`, leaves `firmware-update.json` (with an `id`) and
+  sends `firmware-update`; the tray hands it to the daemon. The Flash step
+  follows `StatusSnapshot::firmware_update` for that `id` (Cancel, until the
+  board is checking the image, sends `cancel-firmware-update`) and says so if
+  nothing picks it up within 15 s (`--daemon` reads no commands) or the
+  update vanishes from the status for 45 s. A window opened mid-update
+  follows the running one (`adopt_running_update`). A board with a slot
+  but a newer `otav` (`device_ota_slot`) is told to update the app first.
+  Older firmware (no INFO) gets a line
+  about installing over USB once; a single-slot board, "USB only". The
+  Device page names the board and version from INFO while it's connected
+  (not "last detected") and adds an "Updates over Bluetooth" pill; its
+  Update firmware button opens the Flash page. A failed install shows its
+  reason on the Flash step (USB or Bluetooth).
 - The wizard reuses the flasher (`FlashMode::Setup`: no step header,
   up-to-date boards can skip) and the Hooks page
   (`SettingsView::show(Page::Hooks, embedded)`). First run = no
