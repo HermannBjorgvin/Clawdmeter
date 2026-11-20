@@ -22,6 +22,8 @@
 #include "clawd_prefs.h"
 #include "perf.h"
 #include "pair_hold.h"
+#include "ota.h"
+#include "ota_ui.h"
 
 #include "hal/board_caps.h"
 #include "hal/display_hal.h"
@@ -159,7 +161,10 @@ static void send_screenshot() {
     lv_draw_buf_t draw_buf;
     lv_draw_buf_init(&draw_buf, w, h, LV_COLOR_FORMAT_RGB565, row_bytes, sbuf, buf_size);
 
-    lv_result_t res = lv_snapshot_take_to_draw_buf(lv_screen_active(), LV_COLOR_FORMAT_RGB565, &draw_buf);
+    // The update screen covers everything from the top layer, which a
+    // snapshot of the active screen leaves out.
+    lv_obj_t* shown = ota_ui_visible() ? lv_layer_top() : lv_screen_active();
+    lv_result_t res = lv_snapshot_take_to_draw_buf(shown, LV_COLOR_FORMAT_RGB565, &draw_buf);
     if (res != LV_RESULT_OK) {
         heap_caps_free(sbuf);
         Serial.println("SCREENSHOT_ERR");
@@ -242,6 +247,23 @@ static void check_serial_cmd() {
                 theme_format_hex(p, hex);
                 Serial.printf("{\"theme\":\"%s\"}\n", hex);
             }
+            else if (strncmp(cmd_buf, "ota_ui ", 7) == 0) {
+                // QA: `ota_ui <0-100>` shows the firmware-update screen at that
+                // percentage, `ota_ui off` hides it (only while no update runs).
+                const bool off = strcmp(cmd_buf + 7, "off") == 0;
+                const bool ask = strcmp(cmd_buf + 7, "confirm") == 0;
+                if (!ota_active()) {
+                    if (off) ota_ui_hide();
+                    else if (ask) ota_ui_show(OTA_UI_CONFIRM, 24);
+                    else ota_ui_show(OTA_UI_RECEIVING, atoi(cmd_buf + 7));
+                }
+                Serial.printf("{\"ota_ui\":%s}\n", ota_ui_visible() ? "true" : "false");
+            }
+            else if (strcmp(cmd_buf, "ota_allow") == 0) {
+                // QA: allow a firmware update waiting on the board, as a tap
+                // or a button press does (USB access can flash it anyway).
+                Serial.printf("{\"ota_allow\":%s}\n", ota_allow() ? "true" : "false");
+            }
             else if (strncmp(cmd_buf, "clawd ", 6) == 0) {
                 const bool ok = director_debug(cmd_buf + 6);
                 Serial.printf("{\"clawd\":\"%s\",\"ok\":%s}\n", cmd_buf + 6, ok ? "true" : "false");
@@ -305,6 +327,7 @@ void setup() {
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, my_touch_cb);
 
+    ota_init();         // before ble_init: the INFO characteristic reports the update slot
     ble_init();
     input_hal_init();
 
@@ -466,6 +489,7 @@ void loop() {
     lv_timer_handler();
     ui_tick_anim();
     ble_tick();
+    ota_tick();
     power_hal_tick();
     imu_hal_tick();
     sound_hal_tick();
@@ -499,6 +523,8 @@ void loop() {
         if (primary_now != primary_was) {
             if (primary_now) {
                 if (idle_consume_wake_press()) primary_wake_swallowed = true;
+                // A firmware update's question takes the press.
+                else if (ota_button_press()) primary_wake_swallowed = true;
                 // No touchscreen: BOOT dismisses an active alert first and is
                 // not a push-to-talk press then.
                 else if (director_button(true)) primary_wake_swallowed = true;
@@ -520,6 +546,7 @@ void loop() {
             if (secondary_now != secondary_was) {
                 if (secondary_now) {
                     if (idle_consume_wake_press()) secondary_wake_swallowed = true;
+                    else if (ota_button_press()) secondary_wake_swallowed = true;
                     else {
                         button_run_press(BTN_SLOT_SECONDARY, &secondary_run, button_action_get(BTN_SLOT_SECONDARY), true);
                         director_button(false);
@@ -535,7 +562,7 @@ void loop() {
         }
 
         if (power_hal_pwr_pressed()) {
-            if (!idle_consume_wake_press()) {
+            if (!idle_consume_wake_press() && !ota_button_press()) {
                 // Counts as you being here. On a touchless board whose only
                 // button this is, it dismisses an active alert first; else it
                 // runs its action, once (the press registers on release).
@@ -609,6 +636,7 @@ void loop() {
             if (usage.has_theme) theme_set(usage.theme);
             if (usage.has_fable_color) fable_color_set(usage.fable_color);
             ui_update(&usage);
+            ota_on_payload();   // a freshly updated image can be kept (ota.h)
             // A prompt (or you're back after a gap): you're at the computer,
             // so a dimmed or dark panel wakes before Clawd notices you. A
             // Stop or tool activity doesn't: Claude working alone isn't you.

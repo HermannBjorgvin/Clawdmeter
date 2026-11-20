@@ -42,6 +42,21 @@ pins and hardware gotchas, which loads when you work in that folder.
   `ui.cpp` (white bars, "Codex" pill); the Resets card is all in
   `draw_resets_card()`, its grid sized by `layout.cpp` `fit_resets()`. `signals` treats its numbers as a replay, so Clawd
   never reacts to them.
+- **Updates over Bluetooth**: `ota_proto.cpp` holds the frames, the receive
+  window and ring (pure, native `test_ota`); `ota.cpp` asks on the board
+  first (CONFIRMING, decided by the pure `OtaGate` in `ota_proto`: a tap via
+  `ota_ui_take_tap`, or a double press through `ota_button_press()` in
+  `main.cpp`'s button handling, which takes every press while the question
+  is up),
+  then does the flash work on
+  the loop task (the BLE callback only fills the ring and asks for resends)
+  and overrides `verifyRollbackLater`, so a new image stays pending until the
+  owner's computer reconnects and a payload parses (`ota_on_payload`, or a
+  minute passes); `ota_ui.cpp` is the progress screen on
+  `lv_layer_top` (serial `ota_ui <pct>|confirm|off` shows it, `ota_allow`
+  allows a waiting update; in the sim too, which
+  stubs `ota.h` in `boards/sim/ota_sim.cpp`). Protocol: `docs/protocol.md`.
+  A change to the GATT table bumps `GATT_REVISION` in `ble.cpp`.
 - **Sound**: `ding.cpp` synthesizes the one sound (a C#5 ding, mirrored by
   the desktop's `chime.rs`); `chime.cpp` streams it through the ES8311.
 - **Generated, never hand-edited**: `splash_animations.h` (only
