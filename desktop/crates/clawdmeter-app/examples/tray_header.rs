@@ -26,7 +26,7 @@ fn main() {
             MenuItem::new("Quit Clawdmeter", true, None),
         );
         let device = Submenu::with_id("device", "Show on device", true);
-        let auto = CheckMenuItem::with_id("device-auto", "Latest active account", true, true, None);
+        let auto = CheckMenuItem::with_id("device-auto", "Most recent", true, true, None);
         let one = CheckMenuItem::with_id("device-0", "~/.claude", true, false, None);
         device.append_items(&[&auto, &one]).expect("submenu");
         menu.append_items(&[&a, &b, &PredefinedMenuItem::separator(), &c, &device]).expect("append");

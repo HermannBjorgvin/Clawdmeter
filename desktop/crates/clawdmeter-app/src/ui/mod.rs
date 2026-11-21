@@ -127,6 +127,7 @@ const ASSETS: &[(&str, &[u8])] = bundled![
         "ban",
         "linux",
         "ticket",
+        "bell",
     ],
 ];
 

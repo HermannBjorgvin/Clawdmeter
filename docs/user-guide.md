@@ -60,8 +60,8 @@ bottom row has **Open Clawdmeter** and, on the right, an update icon with an
 orange dot while a newer release is out (it opens **Update** to install the
 new app first, then **Flash** for the board's firmware; skip the app's
 release and it stays hidden until the next one), a speaker
-that turns the chime on this computer on or off (the Overview's **Play a
-chime on this computer** switch), Settings, and a power icon that quits.
+that turns the chime on this computer on or off (the bell switch at the
+foot of the Overview), Settings, and a power icon that quits.
 The board's own alert chime isn't in the tray menu: switch it with **Alert
 chime** on the Device page. On Linux and Windows the menu lists **Refresh
 usage** (greyed out, saying when it can check again, until a check can run),
@@ -195,12 +195,12 @@ latest. With no Fable reading yet there's no strip. The e-paper board
 doesn't draw it.
 
 **Several accounts.** With more than one account on the Accounts page, the
-device shows one at a time. By default it's the latest active account: the
+device shows one at a time. By default it's the most recent account: the
 one whose usage increased most recently (weekly usage, on an account with no
 5-hour limit). To keep one account on the device, pick it in the drop-down
 at the top right of the Overview, or under **Show on device** in the tray
 menu (its title names the current choice); the device switches within a couple of seconds and stays on it. Pick
-**Latest active account** to go back. With a single account neither shows. While the
+**Most recent** to go back. With a single account neither shows. While the
 chosen account can't be read (not checked yet, its last three checks
 failed, or a Codex account's sign-in has ended), the device shows the automatic choice
 instead, and goes back to the chosen account once it reads. The board can't
