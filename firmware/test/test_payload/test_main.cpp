@@ -264,6 +264,29 @@ static void test_fable_weekly(void) {
     TEST_ASSERT_EQUAL_INT(39, fable_overlay_w(70, 40, 111, fable_fill_w(111, 40)));
 }
 
+// `an`, the shown account's name: printable ASCII, at most 24, "" when absent.
+static void test_account_name(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_EQUAL_STRING("", d.account);                 // an older app
+    TEST_ASSERT_TRUE(payload_parse("{\"an\":\"~/.codex\",\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_EQUAL_STRING("~/.codex", d.account);
+    TEST_ASSERT_TRUE(payload_parse("{\"an\":\"~/.claude-work-account-with-a-long-name\"}", &d, nullptr));
+    TEST_ASSERT_EQUAL_size_t(sizeof(d.account) - 1, strlen(d.account));
+    TEST_ASSERT_EQUAL_STRING("~/.claude-work-account-w", d.account);
+    TEST_ASSERT_TRUE(payload_parse("{\"an\":\"~/caf\u00e9\\tx\"}", &d, nullptr));
+    TEST_ASSERT_EQUAL_STRING("~/caf???x", d.account);        // UTF-8 bytes and a tab
+    TEST_ASSERT_TRUE(payload_parse("{\"an\":7}", &d, nullptr));
+    TEST_ASSERT_EQUAL_STRING("", d.account);                 // not a string
+    // `al`: the latest active account, only with a name.
+    TEST_ASSERT_TRUE(payload_parse("{\"an\":\"~/.codex\",\"al\":1}", &d, nullptr));
+    TEST_ASSERT_TRUE(d.account_auto);
+    TEST_ASSERT_TRUE(payload_parse("{\"an\":\"~/.codex\"}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.account_auto);                       // chosen
+    TEST_ASSERT_TRUE(payload_parse("{\"al\":1}", &d, nullptr));
+    TEST_ASSERT_FALSE(d.account_auto);                       // no name: nothing to show
+}
+
 static void test_long_strings_truncate(void) {
     UsageData d;
     TEST_ASSERT_TRUE(payload_parse("{\"st\":\"abcdefghijklmnopqrstuvwxyz\"}", &d, nullptr));
@@ -329,5 +352,6 @@ int main(void) {
     RUN_TEST(test_theme);
     RUN_TEST(test_fable_weekly);
     RUN_TEST(test_long_strings_truncate);
+    RUN_TEST(test_account_name);
     return UNITY_END();
 }

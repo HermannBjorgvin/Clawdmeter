@@ -97,6 +97,14 @@ The app writes one complete JSON object per write to RX
   Ultra, the endpoint's `five_hour: null`): `s`/`sr` stay 0/-1 for older
   firmware, and the device shows `w`/`wr` alone as its main meter.
   `{"ok":false}` means no data.
+- Account, with two or more: `an` names the shown account (`~/.codex`,
+  ASCII, ≤ 24) and `al:1` marks it as the latest active one ("Auto: …").
+  The device shows the name for 3 s when either changes and in place of
+  every third verb (never over an alert, stale or minimal), and starts its
+  rate math over when a real sample comes from another account, so a switch
+  isn't a reset or a rise (unless two names come out the same after the
+  24-byte ASCII cut); a name appearing or going (an account added or
+  removed) starts it over too. Absent = one account or an older app.
 - Codex (a trial): `pv:"codex"` marks a Codex account's numbers (same usage
   keys; the device draws its Codex screen and keeps them out of Clawd's rate
   math), `rc`/`rx` its reset credits held and each held one's expiry date
@@ -108,7 +116,7 @@ The app writes one complete JSON object per write to RX
   (heartbeats and writes between polls): the rate math and reset detector skip
   them, but a new `es` in the same write still fires.
 - Device settings, on every data payload: `k1`/`k2`/`k3` (what the
-  primary, secondary and PWR buttons do: presets 0–6, keyboard shortcuts
+  primary, secondary and PWR buttons do: presets 0–7, keyboard shortcuts
   and media keys as bit fields, `button_action.h`), `lv` (liveliness 1–5), `aa`
   (attention animation seconds: 120, 30, 10, 0 = off; only his animation,
   not the alert), `pm` (pace marker on the usage bars, `pace.h`), `th`
@@ -118,7 +126,8 @@ The app writes one complete JSON object per write to RX
   (`clawd_prefs.cpp`) so they apply from boot.
 - Device → app: `0x01` on REQ (`…-0004`) when it has no data yet;
   `{"dismiss":true}` on TX (`…-0003`) when a tap or the 2-minute timeout ends
-  an alert. The app clears its own alert and doesn't echo a clear back. Alerts
+  an alert; `{"next":true}` on TX when a Next account button (preset 7) is
+  pressed, and the app saves the next `device_account`. The app clears its own alert and doesn't echo a clear back. Alerts
   nobody clears expire in the app after 2 minutes (a test alert after 30 s);
   if the device still shows one, the app sends `x`.
 

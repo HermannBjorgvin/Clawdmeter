@@ -24,6 +24,14 @@ struct UsageData {
     bool codex;              // `pv` "codex": an OpenAI Codex account (a trial). The
                              //   numbers are drawn on the Codex screen (white bars,
                              //   "Codex" pill) and never reach Clawd's rate math
+    char account[25];        // `an` the shown account's short name ("~/.codex"),
+                             //   printable ASCII, at most 24; "" = absent (one
+                             //   account, or an older app). A change tells the
+                             //   account apart (signals) and shows it for a
+                             //   moment (ui)
+    bool account_auto;       // `al` 1: that account is the latest active one
+                             //   (the app picks it), not one chosen; shown
+                             //   as "Auto: <name>" 
     int16_t resets_held;     // `rc` Codex reset credits held (0-999); -1 = absent:
                              //   no Resets card
     int8_t  resets_expiry_n; // `rx` how many expiry dates came (0-10); -1 = absent

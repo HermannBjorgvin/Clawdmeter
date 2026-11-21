@@ -6,7 +6,7 @@
 // Pure: no Arduino, so it runs in the native unit tests. The values are the
 // wire format; never renumber them.
 //
-//   0..6      a preset (enum below)
+//   0..7      a preset (enum below)
 //   0x10000 | hold << 12 | mods << 8 | usage
 //             a keyboard chord: `usage` is a HID keyboard usage
 //             (BTN_KEY_USAGE_MIN..BTN_KEY_USAGE_MAX), `mods` the HID modifier
@@ -27,6 +27,7 @@ enum ButtonPreset {
     BTN_ACT_ENTER      = 4,   // HID Enter
     BTN_ACT_ESCAPE     = 5,   // HID Escape
     BTN_ACT_BRIGHTNESS = 6,   // cycle the brightness (PWR default)
+    BTN_ACT_NEXT_ACCOUNT = 7, // ask the app to show the next account ({"next":true} on TX)
     BTN_ACT_PRESET_COUNT
 };
 
@@ -56,6 +57,7 @@ enum ButtonKind {
     BTN_KIND_KEY,          // keyboard report: `key` + `modifiers`
     BTN_KIND_CONSUMER,     // consumer report: `consumer`
     BTN_KIND_BRIGHTNESS,
+    BTN_KIND_NEXT_ACCOUNT, // tell the app: the next account on the device
 };
 
 struct ButtonBinding {

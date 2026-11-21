@@ -1,5 +1,6 @@
 #include "signals.h"
 #include "usage_rate.h"
+#include <string.h>
 
 // Pure: no Arduino. See signals.h.
 
@@ -9,6 +10,10 @@ static uint32_t last_seq   = 0;
 static char     last_event = '\0';
 static int      sessions   = -1;
 static int      meter_kind = -1;   // usage_meter_kind of the last real sample
+static char     sample_account[sizeof(((UsageData*)0)->account)] = "";  // `an` of the last real sample
+static bool     have_sample_account = false;                            // ... once there's been one
+static char     shown_account[sizeof(((UsageData*)0)->account)] = "";   // `an` of the last payload with one
+static bool     shown_auto = false;  // its `al`
 
 void signals_clear(void) {
     hooks_seen = false;
@@ -17,6 +22,10 @@ void signals_clear(void) {
     last_event = '\0';
     sessions = -1;
     meter_kind = -1;
+    sample_account[0] = '\0';
+    have_sample_account = false;
+    shown_account[0] = '\0';
+    shown_auto = false;
     usage_rate_clear();
 }
 
@@ -51,6 +60,29 @@ SignalsUpdate signals_ingest_at(const UsageData* d, uint32_t now_ms) {
             u.meter_kind_changed = true;
         }
         meter_kind = kind;
+        // Another account's numbers (`an`, the app picked another one):
+        // not comparable either, so a drop isn't a reset and a jump isn't
+        // a rise. No name counts as a name: the app names accounts only
+        // with two or more, so adding or removing one (and switching on
+        // the way) moves between a name and none. Codex payloads never get
+        // here, so Claude A, Codex, then Claude A again keeps A's history.
+        // An older app never names one: nothing changes for it.
+        if (have_sample_account && strcmp(d->account, sample_account) != 0) {
+            usage_rate_restart();
+            u.meter_kind_changed = true;
+        }
+        memcpy(sample_account, d->account, sizeof(sample_account));
+        have_sample_account = true;
+    }
+    // The account on the device changed, or how it was picked (`al`: the
+    // latest active one or a chosen one), in any payload naming one,
+    // replays and Codex included: the UI names it for a moment. The first
+    // name since boot is a baseline.
+    if (d->account[0]) {
+        u.account_switched = shown_account[0]
+                          && (strcmp(d->account, shown_account) != 0 || d->account_auto != shown_auto);
+        memcpy(shown_account, d->account, sizeof(shown_account));
+        shown_auto = d->account_auto;
     }
     u.session_reset = usage_rate_sample_at(now_ms, d->session_pct, !real_sample);
 

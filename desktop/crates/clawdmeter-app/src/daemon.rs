@@ -127,6 +127,29 @@ fn reload_settings(paths: &Paths, engine: &mut Engine, claude: &mut Option<PathB
     engine.set_claude_found(claude.is_some());
 }
 
+/// The board's "Next account" button: save the next choice
+/// ([`Engine::next_device_account`]: the latest active account, then each
+/// account, round again, passing over one that wouldn't change what the
+/// device shows), then take it at once so its numbers go out now. The file is read first, so a choice made a moment ago
+/// in the window or the tray is the one stepped from. This works headless
+/// too; with a tray, `write_settings` also tells it, and the Overview reads
+/// the file twice a second.
+fn next_device_account(paths: &Paths, engine: &mut Engine, claude: &mut Option<PathBuf>) {
+    reload_settings(paths, engine, claude);
+    let Some(next) = engine.next_device_account() else {
+        log::info!("next account asked for by the device, with no other account to show");
+        return;
+    };
+    let shown = next.as_ref().map_or_else(|| "the latest active account".to_owned(), |d| d.display().to_string());
+    match crate::ui::settings::write_settings(paths, move |s, _| s.device_account = next) {
+        Ok(()) => {
+            log::info!("next account asked for by the device: {shown}");
+            reload_settings(paths, engine, claude);
+        }
+        Err(e) => log::warn!("couldn't save the account the device asked for: {e}"),
+    }
+}
+
 type PollResults = Vec<(PathBuf, probe::Polled)>;
 /// A Codex poll's results, and the reset-credit cache it carried.
 type CodexResults = (PollResults, CodexCache);
@@ -171,6 +194,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         );
     }
     let mut engine = Engine::new(settings);
+    engine.set_home(paths.home.clone());
     // Blocks the usage endpoint set survive restarts (a call during one
     // lengthens it).
     engine.restore_blocks(&backoff::load_blocks(&paths.usage_blocks_file()), unix_now());
@@ -295,6 +319,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                         log::info!("attention alert dismissed on the device");
                         engine.on_device_dismissed();
                     }
+                    DeviceEvent::NextAccount => next_device_account(&paths, &mut engine, &mut claude),
                 }
             }
         }
@@ -482,6 +507,7 @@ pub fn once(paths: &Paths) -> i32 {
     let claude = usage::find_claude(settings.claude_path.as_deref(), &paths.home);
     let now = unix_now();
     let mut engine = Engine::new(settings.clone());
+    engine.set_home(paths.home.clone());
     engine.set_appearance(clawdmeter_core::platform::system_appearance().unwrap_or_default());
     engine.restore_blocks(&backoff::load_blocks(&paths.usage_blocks_file()), now);
     // A blocked account isn't asked: a call during a block lengthens it.
@@ -572,5 +598,53 @@ pub fn once(paths: &Paths) -> i32 {
         0
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The board's "Next account" button: each press saves the next choice,
+    // the latest active account included, and the engine takes it at once;
+    // with one account it does nothing.
+    #[test]
+    fn next_account_button_cycles_and_applies() {
+        use clawdmeter_core::usage::{SessionLimit, Window};
+        let root = std::env::temp_dir().join(format!("cm-daemon-next-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths::under(&root);
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let (a, b) = (root.join("a"), root.join("b"));
+        std::fs::write(&paths.config_file, format!("config_dirs = {}, {}\ncodex_dirs =\n", a.display(), b.display()))
+            .unwrap();
+        let now = unix_now();
+        let reading = |pct| clawdmeter_core::UsageReading {
+            session: Some(Window { pct, resets_at: None }),
+            session_limit: SessionLimit::Applies,
+            ..Default::default()
+        };
+        let mut engine = Engine::new(Settings::load(&paths).unwrap());
+        engine.on_poll_results(now, vec![(a.clone(), Ok(reading(10))), (b.clone(), Ok(reading(5)))]);
+        assert_eq!(engine.status(now).active_account, Some(a.clone()), "the highest, before any rise");
+        let mut claude = None;
+        let chosen = |e: &Engine| e.settings().device_account.clone();
+        next_device_account(&paths, &mut engine, &mut claude);
+        assert_eq!(chosen(&engine), Some(a.clone()), "a, chosen: the same numbers, shown without \"Auto:\"");
+        assert_eq!(Settings::load(&paths).unwrap().device_account, Some(a.clone()), "saved");
+        next_device_account(&paths, &mut engine, &mut claude);
+        assert_eq!(chosen(&engine), Some(b.clone()));
+        assert_eq!(engine.status(now).active_account, Some(b.clone()), "taken at once");
+        next_device_account(&paths, &mut engine, &mut claude);
+        assert_eq!(chosen(&engine), None, "round to the latest active account (a)");
+        assert!(!std::fs::read_to_string(&paths.config_file).unwrap().contains("device_account"));
+        assert_eq!(engine.status(now).active_account, Some(a.clone()));
+
+        std::fs::write(&paths.config_file, format!("config_dirs = {}\ncodex_dirs =\n", a.display())).unwrap();
+        let mut engine = Engine::new(Settings::load(&paths).unwrap());
+        engine.on_poll_results(now, vec![(a, Ok(reading(10)))]);
+        next_device_account(&paths, &mut engine, &mut claude);
+        assert!(!std::fs::read_to_string(&paths.config_file).unwrap().contains("device_account"), "one account");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

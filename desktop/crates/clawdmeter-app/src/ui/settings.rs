@@ -1220,6 +1220,7 @@ impl SettingsView {
         }
         let other = chips()
             .child(choice(format!("{id}-brightness"), ButtonAction::Brightness, "Brightness".into()))
+            .child(choice(format!("{id}-next-account"), ButtonAction::NextAccount, "Next account".into()))
             .child(choice(format!("{id}-nothing"), ButtonAction::None, "Nothing".into()));
         div()
             .w_full()
@@ -2148,6 +2149,7 @@ fn action_icon(a: ButtonAction) -> &'static str {
         ButtonAction::Enter => "corner-down-left",
         ButtonAction::ShiftTab | ButtonAction::Escape | ButtonAction::Chord(_) => "keyboard",
         ButtonAction::Brightness => "sun",
+        ButtonAction::NextAccount => "users",
         ButtonAction::Media(MediaKey::PlayPause) => "play",
         ButtonAction::Media(MediaKey::Previous) => "skip-back",
         ButtonAction::Media(MediaKey::Next) => "skip-forward",
@@ -2165,6 +2167,7 @@ fn action_hint(b: Button, a: ButtonAction) -> &'static str {
         ButtonAction::ShiftTab => "Claude Code mode",
         ButtonAction::Space | ButtonAction::Tab | ButtonAction::Enter | ButtonAction::Escape => "Key",
         ButtonAction::Brightness => "Cycles the brightness",
+        ButtonAction::NextAccount => "Shows the next account",
         ButtonAction::Media(_) => "Media key",
         ButtonAction::Chord(c) if c.hold && b.can_hold() => "Shortcut, held",
         ButtonAction::Chord(_) => "Shortcut",
@@ -2503,6 +2506,9 @@ mod tests {
         click(cx, "button-pwr");
         click(cx, "button-pwr-media-4"); // Vol +
         assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("button_pwr = volume-up"));
+        click(cx, "button-pwr");
+        click(cx, "button-pwr-next-account");
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("button_pwr = next-account"));
         click(cx, "button-pwr");
         click(cx, "button-pwr-brightness"); // its default
         assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("button_pwr = brightness"));

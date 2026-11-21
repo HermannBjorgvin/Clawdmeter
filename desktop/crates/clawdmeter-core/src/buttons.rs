@@ -459,6 +459,9 @@ pub enum ButtonAction {
     Escape,
     /// Cycle the screen brightness.
     Brightness,
+    /// Ask the app to show the next account on the device (the board sends
+    /// `{"next":true}`; `Engine::next_device_account`).
+    NextAccount,
     /// A media key.
     Media(MediaKey),
     /// A recorded keyboard shortcut.
@@ -501,6 +504,7 @@ impl ButtonAction {
             "enter" => ButtonAction::Enter,
             "escape" | "esc" => ButtonAction::Escape,
             "brightness" => ButtonAction::Brightness,
+            "next-account" => ButtonAction::NextAccount,
             _ => ButtonAction::Media(MediaKey::parse(v)?),
         })
     }
@@ -515,6 +519,7 @@ impl ButtonAction {
             ButtonAction::Enter => "enter".into(),
             ButtonAction::Escape => "escape".into(),
             ButtonAction::Brightness => "brightness".into(),
+            ButtonAction::NextAccount => "next-account".into(),
             ButtonAction::Media(m) => m.as_str().into(),
             ButtonAction::Chord(c) => {
                 let combo = c.combo();
@@ -539,13 +544,14 @@ impl ButtonAction {
             ButtonAction::Enter => "Enter".into(),
             ButtonAction::Escape => "Esc".into(),
             ButtonAction::Brightness => "Brightness".into(),
+            ButtonAction::NextAccount => "Next account".into(),
             ButtonAction::Media(m) => m.label().into(),
             ButtonAction::Chord(c) => c.label(style),
         }
     }
 
     /// The payload's `k1` / `k2` / `k3` value (`firmware/src/button_action.h`):
-    /// a preset 0–6; a shortcut `0x10000 | hold << 12 | mods << 8 | usage`;
+    /// a preset 0–7; a shortcut `0x10000 | hold << 12 | mods << 8 | usage`;
     /// a media key `0x20000 | usage`.
     pub fn code(self) -> u32 {
         match self {
@@ -556,6 +562,7 @@ impl ButtonAction {
             ButtonAction::Enter => 4,
             ButtonAction::Escape => 5,
             ButtonAction::Brightness => 6,
+            ButtonAction::NextAccount => 7,
             ButtonAction::Media(m) => CONSUMER_FLAG | u32::from(m.usage()),
             ButtonAction::Chord(c) => {
                 KEY_FLAG | if c.hold { HOLD_BIT } else { 0 } | u32::from(c.mods & 0x0F) << 8 | u32::from(c.usage)
@@ -582,8 +589,9 @@ mod tests {
             ButtonAction::Enter,
             ButtonAction::Escape,
             ButtonAction::Brightness,
+            ButtonAction::NextAccount,
         ];
-        assert_eq!(presets.map(ButtonAction::code), [0, 1, 2, 3, 4, 5, 6], "never renumbered");
+        assert_eq!(presets.map(ButtonAction::code), [0, 1, 2, 3, 4, 5, 6, 7], "never renumbered");
         // The values test_button_action and test_payload decode.
         assert_eq!(chord(MOD_CTRL | MOD_SHIFT, 0x10, false).code(), 0x10310, "Ctrl+Shift+M");
         assert_eq!(chord(MOD_CTRL, 0x2C, true).code(), 0x1112C, "Ctrl+Space, held");
@@ -608,6 +616,7 @@ mod tests {
             ButtonAction::Enter,
             ButtonAction::Escape,
             ButtonAction::Brightness,
+            ButtonAction::NextAccount,
             chord(MOD_CTRL | MOD_SHIFT, 0x10, false),
             chord(MOD_CTRL, 0x2C, true),
             chord(MOD_GUI | MOD_ALT, 0x0E, false),
