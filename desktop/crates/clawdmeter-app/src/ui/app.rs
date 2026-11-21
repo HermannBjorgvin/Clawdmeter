@@ -573,8 +573,8 @@ mod tests {
     }
 
     // In the narrowest window, with a long folder chosen, the drop-down's
-    // label gives way: the title keeps its room (Clawd, then at least 150
-    // px) and the refresh button stays in the window.
+    // label gives way: the title keeps its room (Clawd, then at least
+    // `TITLE_MIN_W`)    // px) and the refresh button stays in the window.
     #[gpui::test]
     fn a_long_choice_truncates_in_a_narrow_window(cx: &mut TestAppContext) {
         let root = std::env::temp_dir().join(format!("cm-app-narrow-{}", std::process::id()));
@@ -591,13 +591,16 @@ mod tests {
         let menu = cx.debug_bounds("device-account").expect("the drop-down");
         let refresh = cx.debug_bounds("refresh").expect("the refresh button");
         let page_left = cx.debug_bounds("nav-overview").expect("the sidebar").right() + px(32.);
-        assert!(menu.left() >= page_left + px(96. + 20. + 150.), "{menu:?} runs into the title");
+        assert!(
+            menu.left() >= page_left + px(96. + 20. + super::super::overview::TITLE_MIN_W),
+            "{menu:?} runs into the title"
+        );
         assert!(refresh.right() <= px(720.), "{refresh:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // Looking for the board, the header reads "Searching" and counts up its
-    // dots without changing width; the lines under the title and under the
+    // Looking for the board, the header reads "Searching" and its dots
+    // (`widgets::Dots`) count up without changing its width; the lines under the title and under the
     // drop-down share a baseline, in the default window and the narrowest.
     #[gpui::test]
     fn the_overview_header_searches_and_lines_up(cx: &mut TestAppContext) {
@@ -618,11 +621,11 @@ mod tests {
         cx.executor().advance_clock(REFRESH);
         cx.run_until_parked();
         let title = cx.debug_bounds("searching").expect("Searching");
-        assert!(cx.debug_bounds("dots-1").is_some());
-        cx.executor().advance_clock(std::time::Duration::from_millis(400));
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("dots-2").is_some(), "a dot more");
-        assert_eq!(cx.debug_bounds("searching"), Some(title), "the same width");
+        for _ in 0..3 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(400));
+            cx.run_until_parked();
+            assert_eq!(cx.debug_bounds("searching"), Some(title), "the same width");
+        }
         for width in [880., 720.] {
             cx.simulate_resize(gpui::size(px(width), px(640.)));
             cx.run_until_parked();

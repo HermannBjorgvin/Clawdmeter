@@ -414,7 +414,6 @@ impl Render for Dots {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
         let shown = self.shown;
         div()
-            .debug_selector(move || format!("dots-{shown}"))
             .flex()
             .flex_shrink_0()
             .children((0..3).map(|i| div().when(i >= shown, |d| d.text_color(gpui::transparent_black())).child(".")))
@@ -829,8 +828,16 @@ mod tests {
         assert_eq!(usage_tone(100), Tone::Bad);
     }
 
-    #[test]
-    fn dots_count_up_and_round_again() {
-        assert_eq!([1, 2, 3].map(next_dots), [2, 3, 1]);
+    #[gpui::test]
+    fn dots_count_up_and_round_again(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let dots = cx.new(Dots::new);
+        let shown = |cx: &mut gpui::TestAppContext| dots.read_with(cx, |d, _| d.shown);
+        assert_eq!(shown(cx), 1);
+        for want in [2, 3, 1, 2] {
+            cx.executor().advance_clock(DOTS_STEP);
+            cx.run_until_parked();
+            assert_eq!(shown(cx), want);
+        }
     }
 }

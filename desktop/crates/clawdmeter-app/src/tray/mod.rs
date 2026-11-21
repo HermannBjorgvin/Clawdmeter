@@ -146,8 +146,9 @@ fn device_pick(id: &str) -> Option<Option<usize>> {
     }
 }
 
-/// The "Show on device" submenu with `count` accounts and Most recent, its labels and ticks set by [`set_device_items`]. `None` when there
-/// is nothing to pick.
+/// The "Show on device" submenu with `count` accounts and Most recent, its
+/// labels and ticks set by [`set_device_items`]. `None` when there is
+/// nothing to pick.
 fn device_menu(count: usize) -> Option<(Submenu, Vec<CheckMenuItem>)> {
     if count < 2 {
         return None;

@@ -535,7 +535,7 @@ impl Render for OverviewView {
                     .flex_col()
                     .flex_1()
                     .min_w_0()
-                    .when(several, |d| d.min_w(px(150.)))
+                    .when(several, |d| d.min_w(px(TITLE_MIN_W)))
                     .gap(px(6.))
                     .child(
                         div().flex().h(px(HEADER_ROW_H)).items_center().gap(px(10.)).child(dot(&t, tone)).child(
@@ -738,7 +738,8 @@ impl OverviewView {
         })
     }
 
-    /// The drop-down's choices, the chosen one ticked. Most recent names the one it shows now; Codex folders say so.
+    /// The drop-down's choices, the chosen one ticked. Most recent names the
+    /// one it shows now; Codex folders say so.
     fn account_menu(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> [AnyElement; 2] {
         let home = &self.paths.home;
         let row = |id: String,
@@ -819,6 +820,11 @@ impl OverviewView {
 
 /// The drop-down's default: the account whose usage rose most recently.
 pub(crate) const MOST_RECENT: &str = "Most recent";
+
+/// The header title's room beside the account drop-down, which gives way
+/// first: "Searching..." whole, in a fallback face a little wider than the
+/// display face.
+pub(crate) const TITLE_MIN_W: f32 = 170.;
 
 /// The header's first row (the title, and beside it the drop-down and the
 /// refresh button), the same height on both sides so the lines under them
@@ -931,6 +937,17 @@ mod tests {
         assert_eq!(reset_text(Some(59 * 60 + 30), 0, "---"), "Resets in 1h 0m", "rounded, like the payload's minutes");
         assert_eq!(reset_text(Some(177 * 60), 0, "---"), "Resets in 2h 57m");
         assert_eq!(reset_text(Some(5 * 1440 * 60 + 11 * 3600), 0, "---"), "Resets in 5d 11h");
+    }
+
+    #[test]
+    fn searching_needs_bluetooth() {
+        let snap =
+            |link: &str, tray: &str| StatusSnapshot { link: link.into(), tray: tray.into(), ..Default::default() };
+        assert!(searching(&snap("searching", "Searching")));
+        assert!(searching(&snap("connecting", "Searching")));
+        assert!(!searching(&snap("no_adapter", "Searching")), "Bluetooth unavailable says so");
+        assert!(!searching(&snap("connected", "Connected")));
+        assert!(!searching(&snap("connected", "Stale")));
     }
 
     #[test]
