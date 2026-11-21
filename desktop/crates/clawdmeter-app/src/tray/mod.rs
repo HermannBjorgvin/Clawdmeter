@@ -768,7 +768,9 @@ impl TrayApp {
         let (mode, until) = (self.settings.keep_awake, self.settings.keep_awake_until);
         if mode.deadline(until, now) != until {
             // A timed choice with no deadline, or one too far off, starts
-            // now ([`KeepAwake::deadline`]).
+            // now ([`KeepAwake::deadline`]). A deadline left under a choice
+            // with no timer (a hand edit of `keep_awake` alone) is saved
+            // away, so it can't end a timed choice picked later.
             self.choose_keep_awake(mode, now);
             return;
         }

@@ -9,7 +9,7 @@
 //! Settings, and Quit as icons, Quit at the far end and red only under the
 //! pointer. The panel is the macOS menu, bar the native items muda put in
 //! (a "Show on device" submenu with two or more accounts, and the "Keep
-//! awake with the lid closed" checkbox), which sit between its body and its
+//! awake with the lid closed" submenu), which sit between its body and its
 //! footer; Linux and Windows keep the native list.
 //!
 //! muda has no API for an item with a view, so the panel goes into muda's
