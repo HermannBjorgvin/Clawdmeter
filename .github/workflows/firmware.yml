@@ -53,6 +53,17 @@ jobs:
         env:
           PLATFORMIO_BUILD_FLAGS: -DCLAWD_VERSION=\"ci-${{ github.sha }}\"
         run: pio run -d firmware -e "${{ matrix.env }}"
+      # The app identifies a board and confirms a flash by the env name the
+      # `info` command reports (CLAWD_ENV). An env that copies another env's
+      # build_flags reports that env's name instead.
+      - name: Image reports its own env
+        env:
+          ENV_NAME: ${{ matrix.env }}
+        run: |
+          if ! strings "firmware/.pio/build/$ENV_NAME/firmware.bin" | grep -qxF "$ENV_NAME"; then
+            echo "::error::firmware.bin for $ENV_NAME does not carry CLAWD_ENV=\"$ENV_NAME\"; set variant_flags, not \${env:<parent>.build_flags}"
+            exit 1
+          fi
       - name: Merge flashable image
         env:
           PLATFORMIO_BUILD_FLAGS: -DCLAWD_VERSION=\"ci-${{ github.sha }}\"
