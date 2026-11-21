@@ -518,6 +518,10 @@ pub struct Settings {
     /// The main meter's percentage beside the macOS menu bar icon
     /// (`menu_bar_usage`, default off).
     pub menu_bar_usage: bool,
+    /// Keep this computer awake with the lid closed (`keep_awake`, default
+    /// off): the tray's checkbox. [`crate::keep_awake`] has what it holds
+    /// and when it lets go.
+    pub keep_awake: bool,
     /// What the device's primary, secondary and PWR buttons do, by
     /// [`Button::index`] (`button_primary`, `button_secondary`, `button_pwr`;
     /// sent as `k1`, `k2`, `k3`).
@@ -706,6 +710,7 @@ impl Settings {
             attention_anim: cfg.get("attention_anim").map(AttentionAnim::parse).unwrap_or_default(),
             pace_marker: on_off(cfg.get("pace_marker"), false),
             menu_bar_usage: on_off(cfg.get("menu_bar_usage"), false),
+            keep_awake: on_off(cfg.get("keep_awake"), false),
             buttons: Button::ALL.map(|b| {
                 cfg.get(b.config_key()).map_or(b.default_action(), |v| ButtonAction::parse(v, b.default_action()))
             }),
@@ -815,6 +820,7 @@ impl Settings {
             ("desktop_chime", "", self.desktop_chime, current.desktop_chime),
             ("pace_marker", "", self.pace_marker, current.pace_marker),
             ("menu_bar_usage", "", self.menu_bar_usage, current.menu_bar_usage),
+            ("keep_awake", "", self.keep_awake, current.keep_awake),
         ] {
             if now != was {
                 cfg.set(key, oo(now));
@@ -1380,6 +1386,24 @@ mod tests {
         s.menu_bar_usage = true;
         s.apply_to(&mut cfg, &paths());
         assert_eq!(cfg.get("menu_bar_usage"), Some("on"));
+    }
+
+    #[test]
+    fn keep_awake() {
+        assert!(!settings("").keep_awake, "off by default");
+        assert!(settings("keep_awake = on\n").keep_awake);
+        assert!(!settings("keep_awake = yes\n").keep_awake, "only an explicit on");
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("keep_awake").is_none(), "the default stays out of the file");
+        s.keep_awake = true;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("keep_awake"), Some("on"));
+        s.keep_awake = false;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("keep_awake"), Some("off"));
     }
 
     #[test]
