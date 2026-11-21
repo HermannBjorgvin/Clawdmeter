@@ -237,14 +237,15 @@ pub(super) fn on_exit(f: impl Fn() + Send + 'static) {
     }
 }
 
-/// The Mac's power, from `pmset -g batt`. A read that fails counts as on
-/// battery with no charge reading, which pauses: it is not a desktop.
-pub(super) fn power() -> Power {
+/// The Mac's power, from `pmset -g batt`; `None` when it didn't run or
+/// failed, which says nothing about the battery (the keeper's `Readings`
+/// decide how long the last reading stands in).
+pub(super) fn power() -> Option<Power> {
     match Command::new("/usr/bin/pmset").args(["-g", "batt"]).output() {
-        Ok(out) if out.status.success() => clamshell::power_from_pmset(&String::from_utf8_lossy(&out.stdout)),
+        Ok(out) if out.status.success() => Some(clamshell::power_from_pmset(&String::from_utf8_lossy(&out.stdout))),
         other => {
             log::debug!("keep awake: pmset -g batt failed: {other:?}");
-            Power { external: Some(false), battery_pct: None }
+            None
         }
     }
 }

@@ -46,7 +46,10 @@ is faked behind `FlashHardware`.
   `Standing`, `Lost` or `Unknown`: only `Lost` releases and re-takes, and
   a check that failed keeps the hold, for the same reason. A lid action
   someone else changed is theirs: never written back, shown as the
-  backend's `caveat`. Retry waits run on `Instant`, not the wall clock).
+  backend's `caveat`. Retry waits run on `Instant`, not the wall clock.
+  A power reading that fails is `None` and goes through `Readings`: the
+  last good one stands in for `PATIENCE` polls, then it counts as on
+  battery with no charge, which pauses).
 - `clawdmeter-ble`: btleplug link. The manager and adapter come from one
   `Bluetooth` handle per runtime (`bluetooth.rs`), kept for good: on Linux
   every btleplug `Manager` is a D-Bus connection that is never closed, on
@@ -121,8 +124,10 @@ is faked behind `FlashHardware`.
   a child in its own process group that waits on a stdin pipe and restores
   when the app dies without dismissing it, if the restore record still
   names that run (`Backend::heal_for`: the owner is read with the record
-  it acts on). Every read-act-rewrite of the record, by the app or a
-  guard, runs under `<state>/keep-awake-restore.lock`. The Windows and macOS halves can't be run from Linux, so
+  it acts on). The app's heal, hold and release and a guard's restore
+  each run under `<state>/keep-awake-restore.lock` (a bounded wait, so a
+  stuck holder can't hang quit); the macOS renew re-saving its own run's
+  marker doesn't need it. The Windows and macOS halves can't be run from Linux, so
   check them on hardware when changing them; the macOS half can at least be
   clippy-checked from Linux in a scratch crate that copies the `keep_awake`
   modules, since only ring's C build stops the real cross-check).

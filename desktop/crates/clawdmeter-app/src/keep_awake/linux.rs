@@ -192,8 +192,9 @@ fn inhibit_idle_suspend() -> (Result<Connection, String>, bool) {
     (held, plasma)
 }
 
-/// The computer's power, from `/sys/class/power_supply`.
-pub(super) fn power() -> Power {
+/// The computer's power, from `/sys/class/power_supply`; `None` when a
+/// battery is there and its charge can't be read just now.
+pub(super) fn power() -> Option<Power> {
     power_from(Path::new("/sys/class/power_supply"))
 }
 
@@ -203,9 +204,11 @@ pub(super) fn power() -> Power {
 /// whatever the chargers say: one too weak for the load is no reason to
 /// skip the floor. Otherwise external power is a mains or USB supply that
 /// is online, or a battery that says it is charging, full or idle.
-/// Several batteries count as their average charge.
-fn power_from(dir: &Path) -> Power {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Power::UNKNOWN };
+/// Several batteries count as their average charge. `None`: a battery is
+/// listed and none gave a charge (sysfs mid-hotplug), which is a reading
+/// that failed, not a battery at an unknown charge.
+fn power_from(dir: &Path) -> Option<Power> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Some(Power::UNKNOWN) };
     let read = |supply: &Path, file: &str| {
         std::fs::read_to_string(supply.join(file)).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
     };
@@ -243,9 +246,12 @@ fn power_from(dir: &Path) -> Power {
         // that says nothing either way counts as on battery.
         _ => Some(online || fed),
     };
+    if batteries > 0 && charges.is_empty() {
+        return None;
+    }
     let battery_pct =
         (!charges.is_empty()).then(|| (charges.iter().map(|&c| c as u32).sum::<u32>() / charges.len() as u32) as u8);
-    Power { external, battery_pct }
+    Some(Power { external, battery_pct })
 }
 
 #[cfg(test)]
@@ -267,7 +273,7 @@ mod tests {
 
     fn check(name: &str, supplies: &[(&str, &[(&str, &str)])], want: Power) {
         let dir = sysfs(name, supplies);
-        assert_eq!(power_from(&dir), want, "{name}");
+        assert_eq!(power_from(&dir), Some(want), "{name}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -355,7 +361,7 @@ mod tests {
             &[("ucsi-source-psy-USBC000:001", &[("type", "USB"), ("online", "0")])],
             Power::UNKNOWN,
         );
-        assert_eq!(power_from(Path::new("/nonexistent/power_supply")), Power::UNKNOWN);
+        assert_eq!(power_from(Path::new("/nonexistent/power_supply")), Some(Power::UNKNOWN));
         check(
             "mouse",
             &[(
@@ -369,13 +375,14 @@ mod tests {
             &[("AC", &[("type", "Mains"), ("online", "1")])],
             Power { external: Some(true), battery_pct: None },
         );
-        check(
+        let dir = sysfs(
             "unreadable-charge",
             &[
                 ("AC", &[("type", "Mains"), ("online", "0")]),
                 ("BAT0", &[("type", "Battery"), ("status", "Discharging")]),
             ],
-            Power { external: Some(false), battery_pct: None },
         );
+        assert_eq!(power_from(&dir), None, "a reading that failed, for the keeper to weigh");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

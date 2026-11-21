@@ -45,7 +45,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use clawdmeter_core::keep_awake::{Backend, Keeper, Power, Status};
+use clawdmeter_core::keep_awake::{Backend, Keeper, Power, Readings, Status};
 use clawdmeter_core::Paths;
 
 /// How often the power source and the hold are looked at again.
@@ -96,7 +96,8 @@ impl Handle {
     }
 
     /// [`Handle::spawn`] over any backend and power reading (tests).
-    fn spawn_with<B: Backend + Send + 'static>(backend: B, power: fn() -> Power, wanted: bool) -> Handle {
+    /// `power` is one reading; `None` when the reading failed.
+    fn spawn_with<B: Backend + Send + 'static>(backend: B, power: fn() -> Option<Power>, wanted: bool) -> Handle {
         let (tx, rx) = mpsc::channel();
         let status = Arc::new(Mutex::new(Status::Off));
         let shared = status.clone();
@@ -105,6 +106,7 @@ impl Handle {
             .spawn(move || {
                 let mut keeper = Keeper::new(backend);
                 let mut wanted = wanted;
+                let mut readings = Readings::default();
                 // The OS session is ending: nothing is held until then.
                 #[cfg_attr(not(any(target_os = "windows", target_os = "macos", test)), allow(unused_mut))]
                 let mut ended: Option<Instant> = None;
@@ -112,7 +114,7 @@ impl Handle {
                     let hold = wanted && ended.is_none_or(|until| Instant::now() >= until);
                     // Nothing to read while it's off: no battery polling for
                     // a feature nobody switched on.
-                    let now_power = if hold { power() } else { Power::UNKNOWN };
+                    let now_power = if hold { readings.settle(power()) } else { Power::UNKNOWN };
                     let status = keeper.tick(hold, now_power, Instant::now()).clone();
                     if let Ok(mut s) = shared.lock() {
                         *s = status;
@@ -211,18 +213,36 @@ fn app_died(mut pipe: impl std::io::Read) -> bool {
 /// on it and rewriting it: `<state>/keep-awake-restore.lock`, held while
 /// the returned file is open. With it a guard's "is this record my run's?
 /// then restore it" and a new run's hold can't interleave: whichever comes
-/// second sees what the first left. `None` (the lock can't be had): go on
-/// without, as the record's owner is still checked on the copy acted on.
+/// second sees what the first left. A holder has it for a few file and
+/// power calls, so the wait is bounded ([`LOCK_WAIT`]): a holder stuck in
+/// one must not hang this process's quit. `None` (the lock can't be had, or
+/// not in time): go on without, as the record's owner is still checked on
+/// the copy acted on.
 #[cfg(any(target_os = "windows", target_os = "macos", test))]
 fn record_lock(state_dir: &std::path::Path) -> Option<std::fs::File> {
-    let locked = std::fs::create_dir_all(state_dir)
-        .and_then(|()| {
-            let path = state_dir.join("keep-awake-restore.lock");
-            std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path)
-        })
-        .and_then(|file| file.lock().map(|()| file));
-    locked.map_err(|e| log::debug!("keep awake: no lock on the restore record ({e})")).ok()
+    let open = std::fs::create_dir_all(state_dir).and_then(|()| {
+        let path = state_dir.join("keep-awake-restore.lock");
+        std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path)
+    });
+    let file = open.map_err(|e| log::debug!("keep awake: no lock on the restore record ({e})")).ok()?;
+    let give_up = Instant::now() + LOCK_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Some(file),
+            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < give_up => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => {
+                log::warn!("keep awake: going on without the restore record's lock ({e})");
+                return None;
+            }
+        }
+    }
 }
+
+/// How long [`record_lock`] waits for another process to let go of it.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+const LOCK_WAIT: Duration = Duration::from_secs(3);
 
 /// A name for this run of the app, for its restore records and its guard.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -289,7 +309,7 @@ fn platform_backend(_paths: &Paths) -> impl Backend + Send + 'static {
 }
 
 #[cfg(target_os = "linux")]
-fn platform_power() -> Power {
+fn platform_power() -> Option<Power> {
     linux::power()
 }
 
@@ -299,7 +319,7 @@ fn platform_backend(paths: &Paths) -> impl Backend + Send + 'static {
 }
 
 #[cfg(target_os = "windows")]
-fn platform_power() -> Power {
+fn platform_power() -> Option<Power> {
     windows::power()
 }
 
@@ -309,7 +329,7 @@ fn platform_backend(paths: &Paths) -> impl Backend + Send + 'static {
 }
 
 #[cfg(target_os = "macos")]
-fn platform_power() -> Power {
+fn platform_power() -> Option<Power> {
     macos::power()
 }
 
@@ -333,8 +353,8 @@ fn platform_backend(_paths: &Paths) -> impl Backend + Send + 'static {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-fn platform_power() -> Power {
-    Power::UNKNOWN
+fn platform_power() -> Option<Power> {
+    Some(Power::UNKNOWN)
 }
 
 #[cfg(test)]
@@ -369,7 +389,7 @@ mod tests {
     #[test]
     fn the_thread_follows_the_setting_and_releases_on_quit() {
         let (holds, releases) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let mut h = Handle::spawn_with(Counting(holds.clone(), releases.clone()), || Power::UNKNOWN, false);
+        let mut h = Handle::spawn_with(Counting(holds.clone(), releases.clone()), || Some(Power::UNKNOWN), false);
         assert_eq!(h.status(), Status::Off);
         h.set(true);
         wait_for(|| h.status() == Status::Holding);
@@ -390,7 +410,7 @@ mod tests {
     #[test]
     fn a_saved_setting_holds_from_the_start_and_a_dropped_handle_lets_go() {
         let (holds, releases) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let h = Handle::spawn_with(Counting(holds.clone(), releases.clone()), || Power::UNKNOWN, true);
+        let h = Handle::spawn_with(Counting(holds.clone(), releases.clone()), || Some(Power::UNKNOWN), true);
         wait_for(|| h.status() == Status::Holding);
         drop(h);
         assert_eq!((holds.load(Ordering::SeqCst), releases.load(Ordering::SeqCst)), (1, 1));
@@ -399,7 +419,7 @@ mod tests {
     #[test]
     fn the_end_of_the_os_session_lets_go_before_it_returns() {
         let (holds, releases) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let mut h = Handle::spawn_with(Counting(holds.clone(), releases.clone()), || Power::UNKNOWN, true);
+        let mut h = Handle::spawn_with(Counting(holds.clone(), releases.clone()), || Some(Power::UNKNOWN), true);
         wait_for(|| h.status() == Status::Holding);
         let end = h.session_ender();
         end();
@@ -450,7 +470,7 @@ mod tests {
     fn low_battery_shows_as_paused() {
         use clawdmeter_core::keep_awake::Pause;
         let (holds, releases) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let low = || Power { external: Some(false), battery_pct: Some(7) };
+        let low = || Some(Power { external: Some(false), battery_pct: Some(7) });
         let h = Handle::spawn_with(Counting(holds.clone(), releases), low, true);
         wait_for(|| h.status() == Status::Paused(Pause::BatteryLow(7)));
         assert_eq!(holds.load(Ordering::SeqCst), 0, "never held under the floor");

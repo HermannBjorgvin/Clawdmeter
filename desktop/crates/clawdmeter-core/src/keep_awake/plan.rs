@@ -92,14 +92,15 @@ pub struct PlanHold<P: Plan> {
     file: RestoreFile,
     /// The plan the hold was taken in.
     scheme: Option<String>,
-    /// The last check found the lid action changed by someone else.
-    overridden: bool,
+    /// The last check found the lid action changed by someone else:
+    /// plugged in, on battery.
+    overridden: (bool, bool),
 }
 
 impl<P: Plan> PlanHold<P> {
     /// A hold over `plan`, with its record in `file`. Touches nothing.
     pub fn new(plan: P, file: RestoreFile) -> Self {
-        PlanHold { plan, file, scheme: None, overridden: false }
+        PlanHold { plan, file, scheme: None, overridden: (false, false) }
     }
 
     /// Edit the plan in use. An earlier record is put back first, so the
@@ -136,7 +137,7 @@ impl<P: Plan> PlanHold<P> {
             }
         }
         self.scheme = Some(scheme);
-        self.overridden = false;
+        self.overridden = (false, false);
         Ok(())
     }
 
@@ -159,13 +160,13 @@ impl<P: Plan> PlanHold<P> {
     ///   moves it there.
     /// - [`Check::Unknown`] when Windows wouldn't say which plan is in use
     ///   or what its lid action is. That is no reason to put the plan back.
-    /// - [`Check::Standing`] otherwise, and [`overridden`] then says whether
+    /// - [`Check::Standing`] otherwise, and [`caveat`] then says whether
     ///   the lid action still reads "Do nothing". A value someone else
     ///   changed (an OEM tool, `powercfg -restoredefaultschemes`, the user)
     ///   is not written back: it is theirs, here and on restore.
     ///
     /// [`hold`]: PlanHold::hold
-    /// [`overridden`]: PlanHold::overridden
+    /// [`caveat`]: PlanHold::caveat
     pub fn check(&mut self) -> Check {
         let Some(held) = self.scheme.clone() else { return Check::Lost };
         match self.plan.active() {
@@ -173,30 +174,38 @@ impl<P: Plan> PlanHold<P> {
             Ok(_) => return Check::Lost,
             Err(e) => return Check::Unknown(e),
         }
-        let mut overridden = false;
-        for source in [Source::Ac, Source::Dc] {
-            match self.plan.read(&held, Setting::LidAction, source) {
-                // A plan with no lid action has no lid to hold.
-                Ok(None | Some(OFF)) => {}
-                Ok(Some(_)) => overridden = true,
-                Err(e) => return Check::Unknown(e),
-            }
-        }
+        let mut changed = |source| match self.plan.read(&held, Setting::LidAction, source) {
+            // A plan with no lid action has no lid to hold.
+            Ok(None | Some(OFF)) => Ok(false),
+            Ok(Some(_)) => Ok(true),
+            Err(e) => Err(e),
+        };
+        let overridden = match (changed(Source::Ac), changed(Source::Dc)) {
+            (Ok(ac), Ok(dc)) => (ac, dc),
+            (Err(e), _) | (_, Err(e)) => return Check::Unknown(e),
+        };
         if overridden != self.overridden {
-            if overridden {
-                log::warn!("keep awake: the power plan's lid action was changed by something else; leaving it");
-            } else {
+            if overridden == (false, false) {
                 log::info!("keep awake: the power plan's lid action reads Do nothing again");
+            } else {
+                log::warn!("keep awake: the power plan's lid action was changed by something else; leaving it");
             }
             self.overridden = overridden;
         }
         Check::Standing
     }
 
-    /// Whether the last [`check`](PlanHold::check) found the lid action
-    /// changed by someone else: the lid is then not held.
-    pub fn overridden(&self) -> bool {
-        self.overridden
+    /// What the last [`check`](PlanHold::check) found the hold no longer
+    /// covers, in the menu's words: the lid isn't held where someone else
+    /// changed its action. `None` while both values read "Do nothing".
+    pub fn caveat(&self) -> Option<String> {
+        let when = match self.overridden {
+            (false, false) => return None,
+            (true, true) => "",
+            (true, false) => " while plugged in",
+            (false, true) => " on battery",
+        };
+        Some(format!("not holding{when}: the lid setting was changed elsewhere"))
     }
 
     /// Put back what the record says and drop it. With no record there is
@@ -218,7 +227,7 @@ impl<P: Plan> PlanHold<P> {
             }
         }
         self.scheme = None;
-        self.overridden = false;
+        self.overridden = (false, false);
         let saved = match loaded {
             Ok(None) => return Ok(()),
             Ok(Some((_, saved))) => saved,
@@ -437,7 +446,7 @@ mod tests {
         assert_eq!(fake.0.borrow().applied, [BALANCED], "applied, so it takes effect");
         assert!(file.path().exists(), "the old values are on disk");
         assert_eq!(hold.check(), Check::Standing);
-        assert!(!hold.overridden());
+        assert_eq!(hold.caveat(), None);
 
         hold.restore().unwrap();
         assert_eq!(plan_of(&fake, BALANCED), [1, 2, 1800, 900]);
@@ -536,7 +545,7 @@ mod tests {
         // Nor is a lid action that can't be read "changed".
         fake.0.borrow_mut().fail_read = true;
         assert_eq!(hold.check(), Check::Unknown("can't read".into()));
-        assert!(!hold.overridden());
+        assert_eq!(hold.caveat(), None);
         fake.0.borrow_mut().fail_read = false;
         assert_eq!(hold.check(), Check::Standing);
         assert_eq!(plan_of(&fake, BALANCED), [0, 0, 1800, 0], "still held");
@@ -552,21 +561,33 @@ mod tests {
         fake.0.borrow_mut().values.insert((BALANCED.into(), Setting::LidAction, Source::Dc), 1);
         let applied = fake.0.borrow().applied.len();
         assert_eq!(hold.check(), Check::Standing, "the hold isn't lost: it isn't taken again over their change");
-        assert!(hold.overridden(), "but the lid is no longer held, and the menu says so");
+        assert_eq!(
+            hold.caveat().as_deref(),
+            Some("not holding on battery: the lid setting was changed elsewhere"),
+            "but the lid is no longer held there, and the menu says so"
+        );
         assert_eq!(hold.check(), Check::Standing);
         assert_eq!(plan_of(&fake, BALANCED), [0, 1, 1800, 0], "nothing written back");
         assert_eq!(fake.0.borrow().applied.len(), applied);
         // Set back to Do nothing (by them): held again.
         fake.0.borrow_mut().values.insert((BALANCED.into(), Setting::LidAction, Source::Dc), OFF);
         assert_eq!(hold.check(), Check::Standing);
-        assert!(!hold.overridden());
+        assert_eq!(hold.caveat(), None);
         // Changed again, then unticked: their value stays, the rest goes back.
         fake.0.borrow_mut().values.insert((BALANCED.into(), Setting::LidAction, Source::Ac), 3);
         assert_eq!(hold.check(), Check::Standing);
-        assert!(hold.overridden());
+        assert_eq!(
+            hold.caveat().as_deref(),
+            Some("not holding while plugged in: the lid setting was changed elsewhere")
+        );
+        fake.0.borrow_mut().values.insert((BALANCED.into(), Setting::LidAction, Source::Dc), 1);
+        assert_eq!(hold.check(), Check::Standing);
+        assert_eq!(hold.caveat().as_deref(), Some("not holding: the lid setting was changed elsewhere"));
+        fake.0.borrow_mut().values.insert((BALANCED.into(), Setting::LidAction, Source::Dc), OFF);
+        assert_eq!(hold.check(), Check::Standing);
         hold.restore().unwrap();
         assert_eq!(plan_of(&fake, BALANCED), [3, 2, 1800, 900]);
-        assert!(!hold.overridden());
+        assert_eq!(hold.caveat(), None);
     }
 
     #[test]

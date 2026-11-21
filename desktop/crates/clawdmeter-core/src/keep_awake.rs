@@ -38,6 +38,10 @@ pub const BATTERY_FLOOR: u8 = 20;
 /// reading that hovers at the floor doesn't flap.
 pub const BATTERY_RESUME: u8 = 5;
 
+/// The menu's words for a hold whose checks have failed [`PATIENCE`] times
+/// in a row.
+const UNCONFIRMED: &str = "can't confirm it is holding";
+
 /// A failed hold is tried again after these waits, the last one from then on.
 const RETRY_SECS: [u64; 4] = [10, 30, 60, 300];
 
@@ -53,6 +57,45 @@ pub struct Power {
 impl Power {
     /// A computer with no battery, or one whose power can't be read.
     pub const UNKNOWN: Power = Power { external: None, battery_pct: None };
+    /// On battery with no reading of the charge: nothing is held on it.
+    pub const UNREAD: Power = Power { external: Some(false), battery_pct: None };
+}
+
+/// How many polls in a row may go without an answer (a power reading, a
+/// check of the hold) before the keeper stops taking the last answer for
+/// granted: about a minute at the thread's 15 s poll.
+pub const PATIENCE: u32 = 4;
+
+/// The power readings, poll by poll. One failed reading says nothing about
+/// the battery, so the last good one stands in for it: pausing over it
+/// would let go of the hold, and with the lid shut that sleeps the
+/// computer. After [`PATIENCE`] failures in a row, or with no reading yet,
+/// the power counts as [`Power::UNREAD`], which pauses: a battery nobody
+/// can read is not held on for long.
+#[derive(Debug, Default)]
+pub struct Readings {
+    last: Option<Power>,
+    misses: u32,
+}
+
+impl Readings {
+    /// The power to act on, given this poll's reading (`None`: it failed).
+    pub fn settle(&mut self, reading: Option<Power>) -> Power {
+        match reading {
+            Some(power) => {
+                self.last = Some(power);
+                self.misses = 0;
+                power
+            }
+            None => {
+                self.misses = self.misses.saturating_add(1);
+                match self.last {
+                    Some(power) if self.misses < PATIENCE => power,
+                    _ => Power::UNREAD,
+                }
+            }
+        }
+    }
 }
 
 /// Why the hold is let go although the setting is on.
@@ -195,8 +238,8 @@ pub struct Keeper<B: Backend> {
     owed: bool,
     /// The failed release was logged, so it isn't logged every tick.
     complained: bool,
-    /// The last check of the hold failed (logged once, not every tick).
-    unsure: bool,
+    /// Checks of the hold that failed in a row.
+    unsure: u32,
     status: Status,
     /// Failed holds in a row, and when to try again: on the monotonic
     /// clock, so a step of the system clock neither stalls nor rushes it.
@@ -214,7 +257,7 @@ impl<B: Backend> Keeper<B> {
             settled: false,
             owed: false,
             complained: false,
-            unsure: false,
+            unsure: 0,
             status: Status::Off,
             strikes: 0,
             retry_at: None,
@@ -246,20 +289,20 @@ impl<B: Backend> Keeper<B> {
         if self.holding {
             match self.backend.check() {
                 Check::Standing => {
-                    if std::mem::take(&mut self.unsure) {
+                    if std::mem::take(&mut self.unsure) > 0 {
                         log::info!("keep awake: the hold checks out again");
                     }
                 }
                 Check::Lost => {
                     log::warn!("keep awake: the hold was lost; taking it again");
-                    self.unsure = false;
                     // Whatever is left of it goes before the next attempt.
                     self.let_go();
                 }
                 Check::Unknown(e) => {
-                    if !std::mem::replace(&mut self.unsure, true) {
+                    if self.unsure == 0 {
                         log::warn!("keep awake: couldn't check the hold ({e}); keeping it and checking again");
                     }
+                    self.unsure = self.unsure.saturating_add(1);
                 }
             }
         }
@@ -283,8 +326,10 @@ impl<B: Backend> Keeper<B> {
             }
         }
         if self.holding {
-            let status = self.backend.caveat().map_or(Status::Holding, Status::Limited);
-            self.set(status)
+            // A hold nobody has been able to check for a while is still
+            // kept, and no longer vouched for.
+            let caveat = if self.unsure >= PATIENCE { Some(UNCONFIRMED.to_owned()) } else { self.backend.caveat() };
+            self.set(caveat.map_or(Status::Holding, Status::Limited))
         } else {
             // Waiting out a retry. Only a failed hold sets the wait, and
             // off and paused clear it, so the status here is that failure.
@@ -292,9 +337,11 @@ impl<B: Backend> Keeper<B> {
         }
     }
 
-    /// Let go for good (quit). The setting is untouched.
+    /// Let go for good (quit). The setting is untouched. A tick after it
+    /// starts fresh, with no wait left from an earlier failure.
     pub fn stop(&mut self) {
         self.let_go();
+        self.forget_failures();
         self.set(Status::Off);
     }
 
@@ -318,7 +365,7 @@ impl<B: Backend> Keeper<B> {
             return;
         }
         self.holding = false;
-        self.unsure = false;
+        self.unsure = 0;
         match self.backend.release() {
             Ok(()) => {
                 if std::mem::take(&mut self.complained) {
@@ -340,7 +387,7 @@ impl<B: Backend> Keeper<B> {
             match &status {
                 Status::Off => log::info!("keep awake: off"),
                 Status::Holding => log::info!("keep awake: holding (the computer stays awake with the lid closed)"),
-                Status::Limited(what) => log::info!("keep awake: holding, with a caveat ({what})"),
+                Status::Limited(what) => log::warn!("keep awake: on, with a caveat ({what})"),
                 Status::Paused(Pause::BatteryLow(pct)) => log::info!(
                     "keep awake: paused, battery at {pct}% (holds again at {}% or on external power)",
                     BATTERY_FLOOR.saturating_add(BATTERY_RESUME)
@@ -696,12 +743,51 @@ mod tests {
             assert_eq!(k.tick(true, AC, at(t)), &Status::Holding, "tick {t}");
         }
         assert_eq!(*log.borrow(), ["hold"], "neither released nor taken again");
+        // A check that keeps failing is still no reason to let go, but the
+        // menu stops vouching for the hold.
+        *check.borrow_mut() = Some(Check::Unknown("no answer".into()));
+        assert_eq!(k.tick(true, AC, at(4)), &Status::Limited(UNCONFIRMED.into()), "{PATIENCE} in a row");
+        assert_eq!(*log.borrow(), ["hold"]);
         assert_eq!(k.tick(true, AC, at(4)), &Status::Holding, "and the next check that works finds it standing");
         // Unticking after a failed check still lets go.
         *check.borrow_mut() = Some(Check::Unknown("no answer".into()));
         k.tick(true, AC, at(5));
         assert_eq!(k.tick(false, AC, at(6)), &Status::Off);
         assert_eq!(*log.borrow(), ["hold", "release"]);
+    }
+
+    #[test]
+    fn a_failed_power_reading_stands_on_the_last_good_one_for_a_while() {
+        let mut readings = Readings::default();
+        assert_eq!(readings.settle(None), Power::UNREAD, "no reading yet: nothing to hold on");
+        assert_eq!(readings.settle(Some(AC)), AC);
+        // The reading fails (macOS: `pmset` didn't run). That says nothing
+        // about the battery, so the hold isn't let go over it.
+        for miss in 1..PATIENCE {
+            assert_eq!(readings.settle(None), AC, "miss {miss}");
+        }
+        assert_eq!(readings.settle(None), Power::UNREAD, "a battery nobody can read for a minute isn't held on");
+        assert_eq!(readings.settle(None), Power::UNREAD);
+        assert_eq!(readings.settle(Some(battery(60))), battery(60));
+        assert_eq!(readings.settle(None), battery(60), "the count starts over with a good reading");
+
+        // Through the keeper: a plugged-in laptop keeps its hold over one miss.
+        let (mut k, log, ..) = keeper();
+        let mut readings = Readings::default();
+        k.tick(true, readings.settle(Some(AC)), at(0));
+        assert_eq!(k.tick(true, readings.settle(None), at(1)), &Status::Holding);
+        assert_eq!(*log.borrow(), ["hold"]);
+    }
+
+    #[test]
+    fn a_stop_clears_the_wait_too() {
+        let (mut k, log, fail, _) = keeper();
+        *fail.borrow_mut() = true;
+        k.tick(true, AC, at(0));
+        k.stop();
+        *fail.borrow_mut() = false;
+        assert_eq!(k.tick(true, AC, at(1)), &Status::Holding, "not left waiting out the old failure as Off");
+        assert_eq!(*log.borrow(), ["hold-failed", "release", "hold"]);
     }
 
     #[test]

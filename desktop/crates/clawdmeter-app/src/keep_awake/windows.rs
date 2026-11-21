@@ -221,9 +221,6 @@ pub(super) struct PowerPlan {
     state_dir: std::path::PathBuf,
 }
 
-/// The menu's words when something else changed the lid action back.
-const OVERRIDDEN: &str = "not holding: the lid setting was changed elsewhere";
-
 impl PowerPlan {
     pub(super) fn new(paths: &Paths) -> Self {
         let run = super::run_id();
@@ -263,7 +260,7 @@ impl Backend for PowerPlan {
     }
 
     fn caveat(&self) -> Option<String> {
-        self.plan.overridden().then(|| OVERRIDDEN.to_owned())
+        self.plan.caveat()
     }
 
     fn check(&mut self) -> Check {
@@ -283,15 +280,16 @@ impl Backend for PowerPlan {
     }
 }
 
-/// The computer's power, from `GetSystemPowerStatus`.
-pub(super) fn power() -> Power {
+/// The computer's power, from `GetSystemPowerStatus`; `None` when the call
+/// fails.
+pub(super) fn power() -> Option<Power> {
     // SAFETY: SYSTEM_POWER_STATUS is plain data the call fills in.
     unsafe {
         let mut status: SYSTEM_POWER_STATUS = std::mem::zeroed();
         if GetSystemPowerStatus(&mut status) == 0 {
-            return Power::UNKNOWN;
+            return None;
         }
-        plan::power(status.ACLineStatus, status.BatteryFlag, status.BatteryLifePercent)
+        Some(plan::power(status.ACLineStatus, status.BatteryFlag, status.BatteryLifePercent))
     }
 }
 
