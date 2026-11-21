@@ -60,6 +60,11 @@ pub trait Plan {
     fn write(&mut self, scheme: &str, setting: Setting, source: Source, value: u32) -> Result<(), String>;
     /// Make `scheme`, the plan in use, act on its stored values.
     fn apply(&mut self, scheme: &str) -> Result<(), String>;
+    /// Whether `scheme` is one of the plans Windows has. A restore asks
+    /// first: a plan the user deleted has nothing to put back.
+    fn exists(&mut self, _scheme: &str) -> bool {
+        true
+    }
     /// Whether a group policy sets this value, so the plan's has no say.
     fn locked(&mut self, _setting: Setting, _source: Source) -> bool {
         false
@@ -172,6 +177,10 @@ impl<P: Plan> PlanHold<P> {
             }
             Err(e) => return Err(format!("can't read {path}: {e}")),
         };
+        if !self.plan.exists(&saved.scheme) {
+            log::info!("keep awake: the power plan that was edited is gone; nothing to put back");
+            return self.file.clear().map_err(|e| format!("can't remove {path}: {e}"));
+        }
         let mut failed = None;
         for c in &saved.changes {
             match self.plan.read(&saved.scheme, c.setting, c.source) {
@@ -180,8 +189,8 @@ impl<P: Plan> PlanHold<P> {
                         failed = Some(e);
                     }
                 }
-                // Changed since: the user's own choice stays. A plan that's
-                // gone has nothing to put back.
+                // Changed since: the user's own choice stays. A setting
+                // that's gone has nothing to put back.
                 Ok(_) => {}
                 Err(e) => failed = Some(e),
             }
@@ -309,6 +318,9 @@ mod tests {
                 s.values.insert((scheme.to_owned(), setting, source), value);
             }
             Ok(())
+        }
+        fn exists(&mut self, scheme: &str) -> bool {
+            self.0.borrow().values.keys().any(|(s, ..)| s == scheme)
         }
         fn apply(&mut self, scheme: &str) -> Result<(), String> {
             let mut s = self.0.borrow_mut();
@@ -513,9 +525,12 @@ mod tests {
         let mut s = fake.0.borrow_mut();
         s.values.retain(|(scheme, ..), _| scheme != BALANCED);
         s.active = SAVER.into();
+        // Reads of a deleted plan fail with whatever Windows says.
+        s.fail_read = true;
         drop(s);
         hold.restore().unwrap();
         assert!(!file.path().exists());
+        assert!(fake.0.borrow().applied.iter().all(|s| s == BALANCED), "the plan in use isn't touched");
     }
 
     #[test]

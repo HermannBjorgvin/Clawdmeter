@@ -39,12 +39,15 @@ struct Mark {
 pub struct LidHold<L: Lid> {
     lid: L,
     file: RestoreFile,
+    /// This hold set the flag and hasn't cleared it: it clears it whatever
+    /// has become of the marker.
+    set: bool,
 }
 
 impl<L: Lid> LidHold<L> {
     /// A hold over `lid`, with its marker in `file`. Touches nothing.
     pub fn new(lid: L, file: RestoreFile) -> Self {
-        LidHold { lid, file }
+        LidHold { lid, file, set: false }
     }
 
     /// Set the flag. A flag an earlier run left set is simply taken over.
@@ -60,6 +63,7 @@ impl<L: Lid> LidHold<L> {
             }
             return Err(e);
         }
+        self.set = true;
         Ok(())
     }
 
@@ -73,15 +77,16 @@ impl<L: Lid> LidHold<L> {
         self.lid.set_sleep_disabled(true).is_ok()
     }
 
-    /// Clear the flag if the marker says this app set it, and drop the
-    /// marker. A marker that can't be read counts as set: clear is the
-    /// flag's default, so clearing is always the safe side. `Err` keeps the
-    /// marker for another try.
+    /// Clear the flag if this hold set it or the marker says an earlier run
+    /// did, and drop the marker. A marker that can't be read counts as set:
+    /// clear is the flag's default, so clearing is always the safe side.
+    /// `Err` keeps the marker for another try.
     pub fn restore(&mut self) -> Result<(), String> {
-        if matches!(self.file.load::<Mark>(), Ok(None)) {
+        if !self.set && matches!(self.file.load::<Mark>(), Ok(None)) {
             return Ok(());
         }
         self.lid.set_sleep_disabled(false)?;
+        self.set = false;
         self.file.clear().map_err(|e| format!("can't remove {}: {e}", self.file.path().display()))
     }
 }
@@ -97,9 +102,9 @@ impl<L: Lid> LidHold<L> {
 /// that says it is discharging counts as on battery whatever the first line
 /// says: a charger too weak for the load is no reason to skip the floor.
 pub fn power_from_pmset(text: &str) -> Power {
-    let draining = text
-        .lines()
-        .any(|line| line.trim_start().starts_with('-') && line.split(';').any(|field| field.trim() == "discharging"));
+    let draining = text.lines().any(|line| {
+        line.trim_start().starts_with('-') && line.split(';').any(|field| field.trim().starts_with("discharging"))
+    });
     let external = text.lines().find_map(|line| {
         let source = line.trim().strip_prefix("Now drawing from '")?;
         Some(source.starts_with("AC Power") && !draining)
@@ -174,6 +179,10 @@ mod tests {
         file.clear().unwrap();
         assert!(hold.renew());
         assert!(file.path().exists(), "a crash now is still healed by the next start");
+        // Gone again, and the box is unticked before the next renew.
+        file.clear().unwrap();
+        hold.restore().unwrap();
+        assert!(!*fake.flag.borrow(), "this hold set the flag, so it clears it without the marker's say");
     }
 
     #[test]
@@ -240,7 +249,11 @@ mod tests {
             "a desktop on its UPS"
         );
         let both = "Now drawing from 'Battery Power'\n -UPS (id=2)\t90%; charged present: true\n -InternalBattery-0 (id=1)\t41%; discharging present: true\n";
-        assert_eq!(power_from_pmset(both).battery_pct, Some(41), "the laptop's own battery, not the UPS");
+        assert_eq!(
+            power_from_pmset(both),
+            Power { external: Some(false), battery_pct: Some(41) },
+            "the laptop's own battery, not the UPS"
+        );
         let weak =
             "Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t31%; discharging; 1:02 remaining present: true\n";
         assert_eq!(

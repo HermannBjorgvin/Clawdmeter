@@ -45,7 +45,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use clawdmeter_core::keep_awake::{Backend, Keeper, Power, Status};
+use clawdmeter_core::keep_awake::{Backend, Keeper, Power, RestoreFile, Status};
 use clawdmeter_core::{unix_now, Paths};
 
 /// How often the power source and the hold are looked at again.
@@ -58,8 +58,8 @@ const POLL: Duration = Duration::from_secs(15);
 #[cfg(any(target_os = "windows", target_os = "macos", test))]
 const SESSION_END_GRACE: Duration = Duration::from_secs(60);
 
-/// The argument the app starts its guard with: `clawdmeter keep-awake-guard`
-/// ([`guard_main`]).
+/// The argument the app starts its guard with: `clawdmeter keep-awake-guard
+/// <run>` ([`guard_main`]).
 pub const GUARD_ARG: &str = "keep-awake-guard";
 
 enum Msg {
@@ -184,20 +184,37 @@ impl Drop for Handle {
     }
 }
 
-/// The guard: `clawdmeter keep-awake-guard`, a child the app starts with
-/// each hold that changes something lasting (Windows, macOS). It waits on
-/// its stdin, a pipe from the app. A byte means the app let go itself:
+/// The guard: `clawdmeter keep-awake-guard <run>`, a child the app starts
+/// with each hold that changes something lasting (Windows, macOS). It waits
+/// on its stdin, a pipe from the app. A byte means the app let go itself:
 /// nothing to do. The pipe closing with no byte means the app died holding
 /// (a crash, a kill, an exit that skipped the release), and the guard puts
-/// the OS back from the restore record.
-pub fn guard_main(paths: &Paths) -> i32 {
-    use std::io::Read;
-    let mut word = [0u8; 1];
-    // A read error isn't the app's death: leave things alone.
-    if let Ok(0) = std::io::stdin().read(&mut word) {
-        platform_backend(paths).heal();
+/// the OS back from the restore record, if the record is still that run's
+/// (`run`, the app's `run_id`): a later run's hold is not its to undo.
+pub fn guard_main(paths: &Paths, run: Option<&str>) -> i32 {
+    if app_died(std::io::stdin()) && is_runs_record(&RestoreFile::in_dir(&paths.state_dir), run) {
+        // Nobody to tell if it fails: the next start tries again.
+        let _ = platform_backend(paths).heal();
     }
     0
+}
+
+/// Whether the guard's pipe says the app died: closed with nothing written.
+/// A byte is the app's dismissal, and a read error isn't a death.
+fn app_died(mut pipe: impl std::io::Read) -> bool {
+    let mut word = [0u8; 1];
+    matches!(pipe.read(&mut word), Ok(0))
+}
+
+/// Whether the record on disk was saved by `run`.
+fn is_runs_record(file: &RestoreFile, run: Option<&str>) -> bool {
+    run.is_some() && file.owner().as_deref() == run
+}
+
+/// A name for this run of the app, for its restore records and its guard.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn run_id() -> String {
+    format!("{}-{}", std::process::id(), unix_now())
 }
 
 /// The app's end of its guard ([`guard_main`]).
@@ -206,11 +223,18 @@ struct Guard(Option<std::process::Child>);
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 impl Guard {
-    /// Start a guard. Without one a crash is healed by the next start.
-    fn start() -> Option<Guard> {
+    /// Start a guard for the records of `run`. Without one a crash is
+    /// healed by the next start.
+    fn start(run: &str) -> Option<Guard> {
         use std::process::{Command, Stdio};
         let child = std::env::current_exe().and_then(|exe| {
-            Command::new(exe).arg(GUARD_ARG).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+            let mut guard = Command::new(exe);
+            guard.arg(GUARD_ARG).arg(run).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+            // A group of its own: launchd signals what is left of a dead
+            // job's process group, and the guard's work starts at that death.
+            #[cfg(unix)]
+            std::os::unix::process::CommandExt::process_group(&mut guard, 0);
+            guard.spawn()
         });
         match child {
             Ok(child) => Some(Guard(Some(child))),
@@ -373,6 +397,31 @@ mod tests {
         h.set(true);
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!((holds.load(Ordering::SeqCst), h.status()), (1, Status::Off));
+    }
+
+    #[test]
+    fn the_guard_heals_only_a_dead_apps_own_record() {
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("no pipe"))
+            }
+        }
+        assert!(app_died(&b""[..]), "the pipe closed with nothing said: the app is gone");
+        assert!(!app_died(&b"q"[..]), "dismissed: the app let go itself");
+        assert!(!app_died(Broken), "an error isn't a death");
+
+        let dir = std::env::temp_dir().join(format!("cm-keep-awake-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = RestoreFile::in_dir(&dir);
+        assert!(!is_runs_record(&file, Some("run-1")), "no record, nothing to heal");
+        RestoreFile::in_dir(&dir).owned_by("run-1").save(&1u32).unwrap();
+        assert!(is_runs_record(&file, Some("run-1")));
+        assert!(!is_runs_record(&file, None), "a guard started by hand heals nothing");
+        // A later run holds by the time the old guard wakes up.
+        RestoreFile::in_dir(&dir).owned_by("run-2").save(&1u32).unwrap();
+        assert!(!is_runs_record(&file, Some("run-1")), "not its app's hold to undo");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

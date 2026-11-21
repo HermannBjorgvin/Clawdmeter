@@ -147,25 +147,27 @@ pub(super) struct Clamshell {
     idle: Option<Assertion>,
     /// Clears the flag if this process dies holding.
     guard: Option<super::Guard>,
+    /// This run's name, in its restore records and its guard's argument.
+    run: String,
 }
 
 impl Clamshell {
     pub(super) fn new(paths: &Paths) -> Self {
-        Clamshell { lid: LidHold::new(RootDomain, RestoreFile::in_dir(&paths.state_dir)), idle: None, guard: None }
+        let run = super::run_id();
+        let file = RestoreFile::in_dir(&paths.state_dir).owned_by(run.clone());
+        Clamshell { lid: LidHold::new(RootDomain, file), idle: None, guard: None, run }
     }
 }
 
 impl Backend for Clamshell {
-    fn heal(&mut self) {
-        if let Err(e) = self.lid.restore() {
-            log::error!("keep awake: couldn't clear the lid flag ({e}); it's tried again on the next start");
-        }
+    fn heal(&mut self) -> Result<(), String> {
+        self.lid.restore()
     }
 
     fn hold(&mut self) -> Result<(), String> {
         // The guard first, so no moment of the flag is without one.
         if self.guard.is_none() {
-            self.guard = super::Guard::start();
+            self.guard = super::Guard::start(&self.run);
         }
         self.lid.hold()?;
         // The lid is held without it; idle sleep is then the Mac's own

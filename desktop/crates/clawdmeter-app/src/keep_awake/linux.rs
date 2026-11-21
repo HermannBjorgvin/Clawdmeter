@@ -228,8 +228,9 @@ fn power_from(dir: &Path) -> Power {
         }
     }
     let external = match (chargers, batteries) {
-        (0, 0) => None,
-        (_, 0) => Some(online),
+        // No battery (a desktop, whatever its USB-C ports list): nothing
+        // says it isn't on external power.
+        (_, 0) => online.then_some(true),
         _ if discharging => Some(false),
         // A dock that lists as offline, or no charger listed at all, while
         // the battery says it is fed still powers the computer. A battery
@@ -343,6 +344,11 @@ mod tests {
     #[test]
     fn a_desktop_and_a_mouse_are_not_a_laptop_battery() {
         check("desktop", &[], Power::UNKNOWN);
+        check(
+            "desktop-with-an-empty-usb-c-port",
+            &[("ucsi-source-psy-USBC000:001", &[("type", "USB"), ("online", "0")])],
+            Power::UNKNOWN,
+        );
         assert_eq!(power_from(Path::new("/nonexistent/power_supply")), Power::UNKNOWN);
         check(
             "mouse",

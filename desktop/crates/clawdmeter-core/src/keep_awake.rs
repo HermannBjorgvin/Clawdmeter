@@ -121,8 +121,14 @@ pub trait Backend {
     /// a start that holds goes straight to [`hold`], so a lid that is shut
     /// then isn't let go of in between.
     ///
+    /// `Err`: something is still changed, and the keeper goes on to
+    /// [`release`] on its next ticks until that is `Ok`.
+    ///
     /// [`hold`]: Backend::hold
-    fn heal(&mut self) {}
+    /// [`release`]: Backend::release
+    fn heal(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 
     /// Keep the computer awake with the lid closed, until [`release`]. Only
     /// called while not holding, and it may be the first call of all: what
@@ -250,7 +256,11 @@ impl<B: Backend> Keeper<B> {
 
     fn heal(&mut self) {
         if !std::mem::replace(&mut self.settled, true) {
-            self.backend.heal();
+            if let Err(e) = self.backend.heal() {
+                log::error!("keep awake: couldn't put back what an earlier run left ({e}); trying again");
+                self.complained = true;
+                self.owed = true;
+            }
         }
     }
 
@@ -306,15 +316,49 @@ impl<B: Backend> Drop for Keeper<B> {
 /// folder from before the change until after the restore, so a run that
 /// died in between is healed by the next one. `T` is the backend's own
 /// record of the old value.
+///
+/// A record also names the run that saved it ([`RestoreFile::owned_by`]),
+/// so that run's guard process puts back only its own app's change and
+/// never one a later run has made since.
 #[derive(Debug, Clone)]
 pub struct RestoreFile {
     path: PathBuf,
+    owner: Option<String>,
+}
+
+/// The file's contents, as saved.
+#[derive(Serialize)]
+struct Saving<'a, T> {
+    owner: Option<&'a str>,
+    record: &'a T,
+}
+
+/// The file's contents, as loaded.
+#[derive(Deserialize)]
+struct Loaded<T> {
+    #[serde(default)]
+    owner: Option<String>,
+    record: T,
 }
 
 impl RestoreFile {
     /// The record at `<state_dir>/keep-awake-restore.json`.
     pub fn in_dir(state_dir: &Path) -> Self {
-        RestoreFile { path: state_dir.join("keep-awake-restore.json") }
+        RestoreFile { path: state_dir.join("keep-awake-restore.json"), owner: None }
+    }
+
+    /// Records saved through this handle name `owner` as the run that made
+    /// them.
+    pub fn owned_by(mut self, owner: impl Into<String>) -> Self {
+        self.owner = Some(owner.into());
+        self
+    }
+
+    /// The run that saved the record on disk: `None` with no record, or one
+    /// that names nobody or can't be read.
+    pub fn owner(&self) -> Option<String> {
+        let bytes = fs::read(&self.path).ok()?;
+        serde_json::from_slice::<Loaded<serde::de::IgnoredAny>>(&bytes).ok()?.owner
     }
 
     /// Where it is.
@@ -330,7 +374,8 @@ impl RestoreFile {
         }
         let tmp = self.path.with_extension("json.tmp");
         let mut file = fs::File::create(&tmp)?;
-        file.write_all(&serde_json::to_vec_pretty(original).map_err(io::Error::other)?)?;
+        let saving = Saving { owner: self.owner.as_deref(), record: original };
+        file.write_all(&serde_json::to_vec_pretty(&saving).map_err(io::Error::other)?)?;
         // On disk before the setting changes: the record has to outlive a
         // power cut right after.
         file.sync_all()?;
@@ -343,9 +388,9 @@ impl RestoreFile {
     /// doesn't parse is [`io::ErrorKind::InvalidData`].
     pub fn load<T: for<'de> Deserialize<'de>>(&self) -> io::Result<Option<T>> {
         match fs::read(&self.path) {
-            Ok(bytes) => {
-                serde_json::from_slice(&bytes).map(Some).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-            }
+            Ok(bytes) => serde_json::from_slice::<Loaded<T>>(&bytes)
+                .map(|loaded| Some(loaded.record))
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
@@ -375,12 +420,19 @@ mod tests {
         lost: Rc<RefCell<bool>>,
         /// Releases fail.
         stuck: Rc<RefCell<bool>>,
+        /// The heal fails.
+        sick: bool,
         caveat: Option<&'static str>,
     }
 
     impl Backend for Fake {
-        fn heal(&mut self) {
+        fn heal(&mut self) -> Result<(), String> {
+            if self.sick {
+                self.log.borrow_mut().push("heal-failed");
+                return Err("sick".into());
+            }
             self.log.borrow_mut().push("heal");
+            Ok(())
         }
         fn hold(&mut self) -> Result<(), String> {
             if *self.fail.borrow() {
@@ -514,6 +566,20 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_heal_is_followed_by_releases_until_one_goes_through() {
+        let fake = Fake { sick: true, ..Fake::default() };
+        let (log, stuck) = (fake.log.clone(), fake.stuck.clone());
+        let mut k = Keeper::new(fake);
+        *stuck.borrow_mut() = true;
+        k.tick(false, AC, 0);
+        k.tick(false, AC, 1);
+        *stuck.borrow_mut() = false;
+        k.tick(false, AC, 2);
+        k.tick(false, AC, 3);
+        assert_eq!(*log.borrow(), ["heal-failed", "release-failed", "release-failed", "release"]);
+    }
+
+    #[test]
     fn a_failed_release_is_tried_again_until_it_goes_through() {
         let fake = Fake::default();
         let (log, stuck) = (fake.log.clone(), fake.stuck.clone());
@@ -615,6 +681,26 @@ mod tests {
         assert!(file.path().exists());
         file.clear().unwrap();
         assert_eq!(file.load::<Vec<u32>>().unwrap(), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_record_names_the_run_that_saved_it() {
+        let dir = std::env::temp_dir().join(format!("cm-keep-awake-owner-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let anyone = RestoreFile::in_dir(&dir);
+        assert_eq!(anyone.owner(), None, "no record");
+        let first = RestoreFile::in_dir(&dir).owned_by("run-1");
+        first.save(&7u32).unwrap();
+        assert_eq!(anyone.owner().as_deref(), Some("run-1"));
+        assert_eq!(anyone.load::<u32>().unwrap(), Some(7), "any handle reads it");
+        // A later run takes over: the first run's guard must see it isn't its own.
+        RestoreFile::in_dir(&dir).owned_by("run-2").save(&8u32).unwrap();
+        assert_eq!(first.owner().as_deref(), Some("run-2"));
+        anyone.save(&9u32).unwrap();
+        assert_eq!(anyone.owner(), None, "saved by nobody in particular");
+        fs::write(anyone.path(), b"{").unwrap();
+        assert_eq!(anyone.owner(), None);
         let _ = fs::remove_dir_all(&dir);
     }
 }

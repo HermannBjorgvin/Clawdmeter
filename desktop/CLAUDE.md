@@ -113,9 +113,10 @@ is faked behind `FlashHardware`.
   a power request and a hidden window that restores on `WM_ENDSESSION`,
   `macos.rs` the root domain's `kPMSetClamshellSleepState`, an idle
   assertion and an `atexit` hook for AppKit's own exit. On Windows and
-  macOS each hold also starts a guard, `clawdmeter keep-awake-guard`: a
-  child that waits on a stdin pipe and restores when the app dies without
-  dismissing it. The Windows and macOS halves can't be run from Linux, so
+  macOS each hold also starts a guard, `clawdmeter keep-awake-guard <run>`:
+  a child in its own process group that waits on a stdin pipe and restores
+  when the app dies without dismissing it, if the restore record still
+  names that run. The Windows and macOS halves can't be run from Linux, so
   check them on hardware when changing them; the macOS half can at least be
   clippy-checked from Linux in a scratch crate that copies the `keep_awake`
   modules, since only ring's C build stops the real cross-check).

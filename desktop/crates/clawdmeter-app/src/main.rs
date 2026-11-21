@@ -66,7 +66,7 @@ fn main() {
     // The tray app's own child (keep_awake's guard): no console, no logger;
     // it waits on stdin and exits.
     if args.first().map(String::as_str) == Some(clawdmeter_app::keep_awake::GUARD_ARG) {
-        std::process::exit(clawdmeter_app::keep_awake::guard_main(&paths));
+        std::process::exit(clawdmeter_app::keep_awake::guard_main(&paths, args.get(1).map(String::as_str)));
     }
     if args.is_empty() {
         logger::init_with_file(&paths.state_dir.join("daemon.log"));

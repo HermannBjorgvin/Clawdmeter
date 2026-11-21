@@ -19,15 +19,15 @@ use clawdmeter_core::keep_awake::{Backend, Power, RestoreFile};
 use clawdmeter_core::Paths;
 use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HANDLE,
-    HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, WPARAM,
+    CloseHandle, GetLastError, LocalFree, ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS,
+    ERROR_SUCCESS, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, WPARAM,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Power::{
-    GetSystemPowerStatus, PowerClearRequest, PowerCreateRequest, PowerGetActiveScheme, PowerReadACValueIndex,
-    PowerReadDCValueIndex, PowerRequestSystemRequired, PowerSetActiveScheme, PowerSetRequest, PowerSettingAccessCheck,
-    PowerWriteACValueIndex, PowerWriteDCValueIndex, ACCESS_AC_POWER_SETTING_INDEX, ACCESS_DC_POWER_SETTING_INDEX,
-    SYSTEM_POWER_STATUS,
+    GetSystemPowerStatus, PowerClearRequest, PowerCreateRequest, PowerEnumerate, PowerGetActiveScheme,
+    PowerReadACValueIndex, PowerReadDCValueIndex, PowerRequestSystemRequired, PowerSetActiveScheme, PowerSetRequest,
+    PowerSettingAccessCheck, PowerWriteACValueIndex, PowerWriteDCValueIndex, ACCESS_AC_POWER_SETTING_INDEX,
+    ACCESS_DC_POWER_SETTING_INDEX, ACCESS_SCHEME, SYSTEM_POWER_STATUS,
 };
 use windows_sys::Win32::System::Threading::{POWER_REQUEST_CONTEXT_SIMPLE_STRING, REASON_CONTEXT, REASON_CONTEXT_0};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -123,6 +123,38 @@ impl Plan for WinPlan {
         check(unsafe { PowerSetActiveScheme(ptr::null_mut(), &scheme) }, "PowerSetActiveScheme")
     }
 
+    fn exists(&mut self, scheme: &str) -> bool {
+        let Ok(wanted) = guid(scheme) else { return false };
+        for index in 0.. {
+            let mut found = GUID::from_u128(0);
+            let mut size = std::mem::size_of::<GUID>() as u32;
+            // SAFETY: the call writes at most one GUID into `found`, whose
+            // size it is told.
+            let code = unsafe {
+                PowerEnumerate(
+                    ptr::null_mut(),
+                    ptr::null(),
+                    ptr::null(),
+                    ACCESS_SCHEME,
+                    index,
+                    ptr::addr_of_mut!(found).cast(),
+                    &mut size,
+                )
+            };
+            if code != ERROR_SUCCESS {
+                // Only a list read to its end without the plan says it is
+                // gone; a list that can't be read says nothing.
+                return code != ERROR_NO_MORE_ITEMS;
+            }
+            if (found.data1, found.data2, found.data3, found.data4)
+                == (wanted.data1, wanted.data2, wanted.data3, wanted.data4)
+            {
+                return true;
+            }
+        }
+        true
+    }
+
     fn locked(&mut self, setting: Setting, source: Source) -> bool {
         let (_, id) = ids(setting);
         let flags = match source {
@@ -183,25 +215,27 @@ pub(super) struct PowerPlan {
     request: Option<Request>,
     /// Puts the plan back if this process dies holding.
     guard: Option<super::Guard>,
+    /// This run's name, in its restore records and its guard's argument.
+    run: String,
 }
 
 impl PowerPlan {
     pub(super) fn new(paths: &Paths) -> Self {
-        PowerPlan { plan: PlanHold::new(WinPlan, RestoreFile::in_dir(&paths.state_dir)), request: None, guard: None }
+        let run = super::run_id();
+        let file = RestoreFile::in_dir(&paths.state_dir).owned_by(run.clone());
+        PowerPlan { plan: PlanHold::new(WinPlan, file), request: None, guard: None, run }
     }
 }
 
 impl Backend for PowerPlan {
-    fn heal(&mut self) {
-        if let Err(e) = self.plan.restore() {
-            log::error!("keep awake: couldn't put the power plan back ({e}); it's tried again on the next start");
-        }
+    fn heal(&mut self) -> Result<(), String> {
+        self.plan.restore()
     }
 
     fn hold(&mut self) -> Result<(), String> {
         // The guard first, so no moment of the edit is without one.
         if self.guard.is_none() {
-            self.guard = super::Guard::start();
+            self.guard = super::Guard::start(&self.run);
         }
         self.plan.hold()?;
         // The lid is held without it; idle sleep is then the plan's own
