@@ -17,6 +17,9 @@ Linux build deps: `.github/actions/linux-desktop-deps/action.yml`.
 
 **Tests must never run a real `systemctl`, `launchctl` or `reg`** against the
 developer's machine: use the injectable `autostart::disable_legacy_with`.
+The same goes for the computer's power settings (`powercfg`, `pmset`,
+`systemd-inhibit`, the power-plan and IOKit calls): `keep_awake` tests run
+over the fakes of its `Backend`, `plan::Plan` and `clamshell::Lid` traits.
 GPUI UI tests use `gpui`'s `test-support` (`#[gpui::test]`); flashing hardware
 is faked behind `FlashHardware`.
 
@@ -32,7 +35,13 @@ is faked behind `FlashHardware`.
   their config spelling and `k1`–`k3` codes), `rate`, `engine` (I/O-free state
   machine: `next_write` / `mark_written`), `autostart` (systemd / XDG /
   LaunchAgent / Run key, legacy-daemon detection + `disable_legacy`),
-  `launch`, `platform`.
+  `launch`, `platform`, `keep_awake` (the tray's "Keep awake with the lid
+  closed": `Keeper` decides when to hold from the setting and the battery,
+  floor 20 %, resume 25 %; a `Backend` per OS does the holding; `plan` is
+  the Windows power-plan edit and `clamshell` the macOS lid flag, both
+  recorded in `<state>/keep-awake-restore.json` before the change and
+  healed on the next start; `heal` is skipped when the first tick holds,
+  because clearing the macOS flag with the lid shut sleeps the Mac).
 - `clawdmeter-ble`: btleplug link. The manager and adapter come from one
   `Bluetooth` handle per runtime (`bluetooth.rs`), kept for good: on Linux
   every btleplug `Manager` is a D-Bus connection that is never closed, on
@@ -84,7 +93,11 @@ is faked behind `FlashHardware`.
   `Settings::accounts`, title "Show on device: <choice>") is on every
   platform with two or more accounts (`MenuShape::device_accounts` on
   Linux/Windows); a pick saves `device_account` through `write_settings`,
-  like the chime.
+  like the chime. "Keep awake with the lid closed" (id `keep-awake`) is a
+  native check item on every platform (on macOS the second native part,
+  after that submenu); it flips `keep_awake` the same way, and its label
+  ends with `keep_awake::Status::note` ("paused, battery at 18%") while
+  ticked and not simply holding.
   `StatusSnapshot::spend` marks a spend-capped account, drawn as one Spend
   meter in the panel, the rows and the Overview),
   window (`ui/`), `daemon.rs` (drives the engine on its own thread: 0.5 s
@@ -92,7 +105,14 @@ is faked behind `FlashHardware`.
   `hooks/` (`clawdmeter hook alert|clear|event` and the settings.json
   installer), `ipc.rs` (single-instance lock, status file, command queues,
   window lock), `onboarding.rs`, `boards.rs` (names, buy links,
-  illustrations), `chime.rs`.
+  illustrations), `chime.rs`, `keep_awake/` (the thread that runs the core
+  `Keeper`, owned by the tray, so `--daemon` has none; one backend per OS
+  behind `cfg`: `linux.rs` a logind `handle-lid-switch` lock plus the
+  desktop's suspend inhibitor, `windows.rs` the power plan through powrprof,
+  a power request and a hidden window that restores on `WM_ENDSESSION`,
+  `macos.rs` the root domain's `kPMSetClamshellSleepState` plus an idle
+  assertion; the Windows and macOS halves can't be run from Linux, so
+  check them on hardware when changing them).
 
 ## Running
 
@@ -138,7 +158,8 @@ is faked behind `FlashHardware`.
   `poll_interval`, `heartbeat_interval`,
   `reset_chime` and `alert_chime` (device chimes; the old `chime` / `beep`
   keys are read when these are absent), `desktop_chime` (the same ding on
-  this computer via rodio, ALSA on Linux), `clock`, `liveliness` (1–5,
+  this computer via rodio, ALSA on Linux), `keep_awake` (default off: the
+  tray's checkbox, read by the tray only), `clock`, `liveliness` (1–5,
   default 3: the Device page's Animation silliness slider, sent as `lv`),
   `attention_anim` (`off`/`10s`/`30s`/`2m`, default `2m`, sent as `aa`
   seconds), `pace_marker` (default off, sent as `pm`), `menu_bar_usage`

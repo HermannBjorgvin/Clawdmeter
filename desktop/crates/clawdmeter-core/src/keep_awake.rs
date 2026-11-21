@@ -18,7 +18,12 @@
 //! A hold the OS drops when the process dies needs no undoing. One that
 //! changes a setting which outlives the process is written to a
 //! [`RestoreFile`] before the change, so the next start puts the old value
-//! back after a crash ([`Backend::heal`]).
+//! back after a crash ([`Backend::heal`]). The two that do: [`plan`]
+//! (Windows, the power plan's lid action) and [`clamshell`] (macOS, the
+//! kernel's lid flag).
+
+pub mod clamshell;
+pub mod plan;
 
 use std::fs;
 use std::io;
@@ -111,13 +116,18 @@ pub fn verdict(power: Power, holding: bool) -> Result<(), Pause> {
 
 /// What keeps the computer awake on one OS.
 pub trait Backend {
-    /// Put back whatever a run that never released left changed. Called
-    /// once, before anything else.
+    /// Put back whatever a run that never released left changed. Called at
+    /// most once, on the first tick, and only when that tick doesn't hold:
+    /// a start that holds goes straight to [`hold`], so a lid that is shut
+    /// then isn't let go of in between.
+    ///
+    /// [`hold`]: Backend::hold
     fn heal(&mut self) {}
 
     /// Keep the computer awake with the lid closed, until [`release`]. Only
-    /// called while not holding. `Err` holds nothing: a half-taken hold is
-    /// released before it returns.
+    /// called while not holding, and it may be the first call of all: what
+    /// an earlier run left is its to take over or put back. `Err` holds
+    /// nothing: a half-taken hold is released before it returns.
     ///
     /// [`release`]: Backend::release
     fn hold(&mut self) -> Result<(), String>;
@@ -147,6 +157,9 @@ pub trait Backend {
 pub struct Keeper<B: Backend> {
     backend: B,
     holding: bool,
+    /// Whether an earlier run's leftovers are dealt with: healed, or taken
+    /// over by a hold.
+    settled: bool,
     status: Status,
     /// Failed holds in a row, and when to try again.
     strikes: usize,
@@ -154,10 +167,10 @@ pub struct Keeper<B: Backend> {
 }
 
 impl<B: Backend> Keeper<B> {
-    /// A keeper over `backend`, after healing what an earlier run left.
-    pub fn new(mut backend: B) -> Self {
-        backend.heal();
-        Keeper { backend, holding: false, status: Status::Off, strikes: 0, retry_at: 0 }
+    /// A keeper over `backend`. Nothing of the OS is touched before the
+    /// first [`tick`](Keeper::tick).
+    pub fn new(backend: B) -> Self {
+        Keeper { backend, holding: false, settled: false, status: Status::Off, strikes: 0, retry_at: 0 }
     }
 
     /// What it's doing now.
@@ -169,12 +182,18 @@ impl<B: Backend> Keeper<B> {
     /// unix time `now`. Returns the status, which changes only here.
     pub fn tick(&mut self, wanted: bool, power: Power, now: i64) -> &Status {
         if !wanted {
+            self.heal();
+            if matches!(self.status, Status::Failed(_)) {
+                // A hold that failed may have left its undoing unfinished.
+                self.backend.release();
+            }
             self.let_go();
             self.strikes = 0;
             self.retry_at = 0;
             return self.set(Status::Off);
         }
         if let Err(pause) = verdict(power, self.holding) {
+            self.heal();
             self.let_go();
             return self.set(Status::Paused(pause));
         }
@@ -184,6 +203,7 @@ impl<B: Backend> Keeper<B> {
             self.let_go();
         }
         if !self.holding && now >= self.retry_at {
+            self.settled = true;
             match self.backend.hold() {
                 Ok(()) => {
                     self.holding = true;
@@ -211,6 +231,12 @@ impl<B: Backend> Keeper<B> {
     pub fn stop(&mut self) {
         self.let_go();
         self.set(Status::Off);
+    }
+
+    fn heal(&mut self) {
+        if !std::mem::replace(&mut self.settled, true) {
+            self.backend.heal();
+        }
     }
 
     fn let_go(&mut self) {
@@ -353,8 +379,9 @@ mod tests {
     #[test]
     fn holds_while_on_and_releases_when_off() {
         let (mut k, log, ..) = keeper();
-        assert_eq!(*log.borrow(), ["heal"], "an earlier run's leftovers go first");
+        assert!(log.borrow().is_empty(), "nothing is touched before the first tick");
         assert_eq!(k.tick(false, AC, 0), &Status::Off);
+        assert_eq!(*log.borrow(), ["heal"], "an earlier run's leftovers go first");
         assert_eq!(k.tick(true, AC, 1), &Status::Holding);
         assert_eq!(k.tick(true, AC, 2), &Status::Holding);
         assert_eq!(*log.borrow(), ["heal", "hold"], "held once, not once per tick");
@@ -369,15 +396,15 @@ mod tests {
         let (mut k, log, ..) = keeper();
         k.tick(true, AC, 0);
         k.stop();
-        assert_eq!(*log.borrow(), ["heal", "hold", "release"]);
+        assert_eq!(*log.borrow(), ["hold", "release"]);
         assert_eq!(k.status(), &Status::Off);
         drop(k);
-        assert_eq!(log.borrow().len(), 3, "already released");
+        assert_eq!(log.borrow().len(), 2, "already released");
 
         let (mut k, log, ..) = keeper();
         k.tick(true, AC, 0);
         drop(k);
-        assert_eq!(*log.borrow(), ["heal", "hold", "release"], "a keeper dropped while holding lets go");
+        assert_eq!(*log.borrow(), ["hold", "release"], "a keeper dropped while holding lets go");
     }
 
     #[test]
@@ -386,7 +413,7 @@ mod tests {
         assert_eq!(k.tick(true, battery(60), 0), &Status::Holding, "on battery above the floor");
         assert_eq!(k.tick(true, battery(BATTERY_FLOOR + 1), 1), &Status::Holding);
         assert_eq!(k.tick(true, battery(BATTERY_FLOOR), 2), &Status::Paused(Pause::BatteryLow(BATTERY_FLOOR)));
-        assert_eq!(*log.borrow(), ["heal", "hold", "release"], "at the floor the computer may sleep");
+        assert_eq!(*log.borrow(), ["hold", "release"], "at the floor the computer may sleep");
         let nearly = BATTERY_FLOOR + BATTERY_RESUME - 1;
         assert_eq!(k.tick(true, battery(nearly), 3), &Status::Paused(Pause::BatteryLow(nearly)), "no flapping");
         assert_eq!(k.tick(true, battery(BATTERY_FLOOR + BATTERY_RESUME), 4), &Status::Holding);
@@ -396,7 +423,7 @@ mod tests {
             &Status::Holding,
             "plugged in"
         );
-        assert_eq!(*log.borrow(), ["heal", "hold", "release", "hold", "release", "hold"]);
+        assert_eq!(*log.borrow(), ["hold", "release", "hold", "release", "hold"]);
     }
 
     #[test]
@@ -422,11 +449,11 @@ mod tests {
         *fail.borrow_mut() = true;
         assert_eq!(k.tick(true, AC, 100), &Status::Failed("refused".into()));
         assert_eq!(k.tick(true, AC, 101), &Status::Failed("refused".into()), "still failed while waiting");
-        assert_eq!(*log.borrow(), ["heal", "hold-failed"], "not hammered every tick");
+        assert_eq!(*log.borrow(), ["hold-failed"], "not hammered every tick");
         k.tick(true, AC, 100 + RETRY_SECS[0]);
-        assert_eq!(log.borrow().len(), 3, "the first retry");
+        assert_eq!(log.borrow().len(), 2, "the first retry");
         k.tick(true, AC, 100 + RETRY_SECS[0] + RETRY_SECS[1] - 1);
-        assert_eq!(log.borrow().len(), 3, "the waits grow");
+        assert_eq!(log.borrow().len(), 2, "the waits grow");
         *fail.borrow_mut() = false;
         assert_eq!(k.tick(true, AC, 100 + RETRY_SECS[0] + RETRY_SECS[1]), &Status::Holding);
         // Switching off and on again starts fresh, with no wait.
@@ -444,7 +471,24 @@ mod tests {
         k.tick(true, AC, 0);
         *lost.borrow_mut() = true;
         assert_eq!(k.tick(true, AC, 1), &Status::Holding);
-        assert_eq!(*log.borrow(), ["heal", "hold", "release", "hold"], "what was left is released first");
+        assert_eq!(*log.borrow(), ["hold", "release", "hold"], "what was left is released first");
+    }
+
+    #[test]
+    fn leftovers_are_healed_once_unless_the_first_tick_holds() {
+        // A start that holds takes the leftovers over: healing first would
+        // let go of a lid that is shut.
+        let (mut k, log, ..) = keeper();
+        k.tick(true, AC, 0);
+        k.tick(false, AC, 1);
+        assert_eq!(*log.borrow(), ["hold", "release"], "the hold dealt with them");
+
+        // A start that is paused holds nothing, so it heals.
+        let (mut k, log, ..) = keeper();
+        k.tick(true, battery(3), 0);
+        k.tick(true, battery(3), 1);
+        k.tick(false, AC, 2);
+        assert_eq!(*log.borrow(), ["heal"], "once");
     }
 
     #[test]

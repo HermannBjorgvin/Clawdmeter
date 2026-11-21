@@ -5,10 +5,17 @@
 //! (the battery floor); this module has the thread that runs it and one
 //! [`Backend`] and power reading per OS:
 //!
-//! - Linux ([`linux`]): a systemd-logind `handle-lid-switch` inhibitor
-//!   lock, which logind drops when the process dies, and the desktop's own
-//!   suspend inhibitor through xdg-desktop-portal, which goes with the
-//!   D-Bus connection. Nothing persistent is changed.
+//! - Linux (`linux`): a systemd-logind `handle-lid-switch` inhibitor lock,
+//!   which logind drops when the process dies, and the desktop's own suspend
+//!   inhibitor, which goes with the D-Bus connection. Nothing persistent is
+//!   changed.
+//! - Windows (`windows`): the active power plan's lid action set to "Do
+//!   nothing", recorded first and put back after
+//!   ([`clawdmeter_core::keep_awake::plan`]), and a power request for idle
+//!   sleep.
+//! - macOS (`macos`): the kernel's lid flag, marked first and cleared after
+//!   ([`clawdmeter_core::keep_awake::clamshell`]), and a power assertion
+//!   for idle sleep.
 //!
 //! The thread owns every OS call, so a slow D-Bus or power call never holds
 //! up the tray's tick. Quit joins it ([`Handle::shutdown`]), so the hold is
@@ -16,6 +23,10 @@
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
 
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -31,6 +42,10 @@ const POLL: Duration = Duration::from_secs(15);
 enum Msg {
     /// The setting changed.
     Want(bool),
+    /// The OS session is ending (Windows: logoff or shutdown), and the
+    /// process with it, with no quit: let go for good and say when done.
+    #[cfg(any(target_os = "windows", test))]
+    SessionEnd(mpsc::Sender<()>),
     /// Quit: let go and end the thread.
     Stop,
 }
@@ -45,10 +60,13 @@ pub struct Handle {
 }
 
 impl Handle {
-    /// Start the thread with the setting as saved. It heals what an earlier
-    /// run left behind before anything else, whatever the setting.
+    /// Start the thread with the setting as saved. Its first tick deals
+    /// with what an earlier run left behind, whatever the setting.
     pub fn spawn(paths: &Paths, wanted: bool) -> Handle {
-        Self::spawn_with(platform_backend(paths), platform_power, wanted)
+        let handle = Self::spawn_with(platform_backend(paths), platform_power, wanted);
+        #[cfg(target_os = "windows")]
+        windows::on_session_end(handle.session_ender());
+        handle
     }
 
     /// [`Handle::spawn`] over any backend and power reading (tests).
@@ -61,16 +79,26 @@ impl Handle {
             .spawn(move || {
                 let mut keeper = Keeper::new(backend);
                 let mut wanted = wanted;
+                // The OS session is over: nothing is held again.
+                #[cfg_attr(not(any(target_os = "windows", test)), allow(unused_mut))]
+                let mut ended = false;
                 loop {
+                    let hold = wanted && !ended;
                     // Nothing to read while it's off: no battery polling for
                     // a feature nobody switched on.
-                    let now_power = if wanted { power() } else { Power::UNKNOWN };
-                    let status = keeper.tick(wanted, now_power, unix_now()).clone();
+                    let now_power = if hold { power() } else { Power::UNKNOWN };
+                    let status = keeper.tick(hold, now_power, unix_now()).clone();
                     if let Ok(mut s) = shared.lock() {
                         *s = status;
                     }
                     match rx.recv_timeout(POLL) {
                         Ok(Msg::Want(w)) => wanted = w,
+                        #[cfg(any(target_os = "windows", test))]
+                        Ok(Msg::SessionEnd(done)) => {
+                            ended = true;
+                            keeper.stop();
+                            let _ = done.send(());
+                        }
                         Err(RecvTimeoutError::Timeout) => {}
                         // A handle dropped without a shutdown is a quit too.
                         Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => break,
@@ -102,6 +130,20 @@ impl Handle {
         self.stop();
     }
 
+    /// What to call when the OS session ends: it lets go and returns once
+    /// the OS is as it was (or after a few seconds, so a stuck call can't
+    /// hold up the logoff).
+    #[cfg(any(target_os = "windows", test))]
+    fn session_ender(&self) -> impl Fn() + Send + 'static {
+        let tx = self.tx.clone();
+        move || {
+            let (done, wait) = mpsc::channel();
+            if tx.send(Msg::SessionEnd(done)).is_ok() {
+                let _ = wait.recv_timeout(Duration::from_secs(4));
+            }
+        }
+    }
+
     fn stop(&mut self) {
         let _ = self.tx.send(Msg::Stop);
         if let Some(t) = self.thread.take() {
@@ -126,11 +168,31 @@ fn platform_power() -> Power {
     linux::power()
 }
 
+#[cfg(target_os = "windows")]
+fn platform_backend(paths: &Paths) -> impl Backend + Send + 'static {
+    windows::PowerPlan::new(paths)
+}
+
+#[cfg(target_os = "windows")]
+fn platform_power() -> Power {
+    windows::power()
+}
+
+#[cfg(target_os = "macos")]
+fn platform_backend(paths: &Paths) -> impl Backend + Send + 'static {
+    macos::Clamshell::new(paths)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_power() -> Power {
+    macos::power()
+}
+
 /// An OS with nothing to hold: the checkbox says so.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 struct Unsupported;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 impl Backend for Unsupported {
     fn hold(&mut self) -> Result<(), String> {
         Err("not supported on this system".into())
@@ -138,12 +200,12 @@ impl Backend for Unsupported {
     fn release(&mut self) {}
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 fn platform_backend(_paths: &Paths) -> impl Backend + Send + 'static {
     Unsupported
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 fn platform_power() -> Power {
     Power::UNKNOWN
 }
@@ -204,6 +266,22 @@ mod tests {
         wait_for(|| h.status() == Status::Holding);
         drop(h);
         assert_eq!((holds.load(Ordering::SeqCst), releases.load(Ordering::SeqCst)), (1, 1));
+    }
+
+    #[test]
+    fn the_end_of_the_os_session_lets_go_before_it_returns() {
+        let (holds, releases) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let mut h = Handle::spawn_with(Counting(holds.clone(), releases.clone()), || Power::UNKNOWN, true);
+        wait_for(|| h.status() == Status::Holding);
+        let end = h.session_ender();
+        end();
+        assert_eq!(releases.load(Ordering::SeqCst), 1, "released by the time the session-end call returns");
+        wait_for(|| h.status() == Status::Off);
+        // The process is about to be ended: nothing is taken again.
+        h.set(false);
+        h.set(true);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!((holds.load(Ordering::SeqCst), h.status()), (1, Status::Off));
     }
 
     #[test]
