@@ -200,7 +200,7 @@ mod tests {
         file.clear().unwrap();
         assert_eq!(hold.renew(), Check::Standing);
         assert!(file.path().exists(), "a crash now is still healed by the next start");
-        // Gone again, and the box is unticked before the next renew.
+        // Gone again, and it is switched off before the next renew.
         file.clear().unwrap();
         hold.restore().unwrap();
         assert!(!*fake.flag.borrow(), "this hold set the flag, so it clears it without the marker's say");

@@ -573,7 +573,7 @@ mod tests {
         fake.0.borrow_mut().values.insert((BALANCED.into(), Setting::LidAction, Source::Dc), OFF);
         assert_eq!(hold.check(), Check::Standing);
         assert_eq!(hold.caveat(), None);
-        // Changed again, then unticked: their value stays, the rest goes back.
+        // Changed again, then switched off: their value stays, the rest goes back.
         fake.0.borrow_mut().values.insert((BALANCED.into(), Setting::LidAction, Source::Ac), 3);
         assert_eq!(hold.check(), Check::Standing);
         assert_eq!(

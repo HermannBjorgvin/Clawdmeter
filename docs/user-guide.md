@@ -69,7 +69,7 @@ usage** (greyed out, saying when it can check again, until a check can run),
 clicking it flips that switch), **Open Clawdmeter**, **Settings…**,
 **Update Clawdmeter to v…** or **Update firmware to v…** and **Quit
 Clawdmeter** instead, with the same conditions. Every platform's menu also
-has the **Keep awake with the lid closed** checkbox
+has the **Keep awake with the lid closed** submenu
 ([below](#keep-awake-with-the-lid-closed)). With the pace marker on,
 their usage rows end with the marker's verdict: *on pace*, *ahead of pace*
 or *at the limit*.
@@ -134,30 +134,73 @@ entry on Windows.
 
 ## Keep awake with the lid closed
 
-Tick **Keep awake with the lid closed** in the tray menu and the laptop
-stays awake when you close its lid, so Claude Code keeps working and the
-device keeps getting its numbers. It also holds off the sleep that follows
-a stretch with no input. The box is off until you tick it, and it stays as
-you left it across restarts (`keep_awake` in the config file). It works in
-the tray app only, not with `--daemon`.
+Pick how long under **Keep awake with the lid closed** in the tray menu
+and the laptop stays awake when you close its lid, so Claude Code keeps
+working and the device keeps getting its numbers. It also holds off the
+sleep that follows a stretch with no input. The submenu's title shows the
+choice, and what is left of it: *Keep awake with the lid closed: For 3
+hours (2 h 41 min left)*.
+
+| Choice | Stays awake |
+| --- | --- |
+| **Off** | Not at all. The default. |
+| **For 1 hour**, **For 3 hours**, **For 7 hours** | Until that long after you picked it. |
+| **Until Claude stops working** | Until Claude has shown no sign of working for 30 minutes. |
+| **Forever** | Until you pick **Off**. |
+
+When a timed choice or **Until Claude stops working** runs out, the choice
+goes back to **Off**, so nothing keeps the laptop awake again until you
+pick something. If the lid is shut at that moment, a Linux laptop or a Mac
+goes to sleep at once; a Windows laptop sleeps at its own **Sleep after**
+time.
+
+The choice is kept across restarts (`keep_awake` in the config file, and a
+timed choice's end in `keep_awake_until`): a restart before the end
+carries on with what is left, and one after it finds the choice off. It
+works in the tray app only, not with `--daemon`.
+
+**Until Claude stops working** goes by what the app already knows; it asks
+Anthropic for nothing extra. Signs of work, on any of your Claude accounts
+(Codex accounts don't count):
+
+- With the Claude Code hooks installed: a prompt you send or a tool Claude
+  runs. A turn that is still running (a prompt Claude hasn't finished
+  answering) counts as work for up to 10 minutes after its last event, so
+  a long tool call isn't taken for idle. One tool call that runs for more
+  than 40 minutes with nothing else happening does end the hold, and with
+  several sessions at once, one of them finishing can hide another's
+  running turn; pick a timer for those.
+- With or without the hooks: your usage going up between two readings.
+  This is the only sign without the hooks, and it is slow (the app reads
+  usage every few minutes) and counts work on the account from anywhere,
+  not just this computer. The app's own usage check sends a tiny message
+  while your 5-hour window runs, so the first point your usage goes up
+  after such a check isn't counted: light work on a large plan may not
+  show. Install the hooks, or pick a timer, if that is you.
+
+The 30 minutes start when you pick the choice (picking it again starts
+them over), or when the app starts with it already picked, so it always
+gives Claude half an hour to begin. After the first idle minute the title
+shows the count: *(Claude idle 12 min)*. A failed reading of your usage is
+no sign either way.
 
 A closed laptop that stays awake keeps drawing power and making heat, so
-don't put it in a bag while the box is ticked. To keep it from running
-flat:
+don't put it in a bag while a choice is on. To keep it from running flat,
+whatever the choice:
 
-- Plugged in, it stays awake for as long as the box is ticked.
+- Plugged in, it stays awake for as long as the choice lasts.
 - On battery, it stays awake down to a 20% charge. At 20% the app lets go
   and the laptop sleeps as usual; it holds again at 25%, or when you plug
-  it in. The menu item then reads *(paused, battery at 18%)*. On Windows a
-  laptop whose lid is already shut sleeps at its own **Sleep after** time
-  rather than at once.
+  it in. The title then reads *(paused, battery at 18%)*. A timer keeps
+  running while it is paused. On Windows a laptop whose lid is already
+  shut sleeps at its own **Sleep after** time rather than at once.
 - A charger too weak to keep up counts as on battery while the battery
   reports that it is draining (Linux and macOS; Windows doesn't say).
 - On battery with a charge that can't be read, it doesn't hold: *(paused on
   battery)*.
 
-Unticking the box, quitting the app, logging out and shutting down all put
-the computer back as it was. What that means differs by system:
+Picking **Off**, a choice running out, quitting the app, logging out and
+shutting down all put the computer back as it was. What that means differs by system:
 
 | System | What the app does | If the app is killed or crashes |
 | --- | --- | --- |
@@ -173,22 +216,22 @@ sleep the Mac until it restarts. Start Clawdmeter once to put it right.
 Things to know:
 
 - **KDE Plasma** decides about the lid itself and ignores every such lock.
-  The menu item reads *(on Plasma, also set the lid to Do nothing)*: set
+  The title reads *(on Plasma, also set the lid to Do nothing)*: set
   **System Settings → Power Management → When laptop lid closed** to *Do
   nothing* yourself. The app still holds off idle sleep.
-- **macOS** support is experimental, and the menu item says so. The flag is
+- **macOS** support is experimental, and the title says so. The flag is
   not a documented part of macOS: on some Macs it is reported to have no
   effect, and macOS may clear it when the power source changes, so a Mac
   can still go to sleep when you plug or unplug it with the lid shut.
   Another keep-awake app that uses the same flag and Clawdmeter will clear
   each other's.
-- **Windows:** if your organisation's policy sets the lid action, the item
+- **Windows:** if your organisation's policy sets the lid action, the title
   reads *(unavailable)* and nothing is changed. If you switch power plans
-  while the box is ticked, the old plan is put back and the new one edited.
-  If something else sets the lid action back while the box is ticked (a
+  while a choice is on, the old plan is put back and the new one edited.
+  If something else sets the lid action back while a choice is on (a
   vendor's power tool, a reset of the power plans, you in Control Panel),
-  the app leaves that value alone, then and when you untick, and the item
-  reads *(not holding: the lid setting was changed elsewhere)*, with
+  the app leaves that value alone, then and when the choice ends, and the
+  title reads *(not holding: the lid setting was changed elsewhere)*, with
   *while plugged in* or *on battery* when only one of the two was changed.
   Some laptops with Modern Standby are reported to enter standby on a lid
   close whatever the lid action says; on those this may not be enough,
@@ -199,7 +242,8 @@ Things to know:
 - *(unavailable)* means the system refused; `daemon.log` says why, and the
   app tries again by itself.
 - With no tray (GNOME without the AppIndicator extension), set
-  `keep_awake = on` in the config file.
+  `keep_awake` in the config file: `1h`, `3h`, `7h`, `claude` or `on`
+  (Forever). A timed value starts when the app reads it.
 
 ## On the device
 
@@ -399,7 +443,8 @@ seconds and preserves comments and unknown keys when saving.
 | `reset_chime` | `off` | Play a chime or buzzer on devices with supported hardware, when the session usage resets. The older `chime` key still works. |
 | `alert_chime` | `off` | Play a chime or buzzer on devices with supported hardware, when Claude needs you. The older `beep` key still works. |
 | `desktop_chime` | `off` | Play the same chime on this computer when Claude needs you. Follows `alert_on`. |
-| `keep_awake` | `off` | Keep this computer awake with the lid closed, down to a 20% charge on battery. The tray menu's **Keep awake with the lid closed** checkbox; see [above](#keep-awake-with-the-lid-closed). The tray app only. |
+| `keep_awake` | `off` | Keep this computer awake with the lid closed, down to a 20% charge on battery, and for how long: `off`, `1h`, `3h`, `7h`, `claude` (until Claude stops working) or `on` (Forever). The tray menu's **Keep awake with the lid closed** submenu; see [above](#keep-awake-with-the-lid-closed). The tray app only. |
+| `keep_awake_until` | unset | When a `1h`, `3h` or `7h` choice ends, as unix seconds. The app writes it with the choice; a time already past switches `keep_awake` off, and one further off than the choice lasts starts the choice over from now. |
 | `clock` | `off` | `auto`, `12`, or `24` replaces the device's Usage title with a clock. |
 | `liveliness` | `3` | How lively Clawd is, `1` (No-nonsense) to `5` (All-nonsense). Set with **Animation silliness** on the Device page. |
 | `attention_anim` | `2m` | How long Clawd points and waves for an alert: `off`, `10s`, `30s` or `2m`. The alert itself is unchanged. Set with **Attention animation** on the Device page. |

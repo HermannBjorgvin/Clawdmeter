@@ -1,10 +1,15 @@
 //! Keep the computer awake with the lid closed (`keep_awake`, the tray's
-//! checkbox): when to hold, when to let go, and what to put back.
+//! submenu): when to hold, when to let go, and what to put back.
 //!
 //! This is the half with no OS calls. A [`Backend`] does the holding (the
-//! app crate has one per OS); [`Keeper`] decides when, from the setting and
-//! the computer's [`Power`]:
+//! app crate has one per OS); [`Keeper`] decides when, from the setting
+//! ([`Mode`], as a [`Wish`]) and the computer's [`Power`]:
 //!
+//! - For as long as the choice says: a number of hours, until Claude has
+//!   shown no sign of working for [`CLAUDE_IDLE_LIMIT`], or with no end
+//!   ([`Keeper::run`]). A hold that ends that way is [`Status::Ended`], and
+//!   the tray puts the setting back to off, so nothing holds again by
+//!   itself.
 //! - On external power it holds for as long as the setting is on.
 //! - On battery it holds while the charge is above [`BATTERY_FLOOR`], lets
 //!   go at the floor so the computer sleeps like any other with its lid
@@ -123,6 +128,10 @@ pub enum Status {
     /// The setting is on and the OS wouldn't hold (the reason). Tried again
     /// later.
     Failed(String),
+    /// The setting is on and its time is up (a timed choice's deadline has
+    /// passed, or Claude has been idle long enough): nothing is held, and
+    /// the tray switches the setting off.
+    Ended,
 }
 
 impl Status {
@@ -130,7 +139,7 @@ impl Status {
     /// something to say: "paused, battery at 18%".
     pub fn note(&self) -> Option<String> {
         match self {
-            Status::Off | Status::Holding => None,
+            Status::Off | Status::Holding | Status::Ended => None,
             Status::Limited(what) => Some(what.clone()),
             Status::Paused(Pause::BatteryLow(pct)) => Some(format!("paused, battery at {pct}%")),
             Status::Paused(Pause::BatteryUnknown) => Some("paused on battery".into()),
@@ -154,6 +163,147 @@ pub fn verdict(power: Power, holding: bool) -> Result<(), Pause> {
             } else {
                 Err(Pause::BatteryLow(pct))
             }
+        }
+    }
+}
+
+/// How long to keep awake for: the tray's choice, saved as `keep_awake`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// Not at all (`off`, the default).
+    #[default]
+    Off,
+    /// For an hour (`1h`).
+    Hour1,
+    /// For three hours (`3h`).
+    Hours3,
+    /// For seven hours (`7h`).
+    Hours7,
+    /// Until Claude stops working (`claude`): [`CLAUDE_IDLE_LIMIT`] with no
+    /// sign of work on any Claude account.
+    Claude,
+    /// Until it is switched off (`on`).
+    Forever,
+}
+
+impl Mode {
+    /// Every choice, in the menu's order.
+    pub const ALL: [Mode; 6] = [Mode::Off, Mode::Hour1, Mode::Hours3, Mode::Hours7, Mode::Claude, Mode::Forever];
+
+    /// From the config value. Anything else is off: nothing is kept awake
+    /// on a guess.
+    pub fn parse(value: &str) -> Mode {
+        let value = value.trim().to_ascii_lowercase();
+        Mode::ALL.into_iter().find(|m| m.as_str() == value).unwrap_or_default()
+    }
+
+    /// The config value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Off => "off",
+            Mode::Hour1 => "1h",
+            Mode::Hours3 => "3h",
+            Mode::Hours7 => "7h",
+            Mode::Claude => "claude",
+            Mode::Forever => "on",
+        }
+    }
+
+    /// The menu item's text.
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Off => "Off",
+            Mode::Hour1 => "For 1 hour",
+            Mode::Hours3 => "For 3 hours",
+            Mode::Hours7 => "For 7 hours",
+            Mode::Claude => "Until Claude stops working",
+            Mode::Forever => "Forever",
+        }
+    }
+
+    /// How long a timed choice lasts, in seconds.
+    pub fn secs(self) -> Option<i64> {
+        match self {
+            Mode::Hour1 => Some(3600),
+            Mode::Hours3 => Some(3 * 3600),
+            Mode::Hours7 => Some(7 * 3600),
+            Mode::Off | Mode::Claude | Mode::Forever => None,
+        }
+    }
+
+    /// A timed choice's deadline to go by at `now` (unix seconds): the
+    /// `saved` one, or a full length from now when none is saved (the value
+    /// was typed into the config) or the saved one is further off than the
+    /// choice lasts (a hand edit, or the clock set back), so "For 1 hour"
+    /// never holds for longer than that from now. `None` for the choices
+    /// with no deadline.
+    pub fn deadline(self, saved: Option<i64>, now: i64) -> Option<i64> {
+        let secs = self.secs()?;
+        Some(saved.filter(|at| at - now <= secs).unwrap_or(now + secs))
+    }
+
+    /// What the choice asks of the keeper. `until` is a timed choice's saved
+    /// deadline (`keep_awake_until`, unix seconds); a timed choice with none
+    /// asks for nothing until the tray has saved one.
+    pub fn wish(self, until: Option<i64>) -> Wish {
+        match (self, until) {
+            (Mode::Off, _) => Wish::Off,
+            (Mode::Forever, _) => Wish::Forever,
+            (Mode::Claude, _) => Wish::WhileClaudeWorks,
+            (_, Some(deadline)) => Wish::Until(deadline),
+            (_, None) => Wish::Off,
+        }
+    }
+}
+
+/// What the setting asks of the [`Keeper`] right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Wish {
+    /// Nothing.
+    #[default]
+    Off,
+    /// Hold until this unix time. It is a time of day the user was shown
+    /// and the config keeps across restarts, so it is read off the wall
+    /// clock.
+    Until(i64),
+    /// Hold until Claude has shown no sign of working for
+    /// [`CLAUDE_IDLE_LIMIT`].
+    WhileClaudeWorks,
+    /// Hold.
+    Forever,
+}
+
+/// "Until Claude stops working" ends after this long with no sign of work.
+pub const CLAUDE_IDLE_LIMIT: Duration = Duration::from_secs(30 * 60);
+
+/// The two clocks a [`Keeper::run`] reads.
+#[derive(Debug, Clone, Copy)]
+pub struct Clock {
+    /// The monotonic clock: waits and the idle time.
+    pub now: Instant,
+    /// Unix seconds: a timed choice's deadline.
+    pub unix: i64,
+}
+
+/// What is left of a hold that ends by itself, for the menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Left {
+    /// Seconds until a timed choice's deadline.
+    Time(i64),
+    /// Seconds since the last sign of Claude working.
+    ClaudeIdle(u64),
+}
+
+impl Left {
+    /// The menu's words: "2 h 41 min left", "Claude idle 12 min". Nothing
+    /// to say in Claude's first idle minute.
+    pub fn note(self) -> Option<String> {
+        match self {
+            Left::Time(secs) if secs < 60 => Some("under a minute left".into()),
+            Left::Time(secs) if secs < 3600 => Some(format!("{} min left", secs / 60)),
+            Left::Time(secs) => Some(format!("{} h {} min left", secs / 3600, secs % 3600 / 60)),
+            Left::ClaudeIdle(secs) if secs < 60 => None,
+            Left::ClaudeIdle(secs) => Some(format!("Claude idle {} min", secs / 60)),
         }
     }
 }
@@ -245,6 +395,16 @@ pub struct Keeper<B: Backend> {
     /// clock, so a step of the system clock neither stalls nor rushes it.
     strikes: usize,
     retry_at: Option<Instant>,
+    /// The wish of the last [`run`](Keeper::run): a new one starts its
+    /// clocks over.
+    wish: Wish,
+    /// That wish's time is up. It stays up until the wish changes, whatever
+    /// Claude or the clock do next.
+    ended: bool,
+    /// When Claude was last seen working, or the wish was made if later
+    /// (the idle time counts from here), and the newest sign of work seen.
+    idle_from: Option<Instant>,
+    seen_work: Option<i64>,
 }
 
 impl<B: Backend> Keeper<B> {
@@ -261,6 +421,10 @@ impl<B: Backend> Keeper<B> {
             status: Status::Off,
             strikes: 0,
             retry_at: None,
+            wish: Wish::Off,
+            ended: false,
+            idle_from: None,
+            seen_work: None,
         }
     }
 
@@ -269,14 +433,82 @@ impl<B: Backend> Keeper<B> {
         &self.status
     }
 
+    /// Bring the hold in line with what the setting asks (`wish`), the
+    /// power and the clocks. `work_at` is the newest sign of Claude working
+    /// the engine has (unix seconds; `None`: none seen): one that differs
+    /// from last time's restarts the idle time of
+    /// [`Wish::WhileClaudeWorks`]. Only a change counts, not which way, so
+    /// a step of the system clock neither hides work nor invents it.
+    ///
+    /// A wish whose time is up is [`Status::Ended`] from then on, and
+    /// nothing is held for it again: the tray switches the setting off, and
+    /// only a new wish holds.
+    pub fn run(&mut self, wish: Wish, power: Power, clock: Clock, work_at: Option<i64>) -> &Status {
+        if wish != self.wish {
+            // The idle time counts from the pick, so picking it while
+            // Claude is idle still gives the full limit.
+            self.wish = wish;
+            self.ended = false;
+            self.idle_from = Some(clock.now);
+            self.seen_work = work_at;
+        } else if work_at != self.seen_work {
+            self.seen_work = work_at;
+            self.idle_from = Some(clock.now);
+        }
+        let over = match wish {
+            Wish::Off | Wish::Forever => false,
+            Wish::Until(deadline) => clock.unix >= deadline,
+            Wish::WhileClaudeWorks => self.idle(clock.now) >= CLAUDE_IDLE_LIMIT,
+        };
+        if over && !std::mem::replace(&mut self.ended, true) {
+            match wish {
+                Wish::WhileClaudeWorks => log::info!("keep awake: Claude has been idle; letting go"),
+                _ => log::info!("keep awake: the time is up; letting go"),
+            }
+        }
+        match wish {
+            Wish::Off => self.settle(false, power, clock.now, Status::Off),
+            _ if self.ended => self.settle(false, power, clock.now, Status::Ended),
+            _ => self.settle(true, power, clock.now, Status::Off),
+        }
+    }
+
+    /// The same choice was picked again: the next [`run`](Keeper::run)
+    /// takes its wish as a new one, so its idle time starts over and a wish
+    /// that had ended holds again. A standing hold isn't touched.
+    pub fn start_over(&mut self) {
+        self.wish = Wish::Off;
+    }
+
+    /// What is left of the wish of the last [`run`](Keeper::run), when it
+    /// ends by itself and hasn't yet.
+    pub fn left(&self, clock: Clock) -> Option<Left> {
+        match self.wish {
+            _ if self.ended => None,
+            Wish::Until(deadline) => Some(Left::Time((deadline - clock.unix).max(0))),
+            Wish::WhileClaudeWorks => Some(Left::ClaudeIdle(self.idle(clock.now).as_secs())),
+            Wish::Off | Wish::Forever => None,
+        }
+    }
+
+    fn idle(&self, now: Instant) -> Duration {
+        self.idle_from.map_or(Duration::ZERO, |from| now.saturating_duration_since(from))
+    }
+
     /// Bring the hold in line with the setting (`wanted`) and the power, at
     /// `now`. Returns the status, which changes only here.
     pub fn tick(&mut self, wanted: bool, power: Power, now: Instant) -> &Status {
+        self.settle(wanted, power, now, Status::Off)
+    }
+
+    /// [`tick`](Keeper::tick), where `rest` is the status while nothing is
+    /// wanted: off, or ended.
+    fn settle(&mut self, wanted: bool, power: Power, now: Instant, rest: Status) -> &Status {
         if !wanted {
             self.heal();
             self.let_go();
             self.forget_failures();
-            return self.set(Status::Off);
+            return self.set(rest);
         }
         if let Err(pause) = verdict(power, self.holding) {
             self.heal();
@@ -396,6 +628,7 @@ impl<B: Backend> Keeper<B> {
                     log::info!("keep awake: paused, on battery with no charge reading")
                 }
                 Status::Failed(e) => log::warn!("keep awake: unavailable ({e}); trying again later"),
+                Status::Ended => log::info!("keep awake: ended"),
             }
             self.status = status;
         }
@@ -788,6 +1021,197 @@ mod tests {
         *fail.borrow_mut() = false;
         assert_eq!(k.tick(true, AC, at(1)), &Status::Holding, "not left waiting out the old failure as Off");
         assert_eq!(*log.borrow(), ["hold-failed", "release", "hold"]);
+    }
+
+    /// The two clocks, `secs` after the test's start: the wall clock at
+    /// `UNIX0 + secs`.
+    const UNIX0: i64 = 1_790_000_000;
+    fn clock(secs: u64) -> Clock {
+        Clock { now: at(secs), unix: UNIX0 + secs as i64 }
+    }
+    const HOUR: u64 = 3600;
+    const LIMIT: u64 = CLAUDE_IDLE_LIMIT.as_secs();
+
+    #[test]
+    fn each_timer_holds_until_its_deadline_then_ends_for_good() {
+        for mode in [Mode::Hour1, Mode::Hours3, Mode::Hours7] {
+            let secs = mode.secs().unwrap() as u64;
+            let wish = mode.wish(Some(UNIX0 + secs as i64));
+            let (mut k, log, ..) = keeper();
+            assert_eq!(k.run(wish, AC, clock(0), None), &Status::Holding, "{mode:?}");
+            assert_eq!(k.left(clock(60)), Some(Left::Time(secs as i64 - 60)));
+            assert_eq!(k.run(wish, AC, clock(secs - 1), None), &Status::Holding, "{mode:?}: to the last second");
+            assert_eq!(k.run(wish, AC, clock(secs), None), &Status::Ended, "{mode:?}");
+            assert_eq!(*log.borrow(), ["hold", "release"]);
+            assert_eq!(k.left(clock(secs)), None);
+            // Nothing holds again by itself, whatever the clock says later.
+            assert_eq!(k.run(wish, AC, clock(secs - 100), None), &Status::Ended);
+            // The tray switches the setting off; a new pick holds again.
+            assert_eq!(k.run(Wish::Off, AC, clock(secs + 1), None), &Status::Off);
+            let again = mode.wish(Some(UNIX0 + 2 * secs as i64 + 2));
+            assert_eq!(k.run(again, AC, clock(secs + 2), None), &Status::Holding);
+            assert_eq!(*log.borrow(), ["hold", "release", "hold"]);
+        }
+        assert_eq!(Mode::Hours3.wish(None), Wish::Off, "a timed choice holds nothing before its deadline is saved");
+    }
+
+    #[test]
+    fn a_timed_choice_never_lasts_longer_than_it_says() {
+        let hour = Mode::Hour1;
+        // A saved deadline within the hour stands, past ones included.
+        assert_eq!(hour.deadline(Some(UNIX0 + 3600), UNIX0), Some(UNIX0 + 3600));
+        assert_eq!(hour.deadline(Some(UNIX0 + 60), UNIX0), Some(UNIX0 + 60));
+        assert_eq!(hour.deadline(Some(UNIX0 - 60), UNIX0), Some(UNIX0 - 60));
+        // None saved (typed into the config), or one further off than an
+        // hour (a hand edit, the clock set back): an hour from now.
+        assert_eq!(hour.deadline(None, UNIX0), Some(UNIX0 + 3600));
+        assert_eq!(hour.deadline(Some(UNIX0 + 3601), UNIX0), Some(UNIX0 + 3600));
+        assert_eq!(Mode::Hours7.deadline(Some(UNIX0 + 3601), UNIX0), Some(UNIX0 + 3601));
+        // The others have none.
+        for mode in [Mode::Off, Mode::Claude, Mode::Forever] {
+            assert_eq!(mode.deadline(Some(UNIX0 + 60), UNIX0), None);
+        }
+    }
+
+    #[test]
+    fn forever_and_off_have_no_end() {
+        let (mut k, log, ..) = keeper();
+        assert_eq!(k.run(Mode::Forever.wish(None), AC, clock(0), None), &Status::Holding);
+        assert_eq!(k.run(Wish::Forever, AC, clock(1000 * HOUR), None), &Status::Holding);
+        assert_eq!(k.left(clock(1000 * HOUR)), None);
+        assert_eq!(k.run(Mode::Off.wish(None), AC, clock(1000 * HOUR + 1), None), &Status::Off);
+        assert_eq!(*log.borrow(), ["hold", "release"]);
+    }
+
+    #[test]
+    fn a_restart_carries_a_timer_on_or_finds_it_over() {
+        // Before the deadline: a new keeper (a new run of the app) holds
+        // for what is left.
+        let wish = Wish::Until(UNIX0 + 3 * HOUR as i64);
+        let (mut k, log, ..) = keeper();
+        assert_eq!(k.run(wish, AC, clock(2 * HOUR), None), &Status::Holding);
+        assert_eq!(k.left(clock(2 * HOUR)), Some(Left::Time(HOUR as i64)));
+        assert_eq!(k.run(wish, AC, clock(3 * HOUR), None), &Status::Ended);
+        assert_eq!(*log.borrow(), ["hold", "release"]);
+        // After it: nothing is held, and an earlier run's leftovers are healed.
+        let (mut k, log, ..) = keeper();
+        assert_eq!(k.run(wish, AC, clock(4 * HOUR), None), &Status::Ended);
+        assert_eq!(*log.borrow(), ["heal"]);
+    }
+
+    #[test]
+    fn until_claude_stops_ends_after_the_idle_limit() {
+        let (mut k, log, ..) = keeper();
+        // Picked while Claude is idle (its last work was long ago): the
+        // clock starts at the pick.
+        let old = Some(UNIX0 - 10_000);
+        assert_eq!(k.run(Wish::WhileClaudeWorks, AC, clock(0), old), &Status::Holding);
+        assert_eq!(k.left(clock(0)), Some(Left::ClaudeIdle(0)));
+        assert_eq!(k.run(Wish::WhileClaudeWorks, AC, clock(LIMIT - 1), old), &Status::Holding);
+        assert_eq!(k.left(clock(LIMIT - 1)), Some(Left::ClaudeIdle(LIMIT - 1)));
+        assert_eq!(k.run(Wish::WhileClaudeWorks, AC, clock(LIMIT), old), &Status::Ended);
+        assert_eq!(*log.borrow(), ["hold", "release"]);
+        // Claude starting again doesn't bring it back: the setting is off by then.
+        assert_eq!(
+            k.run(Wish::WhileClaudeWorks, AC, clock(LIMIT + 60), Some(UNIX0 + LIMIT as i64 + 60)),
+            &Status::Ended
+        );
+        assert_eq!(log.borrow().len(), 2);
+    }
+
+    #[test]
+    fn a_sign_of_work_restarts_the_idle_time_and_no_news_doesnt() {
+        let (mut k, log, ..) = keeper();
+        let wish = Wish::WhileClaudeWorks;
+        k.run(wish, AC, clock(0), None);
+        // A hook event (a prompt or a tool) 20 minutes in.
+        let event = Some(UNIX0 + 1200);
+        assert_eq!(k.run(wish, AC, clock(1200), event), &Status::Holding);
+        assert_eq!(k.left(clock(1200)), Some(Left::ClaudeIdle(0)));
+        // The same timestamp again is no news: a replay, a failed poll and
+        // a poll with nothing new all leave the engine's value where it was.
+        for t in [1500, 2000, 1200 + LIMIT - 1] {
+            assert_eq!(k.run(wish, AC, clock(t), event), &Status::Holding, "at {t}");
+        }
+        assert_eq!(k.left(clock(1200 + LIMIT - 1)), Some(Left::ClaudeIdle(LIMIT - 1)));
+        // A running turn: the engine reports work as of now, tick after tick,
+        // however long the turn takes.
+        let mut t = 1200 + LIMIT - 1;
+        for _ in 0..200 {
+            t += 60;
+            assert_eq!(k.run(wish, AC, clock(t), Some(UNIX0 + t as i64)), &Status::Holding);
+        }
+        // A rise in usage on a real poll (no hooks): one more sign, later.
+        let rise = Some(UNIX0 + t as i64 + 900);
+        assert_eq!(k.run(wish, AC, clock(t + 900), rise), &Status::Holding);
+        assert_eq!(k.run(wish, AC, clock(t + 900 + LIMIT - 1), rise), &Status::Holding);
+        assert_eq!(k.run(wish, AC, clock(t + 900 + LIMIT), rise), &Status::Ended);
+        assert_eq!(*log.borrow(), ["hold", "release"]);
+        // Only a change counts, not which way: with the system clock set
+        // back an hour mid-turn, the engine's "now" is older than the last
+        // one seen, and it is work all the same.
+        let (mut k, ..) = keeper();
+        k.run(wish, AC, clock(0), Some(UNIX0));
+        for t in (60..=2 * LIMIT).step_by(60) {
+            assert_eq!(k.run(wish, AC, clock(t), Some(UNIX0 - 3600 + t as i64)), &Status::Holding, "at {t}");
+        }
+        // And a value that stands still is idle, whatever it says.
+        let stuck = Some(UNIX0 + 10 * LIMIT as i64);
+        k.run(wish, AC, clock(2 * LIMIT + 60), stuck);
+        assert_eq!(k.run(wish, AC, clock(3 * LIMIT + 59), stuck), &Status::Holding);
+        assert_eq!(k.run(wish, AC, clock(3 * LIMIT + 60), stuck), &Status::Ended);
+    }
+
+    #[test]
+    fn picking_the_same_choice_again_starts_it_over() {
+        let (mut k, log, ..) = keeper();
+        let wish = Wish::WhileClaudeWorks;
+        k.run(wish, AC, clock(0), None);
+        // 25 idle minutes in, the same choice again: 30 more from there,
+        // and the hold stands through it.
+        k.run(wish, AC, clock(1500), None);
+        k.start_over();
+        assert_eq!(k.run(wish, AC, clock(1501), None), &Status::Holding);
+        assert_eq!(k.left(clock(1501)), Some(Left::ClaudeIdle(0)));
+        assert_eq!(k.run(wish, AC, clock(1501 + LIMIT - 1), None), &Status::Holding);
+        assert_eq!(*log.borrow(), ["hold"]);
+        assert_eq!(k.run(wish, AC, clock(1501 + LIMIT), None), &Status::Ended);
+        // Picked again once it has ended: it holds again.
+        k.start_over();
+        assert_eq!(k.run(wish, AC, clock(1502 + LIMIT), None), &Status::Holding);
+        assert_eq!(*log.borrow(), ["hold", "release", "hold"]);
+    }
+
+    #[test]
+    fn the_floor_pauses_every_mode_and_the_clocks_run_on() {
+        let low = battery(BATTERY_FLOOR);
+        let paused = Status::Paused(Pause::BatteryLow(BATTERY_FLOOR));
+        for wish in [Wish::Until(UNIX0 + HOUR as i64), Wish::WhileClaudeWorks, Wish::Forever] {
+            let (mut k, log, ..) = keeper();
+            assert_eq!(k.run(wish, battery(60), clock(0), None), &Status::Holding, "{wish:?}");
+            assert_eq!(k.run(wish, low, clock(60), None), &paused, "{wish:?}");
+            assert_eq!(*log.borrow(), ["hold", "release"], "{wish:?}");
+            assert_eq!(k.run(wish, AC, clock(120), None), &Status::Holding, "{wish:?}: plugged in");
+            // Paused again when the time runs out: it ends all the same.
+            assert_eq!(k.run(wish, low, clock(180), None), &paused);
+            let end = k.run(wish, low, clock(HOUR), None).clone();
+            assert_eq!(end, if wish == Wish::Forever { paused.clone() } else { Status::Ended }, "{wish:?}");
+        }
+    }
+
+    #[test]
+    fn what_is_left_in_the_menus_words() {
+        assert_eq!(Left::Time(2 * 3600 + 41 * 60 + 59).note().as_deref(), Some("2 h 41 min left"));
+        assert_eq!(Left::Time(3 * 3600).note().as_deref(), Some("3 h 0 min left"));
+        assert_eq!(Left::Time(59 * 60).note().as_deref(), Some("59 min left"));
+        assert_eq!(Left::Time(59).note().as_deref(), Some("under a minute left"));
+        assert_eq!(Left::ClaudeIdle(12 * 60 + 30).note().as_deref(), Some("Claude idle 12 min"));
+        assert_eq!(Left::ClaudeIdle(59).note(), None);
+        assert_eq!(Status::Ended.note(), None);
+        assert_eq!(
+            Mode::ALL.map(Mode::label),
+            ["Off", "For 1 hour", "For 3 hours", "For 7 hours", "Until Claude stops working", "Forever"]
+        );
     }
 
     #[test]

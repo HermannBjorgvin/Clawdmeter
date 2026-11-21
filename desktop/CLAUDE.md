@@ -36,8 +36,11 @@ is faked behind `FlashHardware`.
   machine: `next_write` / `mark_written`), `autostart` (systemd / XDG /
   LaunchAgent / Run key, legacy-daemon detection + `disable_legacy`),
   `launch`, `platform`, `keep_awake` (the tray's "Keep awake with the lid
-  closed": `Keeper` decides when to hold from the setting and the battery,
-  floor 20 %, resume 25 %; a `Backend` per OS does the holding; `plan` is
+  closed": `Mode` is the choice, `off`/`1h`/`3h`/`7h`/`claude`/`on`, and
+  `Keeper::run` decides when to hold from what it asks (`Wish`), the
+  clocks and the battery, floor 20 %, resume 25 %; a timer's deadline or
+  30 minutes with no newer `EngineStatus::claude_work_at` ends in
+  `Status::Ended`, for good until the wish changes; a `Backend` per OS does the holding; `plan` is
   the Windows power-plan edit and `clamshell` the macOS lid flag, both
   recorded in `<state>/keep-awake-restore.json` before the change and
   healed on the next start; `heal` is skipped when the first tick holds,
@@ -102,10 +105,21 @@ is faked behind `FlashHardware`.
   platform with two or more accounts (`MenuShape::device_accounts` on
   Linux/Windows); a pick saves `device_account` through `write_settings`,
   like the chime. "Keep awake with the lid closed" (id `keep-awake`) is a
-  native check item on every platform (on macOS the second native part,
-  after that submenu); it flips `keep_awake` the same way, and its label
-  ends with `keep_awake::Status::note` ("paused, battery at 18%") while
-  ticked and not simply holding.
+  native submenu built the same way on every platform (on macOS the second
+  native part, after that one): one check item per `keep_awake::Mode`,
+  ids `keep-awake-<config value>`. A pick saves `keep_awake`, and for a
+  timed choice `keep_awake_until`, the same way. Its title is the choice
+  plus `Status::note` and `Left::note` ("…: For 3 hours (paused, battery
+  at 18%, 2 h 41 min left)"). `sync_keep_awake` runs every tick: it hands
+  the thread `EngineStatus::claude_work_at` (the newest sign of Claude
+  working: now while a turn runs, else the last prompt or tool event or
+  usage rise; any change of it is work, and one point of a rise is the
+  probe's own, `UsageMark`), and saves `off` once the thread reports
+  `Ended`. A pick of the choice already on starts it over
+  (`Handle::pick`). The
+  engine is only read: keep awake adds no poll or probe and moves no
+  cadence (`a_keep_awake_change_polls_nothing`). A choice that can't be
+  saved still stands for the run (`keep_awake_after_reload`).
   `StatusSnapshot::spend` marks a spend-capped account, drawn as one Spend
   meter in the panel, the rows and the Overview),
   window (`ui/`), `daemon.rs` (drives the engine on its own thread: 0.5 s
@@ -176,8 +190,10 @@ is faked behind `FlashHardware`.
   `poll_interval`, `heartbeat_interval`,
   `reset_chime` and `alert_chime` (device chimes; the old `chime` / `beep`
   keys are read when these are absent), `desktop_chime` (the same ding on
-  this computer via rodio, ALSA on Linux), `keep_awake` (default off: the
-  tray's checkbox, read by the tray only), `clock`, `liveliness` (1–5,
+  this computer via rodio, ALSA on Linux), `keep_awake` (`off`/`1h`/`3h`/`7h`/`claude`/`on`,
+  default off: the tray's submenu, read by the tray only; `on` is Forever)
+  and `keep_awake_until` (a timed choice's end, unix seconds, written with
+  it), `clock`, `liveliness` (1–5,
   default 3: the Device page's Animation silliness slider, sent as `lv`),
   `attention_anim` (`off`/`10s`/`30s`/`2m`, default `2m`, sent as `aa`
   seconds), `pace_marker` (default off, sent as `pm`), `menu_bar_usage`

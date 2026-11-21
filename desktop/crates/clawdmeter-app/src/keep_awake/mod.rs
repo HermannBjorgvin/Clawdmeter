@@ -1,5 +1,5 @@
 //! Keep the computer awake with the lid closed (`keep_awake`, the tray's
-//! checkbox): the OS half.
+//! submenu): the OS half.
 //!
 //! [`clawdmeter_core::keep_awake`] decides when to hold and when to let go
 //! (the battery floor); this module has the thread that runs it and one
@@ -40,13 +40,14 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use clawdmeter_core::keep_awake::{Backend, Keeper, Power, Readings, Status};
-use clawdmeter_core::Paths;
+use clawdmeter_core::keep_awake::{Backend, Clock, Keeper, Left, Power, Readings, Status, Wish};
+use clawdmeter_core::{unix_now, Paths};
 
 /// How often the power source and the hold are looked at again.
 const POLL: Duration = Duration::from_secs(15);
@@ -63,8 +64,9 @@ const SESSION_END_GRACE: Duration = Duration::from_secs(60);
 pub const GUARD_ARG: &str = "keep-awake-guard";
 
 enum Msg {
-    /// The setting changed.
-    Want(bool),
+    /// The setting changed, or the same choice was picked again: what it
+    /// asks now, and the handle's count of these ([`Report`]).
+    Want(Wish, u64),
     /// The OS session is ending (Windows: logoff or shutdown; macOS: AppKit
     /// is exiting the app), and the process with it, with no quit: let go
     /// and say when done.
@@ -74,20 +76,46 @@ enum Msg {
     Stop,
 }
 
+/// What the thread last did, for the menu.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Report {
+    /// What the keeper is doing.
+    pub status: Status,
+    /// What is left of a hold that ends by itself.
+    pub left: Option<Left>,
+    /// Which change of the setting this answers: a report from before the
+    /// latest [`Handle::set`] or [`Handle::pick`] says nothing about it.
+    change: u64,
+}
+
+#[cfg(test)]
+impl Report {
+    /// A report as the thread would write it (tests of the menu's text).
+    pub fn of(status: Status, left: Option<Left>) -> Report {
+        Report { status, left, change: 0 }
+    }
+}
+
 /// The keep-awake thread: tell it the setting, read its status, and shut it
 /// down on quit.
 pub struct Handle {
     tx: mpsc::Sender<Msg>,
-    status: Arc<Mutex<Status>>,
-    wanted: bool,
+    report: Arc<Mutex<Report>>,
+    /// The newest sign of Claude working (unix seconds; 0: none), for the
+    /// thread to read on its own poll: a running turn moves it every tick,
+    /// which must not wake the thread.
+    work: Arc<AtomicI64>,
+    wish: Wish,
+    /// How many times the wish has changed.
+    change: u64,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Handle {
-    /// Start the thread with the setting as saved. Its first tick deals
-    /// with what an earlier run left behind, whatever the setting.
-    pub fn spawn(paths: &Paths, wanted: bool) -> Handle {
-        let handle = Self::spawn_with(platform_backend(paths), platform_power, wanted);
+    /// Start the thread with what the saved setting asks. Its first tick
+    /// deals with what an earlier run left behind, whatever the setting.
+    pub fn spawn(paths: &Paths, wish: Wish) -> Handle {
+        let handle = Self::spawn_with(platform_backend(paths), platform_power, wish);
         #[cfg(target_os = "windows")]
         windows::on_session_end(handle.session_ender());
         #[cfg(target_os = "macos")]
@@ -97,30 +125,40 @@ impl Handle {
 
     /// [`Handle::spawn`] over any backend and power reading (tests).
     /// `power` is one reading; `None` when the reading failed.
-    fn spawn_with<B: Backend + Send + 'static>(backend: B, power: fn() -> Option<Power>, wanted: bool) -> Handle {
+    fn spawn_with<B: Backend + Send + 'static>(backend: B, power: fn() -> Option<Power>, wish: Wish) -> Handle {
         let (tx, rx) = mpsc::channel();
-        let status = Arc::new(Mutex::new(Status::Off));
-        let shared = status.clone();
+        let report = Arc::new(Mutex::new(Report::default()));
+        let work = Arc::new(AtomicI64::new(0));
+        let (shared, seen_work) = (report.clone(), work.clone());
         let thread = std::thread::Builder::new()
             .name("clawdmeter-keep-awake".into())
             .spawn(move || {
                 let mut keeper = Keeper::new(backend);
-                let mut wanted = wanted;
+                let (mut wish, mut change) = (wish, 0);
                 let mut readings = Readings::default();
                 // The OS session is ending: nothing is held until then.
                 #[cfg_attr(not(any(target_os = "windows", target_os = "macos", test)), allow(unused_mut))]
                 let mut ended: Option<Instant> = None;
                 loop {
-                    let hold = wanted && ended.is_none_or(|until| Instant::now() >= until);
+                    let asked = if ended.is_none_or(|until| Instant::now() >= until) { wish } else { Wish::Off };
                     // Nothing to read while it's off: no battery polling for
                     // a feature nobody switched on.
-                    let now_power = if hold { readings.settle(power()) } else { Power::UNKNOWN };
-                    let status = keeper.tick(hold, now_power, Instant::now()).clone();
-                    if let Ok(mut s) = shared.lock() {
-                        *s = status;
+                    let now_power = if asked == Wish::Off { Power::UNKNOWN } else { readings.settle(power()) };
+                    let clock = Clock { now: Instant::now(), unix: unix_now() };
+                    let work_at = Some(seen_work.load(Ordering::Relaxed)).filter(|at| *at != 0);
+                    let status = keeper.run(asked, now_power, clock, work_at).clone();
+                    let left = keeper.left(clock);
+                    if let Ok(mut r) = shared.lock() {
+                        *r = Report { status, left, change };
                     }
                     match rx.recv_timeout(POLL) {
-                        Ok(Msg::Want(w)) => wanted = w,
+                        Ok(Msg::Want(w, n)) => {
+                            // The same wish again is a new pick of it.
+                            if w == wish {
+                                keeper.start_over();
+                            }
+                            (wish, change) = (w, n);
+                        }
                         #[cfg(any(target_os = "windows", target_os = "macos", test))]
                         Ok(Msg::SessionEnd(done)) => {
                             ended = Some(Instant::now() + SESSION_END_GRACE);
@@ -136,20 +174,59 @@ impl Handle {
             })
             .map_err(|e| log::error!("keep awake: couldn't start its thread: {e}"))
             .ok();
-        Handle { tx, status, wanted, thread }
+        Handle { tx, report, work, wish, change: 0, thread }
     }
 
-    /// The setting as it is now; a change is acted on at once.
-    pub fn set(&mut self, wanted: bool) {
-        if self.wanted != wanted {
-            self.wanted = wanted;
-            let _ = self.tx.send(Msg::Want(wanted));
+    /// What the setting asks now; a change is acted on at once.
+    pub fn set(&mut self, wish: Wish) {
+        if self.wish != wish {
+            self.pick(wish);
         }
     }
 
-    /// What the thread last did.
+    /// A choice the user just made, acted on at once. Picking what is
+    /// already on starts it over: "Until Claude stops working" gets its
+    /// full idle time again, and a choice that just ended holds again.
+    pub fn pick(&mut self, wish: Wish) {
+        self.wish = wish;
+        self.change += 1;
+        let _ = self.tx.send(Msg::Want(wish, self.change));
+    }
+
+    /// The newest sign of Claude working the engine has (unix seconds), for
+    /// "until Claude stops working". Read on the thread's next poll.
+    pub fn note_work(&self, at: Option<i64>) {
+        self.work.store(at.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    /// What the thread last did about what the setting asks now. Until it
+    /// has looked at the latest change there is nothing to say: the note
+    /// of the choice before isn't shown under the new one.
+    pub fn report(&self) -> Report {
+        let report = self.report.lock().map(|r| r.clone()).unwrap_or_default();
+        if report.change == self.change {
+            report
+        } else {
+            Report { change: self.change, ..Report::default() }
+        }
+    }
+
+    /// The thread has looked at the latest change of the setting.
+    #[cfg(test)]
+    fn answered(&self) -> bool {
+        self.report.lock().is_ok_and(|r| r.change == self.change)
+    }
+
+    /// What the keeper is doing.
     pub fn status(&self) -> Status {
-        self.status.lock().map(|s| s.clone()).unwrap_or_default()
+        self.report().status
+    }
+
+    /// The time of what the setting asks now is up (a timer's deadline, or
+    /// Claude idle for long enough): the caller switches the setting off.
+    /// Never true of a wish the thread hasn't looked at yet.
+    pub fn ended(&self) -> bool {
+        self.report().status == Status::Ended
     }
 
     /// Let go and wait for the thread, so the OS is as it was before the
@@ -247,7 +324,7 @@ const LOCK_WAIT: Duration = Duration::from_secs(3);
 /// A name for this run of the app, for its restore records and its guard.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn run_id() -> String {
-    format!("{}-{}", std::process::id(), clawdmeter_core::unix_now())
+    format!("{}-{}", std::process::id(), unix_now())
 }
 
 /// The app's end of its guard ([`guard_main`]).
@@ -333,7 +410,7 @@ fn platform_power() -> Option<Power> {
     macos::power()
 }
 
-/// An OS with nothing to hold: the checkbox says so.
+/// An OS with nothing to hold: the menu says so.
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 struct Unsupported;
 
@@ -359,7 +436,7 @@ fn platform_power() -> Option<Power> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
     use std::time::Instant;
 
     use super::*;
@@ -389,15 +466,15 @@ mod tests {
     #[test]
     fn the_thread_follows_the_setting_and_releases_on_quit() {
         let (holds, releases) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let mut h = Handle::spawn_with(Counting(holds.clone(), releases.clone()), || Some(Power::UNKNOWN), false);
+        let mut h = Handle::spawn_with(Counting(holds.clone(), releases.clone()), || Some(Power::UNKNOWN), Wish::Off);
         assert_eq!(h.status(), Status::Off);
-        h.set(true);
+        h.set(Wish::Forever);
         wait_for(|| h.status() == Status::Holding);
         assert_eq!((holds.load(Ordering::SeqCst), releases.load(Ordering::SeqCst)), (1, 0));
-        h.set(false);
-        wait_for(|| h.status() == Status::Off);
+        h.set(Wish::Off);
+        wait_for(|| h.answered() && h.status() == Status::Off);
         assert_eq!(releases.load(Ordering::SeqCst), 1, "unticking lets go at once, not at the next poll");
-        h.set(true);
+        h.set(Wish::Forever);
         wait_for(|| h.status() == Status::Holding);
         h.shutdown();
         assert_eq!(
@@ -410,7 +487,7 @@ mod tests {
     #[test]
     fn a_saved_setting_holds_from_the_start_and_a_dropped_handle_lets_go() {
         let (holds, releases) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let h = Handle::spawn_with(Counting(holds.clone(), releases.clone()), || Some(Power::UNKNOWN), true);
+        let h = Handle::spawn_with(Counting(holds.clone(), releases.clone()), || Some(Power::UNKNOWN), Wish::Forever);
         wait_for(|| h.status() == Status::Holding);
         drop(h);
         assert_eq!((holds.load(Ordering::SeqCst), releases.load(Ordering::SeqCst)), (1, 1));
@@ -419,15 +496,16 @@ mod tests {
     #[test]
     fn the_end_of_the_os_session_lets_go_before_it_returns() {
         let (holds, releases) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let mut h = Handle::spawn_with(Counting(holds.clone(), releases.clone()), || Some(Power::UNKNOWN), true);
+        let mut h =
+            Handle::spawn_with(Counting(holds.clone(), releases.clone()), || Some(Power::UNKNOWN), Wish::Forever);
         wait_for(|| h.status() == Status::Holding);
         let end = h.session_ender();
         end();
         assert_eq!(releases.load(Ordering::SeqCst), 1, "released by the time the session-end call returns");
         wait_for(|| h.status() == Status::Off);
         // The process is about to be ended: nothing is taken again for now.
-        h.set(false);
-        h.set(true);
+        h.set(Wish::Off);
+        h.set(Wish::Forever);
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!((holds.load(Ordering::SeqCst), h.status()), (1, Status::Off));
     }
@@ -467,11 +545,54 @@ mod tests {
     }
 
     #[test]
+    fn a_timer_that_is_over_reports_ended_for_the_wish_it_was_asked() {
+        let (holds, releases) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        // A restart after the deadline: nothing is held, and the tray is
+        // told to switch the setting off.
+        let past = Wish::Until(unix_now() - 60);
+        let mut h = Handle::spawn_with(Counting(holds.clone(), releases.clone()), || Some(Power::UNKNOWN), past);
+        wait_for(|| h.ended());
+        assert_eq!(holds.load(Ordering::SeqCst), 0);
+        assert_eq!(h.report().left, None);
+        // A new pick: the old "ended" says nothing about it.
+        h.set(Wish::Until(unix_now() + 3600));
+        assert!(!h.ended(), "not before the thread has looked at the new wish");
+        wait_for(|| h.status() == Status::Holding);
+        assert!(!h.ended());
+        assert!(matches!(h.report().left, Some(Left::Time(secs)) if (3500..=3600).contains(&secs)), "{:?}", h.report());
+        h.set(Wish::Off);
+        wait_for(|| h.answered() && h.status() == Status::Off);
+        assert_eq!((holds.load(Ordering::SeqCst), releases.load(Ordering::SeqCst)), (1, 1));
+    }
+
+    #[test]
+    fn picking_an_ended_choice_again_holds_again() {
+        let (holds, releases) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let over = Wish::Until(unix_now() - 60);
+        let mut h = Handle::spawn_with(Counting(holds.clone(), releases), || Some(Power::UNKNOWN), over);
+        wait_for(|| h.ended());
+        // The setting saying the same thing again changes nothing.
+        h.set(over);
+        assert!(h.ended());
+        // A pick is acted on, also of what is already on: the old "ended"
+        // doesn't answer it.
+        h.pick(over);
+        assert!(!h.ended(), "not before the thread has looked at the pick");
+        wait_for(|| h.ended());
+        h.pick(Wish::WhileClaudeWorks);
+        wait_for(|| h.status() == Status::Holding);
+        h.note_work(Some(5));
+        h.pick(Wish::WhileClaudeWorks);
+        wait_for(|| h.answered() && h.status() == Status::Holding);
+        assert_eq!(holds.load(Ordering::SeqCst), 1, "the hold stood through the second pick");
+    }
+
+    #[test]
     fn low_battery_shows_as_paused() {
         use clawdmeter_core::keep_awake::Pause;
         let (holds, releases) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
         let low = || Some(Power { external: Some(false), battery_pct: Some(7) });
-        let h = Handle::spawn_with(Counting(holds.clone(), releases), low, true);
+        let h = Handle::spawn_with(Counting(holds.clone(), releases), low, Wish::Forever);
         wait_for(|| h.status() == Status::Paused(Pause::BatteryLow(7)));
         assert_eq!(holds.load(Ordering::SeqCst), 0, "never held under the floor");
     }

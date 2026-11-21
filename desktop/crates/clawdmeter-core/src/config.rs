@@ -518,10 +518,15 @@ pub struct Settings {
     /// The main meter's percentage beside the macOS menu bar icon
     /// (`menu_bar_usage`, default off).
     pub menu_bar_usage: bool,
-    /// Keep this computer awake with the lid closed (`keep_awake`, default
-    /// off): the tray's checkbox. [`crate::keep_awake`] has what it holds
+    /// Keep this computer awake with the lid closed, and for how long
+    /// (`keep_awake`: `off`, the default, `1h`, `3h`, `7h`, `claude` or
+    /// `on`): the tray's submenu. [`crate::keep_awake`] has what it holds
     /// and when it lets go.
-    pub keep_awake: bool,
+    pub keep_awake: crate::keep_awake::Mode,
+    /// When a timed `keep_awake` ends (`keep_awake_until`, unix seconds),
+    /// saved with the choice so a restart carries on; `None` with any other
+    /// choice.
+    pub keep_awake_until: Option<i64>,
     /// What the device's primary, secondary and PWR buttons do, by
     /// [`Button::index`] (`button_primary`, `button_secondary`, `button_pwr`;
     /// sent as `k1`, `k2`, `k3`).
@@ -672,6 +677,7 @@ impl Settings {
         let poll_interval = file_poll.or(env_default).unwrap_or(DEFAULT_POLL_INTERVAL);
         let heartbeat_interval =
             cfg.get("heartbeat_interval").and_then(parse_interval).unwrap_or(DEFAULT_HEARTBEAT_INTERVAL);
+        let keep_awake = cfg.get("keep_awake").map(crate::keep_awake::Mode::parse).unwrap_or_default();
         Settings {
             config_dirs: parse_config_dirs(cfg.get("config_dirs"), paths),
             codex_dirs: {
@@ -710,7 +716,11 @@ impl Settings {
             attention_anim: cfg.get("attention_anim").map(AttentionAnim::parse).unwrap_or_default(),
             pace_marker: on_off(cfg.get("pace_marker"), false),
             menu_bar_usage: on_off(cfg.get("menu_bar_usage"), false),
-            keep_awake: on_off(cfg.get("keep_awake"), false),
+            keep_awake,
+            keep_awake_until: cfg
+                .get("keep_awake_until")
+                .and_then(|v| v.trim().parse().ok())
+                .filter(|_| keep_awake.secs().is_some()),
             buttons: Button::ALL.map(|b| {
                 cfg.get(b.config_key()).map_or(b.default_action(), |v| ButtonAction::parse(v, b.default_action()))
             }),
@@ -820,13 +830,23 @@ impl Settings {
             ("desktop_chime", "", self.desktop_chime, current.desktop_chime),
             ("pace_marker", "", self.pace_marker, current.pace_marker),
             ("menu_bar_usage", "", self.menu_bar_usage, current.menu_bar_usage),
-            ("keep_awake", "", self.keep_awake, current.keep_awake),
         ] {
             if now != was {
                 cfg.set(key, oo(now));
                 if !old.is_empty() {
                     cfg.remove(old);
                 }
+            }
+        }
+        if current.keep_awake != self.keep_awake {
+            cfg.set("keep_awake", self.keep_awake.as_str());
+        }
+        // The deadline belongs to a timed choice and goes with it.
+        let until = self.keep_awake_until.filter(|_| self.keep_awake.secs().is_some());
+        if current.keep_awake_until != until {
+            match until {
+                Some(at) => cfg.set("keep_awake_until", &at.to_string()),
+                None => cfg.remove("keep_awake_until"),
             }
         }
         if current.clock != self.clock {
@@ -1390,18 +1410,39 @@ mod tests {
 
     #[test]
     fn keep_awake() {
-        assert!(!settings("").keep_awake, "off by default");
-        assert!(settings("keep_awake = on\n").keep_awake);
-        assert!(!settings("keep_awake = yes\n").keep_awake, "only an explicit on");
+        use crate::keep_awake::Mode;
+        assert_eq!(settings("").keep_awake, Mode::Off, "off by default");
+        assert_eq!(settings("keep_awake = on\n").keep_awake, Mode::Forever, "the checkbox's old value is Forever");
+        assert_eq!(settings("keep_awake = yes\n").keep_awake, Mode::Off, "only a known value holds");
+        assert_eq!(settings("keep_awake = 2h\n").keep_awake, Mode::Off);
+        for (text, mode) in [("1h", Mode::Hour1), ("3H", Mode::Hours3), ("7h", Mode::Hours7), ("Claude", Mode::Claude)]
+        {
+            assert_eq!(settings(&format!("keep_awake = {text}\n")).keep_awake, mode, "{text}");
+        }
+        for mode in Mode::ALL {
+            assert_eq!(Mode::parse(mode.as_str()), mode);
+        }
+
+        // The deadline belongs to a timed choice.
+        let timed = settings("keep_awake = 3h\nkeep_awake_until = 1790000000\n");
+        assert_eq!((timed.keep_awake, timed.keep_awake_until), (Mode::Hours3, Some(1_790_000_000)));
+        assert_eq!(settings("keep_awake = on\nkeep_awake_until = 1790000000\n").keep_awake_until, None);
+        assert_eq!(settings("keep_awake = 3h\nkeep_awake_until = soon\n").keep_awake_until, None);
 
         let mut cfg = ConfigFile::parse("");
         let mut s = Settings::from_config(&cfg, &paths(), None);
         s.apply_to(&mut cfg, &paths());
         assert!(cfg.get("keep_awake").is_none(), "the default stays out of the file");
-        s.keep_awake = true;
+        s.keep_awake = Mode::Hours7;
+        s.keep_awake_until = Some(1_790_000_000);
         s.apply_to(&mut cfg, &paths());
-        assert_eq!(cfg.get("keep_awake"), Some("on"));
-        s.keep_awake = false;
+        assert_eq!((cfg.get("keep_awake"), cfg.get("keep_awake_until")), (Some("7h"), Some("1790000000")));
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.keep_awake = Mode::Claude;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!((cfg.get("keep_awake"), cfg.get("keep_awake_until")), (Some("claude"), None), "the deadline goes");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.keep_awake = Mode::Off;
         s.apply_to(&mut cfg, &paths());
         assert_eq!(cfg.get("keep_awake"), Some("off"));
     }
