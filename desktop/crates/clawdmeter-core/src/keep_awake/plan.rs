@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Power, RestoreFile};
+use super::{Check, Power, RestoreFile};
 
 /// One of the plan's settings this module changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -92,12 +92,14 @@ pub struct PlanHold<P: Plan> {
     file: RestoreFile,
     /// The plan the hold was taken in.
     scheme: Option<String>,
+    /// The last check found the lid action changed by someone else.
+    overridden: bool,
 }
 
 impl<P: Plan> PlanHold<P> {
     /// A hold over `plan`, with its record in `file`. Touches nothing.
     pub fn new(plan: P, file: RestoreFile) -> Self {
-        PlanHold { plan, file, scheme: None }
+        PlanHold { plan, file, scheme: None, overridden: false }
     }
 
     /// Edit the plan in use. An earlier record is put back first, so the
@@ -134,6 +136,7 @@ impl<P: Plan> PlanHold<P> {
             }
         }
         self.scheme = Some(scheme);
+        self.overridden = false;
         Ok(())
     }
 
@@ -150,25 +153,75 @@ impl<P: Plan> PlanHold<P> {
         Ok(())
     }
 
-    /// Whether the hold still stands: the plan it edited is the one in use.
-    /// A switch to another plan loses it, and the next [`hold`] moves it.
+    /// Whether the hold still stands:
+    ///
+    /// - [`Check::Lost`] when another plan is in use: the next [`hold`]
+    ///   moves it there.
+    /// - [`Check::Unknown`] when Windows wouldn't say which plan is in use
+    ///   or what its lid action is. That is no reason to put the plan back.
+    /// - [`Check::Standing`] otherwise, and [`overridden`] then says whether
+    ///   the lid action still reads "Do nothing". A value someone else
+    ///   changed (an OEM tool, `powercfg -restoredefaultschemes`, the user)
+    ///   is not written back: it is theirs, here and on restore.
     ///
     /// [`hold`]: PlanHold::hold
-    pub fn holding(&mut self) -> bool {
-        match (&self.scheme, self.plan.active()) {
-            (Some(held), Ok(active)) => *held == active,
-            _ => false,
+    /// [`overridden`]: PlanHold::overridden
+    pub fn check(&mut self) -> Check {
+        let Some(held) = self.scheme.clone() else { return Check::Lost };
+        match self.plan.active() {
+            Ok(active) if active == held => {}
+            Ok(_) => return Check::Lost,
+            Err(e) => return Check::Unknown(e),
         }
+        let mut overridden = false;
+        for source in [Source::Ac, Source::Dc] {
+            match self.plan.read(&held, Setting::LidAction, source) {
+                // A plan with no lid action has no lid to hold.
+                Ok(None | Some(OFF)) => {}
+                Ok(Some(_)) => overridden = true,
+                Err(e) => return Check::Unknown(e),
+            }
+        }
+        if overridden != self.overridden {
+            if overridden {
+                log::warn!("keep awake: the power plan's lid action was changed by something else; leaving it");
+            } else {
+                log::info!("keep awake: the power plan's lid action reads Do nothing again");
+            }
+            self.overridden = overridden;
+        }
+        Check::Standing
+    }
+
+    /// Whether the last [`check`](PlanHold::check) found the lid action
+    /// changed by someone else: the lid is then not held.
+    pub fn overridden(&self) -> bool {
+        self.overridden
     }
 
     /// Put back what the record says and drop it. With no record there is
     /// nothing to do. `Err` keeps the record for another try.
     pub fn restore(&mut self) -> Result<(), String> {
-        self.scheme = None;
+        self.restore_for(None)
+    }
+
+    /// [`restore`](PlanHold::restore), and with `run` only a record that
+    /// run saved (the guard's restore: a later run's record is not its to
+    /// undo). The owner comes from the same read as the values, so the
+    /// record acted on is the one that was checked.
+    pub fn restore_for(&mut self, run: Option<&str>) -> Result<(), String> {
         let path = self.file.path().display().to_string();
-        let saved: Saved = match self.file.load() {
+        let loaded = self.file.load_owned::<Saved>();
+        if let Some(run) = run {
+            if !matches!(&loaded, Ok(Some((Some(owner), _))) if owner == run) {
+                return Ok(());
+            }
+        }
+        self.scheme = None;
+        self.overridden = false;
+        let saved = match loaded {
             Ok(None) => return Ok(()),
-            Ok(Some(saved)) => saved,
+            Ok(Some((_, saved))) => saved,
             Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
                 // The old values can't be had from it, and keeping it would
                 // refuse every hold from here on.
@@ -377,19 +430,20 @@ mod tests {
     fn a_hold_edits_the_plan_and_a_restore_puts_it_back() {
         let (fake, file) = (laptop(), scratch("roundtrip"));
         let mut hold = PlanHold::new(fake.clone(), file.clone());
-        assert!(!hold.holding());
+        assert_eq!(hold.check(), Check::Lost);
         hold.hold().unwrap();
         assert_eq!(plan_of(&fake, BALANCED), [0, 0, 1800, 0], "lid: nothing; battery sleep: never; AC sleep untouched");
         assert_eq!(plan_of(&fake, SAVER), [1, 2, 1800, 900], "only the plan in use");
         assert_eq!(fake.0.borrow().applied, [BALANCED], "applied, so it takes effect");
         assert!(file.path().exists(), "the old values are on disk");
-        assert!(hold.holding());
+        assert_eq!(hold.check(), Check::Standing);
+        assert!(!hold.overridden());
 
         hold.restore().unwrap();
         assert_eq!(plan_of(&fake, BALANCED), [1, 2, 1800, 900]);
         assert_eq!(fake.0.borrow().applied, [BALANCED, BALANCED]);
         assert!(!file.path().exists(), "nothing left to put back");
-        assert!(!hold.holding());
+        assert_eq!(hold.check(), Check::Lost);
         hold.restore().unwrap();
         assert_eq!(fake.0.borrow().applied.len(), 2, "a second restore has nothing to do");
     }
@@ -444,7 +498,7 @@ mod tests {
         fake.0.borrow_mut().values.insert((BALANCED.into(), Setting::SleepAfter, Source::Dc), OFF);
         let applied = fake.0.borrow().applied.len();
         hold.hold().unwrap();
-        assert!(hold.holding());
+        assert_eq!(hold.check(), Check::Standing);
         assert!(!file.path().exists());
         assert_eq!(fake.0.borrow().applied.len(), applied);
     }
@@ -455,7 +509,7 @@ mod tests {
         let mut hold = PlanHold::new(fake.clone(), file);
         hold.hold().unwrap();
         fake.0.borrow_mut().active = SAVER.into();
-        assert!(!hold.holding(), "the plan in use isn't the one edited");
+        assert_eq!(hold.check(), Check::Lost, "the plan in use isn't the one edited");
         let applied = fake.0.borrow().applied.len();
         hold.hold().unwrap();
         assert_eq!(plan_of(&fake, BALANCED), [1, 2, 1800, 900], "the old plan is as it was");
@@ -465,9 +519,85 @@ mod tests {
             [SAVER],
             "the old plan is never applied: that would switch back"
         );
-        assert!(hold.holding());
+        assert_eq!(hold.check(), Check::Standing);
         hold.restore().unwrap();
         assert_eq!(plan_of(&fake, SAVER), [1, 2, 1800, 900]);
+    }
+
+    #[test]
+    fn a_check_that_fails_says_unknown_and_leaves_the_plan_edited() {
+        let (fake, file) = (laptop(), scratch("check-fails"));
+        let mut hold = PlanHold::new(fake.clone(), file.clone());
+        hold.hold().unwrap();
+        // Windows won't say which plan is in use: no reason to undo the hold.
+        fake.0.borrow_mut().fail_active = true;
+        assert_eq!(hold.check(), Check::Unknown("no active plan".into()));
+        fake.0.borrow_mut().fail_active = false;
+        // Nor is a lid action that can't be read "changed".
+        fake.0.borrow_mut().fail_read = true;
+        assert_eq!(hold.check(), Check::Unknown("can't read".into()));
+        assert!(!hold.overridden());
+        fake.0.borrow_mut().fail_read = false;
+        assert_eq!(hold.check(), Check::Standing);
+        assert_eq!(plan_of(&fake, BALANCED), [0, 0, 1800, 0], "still held");
+        assert!(file.path().exists());
+    }
+
+    #[test]
+    fn a_lid_action_changed_by_someone_else_is_reported_and_not_fought() {
+        let (fake, file) = (laptop(), scratch("overridden"));
+        let mut hold = PlanHold::new(fake.clone(), file);
+        hold.hold().unwrap();
+        // An OEM tool, or `powercfg -restoredefaultschemes`, puts Sleep back.
+        fake.0.borrow_mut().values.insert((BALANCED.into(), Setting::LidAction, Source::Dc), 1);
+        let applied = fake.0.borrow().applied.len();
+        assert_eq!(hold.check(), Check::Standing, "the hold isn't lost: it isn't taken again over their change");
+        assert!(hold.overridden(), "but the lid is no longer held, and the menu says so");
+        assert_eq!(hold.check(), Check::Standing);
+        assert_eq!(plan_of(&fake, BALANCED), [0, 1, 1800, 0], "nothing written back");
+        assert_eq!(fake.0.borrow().applied.len(), applied);
+        // Set back to Do nothing (by them): held again.
+        fake.0.borrow_mut().values.insert((BALANCED.into(), Setting::LidAction, Source::Dc), OFF);
+        assert_eq!(hold.check(), Check::Standing);
+        assert!(!hold.overridden());
+        // Changed again, then unticked: their value stays, the rest goes back.
+        fake.0.borrow_mut().values.insert((BALANCED.into(), Setting::LidAction, Source::Ac), 3);
+        assert_eq!(hold.check(), Check::Standing);
+        assert!(hold.overridden());
+        hold.restore().unwrap();
+        assert_eq!(plan_of(&fake, BALANCED), [3, 2, 1800, 900]);
+        assert!(!hold.overridden());
+    }
+
+    #[test]
+    fn a_guard_restores_only_the_record_its_own_run_saved() {
+        let (fake, file) = (laptop(), scratch("guard"));
+        let dir = file.path().parent().unwrap().to_owned();
+        let record = |run: &str| RestoreFile::in_dir(&dir).owned_by(run);
+        // Run 1 holds and is killed. Run 2 starts at once and holds: it puts
+        // run 1's record back and saves its own.
+        PlanHold::new(fake.clone(), record("run-1")).hold().unwrap();
+        let mut second = PlanHold::new(fake.clone(), record("run-2"));
+        second.hold().unwrap();
+        // Run 1's guard wakes up late. The record on disk is run 2's.
+        let mut guard = PlanHold::new(fake.clone(), RestoreFile::in_dir(&dir));
+        guard.restore_for(Some("run-1")).unwrap();
+        assert_eq!(plan_of(&fake, BALANCED), [0, 0, 1800, 0], "run 2's hold is not run 1's guard's to undo");
+        assert!(file.path().exists());
+        assert_eq!(second.check(), Check::Standing);
+        // Run 2's own guard does restore it, and the real originals.
+        guard.restore_for(Some("run-2")).unwrap();
+        assert_eq!(plan_of(&fake, BALANCED), [1, 2, 1800, 900]);
+        assert!(!file.path().exists());
+        // No record, one that names nobody and one that doesn't parse are
+        // no guard's business.
+        guard.restore_for(Some("run-2")).unwrap();
+        PlanHold::new(fake.clone(), RestoreFile::in_dir(&dir)).hold().unwrap();
+        guard.restore_for(Some("run-2")).unwrap();
+        assert_eq!(plan_of(&fake, BALANCED), [0, 0, 1800, 0]);
+        std::fs::write(file.path(), b"{").unwrap();
+        guard.restore_for(Some("run-2")).unwrap();
+        assert!(file.path().exists(), "left for the next start to deal with");
     }
 
     #[test]
@@ -478,7 +608,7 @@ mod tests {
         assert_eq!(hold.hold(), Err("access denied".into()));
         assert_eq!(plan_of(&fake, BALANCED), [1, 2, 1800, 900]);
         assert!(!file.path().exists());
-        assert!(!hold.holding());
+        assert_eq!(hold.check(), Check::Lost);
 
         // Applied but not kept (a policy the check didn't see): undone too.
         let mut s = fake.0.borrow_mut();

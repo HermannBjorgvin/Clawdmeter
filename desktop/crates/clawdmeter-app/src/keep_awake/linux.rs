@@ -37,7 +37,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use clawdmeter_core::keep_awake::{Backend, Power};
+use clawdmeter_core::keep_awake::{Backend, Check, Power};
 use dbus::arg::OwnedFd;
 use dbus::blocking::Connection;
 
@@ -90,7 +90,7 @@ impl Backend for Logind {
         self.plasma.then(|| PLASMA_CAVEAT.to_owned())
     }
 
-    fn holding(&mut self) -> bool {
+    fn check(&mut self) -> Check {
         // The lid lock stands while its descriptor is open. The desktop's
         // inhibitors go with their connection: if it drops they are taken
         // again here, and the lid lock is left alone (letting go of it with
@@ -110,7 +110,13 @@ impl Backend for Logind {
                 self.idle_lost = false;
             }
         }
-        self.lid.is_some()
+        // The lock is an open descriptor in this process: nothing can fail
+        // about looking at it.
+        if self.lid.is_some() {
+            Check::Standing
+        } else {
+            Check::Lost
+        }
     }
 
     fn release(&mut self) -> Result<(), String> {

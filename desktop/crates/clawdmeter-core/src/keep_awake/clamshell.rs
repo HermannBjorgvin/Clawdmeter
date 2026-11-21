@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Power, RestoreFile};
+use super::{Check, Power, RestoreFile};
 
 /// The kernel's lid flag.
 pub trait Lid {
@@ -67,14 +67,21 @@ impl<L: Lid> LidHold<L> {
         Ok(())
     }
 
-    /// Set the flag again, in case `powerd` cleared it. `false`: it couldn't
-    /// be set, and the hold is lost. The marker is written again first if
-    /// it has gone, so a set flag is never without one.
-    pub fn renew(&mut self) -> bool {
-        if !self.file.path().exists() && self.file.save(&Mark { lid_sleep_disabled: true }).is_err() {
-            return false;
+    /// Set the flag again, in case `powerd` cleared it. The marker is
+    /// written again first if it has gone, so a set flag is never without
+    /// one. A failure of either is [`Check::Unknown`], never a lost hold:
+    /// it didn't clear the flag, and letting go over it would, which sleeps
+    /// a Mac whose lid is shut.
+    pub fn renew(&mut self) -> Check {
+        if !self.file.path().exists() {
+            if let Err(e) = self.file.save(&Mark { lid_sleep_disabled: true }) {
+                return Check::Unknown(format!("can't save {}: {e}", self.file.path().display()));
+            }
         }
-        self.lid.set_sleep_disabled(true).is_ok()
+        match self.lid.set_sleep_disabled(true) {
+            Ok(()) => Check::Standing,
+            Err(e) => Check::Unknown(e),
+        }
     }
 
     /// Clear the flag if this hold set it or the marker says an earlier run
@@ -82,8 +89,22 @@ impl<L: Lid> LidHold<L> {
     /// clear is the flag's default, so clearing is always the safe side.
     /// `Err` keeps the marker for another try.
     pub fn restore(&mut self) -> Result<(), String> {
-        if !self.set && matches!(self.file.load::<Mark>(), Ok(None)) {
-            return Ok(());
+        self.restore_for(None)
+    }
+
+    /// [`restore`](LidHold::restore), and with `run` only when the marker
+    /// on disk is one that run saved (the guard's restore: a later run's
+    /// flag is not its to clear).
+    pub fn restore_for(&mut self, run: Option<&str>) -> Result<(), String> {
+        let marker = self.file.load_owned::<Mark>();
+        match run {
+            Some(run) => {
+                if !matches!(&marker, Ok(Some((Some(owner), _))) if owner == run) {
+                    return Ok(());
+                }
+            }
+            None if !self.set && matches!(marker, Ok(None)) => return Ok(()),
+            None => {}
         }
         self.lid.set_sleep_disabled(false)?;
         self.set = false;
@@ -163,7 +184,7 @@ mod tests {
         hold.hold().unwrap();
         assert!(*fake.flag.borrow());
         assert!(file.path().exists(), "marked on disk for the next start");
-        assert!(hold.renew());
+        assert_eq!(hold.renew(), Check::Standing);
         assert_eq!(*fake.calls.borrow(), [true, true], "set again on a poll");
         hold.restore().unwrap();
         assert!(!*fake.flag.borrow());
@@ -177,12 +198,54 @@ mod tests {
         hold.hold().unwrap();
         // Something else removed the marker (a second instance letting go).
         file.clear().unwrap();
-        assert!(hold.renew());
+        assert_eq!(hold.renew(), Check::Standing);
         assert!(file.path().exists(), "a crash now is still healed by the next start");
         // Gone again, and the box is unticked before the next renew.
         file.clear().unwrap();
         hold.restore().unwrap();
         assert!(!*fake.flag.borrow(), "this hold set the flag, so it clears it without the marker's say");
+    }
+
+    #[test]
+    fn a_renew_that_cant_write_its_marker_is_unknown_and_clears_nothing() {
+        let (fake, file) = (Fake::default(), scratch("renew-fails"));
+        let mut hold = LidHold::new(fake.clone(), file.clone());
+        hold.hold().unwrap();
+        // The marker goes and can't be written again (here: a folder where
+        // its temporary file belongs; in the field, a full disk).
+        file.clear().unwrap();
+        let blocker = file.path().with_extension("json.tmp");
+        std::fs::create_dir_all(&blocker).unwrap();
+        assert!(matches!(hold.renew(), Check::Unknown(_)));
+        assert!(*fake.flag.borrow(), "the flag is as it was: the Mac stays awake");
+        assert_eq!(*fake.calls.borrow(), [true], "and nothing cleared it");
+        std::fs::remove_dir_all(&blocker).unwrap();
+        assert_eq!(hold.renew(), Check::Standing);
+    }
+
+    #[test]
+    fn a_guard_clears_only_the_flag_its_own_run_marked() {
+        let (fake, file) = (Fake::default(), scratch("guard"));
+        let dir = file.path().parent().unwrap().to_owned();
+        let marker = |run: &str| RestoreFile::in_dir(&dir).owned_by(run);
+        // Run 1 holds and is killed; run 2 starts at once and takes over.
+        LidHold::new(fake.clone(), marker("run-1")).hold().unwrap();
+        LidHold::new(fake.clone(), marker("run-2")).hold().unwrap();
+        // Run 1's guard wakes up late.
+        let mut guard = LidHold::new(fake.clone(), RestoreFile::in_dir(&dir));
+        guard.restore_for(Some("run-1")).unwrap();
+        assert!(*fake.flag.borrow(), "run 2's flag is not run 1's guard's to clear");
+        assert!(file.path().exists());
+        // Run 2's own guard clears it.
+        guard.restore_for(Some("run-2")).unwrap();
+        assert!(!*fake.flag.borrow());
+        assert!(!file.path().exists());
+        // With no marker, or one it can't read, a guard does nothing.
+        *fake.flag.borrow_mut() = true;
+        guard.restore_for(Some("run-2")).unwrap();
+        std::fs::write(file.path(), b"{").unwrap();
+        guard.restore_for(Some("run-2")).unwrap();
+        assert!(*fake.flag.borrow());
     }
 
     #[test]
@@ -211,7 +274,7 @@ mod tests {
         *fake.fail.borrow_mut() = true;
         assert_eq!(hold.hold(), Err("not permitted".into()));
         assert!(file.path().exists(), "the clear failed too, so the marker waits for another try");
-        assert!(!hold.renew());
+        assert_eq!(hold.renew(), Check::Unknown("not permitted".into()), "a failed set is not a lost hold");
         *fake.fail.borrow_mut() = false;
         hold.restore().unwrap();
         assert!(!file.path().exists());

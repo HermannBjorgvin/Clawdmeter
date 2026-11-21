@@ -15,7 +15,7 @@ use std::ptr;
 use std::sync::Mutex;
 
 use clawdmeter_core::keep_awake::plan::{self, Plan, PlanHold, Setting, Source};
-use clawdmeter_core::keep_awake::{Backend, Power, RestoreFile};
+use clawdmeter_core::keep_awake::{Backend, Check, Power, RestoreFile};
 use clawdmeter_core::Paths;
 use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::{
@@ -217,19 +217,36 @@ pub(super) struct PowerPlan {
     guard: Option<super::Guard>,
     /// This run's name, in its restore records and its guard's argument.
     run: String,
+    /// Where the restore record and its lock are.
+    state_dir: std::path::PathBuf,
 }
+
+/// The menu's words when something else changed the lid action back.
+const OVERRIDDEN: &str = "not holding: the lid setting was changed elsewhere";
 
 impl PowerPlan {
     pub(super) fn new(paths: &Paths) -> Self {
         let run = super::run_id();
         let file = RestoreFile::in_dir(&paths.state_dir).owned_by(run.clone());
-        PowerPlan { plan: PlanHold::new(WinPlan, file), request: None, guard: None, run }
+        PowerPlan {
+            plan: PlanHold::new(WinPlan, file),
+            request: None,
+            guard: None,
+            run,
+            state_dir: paths.state_dir.clone(),
+        }
     }
 }
 
 impl Backend for PowerPlan {
     fn heal(&mut self) -> Result<(), String> {
+        let _lock = super::record_lock(&self.state_dir);
         self.plan.restore()
+    }
+
+    fn heal_for(&mut self, run: &str) -> Result<(), String> {
+        let _lock = super::record_lock(&self.state_dir);
+        self.plan.restore_for(Some(run))
     }
 
     fn hold(&mut self) -> Result<(), String> {
@@ -237,6 +254,7 @@ impl Backend for PowerPlan {
         if self.guard.is_none() {
             self.guard = super::Guard::start(&self.run);
         }
+        let _lock = super::record_lock(&self.state_dir);
         self.plan.hold()?;
         // The lid is held without it; idle sleep is then the plan's own
         // timeout.
@@ -244,12 +262,17 @@ impl Backend for PowerPlan {
         Ok(())
     }
 
-    fn holding(&mut self) -> bool {
-        self.plan.holding()
+    fn caveat(&self) -> Option<String> {
+        self.plan.overridden().then(|| OVERRIDDEN.to_owned())
+    }
+
+    fn check(&mut self) -> Check {
+        self.plan.check()
     }
 
     fn release(&mut self) -> Result<(), String> {
         self.request = None;
+        let _lock = super::record_lock(&self.state_dir);
         // A failed restore keeps its guard: if this process dies before the
         // next try, the guard makes one.
         self.plan.restore()?;

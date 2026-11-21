@@ -185,6 +185,10 @@ Things to know:
 - **Windows:** if your organisation's policy sets the lid action, the item
   reads *(unavailable)* and nothing is changed. If you switch power plans
   while the box is ticked, the old plan is put back and the new one edited.
+  If something else sets the lid action back while the box is ticked (a
+  vendor's power tool, a reset of the power plans, you in Control Panel),
+  the app leaves that value alone, then and when you untick, and the item
+  reads *(not holding: the lid setting was changed elsewhere)*.
   Some laptops with Modern Standby are reported to enter standby on a lid
   close whatever the lid action says; on those this may not be enough,
   above all on battery.

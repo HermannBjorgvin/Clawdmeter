@@ -42,7 +42,11 @@ is faked behind `FlashHardware`.
   recorded in `<state>/keep-awake-restore.json` before the change and
   healed on the next start; `heal` is skipped when the first tick holds,
   because clearing the macOS flag with the lid shut sleeps the Mac; a
-  release that fails is retried on every tick).
+  release that fails is retried on every tick. `Backend::check` answers
+  `Standing`, `Lost` or `Unknown`: only `Lost` releases and re-takes, and
+  a check that failed keeps the hold, for the same reason. A lid action
+  someone else changed is theirs: never written back, shown as the
+  backend's `caveat`. Retry waits run on `Instant`, not the wall clock).
 - `clawdmeter-ble`: btleplug link. The manager and adapter come from one
   `Bluetooth` handle per runtime (`bluetooth.rs`), kept for good: on Linux
   every btleplug `Manager` is a D-Bus connection that is never closed, on
@@ -116,7 +120,9 @@ is faked behind `FlashHardware`.
   macOS each hold also starts a guard, `clawdmeter keep-awake-guard <run>`:
   a child in its own process group that waits on a stdin pipe and restores
   when the app dies without dismissing it, if the restore record still
-  names that run. The Windows and macOS halves can't be run from Linux, so
+  names that run (`Backend::heal_for`: the owner is read with the record
+  it acts on). Every read-act-rewrite of the record, by the app or a
+  guard, runs under `<state>/keep-awake-restore.lock`. The Windows and macOS halves can't be run from Linux, so
   check them on hardware when changing them; the macOS half can at least be
   clippy-checked from Linux in a scratch crate that copies the `keep_awake`
   modules, since only ring's C build stops the real cross-check).

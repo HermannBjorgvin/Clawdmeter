@@ -20,7 +20,7 @@ use std::ptr;
 use std::sync::Mutex;
 
 use clawdmeter_core::keep_awake::clamshell::{self, Lid, LidHold};
-use clawdmeter_core::keep_awake::{Backend, Power, RestoreFile};
+use clawdmeter_core::keep_awake::{Backend, Check, Power, RestoreFile};
 use clawdmeter_core::Paths;
 use objc2::rc::Retained;
 use objc2_foundation::NSString;
@@ -149,19 +149,33 @@ pub(super) struct Clamshell {
     guard: Option<super::Guard>,
     /// This run's name, in its restore records and its guard's argument.
     run: String,
+    /// Where the marker and its lock are.
+    state_dir: std::path::PathBuf,
 }
 
 impl Clamshell {
     pub(super) fn new(paths: &Paths) -> Self {
         let run = super::run_id();
         let file = RestoreFile::in_dir(&paths.state_dir).owned_by(run.clone());
-        Clamshell { lid: LidHold::new(RootDomain, file), idle: None, guard: None, run }
+        Clamshell {
+            lid: LidHold::new(RootDomain, file),
+            idle: None,
+            guard: None,
+            run,
+            state_dir: paths.state_dir.clone(),
+        }
     }
 }
 
 impl Backend for Clamshell {
     fn heal(&mut self) -> Result<(), String> {
+        let _lock = super::record_lock(&self.state_dir);
         self.lid.restore()
+    }
+
+    fn heal_for(&mut self, run: &str) -> Result<(), String> {
+        let _lock = super::record_lock(&self.state_dir);
+        self.lid.restore_for(Some(run))
     }
 
     fn hold(&mut self) -> Result<(), String> {
@@ -169,6 +183,7 @@ impl Backend for Clamshell {
         if self.guard.is_none() {
             self.guard = super::Guard::start(&self.run);
         }
+        let _lock = super::record_lock(&self.state_dir);
         self.lid.hold()?;
         // The lid is held without it; idle sleep is then the Mac's own
         // timeout.
@@ -180,12 +195,13 @@ impl Backend for Clamshell {
         Some("experimental".into())
     }
 
-    fn holding(&mut self) -> bool {
+    fn check(&mut self) -> Check {
         self.lid.renew()
     }
 
     fn release(&mut self) -> Result<(), String> {
         self.idle = None;
+        let _lock = super::record_lock(&self.state_dir);
         // A failed clear keeps its guard: if this process dies before the
         // next try, the guard makes one.
         self.lid.restore()?;

@@ -45,8 +45,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use clawdmeter_core::keep_awake::{Backend, Keeper, Power, RestoreFile, Status};
-use clawdmeter_core::{unix_now, Paths};
+use clawdmeter_core::keep_awake::{Backend, Keeper, Power, Status};
+use clawdmeter_core::Paths;
 
 /// How often the power source and the hold are looked at again.
 const POLL: Duration = Duration::from_secs(15);
@@ -113,7 +113,7 @@ impl Handle {
                     // Nothing to read while it's off: no battery polling for
                     // a feature nobody switched on.
                     let now_power = if hold { power() } else { Power::UNKNOWN };
-                    let status = keeper.tick(hold, now_power, unix_now()).clone();
+                    let status = keeper.tick(hold, now_power, Instant::now()).clone();
                     if let Ok(mut s) = shared.lock() {
                         *s = status;
                     }
@@ -192,9 +192,10 @@ impl Drop for Handle {
 /// the OS back from the restore record, if the record is still that run's
 /// (`run`, the app's `run_id`): a later run's hold is not its to undo.
 pub fn guard_main(paths: &Paths, run: Option<&str>) -> i32 {
-    if app_died(std::io::stdin()) && is_runs_record(&RestoreFile::in_dir(&paths.state_dir), run) {
+    // A guard started by hand names no run and heals nothing.
+    if let (true, Some(run)) = (app_died(std::io::stdin()), run) {
         // Nobody to tell if it fails: the next start tries again.
-        let _ = platform_backend(paths).heal();
+        let _ = platform_backend(paths).heal_for(run);
     }
     0
 }
@@ -206,15 +207,27 @@ fn app_died(mut pipe: impl std::io::Read) -> bool {
     matches!(pipe.read(&mut word), Ok(0))
 }
 
-/// Whether the record on disk was saved by `run`.
-fn is_runs_record(file: &RestoreFile, run: Option<&str>) -> bool {
-    run.is_some() && file.owner().as_deref() == run
+/// The lock every process takes around reading the restore record, acting
+/// on it and rewriting it: `<state>/keep-awake-restore.lock`, held while
+/// the returned file is open. With it a guard's "is this record my run's?
+/// then restore it" and a new run's hold can't interleave: whichever comes
+/// second sees what the first left. `None` (the lock can't be had): go on
+/// without, as the record's owner is still checked on the copy acted on.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+fn record_lock(state_dir: &std::path::Path) -> Option<std::fs::File> {
+    let locked = std::fs::create_dir_all(state_dir)
+        .and_then(|()| {
+            let path = state_dir.join("keep-awake-restore.lock");
+            std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path)
+        })
+        .and_then(|file| file.lock().map(|()| file));
+    locked.map_err(|e| log::debug!("keep awake: no lock on the restore record ({e})")).ok()
 }
 
 /// A name for this run of the app, for its restore records and its guard.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn run_id() -> String {
-    format!("{}-{}", std::process::id(), unix_now())
+    format!("{}-{}", std::process::id(), clawdmeter_core::unix_now())
 }
 
 /// The app's end of its guard ([`guard_main`]).
@@ -400,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn the_guard_heals_only_a_dead_apps_own_record() {
+    fn the_guard_acts_only_on_its_apps_death() {
         struct Broken;
         impl std::io::Read for Broken {
             fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
@@ -410,17 +423,26 @@ mod tests {
         assert!(app_died(&b""[..]), "the pipe closed with nothing said: the app is gone");
         assert!(!app_died(&b"q"[..]), "dismissed: the app let go itself");
         assert!(!app_died(Broken), "an error isn't a death");
+    }
 
-        let dir = std::env::temp_dir().join(format!("cm-keep-awake-guard-{}", std::process::id()));
+    #[test]
+    fn the_record_lock_lets_one_holder_in_at_a_time() {
+        let dir = std::env::temp_dir().join(format!("cm-keep-awake-lock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let file = RestoreFile::in_dir(&dir);
-        assert!(!is_runs_record(&file, Some("run-1")), "no record, nothing to heal");
-        RestoreFile::in_dir(&dir).owned_by("run-1").save(&1u32).unwrap();
-        assert!(is_runs_record(&file, Some("run-1")));
-        assert!(!is_runs_record(&file, None), "a guard started by hand heals nothing");
-        // A later run holds by the time the old guard wakes up.
-        RestoreFile::in_dir(&dir).owned_by("run-2").save(&1u32).unwrap();
-        assert!(!is_runs_record(&file, Some("run-1")), "not its app's hold to undo");
+        let first = record_lock(&dir).expect("the lock");
+        let entered = Arc::new(AtomicUsize::new(0));
+        let (seen, there) = (entered.clone(), dir.clone());
+        // A guard, say, while the app is in the middle of a hold.
+        let second = std::thread::spawn(move || {
+            let lock = record_lock(&there).expect("the lock");
+            seen.store(1, Ordering::SeqCst);
+            drop(lock);
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(entered.load(Ordering::SeqCst), 0, "it waits for the first to finish");
+        drop(first);
+        second.join().unwrap();
+        assert_eq!(entered.load(Ordering::SeqCst), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
