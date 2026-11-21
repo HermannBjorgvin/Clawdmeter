@@ -1,5 +1,6 @@
 #include "../../hal/touch_hal.h"
 #include "board.h"
+#include "rotation.h"
 #include <Arduino.h>
 #include <Wire.h>
 
@@ -36,8 +37,18 @@ static void touch_read_into_shared_state(void) {
         touch_pressed = false;
         return;
     }
-    touch_x = ((uint16_t)(xH & 0x0F) << 8) | xL;
-    touch_y = ((uint16_t)(yH & 0x0F) << 8) | yL;
+    uint16_t px = ((uint16_t)(xH & 0x0F) << 8) | xL;
+    uint16_t py = ((uint16_t)(yH & 0x0F) << 8) | yL;
+    if (px >= LCD_WIDTH)  px = LCD_WIDTH - 1;
+    if (py >= LCD_HEIGHT) py = LCD_HEIGHT - 1;
+    // Map panel-native coordinates into the rotation the panel currently
+    // shows (Arduino_GFX/Adafruit convention, see rotation.h).
+    switch (lcd_applied_rotation()) {
+    case 1:  touch_x = py;                  touch_y = LCD_WIDTH - 1 - px;  break;
+    case 2:  touch_x = LCD_WIDTH - 1 - px;  touch_y = LCD_HEIGHT - 1 - py; break;
+    case 3:  touch_x = LCD_HEIGHT - 1 - py; touch_y = px;                  break;
+    default: touch_x = px;                  touch_y = py;                  break;
+    }
     touch_pressed = true;
 }
 

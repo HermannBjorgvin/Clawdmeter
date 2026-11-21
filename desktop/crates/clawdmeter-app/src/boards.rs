@@ -35,6 +35,9 @@ pub struct BoardInfo {
     /// secondary buttons match the firmware's `BoardCaps::button_count`, PWR
     /// [`Self::pwr_button`].
     pub buttons: &'static [(Button, &'static str)],
+    /// Turns its screen (`BoardCaps::has_rotation`): the Device page offers
+    /// the Display rotation field (`ro`) only here.
+    pub rotation: bool,
 }
 
 /// Every hardware env in `firmware/platformio.ini` (not `sim` / `native`).
@@ -49,6 +52,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "480×480 · 3 buttons",
         chip: "ESP32-S3",
         pwr_button: true,
+        rotation: true,
         buttons: &[(Button::Primary, "Left"), (Button::Pwr, "PWR"), (Button::Secondary, "Right")],
     },
     BoardInfo {
@@ -61,6 +65,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "368×448 · 2 buttons",
         chip: "ESP32-S3",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "PWR")],
     },
     BoardInfo {
@@ -73,6 +78,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "410×502 · watch",
         chip: "ESP32-S3",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "PWR")],
     },
     BoardInfo {
@@ -85,6 +91,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "240×240 · SPI TFT",
         chip: "ESP32-S3",
         pwr_button: true,
+        rotation: true,
         buttons: &[(Button::Primary, "BOOT"), (Button::Secondary, "Button 2"), (Button::Pwr, "PWR")],
     },
     BoardInfo {
@@ -97,6 +104,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "480×480 · RGB TFT",
         chip: "ESP32-S3",
         pwr_button: false,
+        rotation: false,
         buttons: &[(Button::Primary, "BOOT")],
     },
     BoardInfo {
@@ -109,6 +117,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "480×480 · round",
         chip: "ESP32-S3",
         pwr_button: false,
+        rotation: false,
         buttons: &[(Button::Primary, "BOOT")],
     },
     BoardInfo {
@@ -121,6 +130,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "480×480 · round",
         chip: "ESP32-S3",
         pwr_button: false,
+        rotation: false,
         buttons: &[(Button::Primary, "BOOT")],
     },
     BoardInfo {
@@ -133,6 +143,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "480×480 · ESP32-C6",
         chip: "ESP32-C6",
         pwr_button: true,
+        rotation: true,
         buttons: &[(Button::Primary, "Left"), (Button::Pwr, "PWR"), (Button::Secondary, "Right")],
     },
     BoardInfo {
@@ -145,6 +156,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "368×448 · ESP32-C6",
         chip: "ESP32-C6",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "PWR")],
     },
     BoardInfo {
@@ -157,6 +169,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "320×172 · landscape",
         chip: "ESP32-S3",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Pwr, "BOOT")],
     },
     BoardInfo {
@@ -169,6 +182,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "320×172 · ESP32-C6",
         chip: "ESP32-C6",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Pwr, "BOOT")],
     },
     BoardInfo {
@@ -181,6 +195,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "450×600 · AMOLED",
         chip: "ESP32-S3",
         pwr_button: false,
+        rotation: false,
         buttons: &[(Button::Primary, "BOOT")],
     },
     BoardInfo {
@@ -193,6 +208,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "240×284 · SPI TFT",
         chip: "ESP32-S3",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "PWR")],
     },
     BoardInfo {
@@ -205,6 +221,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "480×480 · RGB panel",
         chip: "ESP32-S3",
         pwr_button: false,
+        rotation: false,
         buttons: &[],
     },
     BoardInfo {
@@ -217,6 +234,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "240×240 · SPI LCD",
         chip: "ESP32-S3",
         pwr_button: false,
+        rotation: false,
         buttons: &[(Button::Primary, "BOOT")],
     },
     BoardInfo {
@@ -229,6 +247,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "480×480 · RGB TFT",
         chip: "ESP32-S3",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Pwr, "Button")],
     },
     BoardInfo {
@@ -241,6 +260,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "240×320 · SPI TFT",
         chip: "ESP32-S3",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Pwr, "BOOT")],
     },
     BoardInfo {
@@ -253,6 +273,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "284×240 · SPI TFT",
         chip: "ESP32-S3",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "MID"), (Button::Secondary, "VOL")],
     },
     BoardInfo {
@@ -265,6 +286,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "200×200 · e-paper",
         chip: "ESP32-S3",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "PWR")],
     },
     BoardInfo {
@@ -277,6 +299,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "170×320 · 2 buttons",
         chip: "ESP32-S3",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "Button 2")],
     },
     BoardInfo {
@@ -289,6 +312,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "240×320 · touch only",
         chip: "ESP32-S3",
         pwr_button: false,
+        rotation: false,
         buttons: &[],
     },
     BoardInfo {
@@ -301,6 +325,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "320×240 · 3 buttons · no touch",
         chip: "ESP32",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Primary, "A"), (Button::Pwr, "B"), (Button::Secondary, "C")],
     },
     BoardInfo {
@@ -325,6 +350,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "135×240 · no touch",
         chip: "ESP32-S3",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Primary, "A"), (Button::Pwr, "B")],
     },
     BoardInfo {
@@ -337,6 +363,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "240×320 · resistive touch · 1 button",
         chip: "ESP32",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Pwr, "BOOT")],
     },
     BoardInfo {
@@ -349,6 +376,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "320×240 · resistive touch · 1 button",
         chip: "ESP32",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Pwr, "BOOT")],
     },
     BoardInfo {
@@ -361,6 +389,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "240×320 · capacitive touch · 1 button",
         chip: "ESP32",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Pwr, "BOOT")],
     },
     BoardInfo {
@@ -373,6 +402,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "320×240 · capacitive touch · 1 button",
         chip: "ESP32",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Pwr, "BOOT")],
     },
     BoardInfo {
@@ -385,6 +415,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "466×466 · round",
         chip: "ESP32-S3",
         pwr_button: true,
+        rotation: true,
         buttons: &[(Button::Pwr, "PWR")],
     },
     BoardInfo {
@@ -397,6 +428,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "466×466 · round",
         chip: "ESP32-S3",
         pwr_button: false,
+        rotation: false,
         buttons: &[(Button::Primary, "BOOT")],
     },
     BoardInfo {
@@ -409,6 +441,7 @@ pub const BOARDS: [BoardInfo; 31] = [
         summary: "466×466 · round",
         chip: "ESP32-S3",
         pwr_button: true,
+        rotation: false,
         buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "PWR")],
     },
 ];
@@ -498,6 +531,36 @@ mod tests {
                 other => panic!("{}: has_pwr_button = {other:?}", b.env),
             };
             assert_eq!(b.pwr_button, firmware, "{}", b.env);
+        }
+    }
+
+    /// `rotation` matches `has_rotation` in the board's `caps.cpp`, resolving
+    /// a `BOARD_HAS_ROTATION` define (and the define it names) in `board.h`.
+    #[test]
+    fn rotation_matches_the_firmware() {
+        let boards = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../firmware/src/boards");
+        for b in BOARDS {
+            let dir = boards.join(firmware_dir(b.env));
+            let caps = std::fs::read_to_string(dir.join("caps.cpp")).unwrap();
+            let raw = caps.split(".has_rotation").nth(1).and_then(|r| r.split(',').next()).unwrap();
+            let mut value = raw.trim_start_matches([' ', '=']).trim().trim_start_matches("(bool)").to_owned();
+            let board_h = std::fs::read_to_string(dir.join("board.h")).unwrap_or_default();
+            for _ in 0..3 {
+                let found = board_h.lines().find_map(|l| {
+                    let rest = l.trim().strip_prefix("#define ")?.strip_prefix(value.as_str())?;
+                    rest.starts_with(char::is_whitespace).then(|| rest.split_whitespace().next().map(str::to_owned))?
+                });
+                match found {
+                    Some(v) => value = v,
+                    None => break,
+                }
+            }
+            let firmware = match value.as_str() {
+                "true" | "1" => true,
+                "false" | "0" => false,
+                other => panic!("{}: has_rotation = {other:?}", b.env),
+            };
+            assert_eq!(b.rotation, firmware, "{}", b.env);
         }
     }
 

@@ -104,6 +104,7 @@ const ASSETS: &[(&str, &[u8])] = bundled![
         "webhook",
         "settings",
         "rotate-ccw",
+        "rotate-cw",
         "refresh-cw",
         "power",
         "x",

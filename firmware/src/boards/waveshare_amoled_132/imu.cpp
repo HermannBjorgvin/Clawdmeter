@@ -1,5 +1,6 @@
 #include "../../hal/imu_hal.h"
 #include "../../idle.h"
+#include "../../clawd_prefs.h"
 #include "board.h"
 #include <Arduino.h>
 #include <Preferences.h>
@@ -7,6 +8,8 @@
 // No IMU on this board. The rotation quadrant is driven by the BOOT button
 // instead: each press turns the UI 90° CW, persisted to NVS so it survives a
 // reboot. display.cpp/touch.cpp read the quadrant exactly as on IMU boards.
+// With a fixed `ro` (clawd_prefs.h) BOOT does nothing, so the hidden auto
+// quadrant can't change behind the fixed picture.
 
 #define BTN_POLL_MS 20
 
@@ -29,7 +32,7 @@ void imu_hal_tick(void) {
 
     bool down = digitalRead(BTN_ROTATE_GPIO) == LOW;
     // First press from sleep only wakes the panel, like the other buttons.
-    if (down && !last_down && !idle_consume_wake_press()) {
+    if (down && !last_down && !idle_consume_wake_press() && rotation_get() == ROTATION_AUTO) {
         rotation = (rotation + 1) & 3;
         prefs.putUChar("q", rotation);
         Serial.printf("Rotation: %d\n", rotation);

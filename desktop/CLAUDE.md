@@ -141,7 +141,9 @@ is faked behind `FlashHardware`.
   this computer via rodio, ALSA on Linux), `clock`, `liveliness` (1–5,
   default 3: the Device page's Animation silliness slider, sent as `lv`),
   `attention_anim` (`off`/`10s`/`30s`/`2m`, default `2m`, sent as `aa`
-  seconds), `pace_marker` (default off, sent as `pm`), `menu_bar_usage`
+  seconds), `pace_marker` (default off, sent as `pm`), `rotation` (`auto` or
+  `0`–`3`, default `auto`, sent as `ro` = -1 or the quarter turns; the Device
+  page shows it only for `BoardInfo::rotation` boards), `menu_bar_usage`
   (default off; macOS only: the higher of the session and weekly
   percentages as the status item's title, `tray::menu_bar_title`), `button_primary`
   (default `space`), `button_secondary` (default `shift-tab`) and
@@ -361,7 +363,7 @@ runs or shows (bar the Accounts page's trial note).
   also queues `settings-changed` on `<state>/app-commands`; the tray (it
   takes the queue every 200 ms) forwards it as `Command::ReloadSettings`, so
   a device setting goes out within about a second. `Engine::next_write` sends
-  a changed `lv`/`aa`/`pm`/`k1`–`k3`/`th`/`fc` or clock format (`tf`, off
+  a changed `lv`/`aa`/`pm`/`ro`/`k1`–`k3`/`th`/`fc` or clock format (`tf`, off
   included) at once, unless the numbers are stale (then it waits for the
   next good poll).
   The 5 s re-read stays for hand edits and `--daemon` without a tray.

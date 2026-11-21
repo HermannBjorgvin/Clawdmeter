@@ -19,8 +19,8 @@ sync with the compile-time `BOARD_HAS_*` flags in `board.h`.
 | `display_hal_init`          | Construct the display bus and driver (QSPI, SPI, or RGB). Must run AFTER `board_init()` so any IO expander has released the LCD reset line. |
 | `display_hal_begin`         | `gfx->begin()`, clear screen, set default brightness. Allocate any rotation buffers needed by `display_hal_draw_bitmap`. |
 | `display_hal_set_brightness`| Pass-through to the driver. Driver-defined scale (typically 0..255). |
-| `display_hal_draw_bitmap`   | Push a w×h RGB565 strip at (x, y). If the panel can't rotate natively, apply CPU rotation here before pushing — `imu_hal_rotation_quadrant()` returns the current orientation. **Must complete inside LVGL's render budget** (a few ms at typical strip sizes). |
-| `display_hal_tick`          | Per-loop housekeeping — used by rotation-aware boards to blank the panel + ramp brightness during a rotation transition. No-op on boards without rotation. |
+| `display_hal_draw_bitmap`   | Push a w×h RGB565 strip at (x, y). If the panel can't rotate natively, apply CPU rotation here before pushing, by `rotation_transition_shown()` (`rotation_transition.h`): the orientation the panel shows, which only `display_hal_tick` changes. Read it here and in touch, never the IMU directly, or `ro` is ignored and strips can land in a half-switched frame. **Must complete inside LVGL's render budget** (a few ms at typical strip sizes). |
+| `display_hal_tick`          | Per-loop housekeeping. Rotating boards call `rotation_transition_tick(display_rotation_quadrant(), apply)` here: it blanks, switches (`apply`, or nullptr for CPU rotation), redraws and ramps the brightness back. `display_rotation_quadrant()` (`clawd_prefs.h`) is the IMU's quadrant on auto, else the app's fixed `ro`. No-op on boards without rotation. |
 | `display_hal_round_area`    | LVGL invalidate-area hook. Most QSPI AMOLED drivers expect even-aligned flush regions; apply `& ~1` / `| 1` to coordinates. |
 
 ## `touch_hal.h`
@@ -86,7 +86,8 @@ nothing) is decided in its own `sound.cpp`, and shared code only calls the HAL.
 |------------------------------|----------------|
 | `imu_hal_init`               | Bring up the accelerometer. |
 | `imu_hal_tick`               | Sample the accelerometer at a low rate (~10 Hz) and update the rotation state with hysteresis. |
-| `imu_hal_rotation_quadrant`  | Current rotation, 0..3 (quarter turns CW). Used by `display_hal_draw_bitmap` on rotation-capable boards. Boards without rotation always return 0. |
+| `imu_hal_rotation_quadrant`  | Current rotation, 0..3 (quarter turns CW). The "auto" source behind `display_rotation_quadrant()`, which display and touch read instead. Boards without rotation always return 0. |
+| `imu_hal_fixed_quadrant`     | Optional. The quadrant showing the picture `n` quarter turns clockwise from upright, for a fixed `ro`. Default: `n`; override where quadrant 0 isn't upright or the quadrants count the other way (AMOLED 2.16 C6, LCD 1.54). |
 
 ## `board_info_hal.h` (optional)
 

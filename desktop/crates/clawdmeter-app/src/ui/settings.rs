@@ -16,7 +16,7 @@ use clawdmeter_core::autostart::{self, LaunchMode};
 use clawdmeter_core::buttons::{KeyChord, LabelStyle, MediaKey, Unmappable, MOD_ALT, MOD_CTRL, MOD_GUI, MOD_SHIFT};
 use clawdmeter_core::config::{
     parse_rgb, AlertOn, AttentionAnim, Button, ButtonAction, ClockMode, ColorToken, ConfigFile, DeviceTheme, Palette,
-    LIVELINESS_MAX,
+    Rotation, LIVELINESS_MAX,
 };
 use clawdmeter_core::platform::{Appearance, AppearanceWatch};
 use clawdmeter_core::themes::{FollowTheme, FOLLOWING, PRESETS};
@@ -30,7 +30,7 @@ use gpui::{
 use super::theme::{Theme, FONT_DISPLAY, FONT_MONO, R_ITEM, R_M, R_S};
 use super::update::UpdateView;
 use super::widgets::{
-    button, caption, card, checkbox, field, field_stacked, heading, icon, notice, para, pill, segmented,
+    button, caption, card, checkbox, field, field_stacked, heading, icon, icon_button, notice, para, pill, segmented,
     stepped_slider, subheading, toggle, update_pill, ButtonKind, Tone,
 };
 use super::{command, live_status, not_running_text, run_blocking, Navigate, REFRESH};
@@ -554,6 +554,46 @@ impl SettingsView {
 
     // ---------------------------------------------------------------- panes
 
+    /// Display rotation, on boards that turn their screen: Auto follows the
+    /// board's own sensor; Fixed keeps one orientation, which the rotate
+    /// button turns a quarter turn.
+    fn rotation_field(&mut self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let rotation = self.settings.rotation;
+        let fixed = rotation != Rotation::Auto;
+        let help: SharedString = match rotation {
+            Rotation::Auto => "Turns with the board (AMOLED 1.32: its BOOT button).".into(),
+            Rotation::Fixed(q) => format!("Fixed at {}°. The arrow turns it clockwise.", u32::from(q) * 90).into(),
+        };
+        let (me1, me2) = (cx.entity().downgrade(), cx.entity().downgrade());
+        let turn = icon_button(t, "rotation-turn", "rotate-cw", "Turn a quarter turn", true, false, move |_, _, cx| {
+            let _ = me1.update(cx, |v, cx| {
+                v.save(|s, _| s.rotation = s.rotation.turned());
+                cx.notify();
+            });
+        });
+        let mode = segmented(t, "rotation-mode", &[(false, "Auto"), (true, "Fixed")], &fixed, true, move |f, _, cx| {
+            if f == fixed {
+                return;
+            }
+            let next = if f { Rotation::Fixed(0) } else { Rotation::Auto };
+            let _ = me2.update(cx, |v, cx| {
+                v.save(|s, _| s.rotation = next);
+                cx.notify();
+            });
+        });
+        field(
+            t,
+            "Display rotation",
+            help,
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .child(div().size(px(30.)).when(fixed, |d| d.child(turn)))
+                .child(mode),
+        )
+    }
+
     fn device_pane(&mut self, t: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let snap = self.snap.clone();
         let rec = ipc::load_firmware_record(&self.paths);
@@ -735,6 +775,9 @@ impl SettingsView {
                 });
             }),
         ));
+        if board.is_some_and(|b| b.rotation) {
+            pane = pane.child(self.rotation_field(t, cx));
+        }
         if let Some(buttons) = self.buttons_field(t, board, cx) {
             pane = pane.child(buttons);
         }

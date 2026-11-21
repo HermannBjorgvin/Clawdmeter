@@ -1,5 +1,7 @@
+#include "../../clawd_prefs.h"
 #include "../../hal/touch_hal.h"
 #include "../../hal/imu_hal.h"
+#include "../../rotation_transition.h"
 #include "board.h"
 #include "rotation_map.h"
 #include <Arduino.h>
@@ -34,7 +36,7 @@ static void touch_poll(void) {
     uint16_t py = ((uint16_t)(yH & 0x0F) << 8) | yL;
     if (px >= LCD_WIDTH)  px = LCD_WIDTH - 1;
     if (py >= LCD_HEIGHT) py = LCD_HEIGHT - 1;
-    rot_inverse(imu_hal_rotation_quadrant(), LCD_WIDTH, px, py, &touch_x, &touch_y);
+    rot_inverse(rotation_transition_shown(), LCD_WIDTH, px, py, &touch_x, &touch_y);
     touch_pressed = true;
 }
 

@@ -233,6 +233,19 @@ static void check_serial_cmd() {
                 if (cmd_buf[11] == ' ') pace_marker_set(atoi(cmd_buf + 12) != 0);
                 Serial.printf("{\"pace_marker\":%s}\n", pace_marker_get() ? "true" : "false");
             }
+            else if (strcmp(cmd_buf, "rotation") == 0 || strncmp(cmd_buf, "rotation ", 9) == 0) {
+                // QA: `rotation [auto|0-3]`, the `ro` setting (until the app sends its own).
+                if (cmd_buf[8] == ' ') {
+                    const char* arg = cmd_buf + 9;
+                    char* end = nullptr;
+                    const long v = strtol(arg, &end, 10);
+                    if (strcasecmp(arg, "auto") == 0) rotation_set(ROTATION_AUTO);
+                    else if (end != arg && *end == '\0' && v >= 0 && v <= 3) rotation_set((int8_t)v);
+                    else Serial.println("usage: rotation [auto|0-3]");
+                }
+                Serial.printf("{\"rotation\":%d,\"quadrant\":%u}\n",
+                              (int)rotation_get(), (unsigned)display_rotation_quadrant());
+            }
             else if (strcmp(cmd_buf, "theme") == 0 || strncmp(cmd_buf, "theme ", 6) == 0) {
                 // QA: `theme [hex]`, the `th` string (theme_palette.h; until the app sends its own).
                 uint32_t p[TH_COUNT];
@@ -603,6 +616,7 @@ void loop() {
                 sound_hal_chime();
             }
             if (usage.pace_marker >= 0) pace_marker_set(usage.pace_marker != 0);
+            if (usage.rotation >= -1)     rotation_set(usage.rotation);
             if (usage.btn_primary >= 0)   button_action_set(BTN_SLOT_PRIMARY, usage.btn_primary);
             if (usage.btn_secondary >= 0) button_action_set(BTN_SLOT_SECONDARY, usage.btn_secondary);
             if (usage.btn_pwr >= 0)       button_action_set(BTN_SLOT_PWR, usage.btn_pwr);

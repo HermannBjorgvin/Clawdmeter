@@ -168,6 +168,8 @@ pub struct Engine {
     sent_k: Option<[u32; 3]>,
     /// Last `th` sent.
     sent_th: Option<Palette>,
+    /// The rotation the device last got (`ro`).
+    sent_ro: Option<i8>,
     /// The OS's light/dark mode, which picks System's or Solarized's palette.
     appearance: Appearance,
     /// The clock's hour format the device last got (`tf`; 0 = no clock).
@@ -224,6 +226,7 @@ impl Engine {
             sent_pm: None,
             sent_k: None,
             sent_th: None,
+            sent_ro: None,
             appearance: Appearance::default(),
             sent_tf: None,
             last_event_ts: None,
@@ -354,6 +357,7 @@ impl Engine {
         self.sent_pm = None;
         self.sent_k = None;
         self.sent_th = None;
+        self.sent_ro = None;
         self.sent_tf = None;
         // A fresh poll still waiting for its write goes out as one.
         let resend = !self.fresh_poll;
@@ -714,6 +718,7 @@ impl Engine {
         let pm = u8::from(self.settings.pace_marker);
         let k = self.settings.buttons.map(ButtonAction::code);
         let th = self.colors();
+        let ro = self.settings.rotation.code();
         let clock = clock_fields(self.settings.clock, utc(now), host.utc_offset_secs, host.prefers_12h);
         let tf = clock.as_ref().map_or(0, |cf| cf.hour_format);
         let prefs_changed = self.sent_lv != Some(self.settings.liveliness)
@@ -721,6 +726,7 @@ impl Engine {
             || self.sent_pm != Some(pm)
             || self.sent_k != Some(k)
             || self.sent_th != Some(th)
+            || self.sent_ro != Some(ro)
             || self.sent_tf != Some(tf);
 
         let (mut payload, kind) = if self.logged_out || (self.codex_gone && self.active.is_none()) {
@@ -767,6 +773,7 @@ impl Engine {
             p.pm = Some(pm);
             [p.k1, p.k2, p.k3] = k.map(Some);
             p.th = Some(th);
+            p.ro = Some(ro);
             // The Fable overlay's colour goes with Claude's numbers only; the
             // device keeps the last one, and the Codex screen draws no strip.
             if p.pv.is_none() {
@@ -829,6 +836,9 @@ impl Engine {
         }
         if let Some(th) = w.payload.th {
             self.sent_th = Some(th);
+        }
+        if let Some(ro) = w.payload.ro {
+            self.sent_ro = Some(ro);
         }
         // Every data payload carries the clock (no `tf` means it's off).
         if w.kind != WriteKind::NoData {
@@ -954,7 +964,7 @@ mod tests {
         assert_eq!(w.kind, WriteKind::Poll);
         assert_eq!(
             w.payload.to_json(),
-            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7"}"#
+            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7","ro":-1}"#
         );
         assert!(write(&mut e, T0 + 1).is_none());
     }
@@ -976,7 +986,7 @@ mod tests {
         let w = write(&mut e, T0).unwrap();
         assert_eq!(
             w.payload.to_json(),
-            r#"{"s":0,"sr":-1,"w":48,"wr":1440,"st":"allowed","acct":"week","ok":true,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7"}"#
+            r#"{"s":0,"sr":-1,"w":48,"wr":1440,"st":"allowed","acct":"week","ok":true,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7","ro":-1}"#
         );
         // An account with the limit still wakes at its session reset.
         e.on_poll_results(T0 + 200, vec![(dir.clone(), Ok(reading(5)))]);
@@ -995,7 +1005,7 @@ mod tests {
         assert_eq!(hb.kind, WriteKind::Heartbeat);
         assert_eq!(
             hb.payload.to_json(),
-            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7"}"#
+            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7","ro":-1}"#
         );
         // Three misses: stale, heartbeats stop so the device's freshness lapses.
         for i in 1..=3 {
@@ -1569,6 +1579,23 @@ mod tests {
         assert!(write(&mut e, T0 + 3).is_none());
         e.on_connected();
         assert_eq!(write(&mut e, T0 + 4).unwrap().payload.pm, Some(1), "resent on a reconnect");
+    }
+
+    #[test]
+    fn rotation_goes_out_with_the_data_and_when_it_changes() {
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.ro, Some(-1), "auto on every data payload");
+        assert!(write(&mut e, T0 + 1).is_none(), "nothing new");
+        e.update_settings(settings(
+            "rotation = 2
+",
+        ));
+        let w = write(&mut e, T0 + 2).expect("a new setting is sent right away");
+        assert_eq!((w.kind, w.payload.ro), (WriteKind::Event, Some(2)));
+        assert!(write(&mut e, T0 + 3).is_none());
+        e.on_connected();
+        assert_eq!(write(&mut e, T0 + 4).unwrap().payload.ro, Some(2), "resent on a reconnect");
     }
 
     #[test]

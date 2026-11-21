@@ -3,8 +3,8 @@
 //! Keys match `payload_parse()` in `firmware/src/payload.cpp`, in the order
 //! the old daemons wrote them, plus the Fable weekly % `wf`, the Codex keys
 //! `pv`, `rc`, `rx`, the additive fast-clock fields `a`, `e`, `es`, `n`, `rp`
-//! and the device settings `lv`, `aa`, `pm`, `k1`–`k3`, `th` and `fc` (old
-//! firmware ignores unknown keys).
+//! and the device settings `lv`, `aa`, `pm`, `k1`–`k3`, `th`, `fc` and `ro`
+//! (old firmware ignores unknown keys).
 
 use chrono::{DateTime, Datelike, Months, TimeZone, Utc};
 use serde::Serialize;
@@ -132,12 +132,17 @@ pub struct Payload {
     /// device keeps the last value it got.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fc: Option<Rgb>,
+    /// Screen rotation on boards that rotate: -1 = auto, 0-3 = fixed quarter
+    /// turns clockwise ([`crate::config::Rotation::code`]). The device keeps
+    /// the last value it got; other boards ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ro: Option<i8>,
 }
 
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
     "s", "sr", "w", "wr", "wf", "st", "acct", "pv", "rc", "rx", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x",
-    "a", "e", "es", "n", "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th", "fc",
+    "a", "e", "es", "n", "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th", "fc", "ro",
 ];
 
 /// The fast-clock keys added in v0.4 (old firmware ignores them).
@@ -635,8 +640,8 @@ mod tests {
         assert!(!j.contains("pv") && !j.contains("\"rc\""), "{j}");
     }
 
-    /// Every field at its widest, the longest alert line and three
-    /// shortcuts still fit the app's 500-byte write without trimming `m`.
+    /// Every field at its widest (a Codex reading, which carries the most),
+    /// the longest alert line and three shortcuts still fit the app's 500-byte write without trimming `m`.
     #[test]
     fn widest_payload_fits() {
         let chord = 0x1_1F73; // hold, all four modifiers, F24
@@ -645,7 +650,8 @@ mod tests {
             sr: Some(300),
             w: Some(100),
             wr: Some(10_080),
-            wf: Some(999),
+            // `wf` and `fc` are Claude's and never go out with `pv`.
+            wf: None,
             st: Some("overage".into()),
             acct: Some("week".into()),
             pv: Some("codex".into()),
@@ -673,11 +679,18 @@ mod tests {
             k2: Some(chord),
             k3: Some(chord),
             th: Some(Palette::default()),
-            fc: Some(Palette::default().fable()),
+            fc: None,
+            ro: Some(-1),
         };
         let json = pl.to_json();
         assert!(json.len() < 500, "{} bytes: {json}", json.len());
         assert_eq!(pl.encode(500), json.into_bytes());
+        // The widest Claude payload: `wf` and `fc`, no Codex keys.
+        let claude =
+            Payload { wf: Some(999), pv: None, rc: None, rx: None, fc: Some(Palette::default().fable()), ..pl };
+        let json = claude.to_json();
+        assert!(json.len() < 500, "{} bytes: {json}", json.len());
+        assert_eq!(claude.encode(500), json.into_bytes());
     }
 
     #[test]
@@ -716,6 +729,7 @@ mod tests {
             k3: Some(6),
             th: Some(Palette::default()),
             fc: Some(Palette::default().fable()),
+            ro: Some(-1),
         };
         let v: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&pl.to_json()).unwrap();
         // serde_json's Map is sorted without preserve_order; check membership.

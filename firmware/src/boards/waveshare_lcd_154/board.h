@@ -15,6 +15,33 @@
 #define LCD_WIDTH            240
 #define LCD_HEIGHT           240
 
+// ---- Display rotation (ST7789 MADCTL, Arduino_GFX convention) ----
+// 0 = factory orientation, 1 = 90° clockwise, 2 = 180°, 3 = 270° (90° CCW).
+// The panel is square, so LVGL keeps seeing 240x240; touch.cpp remaps the
+// CST816T coordinates to match. Override with -DLCD_ROTATION=<n> in build_flags.
+// LCD_ROTATION is the orientation with LCD_AUTO_ROTATE=0 (and at boot),
+// unchanged from earlier firmware. LCD_IMU_OFFSET calibrates auto-rotation:
+// the panel rotation while the IMU reports quadrant 0 (buttons on the right; upright, buttons on top, is quadrant 3 = MADCTL 0); a
+// fixed `ro` counts from there too (see rotation.h).
+#ifndef LCD_ROTATION
+#define LCD_ROTATION         0
+#endif
+#ifndef LCD_IMU_OFFSET
+#define LCD_IMU_OFFSET       3
+#endif
+
+// ---- IMU auto-rotation (QMI8658 accelerometer) ----
+// 1 = follow the device's physical orientation, 0 = fixed LCD_ROTATION.
+#ifndef LCD_AUTO_ROTATE
+#define LCD_AUTO_ROTATE      1
+#endif
+// 1 if the IMU's quadrant counts the opposite way to the display rotation
+// (turning the device makes the picture turn the wrong way).
+#ifndef IMU_ROT_REVERSE
+#define IMU_ROT_REVERSE      1
+#endif
+#define QMI8658_ADDR         0x6B
+
 // ---- SPI display pins (ST7789, 4-wire SPI) ----
 #define LCD_CS               21
 #define LCD_SCLK             38
@@ -59,7 +86,7 @@
 
 // ---- Capability flags ----
 #define BOARD_HAS_SECONDARY_BUTTON 1
-#define BOARD_HAS_ROTATION         0
-#define BOARD_HAS_IMU              0    // QMI8658 present but unused
+#define BOARD_HAS_ROTATION         LCD_AUTO_ROTATE
+#define BOARD_HAS_IMU              LCD_AUTO_ROTATE  // QMI8658, used for auto-rotation
 #define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      0
