@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use std::path::Path;
 
+use clawdmeter_core::keep_awake::Status as KeepAwake;
 use clawdmeter_core::{unix_now, Paths, Settings};
 #[cfg(not(target_os = "macos"))]
 use tray_icon::menu::MenuItem;
@@ -164,6 +165,20 @@ fn device_menu(count: usize) -> Option<(Submenu, Vec<CheckMenuItem>)> {
     Some((menu, items))
 }
 
+impl Items {
+    /// Tick and label the keep-awake checkbox (the same native item on every
+    /// platform) from the saved setting and what its thread is doing. muda
+    /// ticks a clicked item by itself; this puts the saved setting back.
+    fn set_keep_awake(&self, settings: &Settings, status: &KeepAwake) {
+        self.keep_awake.set_checked(settings.keep_awake);
+        // Only a ticked box has something to explain.
+        let label = if settings.keep_awake { keep_awake_label(status) } else { KEEP_AWAKE.to_owned() };
+        if self.keep_awake.text() != label {
+            self.keep_awake.set_text(label);
+        }
+    }
+}
+
 /// Title, label and tick the submenu ([`device_choices`]): its title names
 /// the choice, so the menu shows it closed. muda ticks a clicked item by
 /// itself; this puts the saved choice back.
@@ -182,6 +197,24 @@ fn device_title(choices: &[(String, String, bool)]) -> String {
         Some((_, label, _)) => format!("Show on device: {label}"),
         None => "Show on device".to_owned(),
     }
+}
+
+/// The keep-awake checkbox's id and name on every platform (`keep_awake`).
+const KEEP_AWAKE_ID: &str = "keep-awake";
+const KEEP_AWAKE: &str = "Keep awake with the lid closed";
+
+/// The checkbox's text: its name, and while the box is ticked but nothing
+/// holds, why ("Keep awake with the lid closed (paused, battery at 18%)").
+fn keep_awake_label(status: &KeepAwake) -> String {
+    match status.note() {
+        Some(note) => format!("{KEEP_AWAKE} ({note})"),
+        None => KEEP_AWAKE.to_owned(),
+    }
+}
+
+/// The checkbox, unticked until the first update.
+fn keep_awake_item() -> CheckMenuItem {
+    CheckMenuItem::with_id(KEEP_AWAKE_ID, KEEP_AWAKE, true, false, None)
 }
 
 /// A newer release the tray offers. Every release tag ships the app and the
@@ -225,6 +258,8 @@ enum Click {
     /// Switch the chime on this computer (`desktop_chime`), as the
     /// Overview's switch does.
     Chime,
+    /// Switch keeping the computer awake with the lid closed (`keep_awake`).
+    KeepAwake,
     /// Show this account on the device ([`device_pick`]).
     DeviceAccount(Option<usize>),
 }
@@ -244,11 +279,12 @@ fn update_offer(snap: &StatusSnapshot, settings: &Settings, release_build: bool,
 }
 
 /// The macOS menu: the drawn panel (`mac_menu`), whose footer holds the
-/// actions, and with two or more accounts a native "Show on device"
-/// submenu between the panel's body and its footer. muda only appends the
-/// native items, before the panel goes in around them, and never inserts or
-/// removes one (it counts positions without the panel): a change in the
-/// accounts builds the menu again.
+/// actions, and the native items between the panel's body and its footer:
+/// with two or more accounts a "Show on device" submenu, then the
+/// keep-awake checkbox. muda only appends the native items, before the
+/// panel goes in around them, and never inserts or removes one (it counts
+/// positions without the panel): a change in the accounts builds the menu
+/// again.
 #[cfg(target_os = "macos")]
 struct Items {
     menu: Menu,
@@ -257,6 +293,8 @@ struct Items {
     device: Option<(Submenu, Vec<CheckMenuItem>)>,
     /// The accounts it was built with ([`device_accounts`]).
     device_accounts: usize,
+    /// Keep awake with the lid closed (`keep_awake`).
+    keep_awake: CheckMenuItem,
 }
 
 #[cfg(target_os = "macos")]
@@ -264,13 +302,18 @@ impl Items {
     fn new(device_accounts: usize) -> Self {
         let menu = Menu::new();
         let device = device_menu(device_accounts);
+        let keep_awake = keep_awake_item();
+        let separator = PredefinedMenuItem::separator();
+        let mut list: Vec<&dyn tray_icon::menu::IsMenuItem> = vec![&separator];
         if let Some((submenu, _)) = &device {
-            if let Err(e) = menu.append_items(&[&PredefinedMenuItem::separator(), submenu]) {
-                log::warn!("tray menu: {e}");
-            }
+            list.push(submenu);
+        }
+        list.push(&keep_awake);
+        if let Err(e) = menu.append_items(&list) {
+            log::warn!("tray menu: {e}");
         }
         let header = std::cell::RefCell::new(mac_menu::MenuHeader::install(&menu));
-        Items { menu, header, device, device_accounts }
+        Items { menu, header, device, device_accounts, keep_awake }
     }
 
     /// `pressed`: a refresh asked for and not yet served (the panel shows it
@@ -309,6 +352,8 @@ struct Items {
     refresh: MenuItem,
     /// The chime on this computer (`desktop_chime`): the Overview's switch.
     chime: CheckMenuItem,
+    /// Keep awake with the lid closed (`keep_awake`).
+    keep_awake: CheckMenuItem,
     update: MenuItem,
     /// "Show on device", with two or more accounts ([`device_menu`]).
     device: Option<(Submenu, Vec<CheckMenuItem>)>,
@@ -330,6 +375,7 @@ impl Items {
             resets: MenuItem::with_id("resets", "Resets  –", true, None),
             refresh: MenuItem::with_id("refresh", "Refresh usage", true, None),
             chime: CheckMenuItem::with_id("chime", "Chime on this computer", true, false, None),
+            keep_awake: keep_awake_item(),
             update: MenuItem::with_id("update", "Update firmware…", true, None),
             device: device_menu(shape.device_accounts),
         };
@@ -352,7 +398,15 @@ impl Items {
         if shape.resets {
             list.push(&it.resets);
         }
-        list.extend([&sep2 as &dyn tray_icon::menu::IsMenuItem, &it.refresh, &it.chime, &sep3, &open, &settings]);
+        list.extend([
+            &sep2 as &dyn tray_icon::menu::IsMenuItem,
+            &it.refresh,
+            &it.chime,
+            &it.keep_awake,
+            &sep3,
+            &open,
+            &settings,
+        ]);
         if shape.update {
             list.push(&it.update);
         }
@@ -429,6 +483,7 @@ impl Items {
             "settings" => open(Page::Settings),
             "refresh" => Click::App(AppCommand::Refresh),
             "chime" => Click::Chime,
+            KEEP_AWAKE_ID => Click::KeepAwake,
             "update" => open(update_page),
             "quit" => Click::App(AppCommand::Quit),
             other => return device_pick(other).map(Click::DeviceAccount),
@@ -582,6 +637,9 @@ struct TrayApp {
     /// The accounts the "Show on device" items were last labelled with, so a
     /// click picks the account it named even if the list changed since.
     device_paths: Vec<std::path::PathBuf>,
+    /// The thread that keeps the computer awake with the lid closed while
+    /// `keep_awake` is on.
+    keep_awake: crate::keep_awake::Handle,
 }
 
 impl TrayApp {
@@ -616,6 +674,24 @@ impl TrayApp {
             Err(e) => log::warn!("couldn't save desktop_chime: {e}"),
         }
         // Show the new state at once.
+        self.menu_at = 0;
+    }
+
+    /// Switch keeping the computer awake with the lid closed (`keep_awake`):
+    /// saved like the chime, and handed to its thread at once, so a closed
+    /// lid a second later is already covered (or no longer is).
+    fn toggle_keep_awake(&mut self) {
+        let mut on = self.settings.keep_awake;
+        let saved = crate::ui::settings::write_settings(&self.paths, |s, _| {
+            s.keep_awake = !s.keep_awake;
+            on = s.keep_awake;
+        });
+        match saved {
+            Ok(()) => self.settings.keep_awake = on,
+            Err(e) => log::warn!("couldn't save keep_awake: {e}"),
+        }
+        self.keep_awake.set(self.settings.keep_awake);
+        // Put the tick where the setting is (muda moved it already).
         self.menu_at = 0;
     }
 
@@ -736,7 +812,7 @@ impl TrayApp {
         }
 
         // Menu clicks (Linux, Windows; on macOS only the "Show on device"
-        // submenu is native).
+        // submenu and the keep-awake checkbox are native).
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             #[cfg(not(target_os = "macos"))]
             match Items::command(&ev.id, self.offer_page()) {
@@ -746,11 +822,14 @@ impl TrayApp {
                     }
                 }
                 Some(Click::Chime) => self.toggle_desktop_chime(),
+                Some(Click::KeepAwake) => self.toggle_keep_awake(),
                 Some(Click::DeviceAccount(pick)) => self.choose_device_account(pick),
                 None => {}
             }
             #[cfg(target_os = "macos")]
-            if let Some(pick) = device_pick(&ev.id.0) {
+            if ev.id.0 == KEEP_AWAKE_ID {
+                self.toggle_keep_awake();
+            } else if let Some(pick) = device_pick(&ev.id.0) {
                 self.choose_device_account(pick);
             }
         }
@@ -791,6 +870,8 @@ impl TrayApp {
             if let Ok(s) = Settings::load(&self.paths) {
                 self.settings = s;
             }
+            // A hand edit of `keep_awake`, like a click.
+            self.keep_awake.set(self.settings.keep_awake);
         }
 
         // Status out: tray + file.
@@ -861,6 +942,7 @@ impl TrayApp {
                     self.offer.as_ref(),
                     now,
                 );
+                items.set_keep_awake(&self.settings, &self.keep_awake.status());
             }
             if let Some(t) = &self.tray {
                 let _ = t.set_tooltip(Some(tooltip(&snap)));
@@ -912,6 +994,8 @@ impl TrayApp {
     }
 
     fn shutdown(mut self) {
+        // First: nothing below may keep the computer awake a moment longer.
+        self.keep_awake.shutdown();
         if let Some(d) = self.daemon.take() {
             d.shutdown();
         }
@@ -1046,6 +1130,7 @@ fn run_locked(paths: Paths, _lock: Option<std::fs::File>) -> i32 {
     spawn_update_checker(paths.clone(), latest.clone(), check_now.clone());
     let settings = Settings::load(&paths).unwrap_or_else(|_| Settings::from_config(&Default::default(), &paths, None));
     let mut app = TrayApp {
+        keep_awake: crate::keep_awake::Handle::spawn(&paths, settings.keep_awake),
         daemon: Some(daemon::spawn(paths.clone())),
         paths,
         items: None,
@@ -1151,6 +1236,7 @@ mod tests {
         assert_eq!(Items::command(&id("settings"), Page::Flash), open(Page::Settings));
         assert_eq!(Items::command(&id("update"), Page::Update), open(Page::Update));
         assert_eq!(Items::command(&id("chime"), Page::Flash), Some(Click::Chime), "the Overview's switch");
+        assert_eq!(Items::command(&id(KEEP_AWAKE_ID), Page::Flash), Some(Click::KeepAwake));
         assert_eq!(Items::command(&id("quit"), Page::Flash), Some(Click::App(AppCommand::Quit)));
         assert_eq!(Items::command(&id("device-auto"), Page::Flash), Some(Click::DeviceAccount(None)));
         assert_eq!(Items::command(&id("device-1"), Page::Flash), Some(Click::DeviceAccount(Some(1))));
@@ -1185,6 +1271,26 @@ mod tests {
         assert_eq!(device_pick("device-auto"), Some(None));
         assert_eq!(device_pick("device-12"), Some(Some(12)));
         assert_eq!((device_pick("device-x"), device_pick("chime")), (None, None));
+    }
+
+    #[test]
+    fn the_keep_awake_item_says_why_it_isnt_holding() {
+        use clawdmeter_core::keep_awake::Pause;
+        assert_eq!(keep_awake_label(&KeepAwake::Off), "Keep awake with the lid closed");
+        assert_eq!(keep_awake_label(&KeepAwake::Holding), "Keep awake with the lid closed");
+        assert_eq!(
+            keep_awake_label(&KeepAwake::Paused(Pause::BatteryLow(18))),
+            "Keep awake with the lid closed (paused, battery at 18%)"
+        );
+        assert_eq!(
+            keep_awake_label(&KeepAwake::Failed("logind refused".into())),
+            "Keep awake with the lid closed (unavailable)"
+        );
+        assert_eq!(
+            keep_awake_label(&KeepAwake::Limited("on Plasma, also set the lid to Do nothing".into())),
+            "Keep awake with the lid closed (on Plasma, also set the lid to Do nothing)"
+        );
+        assert_eq!(device_pick(KEEP_AWAKE_ID), None, "not a Show on device pick");
     }
 
     #[test]
