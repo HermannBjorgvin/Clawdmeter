@@ -142,8 +142,15 @@ impl Handle {
                 loop {
                     let asked = if ended.is_none_or(|until| Instant::now() >= until) { wish } else { Wish::Off };
                     // Nothing to read while it's off: no battery polling for
-                    // a feature nobody switched on.
-                    let now_power = if asked == Wish::Off { Power::UNKNOWN } else { readings.settle(power()) };
+                    // a feature nobody switched on. What was read before it
+                    // went off is forgotten, so hours later a reading that
+                    // fails doesn't stand on one from then.
+                    let now_power = if asked == Wish::Off {
+                        readings = Readings::default();
+                        Power::UNKNOWN
+                    } else {
+                        readings.settle(power())
+                    };
                     let clock = Clock { now: Instant::now(), unix: unix_now() };
                     let work_at = Some(seen_work.load(Ordering::Relaxed)).filter(|at| *at != 0);
                     let status = keeper.run(asked, now_power, clock, work_at).clone();
@@ -585,6 +592,27 @@ mod tests {
         h.pick(Wish::WhileClaudeWorks);
         wait_for(|| h.answered() && h.status() == Status::Holding);
         assert_eq!(holds.load(Ordering::SeqCst), 1, "the hold stood through the second pick");
+    }
+
+    // Plugged in when it was last on; switched on again much later, on
+    // battery, with a reading that fails: nothing from back then stands in.
+    #[test]
+    fn a_reading_from_before_it_was_off_doesnt_stand_in_later() {
+        use clawdmeter_core::keep_awake::Pause;
+        static FAILING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        fn power() -> Option<Power> {
+            (!FAILING.load(Ordering::SeqCst)).then_some(Power { external: Some(true), battery_pct: Some(90) })
+        }
+        let (holds, releases) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let mut h = Handle::spawn_with(Counting(holds.clone(), releases), power, Wish::Forever);
+        wait_for(|| h.status() == Status::Holding);
+        h.set(Wish::Off);
+        wait_for(|| h.answered() && h.status() == Status::Off);
+        FAILING.store(true, Ordering::SeqCst);
+        h.set(Wish::Forever);
+        wait_for(|| h.answered());
+        assert_eq!(h.status(), Status::Paused(Pause::BatteryUnknown));
+        assert_eq!(holds.load(Ordering::SeqCst), 1, "not held again on the old reading");
     }
 
     #[test]
