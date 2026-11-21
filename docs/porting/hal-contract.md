@@ -105,7 +105,7 @@ function in your board folder only when it has something to report.
 |---------------------------|-------|
 | `screenshot`              | `SCREENSHOT_START w h bytes`, raw RGB565, `SCREENSHOT_END` (`SCREENSHOT_UNSUPPORTED` without PSRAM) |
 | `chime` (or `buzz`)       | plays the ding (no reply) |
-| `chime <gain> [volume]`   | tunes a board's speaker until reboot (gain 0..1, ES8311 volume 0..100) and plays the ding. Replies `{"chime":{"gain":0.70,"volume":77}}`. |
+| `chime <gain> [volume]`   | tunes a board's speaker until reboot (gain 0..1, volume 0..100: the ES8311's volume, or on a board with no codec a scale on the samples) and plays the ding. Replies `{"chime":{"gain":0.70,"volume":77}}`. |
 | `unpair`                  | clears every BLE bond and re-advertises. Replies `{"unpair":true}`. |
 | `ble`                     | `BLE status:` lines: state, bond count, owner, then each connected peer's address, identity address, encryption and bond flags. |
 | `disconnect`              | drops every BLE connection (no reply); the board re-advertises. |

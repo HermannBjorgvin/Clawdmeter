@@ -47,6 +47,7 @@ Nested `CLAUDE.md` files load when you read or edit a file in their folder.
 | `esp32_2432s028r`, `esp32_2432s028r_landscape` | Sunton ESP32-2432S028R (CYD) | classic ESP32, no PSRAM, ILI9341 SPI 240×320 / 320×240, resistive XPT2046 touch |
 | `m5sticks3` | M5Stack M5StickS3 | ST7789P3 SPI 135×240, no touch, M5PM1 PMIC, ES8311 chime |
 | `m5stack_fire` | M5Stack FIRE | ESP32 (classic, no S3), ILI9342C SPI 320×240, no touch, 3 buttons, IP5306 |
+| `m5stack_core2` | M5Stack Core2 (v1.0 / v1.1) | ESP32 (classic), ILI9342C SPI 320×240, FT6336U touch + 3 touch buttons, AXP192 or AXP2101 detected at boot, NS4168 I2S speaker |
 | `lilygo_t_display_s3` | LILYGO T-Display S3 (non-touch) | ST7789 i80 parallel 170×320, BOOT + a PWR-role key |
 | `waveshare_lcd_2` | Waveshare ESP32-S3-Touch-LCD-2 | ST7789T3 SPI 240×320, CST816D touch, no usable buttons |
 | `waveshare_epaper_154` | Waveshare ESP32-S3-ePaper-1.54 | SSD1681 e-paper 200×200, no touch, `minimal_ui` |

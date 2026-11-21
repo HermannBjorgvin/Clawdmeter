@@ -56,6 +56,7 @@ DISPLAY_NAMES = {
     "esp32_2432s028r_landscape": "ESP32-2432S028R CYD 2.8\" (landscape)",
     "m5sticks3": "M5Stack M5StickS3",
     "m5stack_fire": "M5Stack FIRE",
+    "m5stack_core2": "M5Stack Core2",
     "lilygo_t_display_s3": "LILYGO T-Display S3",
     "waveshare_lcd_2": "Waveshare ESP32-S3 Touch LCD 2\"",
     "waveshare_epaper_154": "Waveshare ESP32-S3 ePaper 1.54\"",
