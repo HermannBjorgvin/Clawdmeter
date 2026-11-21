@@ -174,9 +174,10 @@ Anthropic for nothing extra. Signs of work, on any of your Claude accounts
   This is the only sign without the hooks, and it is slow (the app reads
   usage every few minutes) and counts work on the account from anywhere,
   not just this computer. The app's own usage check sends a tiny message
-  while your 5-hour window runs, so the first point your usage goes up
-  after such a check isn't counted: light work on a large plan may not
-  show. Install the hooks, or pick a timer, if that is you.
+  while your 5-hour window runs, so one point of a rise is put down to
+  each such check: only usage that goes up by more than a point between
+  two checks counts. Steady, light work, and most work on a large plan,
+  doesn't show. Install the hooks, or pick a timer, if that is you.
 
 The 30 minutes start when you pick the choice (picking it again starts
 them over), or when the app starts with it already picked, so it always
@@ -444,7 +445,7 @@ seconds and preserves comments and unknown keys when saving.
 | `alert_chime` | `off` | Play a chime or buzzer on devices with supported hardware, when Claude needs you. The older `beep` key still works. |
 | `desktop_chime` | `off` | Play the same chime on this computer when Claude needs you. Follows `alert_on`. |
 | `keep_awake` | `off` | Keep this computer awake with the lid closed, down to a 20% charge on battery, and for how long: `off`, `1h`, `3h`, `7h`, `claude` (until Claude stops working) or `on` (Forever). The tray menu's **Keep awake with the lid closed** submenu; see [above](#keep-awake-with-the-lid-closed). The tray app only. |
-| `keep_awake_until` | unset | When a `1h`, `3h` or `7h` choice ends, as unix seconds. The app writes it with the choice; a time already past switches `keep_awake` off, and one further off than the choice lasts starts the choice over from now. |
+| `keep_awake_until` | unset | When a `1h`, `3h` or `7h` choice ends, as unix seconds. The app writes it with the choice; a time already past switches `keep_awake` off, and one further off than the choice lasts starts the choice over from now. Under any other choice the app removes the key. |
 | `clock` | `off` | `auto`, `12`, or `24` replaces the device's Usage title with a clock. |
 | `liveliness` | `3` | How lively Clawd is, `1` (No-nonsense) to `5` (All-nonsense). Set with **Animation silliness** on the Device page. |
 | `attention_anim` | `2m` | How long Clawd points and waves for an alert: `off`, `10s`, `30s` or `2m`. The alert itself is unchanged. Set with **Attention animation** on the Device page. |

@@ -130,31 +130,31 @@ pub struct EngineStatus {
     pub claude_work_at: Option<i64>,
 }
 
-/// Where a Claude account's main meter stood at its last sign of work (or
-/// its first reading), to tell the next rise ([`UsageMark::rose`]).
+/// Where a Claude account's main meter stood at its last answer, and how
+/// many probe messages have gone out since, to tell the next rise
+/// ([`UsageMark::rose`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UsageMark {
     pct: u32,
-    /// The probe has sent a message since: one point of a rise may be its
-    /// own.
-    probed: bool,
+    /// Probe messages sent since `pct` was read (a probe that missed
+    /// counts: its message may have gone out).
+    probes: u32,
 }
 
 impl UsageMark {
-    /// Take a new reading of the meter (`probed`: the probe's message was
-    /// sent for it). True when usage rose since the mark by more than the
-    /// probe's own messages explain; the mark then moves up. A drop (a
-    /// reset) moves it down and is no rise.
+    /// Take a new reading of the meter (`probed`: a probe message was sent
+    /// for it). True when usage rose since the last reading by more than
+    /// the probes sent in between explain. The mark follows the meter
+    /// either way, so what the probes added never adds up.
     ///
-    /// The probe's allowance is one point: its messages are tiny, but they
-    /// are usage, and without it an idle account's meter ticking over on
-    /// them alone would read as work every time.
+    /// The allowance is one point for each probe: its messages are tiny,
+    /// but they are usage, and an idle account's meter ticks over on them
+    /// alone. Without it, or with one point in all, those ticks would read
+    /// as work for as long as the 5-hour window runs.
     fn rose(&mut self, pct: u32, probed: bool) -> bool {
-        self.probed |= probed;
-        let rose = pct > self.pct + u32::from(self.probed);
-        if rose || pct < self.pct {
-            *self = UsageMark { pct, probed: false };
-        }
+        let probes = self.probes + u32::from(probed);
+        let rose = pct > self.pct.saturating_add(probes);
+        *self = UsageMark { pct, probes: 0 };
         rose
     }
 }
@@ -644,18 +644,18 @@ impl Engine {
             // something else, only set the mark.
             match st.last.as_ref().filter(|l| l.provider == Provider::Claude).map(UsageReading::session_pct) {
                 Some(pct) if answered && !rekind => {
-                    let mark = self.usage_marks.entry(dir.clone()).or_insert(UsageMark { pct, probed: false });
+                    let mark = self.usage_marks.entry(dir.clone()).or_insert(UsageMark { pct, probes: 0 });
                     if mark.rose(pct, probed) {
                         self.claude_rise_at = Some(now);
                     }
                 }
                 Some(pct) if answered => {
-                    self.usage_marks.insert(dir.clone(), UsageMark { pct, probed: false });
+                    self.usage_marks.insert(dir.clone(), UsageMark { pct, probes: 0 });
                 }
                 // A miss: the probe's message may still have been sent.
                 _ => {
                     if let Some(mark) = self.usage_marks.get_mut(&dir) {
-                        mark.probed |= probed;
+                        mark.probes += u32::from(probed);
                     }
                 }
             }
@@ -1819,12 +1819,13 @@ mod tests {
         assert_eq!(work(&e, T0 + 3600), Some(T0 + 3100), "stopped: the last prompt or tool event stands");
     }
 
-    // The probe's own messages are usage too: one point of a rise since the
-    // mark may be theirs, so an idle account's meter ticking over on probes
-    // alone isn't taken for work. A meter that now measures something else
-    // is no rise either.
+    // The probe's own messages are usage too: a point of a rise for each
+    // probe sent since the last reading may be theirs, so an idle account's
+    // meter ticking over on probes alone isn't taken for work, however long
+    // it goes on. A meter that now measures something else is no rise
+    // either.
     #[test]
-    fn a_rise_the_probe_explains_is_no_sign_of_work() {
+    fn a_rise_the_probes_explain_is_no_sign_of_work() {
         use crate::usage::SessionLimit;
         let a = PathBuf::from("/h/.claude");
         let probed = |result: Result<UsageReading, UsageError>| {
@@ -1834,23 +1835,28 @@ mod tests {
         let work = |e: &Engine, now| e.status(now).claude_work_at;
         let mut e = Engine::new(settings(""));
         e.on_poll_results(T0, vec![(a.clone(), Ok(reading(10)))]);
-        // Idle, probed every 5 minutes: one point over the mark is the probe's.
-        e.on_poll_results(T0 + 300, vec![(a.clone(), probed(Ok(reading(10))))]);
-        e.on_poll_results(T0 + 600, vec![(a.clone(), probed(Ok(reading(11))))]);
-        e.on_poll_results(T0 + 900, vec![(a.clone(), probed(Ok(reading(11))))]);
-        assert_eq!(work(&e, T0 + 900), None);
-        // A second point is more than that.
-        e.on_poll_results(T0 + 1200, vec![(a.clone(), probed(Ok(reading(12))))]);
-        assert_eq!(work(&e, T0 + 1200), Some(T0 + 1200));
-        // The mark moved up with it: the next point is the probe's again,
-        // also when the probe that sent a message missed.
-        e.on_poll_results(T0 + 1500, vec![(a.clone(), probed(Err(UsageError::Timeout)))]);
-        e.on_poll_results(T0 + 1800, vec![(a.clone(), Ok(reading(13)))]);
-        assert_eq!(work(&e, T0 + 1800), Some(T0 + 1200));
-        // With no probe since the mark, one point is work.
-        e.on_poll_results(T0 + 2100, vec![(a.clone(), Ok(reading(15)))]);
-        e.on_poll_results(T0 + 2400, vec![(a.clone(), Ok(reading(16)))]);
-        assert_eq!(work(&e, T0 + 2400), Some(T0 + 2400));
+        // Idle for the whole 5-hour window, probed every 5 minutes, and
+        // every probe ticks the meter over: 60 points, and no work.
+        for i in 1..=60 {
+            let now = T0 + 300 * i64::from(i);
+            e.on_poll_results(now, vec![(a.clone(), probed(Ok(reading(10 + i))))]);
+            assert_eq!(work(&e, now), None, "after {i} probes");
+        }
+        // Two points between two probes is more than one probe's.
+        e.on_poll_results(T0 + 20_000, vec![(a.clone(), probed(Ok(reading(72))))]);
+        assert_eq!(work(&e, T0 + 20_000), Some(T0 + 20_000));
+        // A probe that missed sent its message too: with the next one that
+        // is two points allowed, and a third is work.
+        e.on_poll_results(T0 + 20_300, vec![(a.clone(), probed(Err(UsageError::Timeout)))]);
+        e.on_poll_results(T0 + 20_600, vec![(a.clone(), probed(Ok(reading(74))))]);
+        assert_eq!(work(&e, T0 + 20_600), Some(T0 + 20_000));
+        e.on_poll_results(T0 + 20_900, vec![(a.clone(), probed(Err(UsageError::Timeout)))]);
+        e.on_poll_results(T0 + 21_200, vec![(a.clone(), probed(Ok(reading(77))))]);
+        assert_eq!(work(&e, T0 + 21_200), Some(T0 + 21_200));
+        // With no probe in between (the idle source answered), one point
+        // is work.
+        e.on_poll_results(T0 + 21_500, vec![(a.clone(), Ok(reading(78)))]);
+        assert_eq!(work(&e, T0 + 21_500), Some(T0 + 21_500));
 
         // A meter that now measures the week (the account turned out to
         // have no 5-hour limit): the session's 0 → the week's 48 is no rise,

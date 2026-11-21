@@ -113,8 +113,8 @@ is faked behind `FlashHardware`.
   at 18%, 2 h 41 min left)"). `sync_keep_awake` runs every tick: it hands
   the thread `EngineStatus::claude_work_at` (the newest sign of Claude
   working: now while a turn runs, else the last prompt or tool event or
-  usage rise; any change of it is work, and one point of a rise is the
-  probe's own, `UsageMark`), and saves `off` once the thread reports
+  usage rise; any change of it is work, and a point of a rise for each
+  probe since the last reading is the probe's own, `UsageMark`), and saves `off` once the thread reports
   `Ended`. A pick of the choice already on starts it over
   (`Handle::pick`). The
   engine is only read: keep awake adds no poll or probe and moves no
@@ -193,7 +193,7 @@ is faked behind `FlashHardware`.
   this computer via rodio, ALSA on Linux), `keep_awake` (`off`/`1h`/`3h`/`7h`/`claude`/`on`,
   default off: the tray's submenu, read by the tray only; `on` is Forever)
   and `keep_awake_until` (a timed choice's end, unix seconds, written with
-  it), `clock`, `liveliness` (1–5,
+  it and removed under any other choice), `clock`, `liveliness` (1–5,
   default 3: the Device page's Animation silliness slider, sent as `lv`),
   `attention_anim` (`off`/`10s`/`30s`/`2m`, default `2m`, sent as `aa`
   seconds), `pace_marker` (default off, sent as `pm`), `menu_bar_usage`
