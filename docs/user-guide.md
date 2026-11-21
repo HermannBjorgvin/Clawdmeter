@@ -148,19 +148,27 @@ flat:
 - Plugged in, it stays awake for as long as the box is ticked.
 - On battery, it stays awake down to a 20% charge. At 20% the app lets go
   and the laptop sleeps as usual; it holds again at 25%, or when you plug
-  it in. The menu item then reads *(paused, battery at 18%)*.
+  it in. The menu item then reads *(paused, battery at 18%)*. On Windows a
+  laptop whose lid is already shut sleeps at its own **Sleep after** time
+  rather than at once.
+- A charger too weak to keep up counts as on battery while the battery
+  reports that it is draining (Linux and macOS; Windows doesn't say).
 - On battery with a charge that can't be read, it doesn't hold: *(paused on
   battery)*.
 
-Unticking the box and quitting the app put the computer back as it was;
-so does logging out or shutting down on Linux and Windows. What that means
-differs by system:
+Unticking the box, quitting the app, logging out and shutting down all put
+the computer back as it was. What that means differs by system:
 
-| System | What the app does | Left behind if the app is killed |
+| System | What the app does | If the app is killed or crashes |
 | --- | --- | --- |
-| Linux | Takes a systemd-logind lock on the lid switch, and asks GNOME, KDE or Xfce not to suspend when idle. No setting is changed. | Nothing: the system drops both when the app's process ends. |
-| Windows | Sets your power plan's **When I close the lid** to *Do nothing* (plugged in and on battery) and its on-battery **Sleep after** to *Never*, after saving the old values in `keep-awake-restore.json` in the state folder. No admin rights are needed. | The edited plan, until the app's next start, which puts the saved values back. A value you changed yourself in the meantime is left alone. |
-| macOS | Sets a flag in the kernel that stops the lid from sleeping the Mac. No admin rights are needed and no setting is written to disk. | The flag, until the app's next start or a restart of the Mac. |
+| Linux | Takes a systemd-logind lock on the lid switch, and asks GNOME, KDE or Xfce not to suspend when idle. No setting is changed. | The system drops both when the app's process ends. |
+| Windows | Sets your power plan's **When I close the lid** to *Do nothing* (plugged in and on battery) and its on-battery **Sleep after** to *Never*, after saving the old values in `keep-awake-restore.json` in the state folder. No admin rights are needed. | A small guard process the app starts while it holds puts the saved values back within moments. A value you changed yourself in the meantime is left alone. |
+| macOS | Sets a flag in the kernel that stops the lid from sleeping the Mac. No admin rights are needed and no setting is written to disk. | The same guard clears the flag. |
+
+If the guard dies with the app (a power cut, or both ended at once), the
+change stays until Clawdmeter next starts: on Windows the laptop then
+doesn't sleep on battery, lid open or shut, and on macOS the lid doesn't
+sleep the Mac until it restarts. Start Clawdmeter once to put it right.
 
 Things to know:
 
@@ -172,11 +180,14 @@ Things to know:
   not a documented part of macOS: on some Macs it is reported to have no
   effect, and macOS may clear it when the power source changes, so a Mac
   can still go to sleep when you plug or unplug it with the lid shut.
-  Another app that uses the same flag (Amphetamine's closed-display mode)
-  and Clawdmeter will clear each other's.
+  Another keep-awake app that uses the same flag and Clawdmeter will clear
+  each other's.
 - **Windows:** if your organisation's policy sets the lid action, the item
   reads *(unavailable)* and nothing is changed. If you switch power plans
   while the box is ticked, the old plan is put back and the new one edited.
+  Some laptops with Modern Standby are reported to enter standby on a lid
+  close whatever the lid action says; on those this may not be enough,
+  above all on battery.
 - *(unavailable)* means the system refused; `daemon.log` says why, and the
   app tries again by itself.
 - With no tray (GNOME without the AppIndicator extension), set

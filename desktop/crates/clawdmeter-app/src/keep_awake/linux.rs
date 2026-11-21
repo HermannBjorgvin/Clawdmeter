@@ -57,6 +57,8 @@ pub(super) struct Logind {
     /// The session-bus connection the desktop's inhibitors belong to: they
     /// stand while it is open.
     idle: Option<Connection>,
+    /// That connection dropped: taken again on the next poll.
+    idle_lost: bool,
     /// PowerDevil runs here: the lid is its to decide.
     plasma: bool,
 }
@@ -67,12 +69,11 @@ const PLASMA_CAVEAT: &str = "on Plasma, also set the lid to Do nothing";
 impl Backend for Logind {
     fn hold(&mut self) -> Result<(), String> {
         self.lid = Some(inhibit_lid()?);
-        self.plasma = false;
-        match inhibit_idle_suspend() {
-            Ok((conn, plasma)) => {
-                self.idle = Some(conn);
-                self.plasma = plasma;
-            }
+        self.idle_lost = false;
+        let (idle, plasma) = inhibit_idle_suspend();
+        self.plasma = plasma;
+        match idle {
+            Ok(conn) => self.idle = Some(conn),
             Err(e) => log::info!("keep awake: no desktop suspend inhibitor ({e}); the lid lock still holds"),
         }
         if self.plasma {
@@ -91,21 +92,33 @@ impl Backend for Logind {
 
     fn holding(&mut self) -> bool {
         // The lid lock stands while its descriptor is open. The desktop's
-        // inhibitors go with their connection: take them again if it drops.
+        // inhibitors go with their connection: if it drops they are taken
+        // again here, and the lid lock is left alone (letting go of it with
+        // the lid shut would suspend the laptop before the next one lands).
         if let Some(conn) = &self.idle {
             // Read what arrived, so nothing queues up for as long as it holds.
             let _ = conn.process(Duration::ZERO);
             if !conn.channel().is_connected() {
-                return false;
+                log::info!("keep awake: the session bus connection dropped; taking the suspend inhibitor again");
+                self.idle = None;
+                self.idle_lost = true;
+            }
+        }
+        if self.idle_lost {
+            if let (Ok(conn), _) = inhibit_idle_suspend() {
+                self.idle = Some(conn);
+                self.idle_lost = false;
             }
         }
         self.lid.is_some()
     }
 
-    fn release(&mut self) {
+    fn release(&mut self) -> Result<(), String> {
         // Closing the connection and the descriptor is the release.
         self.idle = None;
+        self.idle_lost = false;
         self.lid = None;
+        Ok(())
     }
 }
 
@@ -125,14 +138,19 @@ fn inhibit_lid() -> Result<OwnedFd, String> {
 }
 
 /// Ask the desktop not to suspend when idle, through each inhibitor service
-/// the session has. The connection that comes back holds them; the flag
-/// says PowerDevil is the one that answered (Plasma).
-fn inhibit_idle_suspend() -> Result<(Connection, bool), String> {
-    let conn = Connection::new_session().map_err(|e| format!("no session bus: {}", text(e)))?;
+/// the session has. The connection that comes back holds them. The flag
+/// says PowerDevil runs in this session (Plasma), whether or not it took
+/// the inhibitor: the lid is its to decide either way.
+fn inhibit_idle_suspend() -> (Result<Connection, String>, bool) {
+    let conn = match Connection::new_session() {
+        Ok(conn) => conn,
+        Err(e) => return (Err(format!("no session bus: {}", text(e))), false),
+    };
     let bus = conn.with_proxy("org.freedesktop.DBus", "/org/freedesktop/DBus", TIMEOUT);
     let present = |name: &str| {
         bus.method_call::<(bool,), _, _, _>("org.freedesktop.DBus", "NameHasOwner", (name,)).is_ok_and(|(b,)| b)
     };
+    let plasma = present("org.kde.Solid.PowerManagement");
     // The cookie each call returns is only for taking the inhibitor back
     // early; closing the connection does that, so it isn't kept (PowerDevil
     // hands it out as an int32, the others as a uint32).
@@ -157,15 +175,15 @@ fn inhibit_idle_suspend() -> Result<(Connection, bool), String> {
             pm.method_call("org.freedesktop.PowerManagement.Inhibit", "Inhibit", (WHO, WHY)),
         );
     }
-    match (held.is_empty(), failed.is_empty()) {
+    let held = match (held.is_empty(), failed.is_empty()) {
         (false, _) => {
             log::debug!("keep awake: idle suspend inhibited through {}", held.join(", "));
-            let plasma = present("org.kde.Solid.PowerManagement");
-            Ok((conn, plasma))
+            Ok(conn)
         }
         (true, false) => Err(failed.join("; ")),
         (true, true) => Err("this session has no org.gnome.SessionManager or org.freedesktop.PowerManagement".into()),
-    }
+    };
+    (held, plasma)
 }
 
 /// The computer's power, from `/sys/class/power_supply`.
@@ -175,16 +193,18 @@ pub(super) fn power() -> Power {
 
 /// [`power`] from any folder laid out like sysfs's. Supplies with
 /// `scope = Device` are a mouse's or a headset's battery, not the
-/// computer's. External power is a mains or USB supply that is online; with
-/// none listed, a battery that isn't discharging. Several batteries count
-/// as their average charge.
+/// computer's. A battery that says it is discharging means on battery,
+/// whatever the chargers say: one too weak for the load is no reason to
+/// skip the floor. Otherwise external power is a mains or USB supply that
+/// is online, or a battery that says it is charging, full or idle.
+/// Several batteries count as their average charge.
 fn power_from(dir: &Path) -> Power {
     let Ok(entries) = std::fs::read_dir(dir) else { return Power::UNKNOWN };
     let read = |supply: &Path, file: &str| {
         std::fs::read_to_string(supply.join(file)).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
     };
     let (mut chargers, mut online) = (0, false);
-    let (mut charges, mut discharging, mut batteries) = (Vec::new(), false, 0);
+    let (mut charges, mut discharging, mut fed, mut batteries) = (Vec::new(), false, false, 0);
     for entry in entries.flatten() {
         let supply = entry.path();
         if read(&supply, "scope").is_some_and(|s| s.eq_ignore_ascii_case("device")) {
@@ -196,7 +216,9 @@ fn power_from(dir: &Path) -> Power {
                 if let Some(pct) = read(&supply, "capacity").and_then(|c| c.parse::<u8>().ok()) {
                     charges.push(pct.min(100));
                 }
-                discharging |= read(&supply, "status").is_some_and(|s| s == "Discharging");
+                let status = read(&supply, "status");
+                discharging |= status.as_deref() == Some("Discharging");
+                fed |= matches!(status.as_deref(), Some("Charging" | "Full" | "Not charging"));
             }
             Some(t) if t == "Mains" || t.starts_with("USB") => {
                 chargers += 1;
@@ -207,10 +229,12 @@ fn power_from(dir: &Path) -> Power {
     }
     let external = match (chargers, batteries) {
         (0, 0) => None,
-        (0, _) => Some(!discharging),
-        // A dock that lists as offline while the battery isn't draining
-        // still powers the computer.
-        (_, _) => Some(online || (batteries > 0 && !discharging)),
+        (_, 0) => Some(online),
+        _ if discharging => Some(false),
+        // A dock that lists as offline, or no charger listed at all, while
+        // the battery says it is fed still powers the computer. A battery
+        // that says nothing either way counts as on battery.
+        _ => Some(online || fed),
     };
     let battery_pct =
         (!charges.is_empty()).then(|| (charges.iter().map(|&c| c as u32).sum::<u32>() / charges.len() as u32) as u8);
@@ -280,6 +304,39 @@ mod tests {
                 ("BAT1", &[("type", "Battery"), ("capacity", "50"), ("status", "Not charging")]),
             ],
             Power { external: Some(false), battery_pct: Some(30) },
+        );
+    }
+
+    #[test]
+    fn a_draining_battery_is_on_battery_whatever_the_charger_says() {
+        check(
+            "weak-charger",
+            &[
+                ("ucsi-source-psy-USBC000:001", &[("type", "USB"), ("online", "1")]),
+                ("BAT0", &[("type", "Battery"), ("capacity", "22"), ("status", "Discharging")]),
+            ],
+            Power { external: Some(false), battery_pct: Some(22) },
+        );
+        check(
+            "dock-listed-offline",
+            &[
+                ("AC", &[("type", "Mains"), ("online", "0")]),
+                ("BAT0", &[("type", "Battery"), ("capacity", "80"), ("status", "Full")]),
+            ],
+            Power { external: Some(true), battery_pct: Some(80) },
+        );
+        check(
+            "no-word-either-way",
+            &[
+                ("AC", &[("type", "Mains"), ("online", "0")]),
+                ("BAT0", &[("type", "Battery"), ("capacity", "15"), ("status", "Unknown")]),
+            ],
+            Power { external: Some(false), battery_pct: Some(15) },
+        );
+        check(
+            "no-charger-listed-charging",
+            &[("BAT0", &[("type", "Battery"), ("capacity", "30"), ("status", "Charging")])],
+            Power { external: Some(true), battery_pct: Some(30) },
         );
     }
 

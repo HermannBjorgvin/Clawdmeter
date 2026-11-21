@@ -26,7 +26,7 @@ pub mod clamshell;
 pub mod plan;
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -147,10 +147,11 @@ pub trait Backend {
     }
 
     /// Let go and leave the OS as it was before [`hold`]. Called when
-    /// holding, and safe when not.
+    /// holding, and safe when not. `Err`: something is still changed, and
+    /// the keeper calls again on its next ticks until it is `Ok`.
     ///
     /// [`hold`]: Backend::hold
-    fn release(&mut self);
+    fn release(&mut self) -> Result<(), String>;
 }
 
 /// Holds and lets go of a [`Backend`] as the setting and the power say.
@@ -160,6 +161,11 @@ pub struct Keeper<B: Backend> {
     /// Whether an earlier run's leftovers are dealt with: healed, or taken
     /// over by a hold.
     settled: bool,
+    /// A release is owed: one failed, or a hold failed part-way. Tried on
+    /// every tick that doesn't hold.
+    owed: bool,
+    /// The failed release was logged, so it isn't logged every tick.
+    complained: bool,
     status: Status,
     /// Failed holds in a row, and when to try again.
     strikes: usize,
@@ -170,7 +176,16 @@ impl<B: Backend> Keeper<B> {
     /// A keeper over `backend`. Nothing of the OS is touched before the
     /// first [`tick`](Keeper::tick).
     pub fn new(backend: B) -> Self {
-        Keeper { backend, holding: false, settled: false, status: Status::Off, strikes: 0, retry_at: 0 }
+        Keeper {
+            backend,
+            holding: false,
+            settled: false,
+            owed: false,
+            complained: false,
+            status: Status::Off,
+            strikes: 0,
+            retry_at: 0,
+        }
     }
 
     /// What it's doing now.
@@ -183,10 +198,6 @@ impl<B: Backend> Keeper<B> {
     pub fn tick(&mut self, wanted: bool, power: Power, now: i64) -> &Status {
         if !wanted {
             self.heal();
-            if matches!(self.status, Status::Failed(_)) {
-                // A hold that failed may have left its undoing unfinished.
-                self.backend.release();
-            }
             self.let_go();
             self.strikes = 0;
             self.retry_at = 0;
@@ -207,10 +218,14 @@ impl<B: Backend> Keeper<B> {
             match self.backend.hold() {
                 Ok(()) => {
                     self.holding = true;
+                    // The hold took over whatever was left to undo.
+                    self.owed = false;
                     self.strikes = 0;
                     self.retry_at = 0;
                 }
                 Err(e) => {
+                    // It may have left its own undoing unfinished.
+                    self.owed = true;
                     let wait = RETRY_SECS[self.strikes.min(RETRY_SECS.len() - 1)];
                     self.strikes += 1;
                     self.retry_at = now + wait;
@@ -240,9 +255,23 @@ impl<B: Backend> Keeper<B> {
     }
 
     fn let_go(&mut self) {
-        if self.holding {
-            self.backend.release();
-            self.holding = false;
+        if !self.holding && !self.owed {
+            return;
+        }
+        self.holding = false;
+        match self.backend.release() {
+            Ok(()) => {
+                if std::mem::take(&mut self.complained) {
+                    log::info!("keep awake: the computer is back as it was");
+                }
+                self.owed = false;
+            }
+            Err(e) => {
+                if !std::mem::replace(&mut self.complained, true) {
+                    log::error!("keep awake: couldn't put the computer back as it was ({e}); trying again");
+                }
+                self.owed = true;
+            }
         }
     }
 
@@ -251,7 +280,7 @@ impl<B: Backend> Keeper<B> {
             match &status {
                 Status::Off => log::info!("keep awake: off"),
                 Status::Holding => log::info!("keep awake: holding (the computer stays awake with the lid closed)"),
-                Status::Limited(what) => log::warn!("keep awake: holding, but not the lid ({what})"),
+                Status::Limited(what) => log::info!("keep awake: holding ({what})"),
                 Status::Paused(Pause::BatteryLow(pct)) => log::info!(
                     "keep awake: paused, battery at {pct}% (holds again at {}% or on external power)",
                     BATTERY_FLOOR.saturating_add(BATTERY_RESUME)
@@ -300,15 +329,23 @@ impl RestoreFile {
             fs::create_dir_all(dir)?;
         }
         let tmp = self.path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_vec_pretty(original).map_err(io::Error::other)?)?;
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(&serde_json::to_vec_pretty(original).map_err(io::Error::other)?)?;
+        // On disk before the setting changes: the record has to outlive a
+        // power cut right after.
+        file.sync_all()?;
+        drop(file);
         fs::rename(&tmp, &self.path)
     }
 
     /// The saved value: `Ok(None)` with no record (nothing to put back). A
-    /// record that can't be read or parsed is an error, and stays.
+    /// record that can't be read is an error, and stays; one that reads and
+    /// doesn't parse is [`io::ErrorKind::InvalidData`].
     pub fn load<T: for<'de> Deserialize<'de>>(&self) -> io::Result<Option<T>> {
         match fs::read(&self.path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(io::Error::other),
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).map(Some).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
@@ -336,6 +373,8 @@ mod tests {
         log: Rc<RefCell<Vec<&'static str>>>,
         fail: Rc<RefCell<bool>>,
         lost: Rc<RefCell<bool>>,
+        /// Releases fail.
+        stuck: Rc<RefCell<bool>>,
         caveat: Option<&'static str>,
     }
 
@@ -357,8 +396,13 @@ mod tests {
         fn holding(&mut self) -> bool {
             !std::mem::take(&mut *self.lost.borrow_mut())
         }
-        fn release(&mut self) {
+        fn release(&mut self) -> Result<(), String> {
+            if *self.stuck.borrow() {
+                self.log.borrow_mut().push("release-failed");
+                return Err("stuck".into());
+            }
             self.log.borrow_mut().push("release");
+            Ok(())
         }
     }
 
@@ -460,9 +504,50 @@ mod tests {
         *fail.borrow_mut() = true;
         k.tick(false, AC, 1000);
         k.tick(true, AC, 1001);
+        let before = log.borrow().len();
         k.tick(false, AC, 1002);
+        assert_eq!(log.borrow()[before..], ["release"], "a hold that failed may have left its undoing unfinished");
+        k.tick(false, AC, 1003);
+        assert_eq!(log.borrow().len(), before + 1, "undone once");
         *fail.borrow_mut() = false;
-        assert_eq!(k.tick(true, AC, 1003), &Status::Holding, "a new tick of the box tries at once");
+        assert_eq!(k.tick(true, AC, 1004), &Status::Holding, "a new tick of the box tries at once");
+    }
+
+    #[test]
+    fn a_failed_release_is_tried_again_until_it_goes_through() {
+        let fake = Fake::default();
+        let (log, stuck) = (fake.log.clone(), fake.stuck.clone());
+        let mut k = Keeper::new(fake);
+        k.tick(true, AC, 0);
+        *stuck.borrow_mut() = true;
+        assert_eq!(k.tick(false, AC, 1), &Status::Off);
+        assert_eq!(k.tick(false, AC, 2), &Status::Off);
+        assert_eq!(*log.borrow(), ["hold", "release-failed", "release-failed"], "the OS is still changed: again");
+        *stuck.borrow_mut() = false;
+        k.tick(false, AC, 3);
+        k.tick(false, AC, 4);
+        assert_eq!(log.borrow()[3..], ["release"], "and no more once it is back");
+
+        // Ticking the box again takes the leftovers over instead.
+        *stuck.borrow_mut() = true;
+        k.tick(true, AC, 5);
+        k.tick(false, AC, 6);
+        k.tick(true, AC, 7);
+        *stuck.borrow_mut() = false;
+        k.tick(false, AC, 8);
+        k.tick(false, AC, 9);
+        assert_eq!(log.borrow()[4..], ["hold", "release-failed", "hold", "release"]);
+
+        // Quit tries too.
+        let fake = Fake::default();
+        let (log, stuck) = (fake.log.clone(), fake.stuck.clone());
+        let mut k = Keeper::new(fake);
+        k.tick(true, AC, 0);
+        *stuck.borrow_mut() = true;
+        k.tick(false, AC, 1);
+        *stuck.borrow_mut() = false;
+        k.stop();
+        assert_eq!(*log.borrow(), ["hold", "release-failed", "release"]);
     }
 
     #[test]
@@ -522,7 +607,11 @@ mod tests {
         again.save(&vec![2u32]).unwrap();
         assert_eq!(file.load::<Vec<u32>>().unwrap(), Some(vec![2]), "a new record replaces the old");
         fs::write(file.path(), b"not json").unwrap();
-        assert!(file.load::<Vec<u32>>().is_err(), "a record that can't be read is not 'nothing to put back'");
+        assert_eq!(
+            file.load::<Vec<u32>>().unwrap_err().kind(),
+            io::ErrorKind::InvalidData,
+            "a record that doesn't parse is not 'nothing to put back'"
+        );
         assert!(file.path().exists());
         file.clear().unwrap();
         assert_eq!(file.load::<Vec<u32>>().unwrap(), None);

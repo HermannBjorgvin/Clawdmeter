@@ -20,6 +20,18 @@
 //! The thread owns every OS call, so a slow D-Bus or power call never holds
 //! up the tray's tick. Quit joins it ([`Handle::shutdown`]), so the hold is
 //! released before the process exits.
+//!
+//! Windows and macOS change something that outlives the process, so two
+//! more things put it back when the process ends without its quit path:
+//!
+//! - the end of the OS session (Windows: `WM_ENDSESSION`) or of the app by
+//!   AppKit (macOS: logout or a Quit from outside, which calls `exit`) asks
+//!   the thread to let go and waits for it (`Handle::session_ender`);
+//! - a guard, a child process started with each hold ([`GUARD_ARG`]), puts
+//!   things back when the app dies without a word: a crash or a kill.
+//!
+//! What neither covers (a power cut, both processes killed at once) is
+//! healed by the next start.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -31,7 +43,7 @@ mod windows;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clawdmeter_core::keep_awake::{Backend, Keeper, Power, Status};
 use clawdmeter_core::{unix_now, Paths};
@@ -39,12 +51,24 @@ use clawdmeter_core::{unix_now, Paths};
 /// How often the power source and the hold are looked at again.
 const POLL: Duration = Duration::from_secs(15);
 
+/// After the OS said the session is ending, nothing is held for this long.
+/// A process still alive after it wasn't ended after all (a cancelled
+/// shutdown, an installer that asked the app to close and gave up), and
+/// holds again.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+const SESSION_END_GRACE: Duration = Duration::from_secs(60);
+
+/// The argument the app starts its guard with: `clawdmeter keep-awake-guard`
+/// ([`guard_main`]).
+pub const GUARD_ARG: &str = "keep-awake-guard";
+
 enum Msg {
     /// The setting changed.
     Want(bool),
-    /// The OS session is ending (Windows: logoff or shutdown), and the
-    /// process with it, with no quit: let go for good and say when done.
-    #[cfg(any(target_os = "windows", test))]
+    /// The OS session is ending (Windows: logoff or shutdown; macOS: AppKit
+    /// is exiting the app), and the process with it, with no quit: let go
+    /// and say when done.
+    #[cfg(any(target_os = "windows", target_os = "macos", test))]
     SessionEnd(mpsc::Sender<()>),
     /// Quit: let go and end the thread.
     Stop,
@@ -66,6 +90,8 @@ impl Handle {
         let handle = Self::spawn_with(platform_backend(paths), platform_power, wanted);
         #[cfg(target_os = "windows")]
         windows::on_session_end(handle.session_ender());
+        #[cfg(target_os = "macos")]
+        macos::on_exit(handle.session_ender());
         handle
     }
 
@@ -79,11 +105,11 @@ impl Handle {
             .spawn(move || {
                 let mut keeper = Keeper::new(backend);
                 let mut wanted = wanted;
-                // The OS session is over: nothing is held again.
-                #[cfg_attr(not(any(target_os = "windows", test)), allow(unused_mut))]
-                let mut ended = false;
+                // The OS session is ending: nothing is held until then.
+                #[cfg_attr(not(any(target_os = "windows", target_os = "macos", test)), allow(unused_mut))]
+                let mut ended: Option<Instant> = None;
                 loop {
-                    let hold = wanted && !ended;
+                    let hold = wanted && ended.is_none_or(|until| Instant::now() >= until);
                     // Nothing to read while it's off: no battery polling for
                     // a feature nobody switched on.
                     let now_power = if hold { power() } else { Power::UNKNOWN };
@@ -93,9 +119,9 @@ impl Handle {
                     }
                     match rx.recv_timeout(POLL) {
                         Ok(Msg::Want(w)) => wanted = w,
-                        #[cfg(any(target_os = "windows", test))]
+                        #[cfg(any(target_os = "windows", target_os = "macos", test))]
                         Ok(Msg::SessionEnd(done)) => {
-                            ended = true;
+                            ended = Some(Instant::now() + SESSION_END_GRACE);
                             keeper.stop();
                             let _ = done.send(());
                         }
@@ -133,7 +159,7 @@ impl Handle {
     /// What to call when the OS session ends: it lets go and returns once
     /// the OS is as it was (or after a few seconds, so a stuck call can't
     /// hold up the logoff).
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test))]
     fn session_ender(&self) -> impl Fn() + Send + 'static {
         let tx = self.tx.clone();
         move || {
@@ -155,6 +181,68 @@ impl Handle {
 impl Drop for Handle {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// The guard: `clawdmeter keep-awake-guard`, a child the app starts with
+/// each hold that changes something lasting (Windows, macOS). It waits on
+/// its stdin, a pipe from the app. A byte means the app let go itself:
+/// nothing to do. The pipe closing with no byte means the app died holding
+/// (a crash, a kill, an exit that skipped the release), and the guard puts
+/// the OS back from the restore record.
+pub fn guard_main(paths: &Paths) -> i32 {
+    use std::io::Read;
+    let mut word = [0u8; 1];
+    // A read error isn't the app's death: leave things alone.
+    if let Ok(0) = std::io::stdin().read(&mut word) {
+        platform_backend(paths).heal();
+    }
+    0
+}
+
+/// The app's end of its guard ([`guard_main`]).
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+struct Guard(Option<std::process::Child>);
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+impl Guard {
+    /// Start a guard. Without one a crash is healed by the next start.
+    fn start() -> Option<Guard> {
+        use std::process::{Command, Stdio};
+        let child = std::env::current_exe().and_then(|exe| {
+            Command::new(exe).arg(GUARD_ARG).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+        });
+        match child {
+            Ok(child) => Some(Guard(Some(child))),
+            Err(e) => {
+                log::warn!("keep awake: no guard process ({e}); a crash is healed on the next start");
+                None
+            }
+        }
+    }
+
+    /// The app let go itself: tell the guard so, and it leaves.
+    fn dismiss(mut self) {
+        use std::io::Write;
+        if let Some(stdin) = self.0.as_mut().and_then(|child| child.stdin.as_mut()) {
+            let _ = stdin.write_all(b"q");
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+impl Drop for Guard {
+    /// Closes the pipe. A guard that wasn't dismissed takes that as the
+    /// app's death and puts the OS back, which is right for a hold dropped
+    /// any other way.
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            drop(child.stdin.take());
+            // Reaped off this thread: the guard may be busy restoring.
+            let _ = std::thread::Builder::new().name("clawdmeter-guard-reap".into()).spawn(move || {
+                let _ = child.wait();
+            });
+        }
     }
 }
 
@@ -197,7 +285,9 @@ impl Backend for Unsupported {
     fn hold(&mut self) -> Result<(), String> {
         Err("not supported on this system".into())
     }
-    fn release(&mut self) {}
+    fn release(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
@@ -225,8 +315,9 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-        fn release(&mut self) {
+        fn release(&mut self) -> Result<(), String> {
             self.1.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -277,7 +368,7 @@ mod tests {
         end();
         assert_eq!(releases.load(Ordering::SeqCst), 1, "released by the time the session-end call returns");
         wait_for(|| h.status() == Status::Off);
-        // The process is about to be ended: nothing is taken again.
+        // The process is about to be ended: nothing is taken again for now.
         h.set(false);
         h.set(true);
         std::thread::sleep(Duration::from_millis(50));

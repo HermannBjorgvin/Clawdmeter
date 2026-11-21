@@ -8,6 +8,8 @@
 //!   lid; the plan does that.
 //! - [`on_session_end`] restores the plan when Windows logs off or shuts
 //!   down, which ends the process without running its quit path.
+//! - A guard process ([`super::guard_main`]) restores it when the app is
+//!   killed or crashes.
 
 use std::ptr;
 use std::sync::Mutex;
@@ -17,8 +19,8 @@ use clawdmeter_core::keep_awake::{Backend, Power, RestoreFile};
 use clawdmeter_core::Paths;
 use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_SUCCESS, HANDLE, HWND,
-    INVALID_HANDLE_VALUE, LPARAM, LRESULT, WPARAM,
+    CloseHandle, GetLastError, LocalFree, ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HANDLE,
+    HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, WPARAM,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Power::{
@@ -87,7 +89,7 @@ impl Plan for WinPlan {
         }
     }
 
-    fn read(&mut self, scheme: &str, setting: Setting, source: Source) -> Result<u32, String> {
+    fn read(&mut self, scheme: &str, setting: Setting, source: Source) -> Result<Option<u32>, String> {
         let (scheme, (sub, id)) = (guid(scheme)?, ids(setting));
         let mut value = 0u32;
         // SAFETY: every pointer is to a local that outlives the call.
@@ -97,7 +99,10 @@ impl Plan for WinPlan {
                 Source::Dc => PowerReadDCValueIndex(ptr::null_mut(), &scheme, &sub, &id, &mut value),
             }
         };
-        check(code, "reading the power plan").map(|()| value)
+        if code == ERROR_FILE_NOT_FOUND {
+            return Ok(None);
+        }
+        check(code, "reading the power plan").map(|()| Some(value))
     }
 
     fn write(&mut self, scheme: &str, setting: Setting, source: Source, value: u32) -> Result<(), String> {
@@ -176,26 +181,28 @@ impl Drop for Request {
 pub(super) struct PowerPlan {
     plan: PlanHold<WinPlan>,
     request: Option<Request>,
+    /// Puts the plan back if this process dies holding.
+    guard: Option<super::Guard>,
 }
 
 impl PowerPlan {
     pub(super) fn new(paths: &Paths) -> Self {
-        PowerPlan { plan: PlanHold::new(WinPlan, RestoreFile::in_dir(&paths.state_dir)), request: None }
-    }
-
-    fn restore(&mut self) {
-        if let Err(e) = self.plan.restore() {
-            log::error!("keep awake: couldn't put the power plan back ({e}); it's tried again on the next start");
-        }
+        PowerPlan { plan: PlanHold::new(WinPlan, RestoreFile::in_dir(&paths.state_dir)), request: None, guard: None }
     }
 }
 
 impl Backend for PowerPlan {
     fn heal(&mut self) {
-        self.restore();
+        if let Err(e) = self.plan.restore() {
+            log::error!("keep awake: couldn't put the power plan back ({e}); it's tried again on the next start");
+        }
     }
 
     fn hold(&mut self) -> Result<(), String> {
+        // The guard first, so no moment of the edit is without one.
+        if self.guard.is_none() {
+            self.guard = super::Guard::start();
+        }
         self.plan.hold()?;
         // The lid is held without it; idle sleep is then the plan's own
         // timeout.
@@ -207,9 +214,15 @@ impl Backend for PowerPlan {
         self.plan.holding()
     }
 
-    fn release(&mut self) {
+    fn release(&mut self) -> Result<(), String> {
         self.request = None;
-        self.restore();
+        // A failed restore keeps its guard: if this process dies before the
+        // next try, the guard makes one.
+        self.plan.restore()?;
+        if let Some(guard) = self.guard.take() {
+            guard.dismiss();
+        }
+        Ok(())
     }
 }
 

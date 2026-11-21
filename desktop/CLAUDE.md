@@ -41,7 +41,8 @@ is faked behind `FlashHardware`.
   the Windows power-plan edit and `clamshell` the macOS lid flag, both
   recorded in `<state>/keep-awake-restore.json` before the change and
   healed on the next start; `heal` is skipped when the first tick holds,
-  because clearing the macOS flag with the lid shut sleeps the Mac).
+  because clearing the macOS flag with the lid shut sleeps the Mac; a
+  release that fails is retried on every tick).
 - `clawdmeter-ble`: btleplug link. The manager and adapter come from one
   `Bluetooth` handle per runtime (`bluetooth.rs`), kept for good: on Linux
   every btleplug `Manager` is a D-Bus connection that is never closed, on
@@ -110,9 +111,14 @@ is faked behind `FlashHardware`.
   behind `cfg`: `linux.rs` a logind `handle-lid-switch` lock plus the
   desktop's suspend inhibitor, `windows.rs` the power plan through powrprof,
   a power request and a hidden window that restores on `WM_ENDSESSION`,
-  `macos.rs` the root domain's `kPMSetClamshellSleepState` plus an idle
-  assertion; the Windows and macOS halves can't be run from Linux, so
-  check them on hardware when changing them).
+  `macos.rs` the root domain's `kPMSetClamshellSleepState`, an idle
+  assertion and an `atexit` hook for AppKit's own exit. On Windows and
+  macOS each hold also starts a guard, `clawdmeter keep-awake-guard`: a
+  child that waits on a stdin pipe and restores when the app dies without
+  dismissing it. The Windows and macOS halves can't be run from Linux, so
+  check them on hardware when changing them; the macOS half can at least be
+  clippy-checked from Linux in a scratch crate that copies the `keep_awake`
+  modules, since only ring's C build stops the real cross-check).
 
 ## Running
 

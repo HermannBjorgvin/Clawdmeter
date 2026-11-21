@@ -9,10 +9,15 @@
 //!   holds off idle sleep and goes with the process. It can't hold off the
 //!   lid; the flag does that.
 //! - [`power`] reads `pmset -g batt` (a read; nothing is changed).
+//! - [`on_exit`] clears the flag when AppKit exits the app (logout, or a
+//!   Quit from outside), which skips the tray's quit path.
+//! - A guard process ([`super::guard_main`]) clears it when the app is
+//!   killed or crashes.
 
-use std::ffi::{c_char, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::process::Command;
 use std::ptr;
+use std::sync::Mutex;
 
 use clawdmeter_core::keep_awake::clamshell::{self, Lid, LidHold};
 use clawdmeter_core::keep_awake::{Backend, Power, RestoreFile};
@@ -55,6 +60,9 @@ extern "C" {
     /// This task's port (what C's `mach_task_self()` expands to).
     #[link_name = "mach_task_self_"]
     static MACH_TASK_SELF: Port;
+
+    /// libc's: run `callback` when the process calls `exit`.
+    fn atexit(callback: extern "C" fn()) -> c_int;
 }
 
 /// The power root domain's lid flag.
@@ -137,26 +145,28 @@ impl Drop for Assertion {
 pub(super) struct Clamshell {
     lid: LidHold<RootDomain>,
     idle: Option<Assertion>,
+    /// Clears the flag if this process dies holding.
+    guard: Option<super::Guard>,
 }
 
 impl Clamshell {
     pub(super) fn new(paths: &Paths) -> Self {
-        Clamshell { lid: LidHold::new(RootDomain, RestoreFile::in_dir(&paths.state_dir)), idle: None }
-    }
-
-    fn restore(&mut self) {
-        if let Err(e) = self.lid.restore() {
-            log::error!("keep awake: couldn't clear the lid flag ({e}); it's tried again on the next start");
-        }
+        Clamshell { lid: LidHold::new(RootDomain, RestoreFile::in_dir(&paths.state_dir)), idle: None, guard: None }
     }
 }
 
 impl Backend for Clamshell {
     fn heal(&mut self) {
-        self.restore();
+        if let Err(e) = self.lid.restore() {
+            log::error!("keep awake: couldn't clear the lid flag ({e}); it's tried again on the next start");
+        }
     }
 
     fn hold(&mut self) -> Result<(), String> {
+        // The guard first, so no moment of the flag is without one.
+        if self.guard.is_none() {
+            self.guard = super::Guard::start();
+        }
         self.lid.hold()?;
         // The lid is held without it; idle sleep is then the Mac's own
         // timeout.
@@ -172,9 +182,40 @@ impl Backend for Clamshell {
         self.lid.renew()
     }
 
-    fn release(&mut self) {
+    fn release(&mut self) -> Result<(), String> {
         self.idle = None;
-        self.restore();
+        // A failed clear keeps its guard: if this process dies before the
+        // next try, the guard makes one.
+        self.lid.restore()?;
+        if let Some(guard) = self.guard.take() {
+            guard.dismiss();
+        }
+        Ok(())
+    }
+}
+
+/// What to run when the process exits.
+static ON_EXIT: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
+
+/// Run `f` when the process calls `exit` without the tray's quit path.
+/// AppKit does on logout and on a Quit from outside (the Dock, Activity
+/// Monitor, an Apple event): `-[NSApplication terminate:]` ends in `exit`,
+/// and nothing after `NSApplication::run` ever runs.
+pub(super) fn on_exit(f: impl Fn() + Send + 'static) {
+    extern "C" fn run() {
+        // try_lock: `exit` may come from any thread, and never waits here.
+        if let Ok(slot) = ON_EXIT.try_lock() {
+            if let Some(f) = slot.as_ref() {
+                f();
+            }
+        }
+    }
+    if let Ok(mut slot) = ON_EXIT.lock() {
+        *slot = Some(Box::new(f));
+    }
+    // SAFETY: `run` is a plain function that lives as long as the process.
+    if unsafe { atexit(run) } != 0 {
+        log::warn!("keep awake: no exit hook; a Quit from outside the app is left to the guard");
     }
 }
 

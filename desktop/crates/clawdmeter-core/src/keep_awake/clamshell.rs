@@ -64,8 +64,12 @@ impl<L: Lid> LidHold<L> {
     }
 
     /// Set the flag again, in case `powerd` cleared it. `false`: it couldn't
-    /// be set, and the hold is lost.
+    /// be set, and the hold is lost. The marker is written again first if
+    /// it has gone, so a set flag is never without one.
     pub fn renew(&mut self) -> bool {
+        if !self.file.path().exists() && self.file.save(&Mark { lid_sleep_disabled: true }).is_err() {
+            return false;
+        }
         self.lid.set_sleep_disabled(true).is_ok()
     }
 
@@ -89,11 +93,16 @@ impl<L: Lid> LidHold<L> {
 ///  -InternalBattery-0 (id=1234567)  64%; discharging; 4:12 remaining present: true
 /// ```
 ///
-/// A desktop has the first line alone. A UPS reads as a battery.
+/// A desktop has the first line alone. A UPS reads as a battery. A battery
+/// that says it is discharging counts as on battery whatever the first line
+/// says: a charger too weak for the load is no reason to skip the floor.
 pub fn power_from_pmset(text: &str) -> Power {
+    let draining = text
+        .lines()
+        .any(|line| line.trim_start().starts_with('-') && line.split(';').any(|field| field.trim() == "discharging"));
     let external = text.lines().find_map(|line| {
         let source = line.trim().strip_prefix("Now drawing from '")?;
-        Some(source.starts_with("AC Power"))
+        Some(source.starts_with("AC Power") && !draining)
     });
     let pct = |line: &str| -> Option<u8> {
         let end = line.find('%')?;
@@ -154,6 +163,17 @@ mod tests {
         hold.restore().unwrap();
         assert!(!*fake.flag.borrow());
         assert!(!file.path().exists());
+    }
+
+    #[test]
+    fn a_renewed_flag_is_never_without_its_marker() {
+        let (fake, file) = (Fake::default(), scratch("renew"));
+        let mut hold = LidHold::new(fake.clone(), file.clone());
+        hold.hold().unwrap();
+        // Something else removed the marker (a second instance letting go).
+        file.clear().unwrap();
+        assert!(hold.renew());
+        assert!(file.path().exists(), "a crash now is still healed by the next start");
     }
 
     #[test]
@@ -221,6 +241,16 @@ mod tests {
         );
         let both = "Now drawing from 'Battery Power'\n -UPS (id=2)\t90%; charged present: true\n -InternalBattery-0 (id=1)\t41%; discharging present: true\n";
         assert_eq!(power_from_pmset(both).battery_pct, Some(41), "the laptop's own battery, not the UPS");
+        let weak =
+            "Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t31%; discharging; 1:02 remaining present: true\n";
+        assert_eq!(
+            power_from_pmset(weak),
+            Power { external: Some(false), battery_pct: Some(31) },
+            "a charger that can't keep up: the floor applies"
+        );
+        let idle =
+            "Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t80%; AC attached; not charging present: true\n";
+        assert_eq!(power_from_pmset(idle).external, Some(true));
         assert_eq!(power_from_pmset(""), Power::UNKNOWN);
         assert_eq!(power_from_pmset("pmset: command not found"), Power::UNKNOWN);
         assert_eq!(

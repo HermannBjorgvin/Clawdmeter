@@ -51,8 +51,9 @@ const EDITS: [(Setting, Source); 3] =
 pub trait Plan {
     /// The plan in use.
     fn active(&mut self) -> Result<String, String>;
-    /// A setting's value in `scheme`.
-    fn read(&mut self, scheme: &str, setting: Setting, source: Source) -> Result<u32, String>;
+    /// A setting's value in `scheme`. `Ok(None)`: the plan, or the setting
+    /// in it, doesn't exist (a desktop's plan may have no lid action).
+    fn read(&mut self, scheme: &str, setting: Setting, source: Source) -> Result<Option<u32>, String>;
     /// Store a setting's value in `scheme`. It takes effect on [`apply`].
     ///
     /// [`apply`]: Plan::apply
@@ -109,9 +110,10 @@ impl<P: Plan> PlanHold<P> {
                 // The sleep timeout is the lesser half: hold without it.
                 continue;
             }
-            let original = self.plan.read(&scheme, setting, source)?;
-            if original != OFF {
-                changes.push(Change { setting, source, original });
+            match self.plan.read(&scheme, setting, source)? {
+                // Not there, or already as wanted: nothing to change.
+                None | Some(OFF) => {}
+                Some(original) => changes.push(Change { setting, source, original }),
             }
         }
         if !changes.is_empty() {
@@ -136,7 +138,7 @@ impl<P: Plan> PlanHold<P> {
         }
         self.plan.apply(&saved.scheme)?;
         for c in &saved.changes {
-            if self.plan.read(&saved.scheme, c.setting, c.source)? != OFF {
+            if self.plan.read(&saved.scheme, c.setting, c.source)? != Some(OFF) {
                 return Err("the power plan didn't take the change".into());
             }
         }
@@ -158,36 +160,48 @@ impl<P: Plan> PlanHold<P> {
     /// nothing to do. `Err` keeps the record for another try.
     pub fn restore(&mut self) -> Result<(), String> {
         self.scheme = None;
+        let path = self.file.path().display().to_string();
         let saved: Saved = match self.file.load() {
             Ok(None) => return Ok(()),
             Ok(Some(saved)) => saved,
-            Err(e) => return Err(format!("can't read {}: {e}", self.file.path().display())),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                // The old values can't be had from it, and keeping it would
+                // refuse every hold from here on.
+                log::error!("keep awake: {path} doesn't parse ({e}); dropping it. Check the power plan's lid action.");
+                return self.file.clear().map_err(|e| format!("can't remove {path}: {e}"));
+            }
+            Err(e) => return Err(format!("can't read {path}: {e}")),
         };
         let mut failed = None;
         for c in &saved.changes {
             match self.plan.read(&saved.scheme, c.setting, c.source) {
-                Ok(OFF) => {
+                Ok(Some(OFF)) => {
                     if let Err(e) = self.plan.write(&saved.scheme, c.setting, c.source, c.original) {
                         failed = Some(e);
                     }
                 }
-                // Changed since: the user's own choice stays.
+                // Changed since: the user's own choice stays. A plan that's
+                // gone has nothing to put back.
                 Ok(_) => {}
-                // A plan that's gone has nothing to put back.
-                Err(e) => log::warn!("keep awake: can't read {:?} ({:?}) to restore it: {e}", c.setting, c.source),
+                Err(e) => failed = Some(e),
             }
         }
         // Only the plan in use is re-applied: applying another would switch
         // the user's plan.
-        if self.plan.active().is_ok_and(|active| active == saved.scheme) {
-            if let Err(e) = self.plan.apply(&saved.scheme) {
-                failed = Some(e);
+        match self.plan.active() {
+            Ok(active) if active == saved.scheme => {
+                if let Err(e) = self.plan.apply(&saved.scheme) {
+                    failed = Some(e);
+                }
             }
+            Ok(_) => {}
+            // Not knowing, the values may be stored and not in effect.
+            Err(e) => failed = Some(e),
         }
         if let Some(e) = failed {
             return Err(e);
         }
-        self.file.clear().map_err(|e| format!("can't remove {}: {e}", self.file.path().display()))
+        self.file.clear().map_err(|e| format!("can't remove {path}: {e}"))
     }
 }
 
@@ -262,6 +276,8 @@ mod tests {
         locked: Vec<(Setting, Source)>,
         fail_write: bool,
         fail_apply: bool,
+        fail_read: bool,
+        fail_active: bool,
         /// Writes are accepted and not kept.
         ignore_writes: bool,
     }
@@ -271,10 +287,18 @@ mod tests {
 
     impl Plan for Fake {
         fn active(&mut self) -> Result<String, String> {
-            Ok(self.0.borrow().active.clone())
+            let s = self.0.borrow();
+            if s.fail_active {
+                return Err("no active plan".into());
+            }
+            Ok(s.active.clone())
         }
-        fn read(&mut self, scheme: &str, setting: Setting, source: Source) -> Result<u32, String> {
-            self.0.borrow().values.get(&(scheme.to_owned(), setting, source)).copied().ok_or("no such plan".into())
+        fn read(&mut self, scheme: &str, setting: Setting, source: Source) -> Result<Option<u32>, String> {
+            let s = self.0.borrow();
+            if s.fail_read {
+                return Err("can't read".into());
+            }
+            Ok(s.values.get(&(scheme.to_owned(), setting, source)).copied())
         }
         fn write(&mut self, scheme: &str, setting: Setting, source: Source, value: u32) -> Result<(), String> {
             let mut s = self.0.borrow_mut();
@@ -495,12 +519,52 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_record_is_an_error_not_a_clean_slate() {
-        let (fake, file) = (laptop(), scratch("unreadable"));
+    fn a_restore_that_cant_read_or_cant_tell_the_plan_keeps_the_record() {
+        let (fake, file) = (laptop(), scratch("transient"));
+        let mut hold = PlanHold::new(fake.clone(), file.clone());
+        hold.hold().unwrap();
+        fake.0.borrow_mut().fail_read = true;
+        assert_eq!(hold.restore(), Err("can't read".into()));
+        assert!(file.path().exists(), "the old values aren't thrown away over one failed read");
+        fake.0.borrow_mut().fail_read = false;
+
+        // The values go back, but nobody can say they're in effect.
+        fake.0.borrow_mut().fail_active = true;
+        assert_eq!(hold.restore(), Err("no active plan".into()));
+        assert_eq!(plan_of(&fake, BALANCED), [1, 2, 1800, 900]);
+        assert!(file.path().exists());
+        fake.0.borrow_mut().fail_active = false;
+        let applied = fake.0.borrow().applied.len();
+        hold.restore().unwrap();
+        assert_eq!(fake.0.borrow().applied.len(), applied + 1, "applied on the try that could tell");
+        assert!(!file.path().exists());
+    }
+
+    #[test]
+    fn a_plan_with_no_lid_action_still_holds() {
+        let (fake, file) = (laptop(), scratch("desktop"));
+        fake.0.borrow_mut().values.retain(|(_, setting, _), _| *setting != Setting::LidAction);
+        let mut hold = PlanHold::new(fake.clone(), file);
+        hold.hold().unwrap();
+        assert_eq!(value(&fake, BALANCED, Setting::SleepAfter, Source::Dc), OFF);
+        hold.restore().unwrap();
+        assert_eq!(value(&fake, BALANCED, Setting::SleepAfter, Source::Dc), 900);
+    }
+
+    #[test]
+    fn a_record_that_doesnt_parse_is_dropped_and_one_that_cant_be_read_blocks() {
+        let (fake, file) = (laptop(), scratch("unparsable"));
         std::fs::create_dir_all(file.path().parent().unwrap()).unwrap();
         std::fs::write(file.path(), b"{").unwrap();
         let mut hold = PlanHold::new(fake.clone(), file.clone());
-        assert!(hold.hold().is_err(), "holding now would save this module's own zeros as the originals");
+        hold.restore().unwrap();
+        assert!(!file.path().exists(), "it can't say what to put back, and would refuse every hold");
+        assert_eq!(plan_of(&fake, BALANCED), [1, 2, 1800, 900]);
+
+        // A record that is there and can't be read (here: a folder in its
+        // place) may still hold the old values: no hold on top of it.
+        std::fs::create_dir_all(file.path()).unwrap();
+        assert!(hold.hold().is_err(), "holding now could save this module's own zeros as the originals");
         assert_eq!(plan_of(&fake, BALANCED), [1, 2, 1800, 900]);
     }
 

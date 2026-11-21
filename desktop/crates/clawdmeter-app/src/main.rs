@@ -5,6 +5,8 @@
 //! - `--daemon`: headless (no window, no tray) for servers and CI.
 //! - `--window [PAGE]`: the app window (one per user; a second call switches
 //!   the open one to PAGE).
+//! - `keep-awake-guard`: the tray app's own child, never run by hand
+//!   (`keep_awake::guard_main`).
 
 // The tray app is a GUI program on Windows: no console window. CLI modes
 // attach to the parent console instead (see `attach_console`).
@@ -61,6 +63,11 @@ fn main() {
         std::process::exit(clawdmeter_app::hooks::main(&args[1..]));
     }
     let paths = Paths::for_user();
+    // The tray app's own child (keep_awake's guard): no console, no logger;
+    // it waits on stdin and exits.
+    if args.first().map(String::as_str) == Some(clawdmeter_app::keep_awake::GUARD_ARG) {
+        std::process::exit(clawdmeter_app::keep_awake::guard_main(&paths));
+    }
     if args.is_empty() {
         logger::init_with_file(&paths.state_dir.join("daemon.log"));
         warn_if_legacy_daemon(&paths);
