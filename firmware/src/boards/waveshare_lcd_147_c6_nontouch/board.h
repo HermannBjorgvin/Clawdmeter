@@ -1,6 +1,6 @@
 #pragma once
 
-// Waveshare ESP32-C6-LCD-1.47 / -M (non-touch, ESP32-C6FH4).
+// Waveshare ESP32-C6-LCD-1.47 / -M (non-touch; Waveshare documents ESP32-C6FH4).
 // Pin map and 34-column panel offset: Waveshare Arduino example.
 #define BOARD_NAME "Waveshare LCD 1.47 (C6, non-touch)"
 #define LCD_WIDTH 320
@@ -9,6 +9,8 @@
 #define LCD_PANEL_H 320
 #define LCD_COL_OFFSET 34
 #define LCD_ROTATION 1
+#define SD_CS 4
+#define SPI_MISO 5
 #define LCD_MOSI 6
 #define LCD_SCLK 7
 #define LCD_CS 14

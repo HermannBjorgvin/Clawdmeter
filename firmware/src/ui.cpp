@@ -473,7 +473,7 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, const LayoutRect& r, const c
 static void apply_pair_text(void) {
     if (!pair_lines[0]) return;
     const bool pwr = board_caps().has_pwr_button;
-    const char* const* lines = pwr ? PAIR_TEXT_PWR : PAIR_TEXT_TOUCH;
+    const char* const* lines = pwr ? (board_caps().pwr_button_is_boot ? PAIR_TEXT_BOOT : PAIR_TEXT_PWR) : PAIR_TEXT_TOUCH;
     const char* note = "";
     // Only the touch hold talks back; the PWR hint stays as it is.
     if (!pwr && pair_hint == PAIR_HINT_HOLDING) note = PAIR_TEXT_HOLDING;

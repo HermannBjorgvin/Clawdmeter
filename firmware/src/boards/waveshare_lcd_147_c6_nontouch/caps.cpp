@@ -13,5 +13,6 @@ static const BoardCaps caps = {
     .minimal_ui = false,
     .has_pwr_button = true,
     .has_touch = false,
+    .pwr_button_is_boot = true,
 };
 const BoardCaps& board_caps(void) { return caps; }

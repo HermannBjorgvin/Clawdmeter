@@ -287,7 +287,7 @@ static int wrapped_lines(const lv_font_t* f, const char* text, int16_t w) {
 // offsets below the first card's top, lower where a wrapped line above
 // needs the room.
 static void fit_pairing(Layout& L, const Design& d) {
-    static const char* const* const SETS[] = { PAIR_TEXT_PWR, PAIR_TEXT_TOUCH, PAIR_TEXT_CLEARED };
+    static const char* const* const SETS[] = { PAIR_TEXT_PWR, PAIR_TEXT_BOOT, PAIR_TEXT_TOUCH, PAIR_TEXT_CLEARED };
     int t = 0;
     for (; t + 2 < TEXT_FONT_COUNT; t++) {
         int16_t w = 0;
