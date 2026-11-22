@@ -172,6 +172,18 @@ pub const BOARDS: [BoardInfo; 31] = [
         buttons: &[(Button::Pwr, "BOOT")],
     },
     BoardInfo {
+        env: "waveshare_lcd_147_c6_nontouch",
+        name: "LCD 1.47 (C6, non-touch)",
+        product: "Waveshare ESP32-C6-LCD-1.47",
+        width: 320,
+        height: 172,
+        buy_url: "https://www.waveshare.com/esp32-c6-lcd-1.47.htm?aff_id=149786",
+        summary: "320×172 · C6 · no touch",
+        chip: "ESP32-C6",
+        pwr_button: true,
+        buttons: &[(Button::Pwr, "BOOT")],
+    },
+    BoardInfo {
         env: "lilygo_t4s3",
         name: "T4-S3",
         product: "LILYGO T4-S3",

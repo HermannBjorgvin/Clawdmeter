@@ -41,6 +41,7 @@ DISPLAY_NAMES = {
     "waveshare_lcd_154": "Waveshare ESP32-S3 LCD 1.54\"",
     "waveshare_lcd_4": "Waveshare ESP32-S3 LCD 4\"",
     "waveshare_lcd_147": "Waveshare ESP32-S3 LCD 1.47\"",
+    "waveshare_lcd_147_c6_nontouch": "Waveshare ESP32-C6 LCD 1.47\" (non-touch)",
     "waveshare_lcd_147_c6": "Waveshare ESP32-C6 LCD 1.47\"",
     "waveshare_lcd_21": "Waveshare ESP32-S3 LCD 2.1\" (round)",
     "waveshare_lcd_28c": "Waveshare ESP32-S3 LCD 2.8\" C (round)",
