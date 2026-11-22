@@ -478,11 +478,14 @@ impl Render for OverviewView {
                 (state_tone(s.tray_state()), state_title(s), sub)
             }
         };
-        let title = match &self.snap {
-            Some(s) if searching(s) => {
-                div().flex().child("Searching").child(self.dots.clone()).debug_selector(|| "searching".into())
-            }
-            _ => div().child(title),
+        let is_searching = self.snap.as_ref().is_some_and(searching);
+        // The title's own width, with every dot: the header gives the
+        // controls' side less room before it cuts the title.
+        let title_w = text_width(window, if is_searching { "Searching..." } else { title }, FONT_DISPLAY, 24.);
+        let title = if is_searching {
+            div().child(div().flex().child("Searching").child(self.dots.clone()).debug_selector(|| "searching".into()))
+        } else {
+            div().child(title)
         };
         let refresh = self.snap.as_ref().map(|s| self.refresh_control(&t, s, now, cx));
         let several = self.accounts.len() > 1;
@@ -495,12 +498,20 @@ impl Render for OverviewView {
             one_line(second_line(div()).debug_selector(|| "header-note".into()).text_color(mute)).child(n)
         };
         let controls = match (several, refresh) {
-            // The note gives way (an ellipsis) before the title does.
-            (false, refresh) => {
-                div().flex().min_w_0().h(px(HEADER_ROW_H)).items_center().children(refresh.map(|(note, button)| {
-                    div().flex().min_w_0().items_center().gap(px(8.)).children(note.map(note_el)).child(button)
-                }))
-            }
+            // The note gives way (an ellipsis) before the title does; the
+            // button stays at the right edge.
+            (false, refresh) => div().flex().min_w_0().h(px(HEADER_ROW_H)).items_center().justify_end().children(
+                refresh.map(|(note, button)| {
+                    div()
+                        .flex()
+                        .min_w_0()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(8.))
+                        .children(note.map(note_el))
+                        .child(button)
+                }),
+            ),
             (true, refresh) => {
                 let (note, button) = refresh.map_or((None, None), |(n, b)| (n, Some(b)));
                 // Rows stretched to the column's width and their contents
@@ -531,22 +542,30 @@ impl Render for OverviewView {
         let page_w = (f32::from(window.viewport_size().width) - super::SIDEBAR_W).min(super::PAGE_MAX_W)
             - 2. * super::PAGE_PAD_X;
         let compact = page_w < HEADER_FULL_W;
+        let (cell, gap) = if compact { (3., 12.) } else { (4., 20.) };
+        // The title column never narrower than the title (its dot and gap
+        // included), unless that would leave the controls less than the
+        // refresh button and, with several accounts, the drop-down's icon
+        // and an ellipsis. The rest of its room is what the controls leave.
+        let controls_min = if several { HEADER_CONTROLS_MIN_SEVERAL } else { HEADER_CONTROLS_MIN };
+        let room = page_w - cell * crate::art::IDLE_W as f32 - 2. * gap;
+        let title_min = (title_w + 18.).ceil().min(room - controls_min).max(0.);
         let header = div()
             .flex()
             .items_start()
-            .gap(px(if compact { 12. } else { 20. }))
-            .child(clawd(if compact { 3. } else { 4. }))
+            .gap(px(gap))
+            .child(div().debug_selector(|| "header-clawd".into()).child(clawd(cell)))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .min_w_0()
-                    .min_w(px(TITLE_MIN_W))
+                    .min_w(px(title_min))
                     .gap(px(6.))
                     .child(
                         div().flex().h(px(HEADER_ROW_H)).items_center().gap(px(10.)).child(dot(&t, tone)).child(
                             one_line(title)
+                                .debug_selector(|| "header-title".into())
                                 .font_family(FONT_DISPLAY)
                                 .text_size(px(24.))
                                 .line_height(px(HEADER_ROW_H))
@@ -826,15 +845,30 @@ impl OverviewView {
 /// The drop-down's default: the account whose usage rose most recently.
 pub(crate) const MOST_RECENT: &str = "Most recent";
 
-/// The header title's room beside the controls, which give way first:
-/// "Searching..." whole.
-pub(crate) const TITLE_MIN_W: f32 = 160.;
-
 /// The page width (inside its padding) below which the header goes compact
 /// (Clawd at 3 px cells, 12 px gaps), so that in the narrowest window (440
-/// px) the title, "Most recent" and the refresh button still fit side by
-/// side: 72 + 2 × 12 + 160 + about 183.
+/// px) "● Searching...", "Most recent" and the refresh button still fit
+/// side by side: 72 + 2 × 12 + about 152 + about 183.
 const HEADER_FULL_W: f32 = 480.;
+
+/// The least the header's controls keep beside a long title: the refresh
+/// button; with several accounts also the drop-down's icon and an ellipsis.
+const HEADER_CONTROLS_MIN: f32 = 30.;
+const HEADER_CONTROLS_MIN_SEVERAL: f32 = 30. + 8. + 64.;
+
+/// How wide `text` is on one line in `family` at `size` px.
+pub(crate) fn text_width(window: &Window, text: &str, family: &'static str, size: f32) -> f32 {
+    let run = gpui::TextRun {
+        len: text.len(),
+        font: gpui::font(family),
+        color: gpui::black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window.text_system().shape_line(SharedString::from(text.to_owned()), px(size), &[run], None);
+    f32::from(line.width)
+}
 
 /// The header's first row (the title, and beside it the drop-down and the
 /// refresh button), the same height on both sides so the lines under them

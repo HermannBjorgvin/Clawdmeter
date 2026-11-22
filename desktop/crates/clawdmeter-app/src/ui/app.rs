@@ -383,6 +383,8 @@ mod tests {
 
     use super::*;
     use crate::ui::flasher::tests::FakeBoard;
+    use crate::ui::overview::text_width;
+    use crate::ui::theme::FONT_DISPLAY;
 
     fn click(cx: &mut VisualTestContext, selector: &'static str) {
         cx.run_until_parked();
@@ -573,9 +575,9 @@ mod tests {
     }
 
     // In the narrowest window, with a long folder chosen, the drop-down's
-    // label gives way: the title keeps its room (Clawd at 3 px cells and a
-    // 12 px gap in the compact header, then at least `TITLE_MIN_W`) and the
-    // refresh button stays in the window.
+    // label gives way: the compact header (Clawd at 3 px cells) keeps the
+    // whole title, the drop-down starts after it and the refresh button
+    // stays in the window.
     #[gpui::test]
     fn a_long_choice_truncates_in_a_narrow_window(cx: &mut TestAppContext) {
         let root = std::env::temp_dir().join(format!("cm-app-narrow-{}", std::process::id()));
@@ -591,12 +593,49 @@ mod tests {
         cx.run_until_parked();
         let menu = cx.debug_bounds("device-account").expect("the drop-down");
         let refresh = cx.debug_bounds("refresh").expect("the refresh button");
-        let page_left = cx.debug_bounds("nav-overview").expect("the sidebar").right() + px(32.);
-        assert!(
-            menu.left() >= page_left + px(72. + 12. + super::super::overview::TITLE_MIN_W),
-            "{menu:?} runs into the title"
-        );
-        assert!(refresh.right() <= px(720.), "{refresh:?}");
+        let title = cx.debug_bounds("header-title").expect("the title");
+        let whole = cx.update(|window, _| text_width(window, "Searching...", FONT_DISPLAY, 24.));
+        assert!(f32::from(title.size.width) >= whole, "{title:?} cuts \"Searching...\" ({whole} px)");
+        assert!(menu.left() >= title.right(), "{menu:?} runs into the title {title:?}");
+        assert!(refresh.right() <= px(720. - 32.), "{refresh:?}");
+        let clawd = cx.debug_bounds("header-clawd").expect("Clawd");
+        assert_eq!(clawd.size.width, px(72.), "compact below 760 px");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // With one account, a long headline beside a long refresh note: the
+    // note gives way (it's cut short) before the title does, and the
+    // refresh button stays at the page's right edge.
+    #[gpui::test]
+    fn the_note_gives_way_before_the_title(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("cm-app-long-title-{}", std::process::id()));
+        let claude = root.join("acct");
+        let config = format!("config_dirs = {}\ncodex_dirs =\n", claude.display());
+        let (paths, _view, _overview, cx) = overview_window(cx, &root, &config, &claude);
+        let now = clawdmeter_core::unix_now();
+        let snap = ipc::StatusSnapshot {
+            updated_at: now,
+            account: Some(claude.display().to_string()),
+            link: "connected".into(),
+            tray: "Stale".into(),
+            read_at: Some(now - 120),
+            paused_until: Some(now + 3_600),
+            ..Default::default()
+        };
+        ipc::write_status(&paths, &snap).unwrap();
+        cx.executor().advance_clock(REFRESH);
+        cx.run_until_parked();
+        for width in [880., 720.] {
+            cx.simulate_resize(gpui::size(px(width), px(640.)));
+            cx.run_until_parked();
+            let title = cx.debug_bounds("header-title").expect("the title");
+            let whole = cx.update(|window, _| text_width(window, "Usage out of date", FONT_DISPLAY, 24.));
+            assert!(f32::from(title.size.width) >= whole, "{title:?} cuts the title ({whole} px) at {width} px");
+            let note = cx.debug_bounds("header-note").expect("the pause note");
+            assert!(note.left() >= title.right(), "{note:?} runs into the title at {width} px");
+            let refresh = cx.debug_bounds("refresh").expect("the refresh button");
+            assert_eq!(refresh.right(), px(width - 32.), "at {width} px");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -634,6 +673,8 @@ mod tests {
             let sub = cx.debug_bounds("header-sub").expect("the account line");
             let note = cx.debug_bounds("header-note").expect("the refresh note");
             assert_eq!((sub.top(), sub.size.height), (note.top(), note.size.height), "at {width} px");
+            let clawd = cx.debug_bounds("header-clawd").expect("Clawd").size.width;
+            assert_eq!(clawd, px(if width < 760. { 72. } else { 96. }), "Clawd at {width} px");
         }
         let _ = std::fs::remove_dir_all(&root);
     }
