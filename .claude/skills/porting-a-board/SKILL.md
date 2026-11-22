@@ -35,7 +35,7 @@ Port progress:
 - [ ] README "Experimental" row
 - [ ] DISPLAY_NAMES entry in tools/ci/make_manifest.py; python3 -m unittest discover -s tools/ci/tests passes
 - [ ] UI checked at the panel's native size (verifying-firmware-ui skill)
-- [ ] PR body: buy link, photo or "no photo", exact hardware tested
+- [ ] PR body: buy link, photo or "no photo", simulator screenshot at the panel size when there's no device screenshot, exact hardware tested
 ```
 
 ## Firmware
@@ -97,6 +97,12 @@ Use `.github/pull_request_template.md` and fill its **New board** section:
 - the buy link;
 - preferably a photo of the actual board running Clawdmeter, or say none is
   available;
+- a screenshot of the UI: from the device when possible
+  (`capturing-device-screenshots` skill). When it isn't (a C6 has no
+  framebuffer screenshot, or no board is attached), attach a simulator capture
+  at the board's panel size (`verifying-firmware-ui` skill, or the board's
+  cell in `tools/simgrid/`) and label it as a simulator capture. A new-board
+  PR with neither is incomplete;
 - **Hardware testing**: the exact board and revision and what was verified,
   or "not tested on hardware";
 - **Human involvement**: only what the human confirmed they did.
