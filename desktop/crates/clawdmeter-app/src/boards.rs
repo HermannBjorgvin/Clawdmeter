@@ -38,7 +38,7 @@ pub struct BoardInfo {
 }
 
 /// Every hardware env in `firmware/platformio.ini` (not `sim` / `native`).
-pub const BOARDS: [BoardInfo; 31] = [
+pub const BOARDS: [BoardInfo; 32] = [
     BoardInfo {
         env: "waveshare_amoled_216",
         name: "AMOLED 2.16",

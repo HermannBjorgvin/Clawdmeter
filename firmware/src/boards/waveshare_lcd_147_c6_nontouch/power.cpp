@@ -48,7 +48,9 @@ void power_hal_tick(void) {
 
 int  power_hal_battery_pct(void) { return -1; }
 bool power_hal_is_charging(void) { return false; }
-bool power_hal_is_vbus_in(void)  { return false; }
+// This board has no battery or VBUS sense; treat external power as present
+// so the idle policy keeps the display on while the board is powered.
+bool power_hal_is_vbus_in(void)  { return true; }
 
 bool power_hal_pwr_pressed(void) {
     if (pwr_pressed_flag) { pwr_pressed_flag = false; return true; }
