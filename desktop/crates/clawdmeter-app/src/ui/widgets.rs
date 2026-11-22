@@ -192,7 +192,7 @@ fn button_with(
         // A menu button's label (a choice, which can be long) truncates
         // when its row is short of room; other buttons keep their size.
         .map(|el| match menu {
-            Some(_) => el.flex_shrink().min_w_0().child(div().min_w_0().truncate().child(label.into())),
+            Some(_) => el.flex_shrink().min_w_0().child(one_line(div().min_w_0()).child(label.into())),
             None => el.child(label.into()),
         })
         .when(menu.is_some(), |el| el.child(icon("chevron-down", 15., fg).flex_shrink_0().ml(px(6.)).mr(px(-4.))));
@@ -374,6 +374,15 @@ pub fn pill(t: &Theme, text: impl IntoElement, tone: Tone) -> impl IntoElement {
         .whitespace_nowrap()
         .child(div().size(px(6.)).rounded(px(R_PILL)).bg(c))
         .child(text)
+}
+
+/// One line of text that ends in an ellipsis when its box is short of room.
+/// Not `truncate()`: GPUI 0.2.2 measures nowrap text once and keeps that
+/// size, so text shrunk by its flex row afterwards is clipped mid-word with
+/// no ellipsis. Wrapping text is measured again at its final width, and
+/// `line_clamp(1)` holds it to one line, cut with the ellipsis.
+pub fn one_line<E: Styled>(el: E) -> E {
+    el.whitespace_normal().line_clamp(1).text_ellipsis()
 }
 
 /// How long each step of [`Dots`] shows.

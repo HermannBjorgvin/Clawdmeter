@@ -15,8 +15,8 @@ use gpui::{
 
 use super::theme::{Theme, FONT_BODY, FONT_DISPLAY, FONT_MONO, R_M, R_PILL};
 use super::widgets::{
-    button, clawd, dot, icon, icon_button, menu_button, menu_row, notice, popover_menu, toggle, tone_color, tooltip,
-    usage_tone, ButtonKind, Dots, Tone,
+    button, clawd, dot, icon, icon_button, menu_button, menu_row, notice, one_line, popover_menu, toggle, tone_color,
+    tooltip, usage_tone, ButtonKind, Dots, Tone,
 };
 use super::{command, live_status, not_running_text, Navigate, REFRESH};
 use crate::art::TrayState;
@@ -492,13 +492,14 @@ impl Render for OverviewView {
         // truncates) before the title does.
         let mute = t.mute;
         let note_el = move |n: SharedString| {
-            second_line(div()).debug_selector(|| "header-note".into()).text_color(mute).truncate().child(n)
+            one_line(second_line(div()).debug_selector(|| "header-note".into()).text_color(mute)).child(n)
         };
         let controls = match (several, refresh) {
+            // The note gives way (an ellipsis) before the title does.
             (false, refresh) => {
-                div().flex().flex_shrink_0().h(px(HEADER_ROW_H)).items_center().gap(px(8.)).children(refresh.map(
-                    |(note, button)| div().flex().items_center().gap(px(8.)).children(note.map(note_el)).child(button),
-                ))
+                div().flex().min_w_0().h(px(HEADER_ROW_H)).items_center().children(refresh.map(|(note, button)| {
+                    div().flex().min_w_0().items_center().gap(px(8.)).children(note.map(note_el)).child(button)
+                }))
             }
             (true, refresh) => {
                 let (note, button) = refresh.map_or((None, None), |(n, b)| (n, Some(b)));
@@ -521,37 +522,42 @@ impl Render for OverviewView {
                             .child(self.account_control(&t, window, cx))
                             .children(button),
                     )
-                    .children(note.map(|n| div().flex().justify_end().min_w_0().child(note_el(n))))
+                    .children(note.map(|n| note_el(n).text_right()))
             }
         };
+        // The page column's width inside its padding. Short of room for the
+        // title, the drop-down and the refresh button side by side, the
+        // header draws Clawd smaller and closes up its gaps.
+        let page_w = (f32::from(window.viewport_size().width) - super::SIDEBAR_W).min(super::PAGE_MAX_W)
+            - 2. * super::PAGE_PAD_X;
+        let compact = page_w < HEADER_FULL_W;
         let header = div()
             .flex()
             .items_start()
-            .gap(px(20.))
-            .child(clawd(4.))
+            .gap(px(if compact { 12. } else { 20. }))
+            .child(clawd(if compact { 3. } else { 4. }))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_w_0()
-                    .when(several, |d| d.min_w(px(TITLE_MIN_W)))
+                    .min_w(px(TITLE_MIN_W))
                     .gap(px(6.))
                     .child(
                         div().flex().h(px(HEADER_ROW_H)).items_center().gap(px(10.)).child(dot(&t, tone)).child(
-                            title
+                            one_line(title)
                                 .font_family(FONT_DISPLAY)
                                 .text_size(px(24.))
                                 .line_height(px(HEADER_ROW_H))
                                 .min_w_0()
-                                .truncate(),
+                                .overflow_hidden(),
                         ),
                     )
                     .child(
-                        second_line(div())
+                        one_line(second_line(div()))
                             .debug_selector(|| "header-sub".into())
                             .text_color(t.mute)
-                            .truncate()
                             .child(sub),
                     ),
             )
@@ -609,8 +615,7 @@ impl Render for OverviewView {
             // reset credits.
             let meters = div().flex().flex_col().gap(px(12.));
             // The cards' width: the page column beside the sidebar, inside its padding.
-            let card_w = (f32::from(window.viewport_size().width) - super::SIDEBAR_W).min(super::PAGE_MAX_W)
-                - 2. * super::PAGE_PAD_X;
+            let card_w = page_w;
             let session_reset = reset_text(s.session_resets_at, now, "Not started");
             let week_reset = reset_text(s.week_resets_at, now, "---");
             page = page.child(if s.no_session_limit {
@@ -821,10 +826,15 @@ impl OverviewView {
 /// The drop-down's default: the account whose usage rose most recently.
 pub(crate) const MOST_RECENT: &str = "Most recent";
 
-/// The header title's room beside the account drop-down, which gives way
-/// first: "Searching..." whole, in a fallback face a little wider than the
-/// display face.
-pub(crate) const TITLE_MIN_W: f32 = 170.;
+/// The header title's room beside the controls, which give way first:
+/// "Searching..." whole.
+pub(crate) const TITLE_MIN_W: f32 = 160.;
+
+/// The page width (inside its padding) below which the header goes compact
+/// (Clawd at 3 px cells, 12 px gaps), so that in the narrowest window (440
+/// px) the title, "Most recent" and the refresh button still fit side by
+/// side: 72 + 2 × 12 + 160 + about 183.
+const HEADER_FULL_W: f32 = 480.;
 
 /// The header's first row (the title, and beside it the drop-down and the
 /// refresh button), the same height on both sides so the lines under them

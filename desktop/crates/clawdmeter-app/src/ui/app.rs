@@ -573,8 +573,9 @@ mod tests {
     }
 
     // In the narrowest window, with a long folder chosen, the drop-down's
-    // label gives way: the title keeps its room (Clawd, then at least
-    // `TITLE_MIN_W`)    // px) and the refresh button stays in the window.
+    // label gives way: the title keeps its room (Clawd at 3 px cells and a
+    // 12 px gap in the compact header, then at least `TITLE_MIN_W`) and the
+    // refresh button stays in the window.
     #[gpui::test]
     fn a_long_choice_truncates_in_a_narrow_window(cx: &mut TestAppContext) {
         let root = std::env::temp_dir().join(format!("cm-app-narrow-{}", std::process::id()));
@@ -592,7 +593,7 @@ mod tests {
         let refresh = cx.debug_bounds("refresh").expect("the refresh button");
         let page_left = cx.debug_bounds("nav-overview").expect("the sidebar").right() + px(32.);
         assert!(
-            menu.left() >= page_left + px(96. + 20. + super::super::overview::TITLE_MIN_W),
+            menu.left() >= page_left + px(72. + 12. + super::super::overview::TITLE_MIN_W),
             "{menu:?} runs into the title"
         );
         assert!(refresh.right() <= px(720.), "{refresh:?}");
@@ -600,8 +601,9 @@ mod tests {
     }
 
     // Looking for the board, the header reads "Searching" and its dots
-    // (`widgets::Dots`) count up without changing its width; the lines under the title and under the
-    // drop-down share a baseline, in the default window and the narrowest.
+    // (`widgets::Dots`) count up without changing its width. On either side
+    // of the compact header's switch (760 px) and in the narrowest window,
+    // the lines under the title and under the drop-down share a baseline.
     #[gpui::test]
     fn the_overview_header_searches_and_lines_up(cx: &mut TestAppContext) {
         let root = std::env::temp_dir().join(format!("cm-app-searching-{}", std::process::id()));
@@ -626,7 +628,7 @@ mod tests {
             cx.run_until_parked();
             assert_eq!(cx.debug_bounds("searching"), Some(title), "the same width");
         }
-        for width in [880., 720.] {
+        for width in [880., 760., 759., 720.] {
             cx.simulate_resize(gpui::size(px(width), px(640.)));
             cx.run_until_parked();
             let sub = cx.debug_bounds("header-sub").expect("the account line");
