@@ -242,6 +242,19 @@ pub enum Plan {
     Known(UsageReading),
 }
 
+/// `claude` pointed at a listed folder that doesn't exist would create it,
+/// with Claude Code's state inside, so nothing runs there: it reads as
+/// signed out. The endpoint can still answer from a Keychain token (macOS
+/// keeps it apart from the folder). `~/.claude` is exempt: the CLI runs it
+/// as its own default, with `CLAUDE_CONFIG_DIR` unset.
+fn cli_may_run(config_dir: &Path, home: &Path) -> Result<(), UsageError> {
+    if config_dir.is_dir() || config_dir == home.join(".claude") {
+        Ok(())
+    } else {
+        Err(UsageError::NotLoggedIn(format!("{} doesn't exist", config_dir.display())))
+    }
+}
+
 /// The idle source for one account: the usage endpoint with Claude Code's
 /// token, else (no readable token) `claude -p /usage`. An expired or
 /// refused token also goes to `/usage`: Claude Code renews its own sign-in
@@ -255,10 +268,14 @@ pub fn poll_idle(
     match (crate::oauth::poll_endpoint(config_dir, home, now), claude) {
         (Some(Err(e @ (UsageError::TokenExpired | UsageError::TokenRejected))), Some(c)) => {
             log::info!("{}: {e}; asking claude /usage", config_dir.display());
+            cli_may_run(config_dir, home)?;
             usage::poll_account(c, config_dir, home, now)
         }
         (Some(r), _) => r,
-        (None, Some(c)) => usage::poll_account(c, config_dir, home, now),
+        (None, Some(c)) => {
+            cli_may_run(config_dir, home)?;
+            usage::poll_account(c, config_dir, home, now)
+        }
         (None, None) => Err(UsageError::Spawn("no Claude Code sign-in or claude CLI found".into())),
     }
 }
@@ -322,9 +339,17 @@ pub fn poll(
     now: DateTime<Utc>,
 ) -> Polled {
     let probe = |result, probe| Polled { result, idle: false, probe, idle_miss: None };
+    let no_folder = cli_may_run(config_dir, home).err();
     match (plan, claude) {
         (Plan::Known(r), _) => probe(Ok(r.clone()), ProbeRun::NotRun),
         (Plan::Usage, _) | (Plan::Probe { .. }, None) => poll_idle(claude, config_dir, home, now).into(),
+        // No probe in a folder that isn't there (it would create it): the
+        // idle source answers instead, from the endpoint or as signed out,
+        // unless the account is backing off, as after a missed probe.
+        (Plan::Probe { usage_fallback }, Some(_)) if no_folder.is_some() => match (usage_fallback, no_folder) {
+            (false, Some(e)) => probe(Err(e), ProbeRun::Missed),
+            _ => poll_idle(claude, config_dir, home, now).into(),
+        },
         (Plan::Probe { usage_fallback }, Some(c)) => match run_probe(c, config_dir, home, cwd, usage::CLI_TIMEOUT) {
             // No five_hour: the window just ended, or the account has no
             // 5-hour limit any more. Only the usage endpoint can tell, so ask
@@ -363,8 +388,11 @@ mod tests {
     use super::*;
 
     // An expired token goes to `claude -p /usage` (a stand-in script here),
-    // which renews it; without a CLI the expiry is reported. The folder isn't
-    // `<home>/.claude`, whose Keychain entry is the real default one on macOS.
+    // which renews it; without a CLI the expiry is reported. A listed folder
+    // that doesn't exist runs neither the CLI nor the probe (they would
+    // create it). The folder
+    // isn't `<home>/.claude`, whose Keychain entry is the real default one
+    // on macOS.
     #[cfg(unix)]
     #[test]
     fn expired_token_asks_the_cli() {
@@ -382,6 +410,13 @@ mod tests {
         let now = Utc::now();
         assert_eq!(poll_idle(None, &cfg, &dir, now), Err(UsageError::TokenExpired));
         assert!(poll_idle(Some(&fake), &cfg, &dir, now).is_ok());
+        let missing = dir.join("never-signed-in");
+        assert!(matches!(poll_idle(Some(&fake), &missing, &dir, now), Err(UsageError::NotLoggedIn(_))));
+        for usage_fallback in [true, false] {
+            let probed = poll(Some(&fake), &missing, &dir, &dir, &Plan::Probe { usage_fallback }, now);
+            assert!(matches!(probed.result, Err(UsageError::NotLoggedIn(_))));
+        }
+        assert!(!missing.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

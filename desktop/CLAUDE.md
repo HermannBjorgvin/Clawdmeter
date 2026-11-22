@@ -211,7 +211,9 @@ Per account (`probe.rs`, `oauth.rs`):
 - **Clawdmeter never refreshes the token.** On an expired or rejected token,
   or none readable, it falls back to `claude -p /usage` (Claude Code
   refreshes its own token, and that doesn't start a window), under the same
-  backoff.
+  backoff. Neither `claude` call runs in a listed folder that doesn't exist
+  (the CLI would create it; `probe::cli_may_run`, `~/.claude` exempt): the
+  endpoint still answers from a Keychain token, else it reads as signed out.
 - **The probe must never start a window** (owner's rule). `choose_source`
   allows it only when the last known five-hour reset is more than 5 min away,
   or a prompt/tool event from that account came after it, within 5 h
