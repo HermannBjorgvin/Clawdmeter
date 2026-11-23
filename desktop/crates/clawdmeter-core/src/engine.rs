@@ -177,6 +177,9 @@ pub struct Engine {
     unattributed_activity: Option<i64>,
     /// A `claude` binary was found, so the probe can run.
     claude_found: bool,
+    /// Listed folders that don't exist: planned as the idle source, never
+    /// the probe ([`Engine::set_missing_folders`]).
+    missing_folders: Vec<PathBuf>,
     /// A new alert should chime on this computer (`desktop_chime`).
     desktop_chime_due: bool,
 }
@@ -229,6 +232,7 @@ impl Engine {
             last_event_ts: None,
             unattributed_activity: None,
             claude_found: true,
+            missing_folders: Vec::new(),
             desktop_chime_due: false,
         }
     }
@@ -369,6 +373,13 @@ impl Engine {
         }
     }
 
+    /// Listed folders that don't exist (the daemon's `probe::cli_may_run`
+    /// check). The probe would create one, so these accounts follow the
+    /// idle source: its cadence, and its backoff.
+    pub fn set_missing_folders(&mut self, dirs: Vec<PathBuf>) {
+        self.missing_folders = dirs;
+    }
+
     /// Whether a `claude` binary was found. Without one the probe can't run,
     /// so the idle source (the usage endpoint) answers on its slower cadence
     /// even while a window runs.
@@ -484,7 +495,7 @@ impl Engine {
     fn source(&self, dir: &PathBuf, now: i64) -> Source {
         let empty = AccountState::default();
         match probe::choose_source(self.accounts.get(dir).unwrap_or(&empty), self.unattributed_activity, now) {
-            Source::Probe if !self.claude_found => Source::Usage,
+            Source::Probe if !self.claude_found || self.missing_folders.contains(dir) => Source::Usage,
             s => s,
         }
     }
@@ -1347,19 +1358,26 @@ mod tests {
         assert_eq!(write(&mut e, T0 + 2000).unwrap().kind, WriteKind::Poll);
     }
 
-    // Without a claude binary there's no probe: the usage endpoint answers
-    // every 12 minutes, window or not.
+    // Without a claude binary, or for a listed folder that doesn't exist
+    // (the probe would create it), there's no probe: the usage endpoint
+    // answers every 12 minutes, window or not.
     #[test]
-    fn without_claude_the_endpoint_answers_on_its_cadence() {
-        let mut e = Engine::new(settings(""));
-        e.set_hooks_installed(true);
-        e.set_claude_found(false);
+    fn without_a_probe_the_endpoint_answers_on_its_cadence() {
         let a = PathBuf::from("/h/.claude");
-        e.on_poll_results(T0, vec![(a.clone(), Ok(reading(15)))]);
-        let mine = HookEvent { account: Some(a.clone()), ..ev(T0 + 200, "UserPromptSubmit") };
-        e.on_hook_event(&mine, T0 + 200);
-        assert!(e.begin_poll(T0 + 200).is_none(), "a prompt doesn't speed it up");
-        assert_eq!(plans(&mut e, T0 + 720), vec![ProbePlan::Usage]);
+        for missing_folder in [false, true] {
+            let mut e = Engine::new(settings(""));
+            e.set_hooks_installed(true);
+            if missing_folder {
+                e.set_missing_folders(vec![a.clone()]);
+            } else {
+                e.set_claude_found(false);
+            }
+            e.on_poll_results(T0, vec![(a.clone(), Ok(reading(15)))]);
+            let mine = HookEvent { account: Some(a.clone()), ..ev(T0 + 200, "UserPromptSubmit") };
+            e.on_hook_event(&mine, T0 + 200);
+            assert!(e.begin_poll(T0 + 200).is_none(), "a prompt doesn't speed it up ({missing_folder})");
+            assert_eq!(plans(&mut e, T0 + 720), vec![ProbePlan::Usage], "{missing_folder}");
+        }
     }
 
     // A block survives a restart: nothing calls the endpoint or /usage for

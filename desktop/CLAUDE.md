@@ -213,7 +213,11 @@ Per account (`probe.rs`, `oauth.rs`):
   refreshes its own token, and that doesn't start a window), under the same
   backoff. Neither `claude` call runs in a listed folder that doesn't exist
   (the CLI would create it; `probe::cli_may_run`, `~/.claude` exempt): the
-  endpoint still answers from a Keychain token, else it reads as signed out.
+  daemon tells the engine (`set_missing_folders`), which plans the idle
+  source for it, on its cadence and backoff. The endpoint still answers from
+  a Keychain token; an expired or refused one stays that error (a refused one
+  backs off), and none reads as signed out. A relative folder in the config
+  is under home.
 - **The probe must never start a window** (owner's rule). `choose_source`
   allows it only when the last known five-hour reset is more than 5 min away,
   or a prompt/tool event from that account came after it, within 5 h

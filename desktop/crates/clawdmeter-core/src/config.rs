@@ -682,7 +682,7 @@ impl Settings {
                 .get("device_account")
                 .map(str::trim)
                 .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto"))
-                .map(|s| paths.expand_tilde(s)),
+                .map(|s| config_folder(s, paths)),
             poll_interval,
             poll_interval_explicit: file_poll.is_some() || env_default.is_some(),
             heartbeat_interval,
@@ -763,7 +763,7 @@ impl Settings {
             return;
         }
         if let Some(d) = env_dir.map(str::trim).filter(|d| !d.is_empty()) {
-            self.config_dirs = vec![paths.expand_tilde(d)];
+            self.config_dirs = vec![config_folder(d, paths)];
         }
     }
 
@@ -887,7 +887,23 @@ impl Settings {
 
 /// A comma list of folders, `~` expanded, blanks dropped.
 pub fn parse_dir_list(raw: &str, paths: &Paths) -> Vec<PathBuf> {
-    raw.split(',').map(str::trim).filter(|s| !s.is_empty()).map(|s| paths.expand_tilde(s)).collect()
+    raw.split(',').map(str::trim).filter(|s| !s.is_empty()).map(|s| config_folder(s, paths)).collect()
+}
+
+/// A folder from the config: `~` expanded, and a relative one taken from
+/// home. The app's own working directory means nothing here, and the probe
+/// runs from another, so the folder check and `claude` would look in
+/// different places.
+/// A Windows drive-relative entry (`C:foo`) can't be placed under home and
+/// stays as it is.
+fn config_folder(raw: &str, paths: &Paths) -> PathBuf {
+    let p = paths.expand_tilde(raw);
+    let drive = matches!(p.components().next(), Some(std::path::Component::Prefix(_)));
+    if p.is_relative() && !p.has_root() && !drive {
+        paths.home.join(p)
+    } else {
+        p
+    }
 }
 
 /// `config_dirs`: comma list, `~` expanded, blanks dropped; default `[~/.claude]`.
@@ -978,6 +994,9 @@ mod tests {
             vec![PathBuf::from("/home/u/.claude"), PathBuf::from("/home/u/.claude-work")]
         );
         assert_eq!(settings("config_dirs = , ,\n").config_dirs, vec![PathBuf::from("/home/u/.claude")]);
+        let rel = settings("config_dirs = ~/.claude, claude-work\ndevice_account = claude-work\n");
+        assert_eq!(rel.config_dirs[1], PathBuf::from("/home/u/claude-work"), "relative: under home");
+        assert_eq!(rel.device_account.as_deref(), Some(rel.config_dirs[1].as_path()));
     }
 
     // Codex accounts: the default Codex home with no key, the list once

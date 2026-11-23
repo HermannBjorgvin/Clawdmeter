@@ -243,11 +243,12 @@ pub enum Plan {
 }
 
 /// `claude` pointed at a listed folder that doesn't exist would create it,
-/// with Claude Code's state inside, so nothing runs there: it reads as
-/// signed out. The endpoint can still answer from a Keychain token (macOS
-/// keeps it apart from the folder). `~/.claude` is exempt: the CLI runs it
-/// as its own default, with `CLAUDE_CONFIG_DIR` unset.
-fn cli_may_run(config_dir: &Path, home: &Path) -> Result<(), UsageError> {
+/// with Claude Code's state inside, so nothing runs there: the engine plans
+/// the idle source for it ([`crate::Engine::set_missing_folders`]), and with
+/// no token that reads as signed out. The endpoint can still answer from a
+/// Keychain token (macOS keeps it apart from the folder). `~/.claude` is
+/// exempt: the CLI runs it as its own default, with `CLAUDE_CONFIG_DIR` unset.
+pub fn cli_may_run(config_dir: &Path, home: &Path) -> Result<(), UsageError> {
     if config_dir.is_dir() || config_dir == home.join(".claude") {
         Ok(())
     } else {
@@ -267,8 +268,13 @@ pub fn poll_idle(
 ) -> Result<UsageReading, UsageError> {
     match (crate::oauth::poll_endpoint(config_dir, home, now), claude) {
         (Some(Err(e @ (UsageError::TokenExpired | UsageError::TokenRejected))), Some(c)) => {
+            if cli_may_run(config_dir, home).is_err() {
+                // No `/usage` in a folder that isn't there: the endpoint's own
+                // miss stands, so a refused token backs the account off.
+                log::info!("{}: {e}; not asking claude /usage, the folder doesn't exist", config_dir.display());
+                return Err(e);
+            }
             log::info!("{}: {e}; asking claude /usage", config_dir.display());
-            cli_may_run(config_dir, home)?;
             usage::poll_account(c, config_dir, home, now)
         }
         (Some(r), _) => r,
@@ -339,17 +345,21 @@ pub fn poll(
     now: DateTime<Utc>,
 ) -> Polled {
     let probe = |result, probe| Polled { result, idle: false, probe, idle_miss: None };
-    let no_folder = cli_may_run(config_dir, home).err();
     match (plan, claude) {
         (Plan::Known(r), _) => probe(Ok(r.clone()), ProbeRun::NotRun),
         (Plan::Usage, _) | (Plan::Probe { .. }, None) => poll_idle(claude, config_dir, home, now).into(),
-        // No probe in a folder that isn't there (it would create it): the
-        // idle source answers instead, from the endpoint or as signed out,
-        // unless the account is backing off, as after a missed probe.
-        (Plan::Probe { usage_fallback }, Some(_)) if no_folder.is_some() => match (usage_fallback, no_folder) {
-            (false, Some(e)) => probe(Err(e), ProbeRun::Missed),
-            _ => poll_idle(claude, config_dir, home, now).into(),
-        },
+        // The engine plans the idle source for a missing folder; one gone
+        // since the plan (the daemon looks every few seconds) still gets no
+        // probe, which would create it. The idle source answers instead,
+        // unless the account is backing off: then nothing is asked.
+        (Plan::Probe { usage_fallback }, Some(_)) if cli_may_run(config_dir, home).is_err() => {
+            if *usage_fallback {
+                poll_idle(claude, config_dir, home, now).into()
+            } else {
+                let gone = format!("{} doesn't exist", config_dir.display());
+                probe(Err(UsageError::Spawn(gone)), ProbeRun::NotRun)
+            }
+        }
         (Plan::Probe { usage_fallback }, Some(c)) => match run_probe(c, config_dir, home, cwd, usage::CLI_TIMEOUT) {
             // No five_hour: the window just ended, or the account has no
             // 5-hour limit any more. Only the usage endpoint can tell, so ask
@@ -390,9 +400,8 @@ mod tests {
     // An expired token goes to `claude -p /usage` (a stand-in script here),
     // which renews it; without a CLI the expiry is reported. A listed folder
     // that doesn't exist runs neither the CLI nor the probe (they would
-    // create it). The folder
-    // isn't `<home>/.claude`, whose Keychain entry is the real default one
-    // on macOS.
+    // create it): with no token it reads as signed out. The folder isn't
+    // `<home>/.claude`, whose Keychain entry is the real default one on macOS.
     #[cfg(unix)]
     #[test]
     fn expired_token_asks_the_cli() {
@@ -412,10 +421,8 @@ mod tests {
         assert!(poll_idle(Some(&fake), &cfg, &dir, now).is_ok());
         let missing = dir.join("never-signed-in");
         assert!(matches!(poll_idle(Some(&fake), &missing, &dir, now), Err(UsageError::NotLoggedIn(_))));
-        for usage_fallback in [true, false] {
-            let probed = poll(Some(&fake), &missing, &dir, &dir, &Plan::Probe { usage_fallback }, now);
-            assert!(matches!(probed.result, Err(UsageError::NotLoggedIn(_))));
-        }
+        let probed = poll(Some(&fake), &missing, &dir, &dir, &Plan::Probe { usage_fallback: true }, now);
+        assert!(probed.idle && matches!(probed.result, Err(UsageError::NotLoggedIn(_))), "{probed:?}");
         assert!(!missing.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
