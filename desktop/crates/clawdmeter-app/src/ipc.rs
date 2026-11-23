@@ -60,7 +60,6 @@ pub struct AccountError {
     pub retrying: bool,
 }
 
-
 /// The window-facing view of [`Status`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StatusSnapshot {
@@ -492,6 +491,23 @@ pub fn load_latest_release(paths: &Paths) -> Option<String> {
     fs::read_to_string(latest_release_file(paths)).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
 }
 
+/// Reset credits held, in words, naming their kinds when every one's kind
+/// is known: "1 weekly + 1 Fable resets", "2 weekly resets", "1 Fable
+/// reset", else "3 resets". Short enough for the macOS panel's rows.
+pub fn resets_words(held: u32, kinds: &str) -> String {
+    let s = if held == 1 { "" } else { "s" };
+    if held == 0 || kinds.chars().count() != held as usize {
+        return format!("{held} reset{s}");
+    }
+    let count = |k: char| kinds.chars().filter(|c| *c == k).count();
+    let parts: Vec<String> = [('w', "weekly"), ('f', "Fable"), ('o', "other")]
+        .into_iter()
+        .filter(|(k, _)| count(*k) > 0)
+        .map(|(k, w)| format!("{} {w}", count(k)))
+        .collect();
+    format!("{} reset{s}", parts.join(" + "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,7 +525,6 @@ mod tests {
     }
     use clawdmeter_core::usage::{SessionLimit, UsageReading, Window};
     use clawdmeter_core::EngineStatus;
-
 
     fn status(link: LinkState, reading: bool, last_write: Option<i64>) -> Status {
         Status {

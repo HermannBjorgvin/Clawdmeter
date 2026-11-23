@@ -1264,7 +1264,7 @@ mod tests {
         assert_eq!(resets_row(3, &[], "", &utc), "3 resets", "no dates known");
         assert_eq!(resets_row(0, &[], "", &utc), "No resets available");
         // Claude's grants by kind.
-        assert_eq!(resets_row(2, &both, "wf", &utc), "2 resets (1 Fable) · next expires Dec 1");
+        assert_eq!(resets_row(2, &both, "wf", &utc), "1 weekly + 1 Fable resets · next expires Dec 1");
         assert_eq!(resets_row(1, &[dec12.timestamp()], "f", &utc), "1 Fable reset · next expires Dec 12");
         // Local time picks the day, as `rx` does.
         let east = chrono::FixedOffset::east_opt(3 * 3600).unwrap();

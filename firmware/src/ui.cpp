@@ -832,7 +832,31 @@ static void draw_resets_card(const UsageData* d) {
         lv_obj_add_flag(resets_note, LV_OBJ_FLAG_HIDDEN);
     }
 
-    const int cols = L.resets_cols, gap = L.resets_gap;
+    // Claude's grants come with what each resets (`rf`): a chip then says so,
+    // "Weekly Dec 10" or "Fable Mar 9", and the chips spread over the grid's
+    // rows and across the card to make room for it.
+    const bool kinded = shown > 0 && (int)strlen(d->resets_kind) >= shown;
+    const int items = shown + (more ? 1 : 0);
+    const int cols = !kinded ? L.resets_cols
+                   : items <= L.resets_cols ? items
+                   : (items + L.resets_rows - 1) / L.resets_rows;
+    const int gap = L.resets_gap;
+    // One wording for the whole card: the kind's word ("Weekly Dec 10"),
+    // its letter ("W Dec 10"), or none, the first that fits every chip.
+    static const char* const KIND_WORDS[2][2] = { { "Weekly", "Fable" }, { "W", "F" } };
+    const int cell_w = (inner_w + gap) / cols - gap - 1;
+    int level = kinded ? 0 : 2;
+    for (; level < 2; level++) {
+        bool fits = true;
+        for (int i = 0; i < shown && fits; i++) {
+            const char k = d->resets_kind[i];
+            if (k != 'w' && k != 'f') continue;
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%s %s", KIND_WORDS[level][k == 'f'], d->resets_expiry[i]);
+            fits = layout_text_width(L.resets_font, buf) + L.resets_chip_h / 2 <= cell_w;
+        }
+        if (fits) break;
+    }
     for (int i = 0; i < MAX_RESET_CHIPS; i++) {
         lv_obj_t* c = resets_chip[i];
         lv_obj_t* label = resets_chip_text[i];
@@ -853,7 +877,11 @@ static void draw_resets_card(const UsageData* d) {
         bool first_other = true;
         for (int j = 0; j < i && j < (int)strlen(d->resets_kind); j++) first_other = first_other && d->resets_kind[j] == 'f';
         if (i < shown) {
-            lv_label_set_text(label, d->resets_expiry[i]);
+            const char kind = kinded ? d->resets_kind[i] : 0;
+            if (level < 2 && (kind == 'w' || kind == 'f'))
+                lv_label_set_text_fmt(label, "%s %s", KIND_WORDS[level][kind == 'f'], d->resets_expiry[i]);
+            else
+                lv_label_set_text(label, d->resets_expiry[i]);
             // A Claude grant that resets only Fable's limit wears Fable's
             // violet (`rf` 'f', the overlay's `fc`); else the soonest,
             // inverted. Paper text on ink prints broken in 1 bit, so a mono

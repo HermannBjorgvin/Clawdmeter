@@ -388,12 +388,26 @@ where
 /// The Resets card's chips: as many columns as fit the card at their
 /// narrowest ("+10 more" with room), and two rows at most.
 const CHIP_MIN_W: f32 = 84.;
+const CHIP_LABELLED_W: f32 = 124.;
 const CHIP_GAP: f32 = 8.;
 const CHIP_ROWS: usize = 2;
 
 /// Chips per row across a card `inner_w` wide (between its padding).
-fn chip_cols(inner_w: f32) -> usize {
-    (((inner_w + CHIP_GAP) / (CHIP_MIN_W + CHIP_GAP)) as usize).max(3)
+fn chip_cols(inner_w: f32, min_w: f32) -> usize {
+    (((inner_w + CHIP_GAP) / (min_w + CHIP_GAP)) as usize).max(if min_w > CHIP_MIN_W { 2 } else { 3 })
+}
+
+/// A chip's texts, longest first: the date after what it resets, when
+/// that's known ("Weekly Dec 10", "W Dec 10"), then the date alone. The
+/// device and the macOS panel use one level for every chip, the first that
+/// fits them all; the Overview's chips are sized for the first.
+pub fn kind_chip_texts(date: &str, kind: Option<char>) -> Vec<String> {
+    let words: &[&str] = match kind {
+        Some('w') => &["Weekly", "W"],
+        Some('f') => &["Fable", "F"],
+        _ => &[],
+    };
+    words.iter().map(|w| format!("{w} {date}")).chain([date.to_owned()]).collect()
 }
 
 /// A Codex account's reset credits: "Resets expire" with the count in a
@@ -402,7 +416,9 @@ fn chip_cols(inner_w: f32) -> usize {
 /// the card; the last cell is "+N more" when they don't all fit or a date
 /// isn't known. `inner_w` is the card's width inside its padding.
 fn resets_card(t: &Theme, held: u32, expires_at: &[i64], kinds: &str, inner_w: f32) -> impl IntoElement {
-    let cols = chip_cols(inner_w);
+    // Claude's grants say what each resets: wider chips carry the word.
+    let labelled = held > 0 && kinds.chars().count() >= held as usize;
+    let cols = chip_cols(inner_w, if labelled { CHIP_LABELLED_W } else { CHIP_MIN_W });
     let ResetChips { dates, more, note } = reset_chips(held, expires_at, cols * CHIP_ROWS, &chrono::Local);
     let fg = if held == 0 { t.dim } else { t.text };
     let header = div()
@@ -444,6 +460,7 @@ fn resets_card(t: &Theme, held: u32, expires_at: &[i64], kinds: &str, inner_w: f
     let soonest = (0..shown).find(|i| !fable(*i));
     let any_fable = (0..shown).any(fable);
     let chips = dates.into_iter().enumerate().map(|(i, d)| {
+        let d = kind_chip_texts(&d, kinds.chars().nth(i).filter(|_| labelled)).swap_remove(0);
         if fable(i) {
             chip(d).bg(violet).text_color(rgb(0xffffff))
         } else if Some(i) == soonest {
@@ -897,9 +914,9 @@ mod tests {
     fn chips_fill_two_rows_across_the_card() {
         // The narrowest window (720 px) and the default (880 px).
         let inner = |w: f32| (w - SIDEBAR_W).min(PAGE_MAX_W) - 2. * PAGE_PAD_X - 32.;
-        assert_eq!(chip_cols(inner(720.)), 4);
-        assert_eq!(chip_cols(inner(880.)), 6);
-        assert_eq!(chip_cols(inner(2000.)), 6);
+        assert_eq!(chip_cols(inner(720.), CHIP_MIN_W), 4);
+        assert_eq!(chip_cols(inner(880.), CHIP_MIN_W), 6);
+        assert_eq!(chip_cols(inner(2000.), CHIP_MIN_W), 6);
     }
 
     #[test]

@@ -840,6 +840,22 @@ impl MenuHeader {
         let more = (data.chips.more > 0).then(|| format!("+{} more", data.chips.more));
         let cells: Vec<&str> = data.chips.dates.iter().map(String::as_str).chain(more.as_deref()).collect();
         let theme = if dark { Theme::dark() } else { Theme::light() };
+        // A Claude grant's chip says what it resets: one wording for the
+        // row, the longest that fits every chip (`kind_chip_texts`).
+        let worded = |i: usize, level: usize| {
+            let t = crate::ui::overview::kind_chip_texts(&data.chips.dates[i], data.kinds.chars().nth(i));
+            t[level.min(t.len() - 1)].clone()
+        };
+        let level = r.chips.first().map_or(2, |(_, probe)| {
+            (0..2)
+                .find(|l| {
+                    (0..data.chips.dates.len()).all(|i| {
+                        probe.setStringValue(&NSString::from_str(&worded(i, *l)));
+                        text_width(probe) <= chip_w - 2.0 * CHIP_TEXT_INSET
+                    })
+                })
+                .unwrap_or(2)
+        });
         for (i, (chip, text)) in r.chips.iter().enumerate() {
             let Some(cell) = cells.get(i) else {
                 chip.setHidden(true);
@@ -853,7 +869,8 @@ impl MenuHeader {
                 && (0..i).all(|j| data.kinds.chars().nth(j) == Some('f'))
                 && data.kinds.chars().nth(i) != Some('f');
             let is_more = more.is_some() && i == cells.len() - 1;
-            text.setStringValue(&NSString::from_str(cell));
+            let cell = if i < data.chips.dates.len() { worded(i, level) } else { (*cell).to_owned() };
+            text.setStringValue(&NSString::from_str(&cell));
             // "+N more" shortens to "+N" where it doesn't fit, as on the device.
             if is_more && text_width(text) > chip_w - 2.0 * CHIP_TEXT_INSET {
                 text.setStringValue(&NSString::from_str(&format!("+{}", data.chips.more)));
