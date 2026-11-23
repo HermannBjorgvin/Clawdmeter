@@ -100,7 +100,9 @@ The app writes one complete JSON object per write to RX
 - Codex (a trial): `pv:"codex"` marks a Codex account's numbers (same usage
   keys; the device draws its Codex screen and keeps them out of Clawd's rate
   math), `rc`/`rx` its reset credits held and each held one's expiry date
-  (≤ 10; absent = unknown). Fable is Claude's: `wf`/`fc` are never sent
+  (≤ 10; absent = unknown). They're also sent for a weekly-only Claude
+  account's limit-reset grants, read once a day with `claude_resets = on`
+  (`clawdmeter-core::grants`), without `pv`. Fable is Claude's: `wf`/`fc` are never sent
   with `pv`, and the Codex screen never draws the strip.
 - Attention: `b` (alert chime), `m` (ASCII message), `x` (clear).
 - Fast clock: `a` (activity 0–3), `e` + `es` (event `p`/`s`/`b` and its

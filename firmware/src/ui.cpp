@@ -753,11 +753,12 @@ void ui_init(void) {
     anim_verb_idx = fitting_verb(0);
 }
 
-// A Codex account with its reset credits: the second card is the Resets
-// card. Without them (or with a 5-hour window, which keeps the week there)
-// the Claude layout holds.
-static bool codex_resets_card(const UsageData* d) {
-    return d->codex && d->weekly_only && d->resets_held >= 0;
+// A weekly-only plan with its reset credits held (a Codex plan's credits, or
+// Claude's limit-reset grants): the second card is the Resets card. Without
+// them (or with a 5-hour window, which keeps the week there) the usual layout
+// holds.
+static bool shows_resets_card(const UsageData* d) {
+    return d->weekly_only && d->resets_held >= 0;
 }
 
 // The first of `texts` that fits `w` in `font`, else the last.
@@ -949,7 +950,7 @@ void ui_apply_theme(void) {
     apply_pair_text();   // its last line follows the hold state
     if (have_last_data) {
         apply_bar_colors(&last_data);
-        if (codex_resets_card(&last_data)) draw_resets_card(&last_data);
+        if (shows_resets_card(&last_data)) draw_resets_card(&last_data);
         if (last_data.enterprise) apply_period_colors(&last_data);
     }
 }
@@ -977,7 +978,7 @@ void ui_update(const UsageData* data) {
     }
 
     int s_pct = (int)(data->session_pct + 0.5f);
-    const bool resets_card = codex_resets_card(data);
+    const bool resets_card = shows_resets_card(data);
     // No 5-hour limit: the one card left sits in the middle of the space the
     // two cards take, unless a Codex account's Resets card takes the second.
     const bool lone = data->weekly_only && !resets_card;

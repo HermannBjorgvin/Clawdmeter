@@ -223,10 +223,11 @@ impl StatusSnapshot {
     }
 
     /// The reset credits held, where every surface shows them (the device's
-    /// Resets card, the Overview, both trays): a weekly-only Codex plan
-    /// whose count is known. With a 5-hour window the week takes that place.
+    /// Resets card, the Overview, both trays): a weekly-only plan whose count
+    /// is known, Codex's credits or Claude's limit-reset grants. With a 5-hour
+    /// window the week takes that place; a spend cap has none.
     pub fn shown_resets(&self) -> Option<u32> {
-        self.resets_held.filter(|_| self.codex && self.no_session_limit)
+        self.resets_held.filter(|_| self.no_session_limit && !self.spend)
     }
 
     /// Fable's % for the strip inside the Weekly bar, where the Overview and
@@ -544,9 +545,11 @@ mod tests {
             (later.shown_resets(), later.resets_expiries),
             (Some(2), vec![day(5).timestamp(), day(12).timestamp()])
         );
-        // Only a weekly-only Codex plan with a known count shows them.
+        // Only a weekly-only plan with a known count shows them: Codex's
+        // credits, or Claude's limit-reset grants alike.
         assert_eq!(StatusSnapshot { no_session_limit: false, ..snap.clone() }.shown_resets(), None);
-        assert_eq!(StatusSnapshot { codex: false, ..snap.clone() }.shown_resets(), None);
+        assert_eq!(StatusSnapshot { codex: false, ..snap.clone() }.shown_resets(), Some(3));
+        assert_eq!(StatusSnapshot { spend: true, ..snap.clone() }.shown_resets(), None);
         assert_eq!(StatusSnapshot { resets_held: None, ..snap }.shown_resets(), None);
     }
 

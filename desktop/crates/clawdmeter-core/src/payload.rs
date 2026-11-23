@@ -46,7 +46,8 @@ pub struct Payload {
     /// draws its Codex screen); absent for Claude.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pv: Option<String>,
-    /// Codex reset credits held. Absent when unknown: no Resets card.
+    /// Reset credits held: Codex's, or Claude's limit-reset grants. Absent
+    /// when unknown: no Resets card.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rc: Option<u32>,
     /// Each held reset credit's expiry date, host-local like `rd` ("Dec 1"),
@@ -308,15 +309,16 @@ impl Payload {
         };
         if r.provider == Provider::Codex {
             p.pv = Some("codex".to_owned());
-            if let Some(c) = r.resets.as_ref().map(|c| c.at(now)) {
-                p.rc = Some(c.held);
-                if !c.expiries.is_empty() {
-                    let day = |t: &DateTime<Utc>| {
-                        let l = t.with_timezone(tz);
-                        format!("{} {}", l.format("%b"), l.day())
-                    };
-                    p.rx = Some(c.expiries.iter().take(ResetCredits::MAX_EXPIRIES).map(day).collect());
-                }
+        }
+        // Reset credits: Codex's, or Claude's limit-reset grants (`grants`).
+        if let Some(c) = r.resets.as_ref().map(|c| c.at(now)) {
+            p.rc = Some(c.held);
+            if !c.expiries.is_empty() {
+                let day = |t: &DateTime<Utc>| {
+                    let l = t.with_timezone(tz);
+                    format!("{} {}", l.format("%b"), l.day())
+                };
+                p.rx = Some(c.expiries.iter().take(ResetCredits::MAX_EXPIRIES).map(day).collect());
             }
         }
         p
@@ -629,10 +631,12 @@ mod tests {
         // Fable is Claude's: never `wf` with `pv`, whatever the reading holds.
         let with_fable = UsageReading { models: vec![("fable".into(), week.clone())], ..r.clone() };
         assert_eq!(Payload::from_reading(&with_fable, now).wf, None);
-        // A Claude reading never carries them.
+        // A Claude reading carries its grants the same way, without `pv`.
         let claude = UsageReading { provider: Provider::Claude, ..r };
         let j = Payload::from_reading(&claude, now).to_json();
-        assert!(!j.contains("pv") && !j.contains("\"rc\""), "{j}");
+        assert!(!j.contains("pv") && j.contains("\"rc\""), "{j}");
+        let none = UsageReading { resets: None, ..claude };
+        assert!(!Payload::from_reading(&none, now).to_json().contains("\"rc\""), "unknown: no rc");
     }
 
     /// Every field at its widest, the longest alert line and three

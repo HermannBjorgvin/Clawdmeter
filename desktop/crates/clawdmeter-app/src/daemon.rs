@@ -146,6 +146,66 @@ fn poll_all(claude: Option<PathBuf>, plan: PollPlan, home: PathBuf, cwd: PathBuf
         .collect()
 }
 
+/// Each limit-reset grants read: the account, and what it answered.
+type GrantAsks = Vec<(PathBuf, Result<clawdmeter_core::grants::Answer, usage::UsageError>)>;
+
+/// The installed Claude Code's version for the grants call's User-Agent:
+/// which binary, what it said (`None`: couldn't tell) and when (unix s).
+type CliVersion = (PathBuf, Option<String>, i64);
+
+/// `cached` needs reading again for `claude` at `now`: another binary, a
+/// day old (Claude Code updates itself), or an hour after a failed read.
+fn version_stale(cached: Option<&CliVersion>, claude: &std::path::Path, now: i64) -> bool {
+    match cached {
+        None => true,
+        Some((p, v, at)) => p != claude || now - at >= if v.is_some() { 86_400 } else { 3_600 },
+    }
+}
+
+/// Read the limit-reset grants of `due` (blocking, on a task of its own so
+/// a slow answer never holds up a poll): `claude --version` first when
+/// stale (no version, no call), then one call per account with Claude
+/// Code's User-Agent.
+fn ask_grants(
+    due: Vec<PathBuf>,
+    claude: PathBuf,
+    cached: Option<CliVersion>,
+    home: PathBuf,
+    now_unix: i64,
+) -> (GrantAsks, Option<CliVersion>) {
+    let version = if version_stale(cached.as_ref(), &claude, now_unix) {
+        Some((claude.clone(), clawdmeter_core::grants::claude_version(&claude, &home), now_unix))
+    } else {
+        cached
+    };
+    let Some(v) = version.as_ref().and_then(|(_, v, _)| v.clone()) else { return (Vec::new(), version) };
+    let now = chrono::Utc::now();
+    let asks = due
+        .into_iter()
+        .map(|d| {
+            let answer = clawdmeter_core::grants::fetch(&d, &home, &v, now);
+            (d, answer)
+        })
+        .collect();
+    (asks, version)
+}
+
+/// The grants file (`<state>/claude-grants.json`).
+fn grants_file(paths: &Paths) -> PathBuf {
+    paths.state_dir.join("claude-grants.json")
+}
+
+/// Hand the cached grants to the engine (at start-up, and when the switch
+/// goes on).
+fn seed_grants(engine: &mut Engine, cache: &clawdmeter_core::grants::GrantsCache) {
+    let dirs = engine.settings().config_dirs.clone();
+    for d in dirs {
+        if let Some(c) = cache.accounts.get(&d).and_then(|e| e.credits()) {
+            engine.set_claude_resets(&d, Some(c));
+        }
+    }
+}
+
 /// Read each Codex account due (blocking; the endpoint is slow).
 fn poll_codex(dirs: Vec<PathBuf>, mut cache: CodexCache) -> CodexResults {
     let now = chrono::Utc::now();
@@ -202,6 +262,15 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let mut device_events: Option<DeviceEvents> = None;
     let mut connecting: Option<JoinHandle<ConnectResult>> = None;
     let mut polling: Option<JoinHandle<PollResults>> = None;
+    let mut grants_task: Option<JoinHandle<(GrantAsks, Option<CliVersion>)>> = None;
+    // Claude's limit-reset grants (`claude_resets`): last answers, and the
+    // installed Claude Code's version for the one call's User-Agent.
+    let mut grants = clawdmeter_core::grants::GrantsCache::load(&grants_file(&paths));
+    let mut resets_on = engine.settings().claude_resets;
+    if resets_on {
+        seed_grants(&mut engine, &grants);
+    }
+    let mut cli_version: Option<CliVersion> = None;
     // Codex accounts poll on their own task, so a slow endpoint never holds
     // up a Claude account. The credits cache travels with it.
     let mut codex_polling: Option<JoinHandle<CodexResults>> = None;
@@ -241,6 +310,10 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     // This tick's write check sees the new settings.
                     last_settings = now;
                     reload_settings(&paths, &mut engine, &mut claude);
+                    if engine.settings().claude_resets && !resets_on {
+                        seed_grants(&mut engine, &grants);
+                    }
+                    resets_on = engine.settings().claude_resets;
                 }
                 Ok(Command::Shutdown) | Err(mpsc::error::TryRecvError::Disconnected) => {
                     if let Some(l) = link.take() {
@@ -258,6 +331,10 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         if now - last_settings >= SETTINGS_EVERY {
             last_settings = now;
             reload_settings(&paths, &mut engine, &mut claude);
+            if engine.settings().claude_resets && !resets_on {
+                seed_grants(&mut engine, &grants);
+            }
+            resets_on = engine.settings().claude_resets;
         }
 
         // ---- fast clock ----
@@ -305,7 +382,86 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                         log::warn!("{}: {e}", d.display());
                     }
                 }
+                // Grants are only asked right after the endpoint itself just
+                // answered a weekly-only account (the only kind that shows
+                // them): never after a miss, a probe or a known reading.
+                let answered: Vec<PathBuf> = results
+                    .iter()
+                    .filter(|(_, r)| r.idle && r.idle_miss.is_none() && r.result.is_ok())
+                    .map(|(d, _)| d.clone())
+                    .collect();
                 engine.on_poll_results(unix_now(), results);
+                let at = unix_now();
+                if engine.settings().claude_resets && grants_task.is_none() {
+                    // Still listed (an account removed mid-poll is dropped by
+                    // the engine) and weekly-only as the engine now keeps it.
+                    let due: Vec<PathBuf> = answered
+                        .into_iter()
+                        .filter(|d| engine.settings().config_dirs.contains(d))
+                        .filter(|d| engine.reading(d).is_some_and(usage::UsageReading::no_session_limit))
+                        .filter(|d| grants.due(d, at) && !engine.endpoint_parked(d, at))
+                        .collect();
+                    if let (false, Some(c)) = (due.is_empty(), claude.clone()) {
+                        let (cached, home) = (cli_version.clone(), paths.home.clone());
+                        grants_task = Some(tokio::task::spawn_blocking(move || ask_grants(due, c, cached, home, at)));
+                    }
+                }
+                let blocks = engine.blocks(unix_now());
+                if blocks != saved_blocks {
+                    if let Err(e) = backoff::save_blocks(&paths.usage_blocks_file(), &blocks) {
+                        log::warn!("couldn't save usage blocks: {e}");
+                    }
+                    saved_blocks = blocks;
+                }
+            }
+        }
+        if grants_task.as_ref().is_some_and(JoinHandle::is_finished) {
+            if let Ok((asks, version)) = grants_task.take().expect("checked").await {
+                if version.as_ref().map(|v| &v.1) != cli_version.as_ref().map(|v| &v.1) {
+                    match version.as_ref().map(|v| (&v.0, &v.1)) {
+                        Some((_, Some(v))) => {
+                            log::info!("Claude Code {v}: limit-reset grants are read with its User-Agent")
+                        }
+                        Some((p, None)) => log::warn!("couldn't read {} --version: no limit-reset grants", p.display()),
+                        None => {}
+                    }
+                }
+                cli_version = version;
+                // The switch may have gone off while the calls ran.
+                let on = engine.settings().claude_resets;
+                for (d, answer) in asks {
+                    let at = unix_now();
+                    match answer {
+                        Ok(clawdmeter_core::grants::Answer::Held(c)) => {
+                            log::info!("{}: {} limit reset(s) held", d.display(), c.held);
+                            grants.record(&d, at, Some(&c));
+                            if on {
+                                engine.set_claude_resets(&d, Some(c));
+                            }
+                        }
+                        Ok(clawdmeter_core::grants::Answer::Ineligible(why)) => {
+                            log::info!("{}: no limit-reset grants ({why})", d.display());
+                            grants.record(&d, at, None);
+                            engine.set_claude_resets(&d, None);
+                        }
+                        Ok(clawdmeter_core::grants::Answer::Unreadable) => {
+                            log::warn!("{}: limit-reset grants answer not understood; keeping the last", d.display());
+                            grants.touch(&d, at);
+                        }
+                        // Asked again once Claude Code has renewed it.
+                        Err(usage::UsageError::TokenExpired) => {}
+                        // A miss (a 429 included) backs the account off like a
+                        // poll's would, so nothing calls a blocked endpoint again.
+                        Err(e) => {
+                            log::warn!("{}: limit-reset grants: {e}; asking again in a day", d.display());
+                            grants.touch(&d, at);
+                            engine.on_endpoint_miss(&d, &e, at);
+                        }
+                    }
+                }
+                if let Err(e) = grants.save(&grants_file(&paths)) {
+                    log::warn!("couldn't save {}: {e}", grants_file(&paths).display());
+                }
                 let blocks = engine.blocks(unix_now());
                 if blocks != saved_blocks {
                     if let Err(e) = backoff::save_blocks(&paths.usage_blocks_file(), &blocks) {

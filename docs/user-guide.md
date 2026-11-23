@@ -209,6 +209,17 @@ a drop in usage for a reset (the reset chime, if it's on, and Clawd's
 reaction) and a rise for heavy use. Automatic switching between Claude
 accounts does the same.
 
+**Claude's free limit resets.** With **Show Claude's free limit resets** on
+(Settings, off by default), Clawdmeter reads once a day which limit resets
+Anthropic has granted each account, the ones Claude Code's `/limit-reset`
+uses. A weekly-only account then shows them as Codex's credits are shown:
+the count and each one's end date in a Resets card on the device and the
+Overview, under the meter in the macOS panel, and as a row in the Linux and
+Windows menu. Clawdmeter only reads them; it never uses one. The endpoint
+answers only Claude Code's own User-Agent, so that one call sends it. It's
+read-only, but Anthropic may stop answering it or object to it.
+
+
 **Codex accounts (a trial).** With the Codex CLI signed in to ChatGPT, its
 folder (`~/.codex`, or `$CODEX_HOME`) is picked up as an account on its own;
 the Accounts page's **Add account folder…** takes other Codex folders too (a
@@ -408,6 +419,7 @@ Every trigger, including manual refresh, respects a two-minute minimum gap
 and any retry delay. Transient failures delay retries by 10, 20, then 30
 minutes. A failed check never becomes a zero reading. Heartbeats stop once
 the selected reading is stale, allowing the device to show the loss of fresh data.
+
 
 ### Command line
 

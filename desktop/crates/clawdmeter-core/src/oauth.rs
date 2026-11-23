@@ -266,21 +266,28 @@ pub fn interpret(
     }
 }
 
-/// Call the endpoint with `token` (blocking).
-pub fn fetch_usage(token: &Token, now: DateTime<Utc>) -> Result<UsageReading, UsageError> {
+/// GET `url` with `token` and `user_agent` (blocking): the status, the
+/// `retry-after` header and the body.
+pub fn get(url: &str, token: &Token, user_agent: &str) -> Result<(u16, Option<String>, String), UsageError> {
     let agent: ureq::Agent =
         ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(HTTP_TIMEOUT)).build().into();
     let mut resp = agent
-        .get(USAGE_URL)
+        .get(url)
         .header("Authorization", &format!("Bearer {}", token.access))
         .header("anthropic-beta", OAUTH_BETA)
-        .header("User-Agent", &user_agent())
+        .header("User-Agent", user_agent)
         .header("Accept", "application/json")
         .call()
         .map_err(|e| UsageError::Offline(e.to_string()))?;
     let status = resp.status().as_u16();
     let retry_after = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).map(str::to_owned);
     let body = resp.body_mut().read_to_string().unwrap_or_default();
+    Ok((status, retry_after, body))
+}
+
+/// Call the endpoint with `token` (blocking).
+pub fn fetch_usage(token: &Token, now: DateTime<Utc>) -> Result<UsageReading, UsageError> {
+    let (status, retry_after, body) = get(USAGE_URL, token, &user_agent())?;
     interpret(status, retry_after.as_deref(), &body, now)
 }
 

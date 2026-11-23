@@ -3,7 +3,7 @@
 //! the clock, and performs the writes it asks for.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -179,6 +179,9 @@ pub struct Engine {
     claude_found: bool,
     /// A new alert should chime on this computer (`desktop_chime`).
     desktop_chime_due: bool,
+    /// Claude accounts' limit-reset grants (`crate::grants`), put on each
+    /// of their readings.
+    claude_resets: BTreeMap<PathBuf, crate::usage::ResetCredits>,
 }
 
 /// A Codex account that can't be read until its sign-in is renewed: no
@@ -230,6 +233,48 @@ impl Engine {
             unattributed_activity: None,
             claude_found: true,
             desktop_chime_due: false,
+            claude_resets: BTreeMap::new(),
+        }
+    }
+
+    /// The usage endpoint missed a side call for `dir` (the limit-reset
+    /// grants): it backs the account off as a poll's miss would, so the next
+    /// poll doesn't call a blocked endpoint again.
+    pub fn on_endpoint_miss(&mut self, dir: &Path, e: &UsageError, now: i64) {
+        if let Some(st) = self.accounts.get_mut(dir) {
+            st.back_off(now, e);
+        }
+    }
+
+    /// `dir`'s latest reading as the engine keeps it (`None`: not listed, or
+    /// none yet).
+    pub fn reading(&self, dir: &Path) -> Option<&UsageReading> {
+        self.accounts.get(dir).and_then(|a| a.last.as_ref())
+    }
+
+    /// `dir`'s usage endpoint is parked (a 429's pause or a miss's backoff).
+    pub fn endpoint_parked(&self, dir: &Path, now: i64) -> bool {
+        self.accounts.get(dir).is_some_and(|a| a.backoff.remaining(now).is_some())
+    }
+
+    /// A Claude account's limit-reset grants as last read (`None`: unknown,
+    /// or the switch is off). They ride on its readings from now on; a change
+    /// on the shown account goes out at once as a replay.
+    pub fn set_claude_resets(&mut self, dir: &Path, credits: Option<crate::usage::ResetCredits>) {
+        let dir = dir.to_path_buf();
+        if self.is_codex(&dir) {
+            return;
+        }
+        match &credits {
+            Some(c) => self.claude_resets.insert(dir.clone(), c.clone()),
+            None => self.claude_resets.remove(&dir),
+        };
+        let Some(r) = self.accounts.get_mut(&dir).and_then(|a| a.last.as_mut()) else { return };
+        if r.resets != credits {
+            r.resets = credits;
+            if self.active.as_ref() == Some(&dir) {
+                self.shown_changed = true;
+            }
         }
     }
 
@@ -262,6 +307,16 @@ impl Engine {
             self.accounts.retain(|k, _| settings.config_dirs.contains(k) || settings.codex_dirs.contains(k));
         }
         self.settings = settings;
+        if accounts_changed {
+            let listed = &self.settings.config_dirs;
+            self.claude_resets.retain(|d, _| listed.contains(d));
+        }
+        if !self.settings.claude_resets {
+            let dirs: Vec<PathBuf> = self.claude_resets.keys().cloned().collect();
+            for d in dirs {
+                self.set_claude_resets(&d, None);
+            }
+        }
         // A removed account leaves the automatic choice now, not at the next
         // poll. The others' values haven't changed, so no rise is recorded.
         if accounts_changed {
@@ -587,6 +642,12 @@ impl Engine {
             }
             let kind = st.last.as_ref().map(UsageReading::meter_kind);
             st.record_polled(now, r);
+            // A Claude account's grants come from their own call, once a day.
+            if let (Some(c), Some(l)) = (self.claude_resets.get(&dir), st.last.as_mut()) {
+                if l.provider == crate::usage::Provider::Claude {
+                    l.resets = Some(c.clone());
+                }
+            }
             if kind.is_some_and(|k| st.last.as_ref().is_some_and(|l| l.meter_kind() != k)) {
                 rekinded.push(dir.clone());
             }

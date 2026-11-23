@@ -453,11 +453,11 @@ mod tests {
         let undated = StatusSnapshot { resets_expiries: vec![], ..week.clone() };
         assert_eq!(resets(&undated, &utc).unwrap().chips.note, Some("Expiry dates unknown"));
         // Only where the device and the Linux/Windows menu show them: an
-        // unknown count, a 5-hour plan (the week takes that place) or a
-        // Claude account has none.
+        // unknown count or a 5-hour plan (the week takes that place) has none;
+        // a weekly-only Claude account shows its limit-reset grants the same way.
         assert_eq!(resets(&StatusSnapshot { resets_held: None, ..week.clone() }, &utc), None);
         assert_eq!(resets(&StatusSnapshot { no_session_limit: false, ..week.clone() }, &utc), None);
-        assert_eq!(resets(&StatusSnapshot { codex: false, ..week.clone() }, &utc), None);
+        assert_eq!(resets(&StatusSnapshot { codex: false, ..week.clone() }, &utc).map(|r| r.held), Some(3));
         // Header::new carries them beside the one Codex meter.
         let h = Header::new(&week, Path::new("/home/u"), true, false, RefreshState::Ready, NOW);
         assert_eq!((h.meters.len(), h.resets.map(|r| r.held)), (1, Some(3)));

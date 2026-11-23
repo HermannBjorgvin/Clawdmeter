@@ -1083,7 +1083,7 @@ impl AccountState {
     }
 
     /// Start or extend the backoff for an idle-source miss.
-    fn back_off(&mut self, now: i64, e: &UsageError) {
+    pub(crate) fn back_off(&mut self, now: i64, e: &UsageError) {
         match e {
             // The endpoint said exactly how long: no more, no less.
             UsageError::Throttled { retry_after_secs: Some(s) } => self.backoff.park_exact(now, *s),
