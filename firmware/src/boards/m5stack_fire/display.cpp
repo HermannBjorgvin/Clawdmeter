@@ -2,10 +2,13 @@
 #include "board.h"
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
+#include "../common/ili9342_m5.inc"
 
 // ILI9342C over 4-wire SPI (VSPI) — the M5Stack Core/Fire panel. Arduino_GFX
 // ships a dedicated Arduino_ILI9342 driver whose rotation table already applies
 // the panel's BGR order, so the HAL surface is identical to the ST7789 port.
+// Its init list is replaced by M5GFX's ILI9342C one (gamma tables and the
+// extended-command unlock; ili9342_m5.inc). The FIRE only ships the C.
 // Brightness is a LEDC PWM duty on the backlight GPIO (the TFT has no in-panel
 // brightness command), same approach as the LCD-1.54.
 //
@@ -14,12 +17,12 @@
 // down — on this hardware; both are 320x240, just mirrored 180°).
 
 static Arduino_DataBus*  bus = nullptr;
-static Arduino_ILI9342*  gfx = nullptr;
+static M5_ILI9342*       gfx = nullptr;
 
 void display_hal_init(void) {
     bus = new Arduino_ESP32SPI(LCD_DC, LCD_CS, LCD_SCLK, LCD_MOSI, LCD_MISO);
     // ips=true — the M5Stack panel needs color inversion for correct blacks.
-    gfx = new Arduino_ILI9342(bus, LCD_RST, 2 /* rotation */, true /* ips */);
+    gfx = new M5_ILI9342(bus, LCD_RST, 2 /* rotation */, true /* ips */, ILI9342_VARIANT_C);
 }
 
 void display_hal_begin(void) {
