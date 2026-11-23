@@ -1,8 +1,9 @@
 #pragma once
 #include <stdint.h>
 
-// Pure geometry for the 60x60 grid Clawd performs on at full size
-// (performer.cpp; mascot.cpp sizes the lurk and attention sprites from it).
+// Pure geometry for the grid Clawd performs on at full size: 60 rows, and 60
+// columns plus a margin that widens it to the panel (performer.cpp; mascot.cpp
+// sizes the lurk and attention sprites from the 60-cell size).
 // Deliberately free of LVGL/Arduino dependencies so it can be unit-tested on
 // the host (see test/test_splash_geometry/). Decides the in-buffer pixel size
 // of each grid cell and the LVGL image scale needed to fill the panel.
@@ -37,6 +38,16 @@ static inline SplashGeometry splash_compute_geometry(int width, int height,
     }
     g.canvas_dim = SPLASH_GRID * g.cell;
     return g;
+}
+
+// Whole cells to add on each side of the 60-column grid so that a canvas of
+// cell-px cells spans a panel width px wide: 0 on a square or portrait panel,
+// 10 on 320x240 (4 px cells). The performer draws on this wider grid so a
+// walk reaches the real edge of a landscape panel, not the square's.
+static inline int splash_side_cells(int width, int cell) {
+    const int spare = width - SPLASH_GRID * cell;
+    if (spare <= 0 || cell < 1) return 0;
+    return (spare / 2 + cell - 1) / cell;
 }
 
 // ─── Round panels ────────────────────────────────────────────────────────────
@@ -85,6 +96,20 @@ static inline void span_to_cells(int grid_x, int cell, int grid_cells,
     if (a < 0) a = 0;
     if (b > grid_cells) b = grid_cells;
     if (b < a) b = a;
+    *c0 = a;
+    *c1 = b;
+}
+
+// The same span as the cells that show any of it, [*c0, *c1): a sprite is off
+// the glass only once it is past these, partly visible cells included.
+static inline void span_to_touched_cells(int grid_x, int cell, int grid_cells,
+                                         int x0, int x1, int* c0, int* c1) {
+    int a = x0 - grid_x;
+    int b = x1 - grid_x;
+    a = a <= 0 ? 0 : a / cell;
+    b = b <= 0 ? 0 : (b + cell - 1) / cell;
+    if (b > grid_cells) b = grid_cells;
+    if (a > b) a = b;
     *c0 = a;
     *c1 = b;
 }
