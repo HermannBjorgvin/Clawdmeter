@@ -102,7 +102,9 @@ The app writes one complete JSON object per write to RX
   math), `rc`/`rx` its reset credits held and each held one's expiry date
   (≤ 10; absent = unknown). They're also sent for a weekly-only Claude
   account's limit-reset grants, read once a day with `claude_resets = on`
-  (`clawdmeter-core::grants`), without `pv`. Fable is Claude's: `wf`/`fc` are never sent
+  (`clawdmeter-core::grants`), without `pv`, with `rf` (what each date
+  resets: `w` weekly, `f` Fable only; the device draws `f` chips violet and
+  names each chip's kind where it fits). Fable is Claude's: `wf`/`fc` are never sent
   with `pv`, and the Codex screen never draws the strip.
 - Attention: `b` (alert chime), `m` (ASCII message), `x` (clear).
 - Fast clock: `a` (activity 0–3), `e` + `es` (event `p`/`s`/`b` and its

@@ -873,9 +873,11 @@ static void draw_resets_card(const UsageData* d) {
         ThemeColor bg = TH_BAR_BG, text = TH_TEXT;
         bool mono_pill = false;
         bool fable_chip = false;
-        // The soonest chip that isn't Fable-only gets the highlight.
-        bool first_other = true;
-        for (int j = 0; j < i && j < (int)strlen(d->resets_kind); j++) first_other = first_other && d->resets_kind[j] == 'f';
+        // The soonest chip that isn't Fable-only gets the highlight (the
+        // first, when the kinds aren't known: Codex's credits).
+        int soonest = 0;
+        while (soonest < shown && soonest < (int)strlen(d->resets_kind) && d->resets_kind[soonest] == 'f') soonest++;
+        const bool first_other = i == soonest;
         if (i < shown) {
             const char kind = kinded ? d->resets_kind[i] : 0;
             if (level < 2 && (kind == 'w' || kind == 'f'))

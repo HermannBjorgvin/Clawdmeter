@@ -219,7 +219,8 @@ is drawn in Fable's violet; the others reset the weekly limit. Each chip
 also names its kind where it fits ("Weekly Dec 10", "Fable Mar 9", or "W"
 and "F" on a small screen), and the rows and menus say it in words:
 "1 weekly + 1 Fable resets". The macOS panel shows
-the same chips under the meter, and the Linux and Windows menu has a row. Clawdmeter only reads them; it never uses one. The endpoint
+the same chips under the meter, and the Linux and Windows menu has a row. Clawdmeter only reads them; it never uses one, and one you use with
+`/limit-reset` stays shown until the next day's read. The endpoint
 answers only Claude Code's own User-Agent, so that one call sends it. It's
 read-only, but Anthropic may stop answering it or object to it.
 

@@ -270,9 +270,6 @@ static void test_long_strings_truncate(void) {
     TEST_ASSERT_EQUAL_size_t(sizeof(d.status) - 1, strlen(d.status));
 }
 
-// Codex (a trial): `pv` names the provider, `rc` the reset credits held and
-// `rx` their expiry dates. Absent is -1 (unknown), never 0; the count clamps
-// to 0..999.
 // `rf`: what each `rx` date resets, one letter each; absent reads as "".
 static void test_resets_kind(void) {
     UsageData d;
@@ -281,6 +278,10 @@ static void test_resets_kind(void) {
     TEST_ASSERT_TRUE(payload_parse("{\"rc\":1,\"ok\":true}", &d, nullptr));
     TEST_ASSERT_EQUAL_STRING("", d.resets_kind);
 }
+
+// Codex (a trial): `pv` names the provider, `rc` the reset credits held and
+// `rx` their expiry dates. Absent is -1 (unknown), never 0; the count clamps
+// to 0..999.
 
 static void test_codex_fields(void) {
     UsageData d;
