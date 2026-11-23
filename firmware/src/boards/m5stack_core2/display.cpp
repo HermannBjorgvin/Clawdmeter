@@ -3,17 +3,23 @@
 #include "pmu.h"
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
+#include "../common/ili9342_m5.inc"
 
-// Same ILI9342C as the FIRE (Arduino_ILI9342, IPS inversion on), on the Core2's
-// pins. The reset line was pulsed by pmu_init() in board_init(), so the driver
-// gets no RST pin; brightness is the power chip's backlight rail.
+// ILI9342C or, on later units, ILI9342E (probed at boot), on the Core2's pins,
+// with M5GFX's init lists (ili9342_m5.inc). The reset line was pulsed by
+// pmu_init() in board_init(), so the driver gets no RST pin; brightness is the
+// power chip's backlight rail.
 
 static Arduino_DataBus* bus = nullptr;
-static Arduino_ILI9342* gfx = nullptr;
+static M5_ILI9342* gfx = nullptr;
+static Ili9342Variant panel_variant = ILI9342_VARIANT_UNKNOWN;
+
+const char* core2_panel_name(void) { return ili9342_variant_name(panel_variant); }
 
 void display_hal_init(void) {
+    panel_variant = ili9342_probe(150);
     bus = new Arduino_ESP32SPI(LCD_DC, LCD_CS, LCD_SCLK, LCD_MOSI, LCD_MISO);
-    gfx = new Arduino_ILI9342(bus, GFX_NOT_DEFINED, 2 /* rotation */, true /* ips */);
+    gfx = new M5_ILI9342(bus, GFX_NOT_DEFINED, 2 /* rotation */, true /* ips */, panel_variant);
 }
 
 void display_hal_begin(void) {
