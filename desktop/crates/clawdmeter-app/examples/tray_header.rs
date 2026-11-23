@@ -53,6 +53,21 @@ fn main() {
     };
     let states = [
         (
+            // A weekly-only Claude account's limit-reset grants: a weekly
+            // one, and one for Fable's limit only (violet).
+            "claude-resets",
+            false,
+            StatusSnapshot {
+                no_session_limit: true,
+                week_pct: Some(12),
+                week_resets_at: Some(now + (6 * 24 + 6) * 3600),
+                resets_held: Some(2),
+                resets_expiries: vec![now + 19 * 86_400, now + 108 * 86_400],
+                resets_kinds: "wf".into(),
+                ..base.clone()
+            },
+        ),
+        (
             "weekly-only",
             false,
             StatusSnapshot {

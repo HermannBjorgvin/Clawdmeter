@@ -74,6 +74,7 @@ bool payload_parse(const char* json, UsageData* out, const char** err) {
             copy_str(d.resets_expiry[d.resets_expiry_n++], sizeof(d.resets_expiry[0]), v.as<const char*>());
         }
     }
+    copy_str(d.resets_kind, sizeof(d.resets_kind), doc["rf"] | "");
     d.time_pct = doc["tp"] | 0;
     d.period_days = doc["pd"] | 30;
     copy_str(d.reset_date, sizeof(d.reset_date), doc["rd"] | "");

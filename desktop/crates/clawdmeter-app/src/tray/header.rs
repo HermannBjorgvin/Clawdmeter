@@ -49,6 +49,9 @@ pub struct Resets {
     /// The row: up to [`RESET_CHIPS`] cells, soonest first, the last one
     /// "+N more" when they don't all fit; or the line in their place.
     pub chips: ResetChips,
+    /// What each date resets (`ResetKind::code` letters, `f` for Fable
+    /// only), in step with the dates; empty when all alike.
+    pub kinds: String,
 }
 
 /// The panel's chips: one row of four across it ("+10 more" fits a chip;
@@ -201,7 +204,7 @@ where
     Tz::Offset: std::fmt::Display,
 {
     let held = s.shown_resets()?;
-    Some(Resets { held, chips: reset_chips(held, &s.resets_expiries, RESET_CHIPS, tz) })
+    Some(Resets { held, chips: reset_chips(held, &s.resets_expiries, RESET_CHIPS, tz), kinds: s.resets_kinds.clone() })
 }
 
 /// "14:20", local time: when a pause ends (`usage::paused_clock`).

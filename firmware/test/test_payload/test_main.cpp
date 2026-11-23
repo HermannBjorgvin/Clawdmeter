@@ -273,6 +273,15 @@ static void test_long_strings_truncate(void) {
 // Codex (a trial): `pv` names the provider, `rc` the reset credits held and
 // `rx` their expiry dates. Absent is -1 (unknown), never 0; the count clamps
 // to 0..999.
+// `rf`: what each `rx` date resets, one letter each; absent reads as "".
+static void test_resets_kind(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{\"rc\":2,\"rx\":[\"Dec 10\",\"Mar 9\"],\"rf\":\"wf\",\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_EQUAL_STRING("wf", d.resets_kind);
+    TEST_ASSERT_TRUE(payload_parse("{\"rc\":1,\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_EQUAL_STRING("", d.resets_kind);
+}
+
 static void test_codex_fields(void) {
     UsageData d;
     TEST_ASSERT_TRUE(payload_parse("{\"s\":10,\"ok\":true}", &d, nullptr));
@@ -316,6 +325,7 @@ static void test_codex_fields(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_codex_fields);
+    RUN_TEST(test_resets_kind);
     RUN_TEST(test_rejects_malformed_json);
     RUN_TEST(test_empty_object_gives_legacy_defaults);
     RUN_TEST(test_legacy_fields);

@@ -124,8 +124,8 @@ impl Provider {
     }
 }
 
-/// Codex's rate-limit reset credits: one-shot resets of the usage limit that
-/// OpenAI grants and that expire after a while.
+/// One-shot resets of a usage limit that expire after a while: Codex's
+/// rate-limit reset credits, or Claude's limit-reset grants.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResetCredits {
     /// Credits still held (the usage endpoint's `available_count`).
@@ -133,6 +133,60 @@ pub struct ResetCredits {
     /// When each held credit expires, soonest first, those still ahead and
     /// at most [`ResetCredits::MAX_EXPIRIES`]; empty when unknown.
     pub expiries: Vec<DateTime<Utc>>,
+    /// What each of `expiries` resets, in step with it (Claude's grants);
+    /// empty when they're all alike (Codex's credits).
+    pub kinds: Vec<ResetKind>,
+}
+
+/// What a Claude limit-reset grant resets (its `clears`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetKind {
+    /// The weekly limit (`seven_day`).
+    Weekly,
+    /// Only Fable's own weekly limit (`seven_day_overage_included`).
+    Fable,
+    /// Something this version doesn't know.
+    Other,
+}
+
+impl ResetKind {
+    /// From a grant's `clears` list.
+    pub fn from_clears(clears: &[&str]) -> Self {
+        if clears.contains(&"seven_day") {
+            ResetKind::Weekly
+        } else if clears.contains(&"seven_day_overage_included") {
+            ResetKind::Fable
+        } else {
+            ResetKind::Other
+        }
+    }
+
+    /// The payload's one-letter code (`rf`).
+    pub fn code(self) -> char {
+        match self {
+            ResetKind::Weekly => 'w',
+            ResetKind::Fable => 'f',
+            ResetKind::Other => 'o',
+        }
+    }
+
+    /// From [`ResetKind::code`].
+    pub fn from_code(c: char) -> Self {
+        match c {
+            'w' => ResetKind::Weekly,
+            'f' => ResetKind::Fable,
+            _ => ResetKind::Other,
+        }
+    }
+
+    /// For people: "weekly", "Fable", "other".
+    pub fn word(self) -> &'static str {
+        match self {
+            ResetKind::Weekly => "weekly",
+            ResetKind::Fable => "Fable",
+            ResetKind::Other => "other",
+        }
+    }
 }
 
 impl ResetCredits {
@@ -149,9 +203,14 @@ impl ResetCredits {
     /// account is parked or offline, so an expiry can pass before the next
     /// poll drops it; the device, the Overview and the tray all take this.
     pub fn at(&self, now: DateTime<Utc>) -> ResetCredits {
-        let ahead: Vec<_> = self.expiries.iter().copied().filter(|t| *t > now).collect();
-        let gone = (self.expiries.len() - ahead.len()) as u32;
-        ResetCredits { held: self.held.saturating_sub(gone), expiries: ahead }
+        let paired = self.kinds.len() == self.expiries.len();
+        let keep: Vec<usize> = (0..self.expiries.len()).filter(|&i| self.expiries[i] > now).collect();
+        let gone = (self.expiries.len() - keep.len()) as u32;
+        ResetCredits {
+            held: self.held.saturating_sub(gone),
+            expiries: keep.iter().map(|&i| self.expiries[i]).collect(),
+            kinds: if paired { keep.iter().map(|&i| self.kinds[i]).collect() } else { Vec::new() },
+        }
     }
 }
 
@@ -1178,16 +1237,18 @@ mod tests {
         let c = ResetCredits {
             held: 3,
             expiries: vec![at("2026-11-30T19:56:00Z"), at("2026-12-01T12:00:00Z"), at("2026-12-12T12:00:00Z")],
+            kinds: vec![ResetKind::Weekly, ResetKind::Fable, ResetKind::Weekly],
         };
         assert_eq!(c.at(at("2026-11-16T17:00:00Z")), c, "all ahead");
         let dec1 = c.at(at("2026-12-01T00:00:00Z"));
         assert_eq!((dec1.held, dec1.expiries.len(), dec1.next_expiry()), (2, 2, Some(at("2026-12-01T12:00:00Z"))));
+        assert_eq!(dec1.kinds, vec![ResetKind::Fable, ResetKind::Weekly], "kinds stay in step");
         assert_eq!(c.at(at("2026-11-30T19:56:00Z")).held, 2, "gone at its expiry");
-        assert_eq!(c.at(at("2027-01-01T00:00:00Z")), ResetCredits { held: 0, expiries: vec![] });
+        assert_eq!(c.at(at("2027-01-01T00:00:00Z")), ResetCredits::default());
         // Undated credits (more held than dates known) stay counted.
         let more = ResetCredits { held: 12, ..c.clone() };
         assert_eq!(more.at(at("2026-12-01T00:00:00Z")).held, 11);
-        let undated = ResetCredits { held: 2, expiries: vec![] };
+        let undated = ResetCredits { held: 2, ..Default::default() };
         assert_eq!(undated.at(at("2027-01-01T00:00:00Z")), undated);
     }
 

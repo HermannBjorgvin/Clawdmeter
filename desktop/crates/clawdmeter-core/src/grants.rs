@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::oauth;
-use crate::usage::{ResetCredits, UsageError};
+use crate::usage::{ResetCredits, ResetKind, UsageError};
 
 /// The usage endpoint with the grants block.
 pub const GRANTS_URL: &str = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1";
@@ -93,6 +93,7 @@ pub fn parse_grants(body: &str, now: DateTime<Utc>) -> Option<ResetCredits> {
         return None;
     }
     let mut readable = 0usize;
+    let mut known_kinds = true;
     let time = |g: &Value, k: &str| {
         g.get(k)
             .and_then(Value::as_str)
@@ -121,15 +122,22 @@ pub fn parse_grants(body: &str, now: DateTime<Utc>) -> Option<ResetCredits> {
         if held > MAX_RESETS {
             return None;
         }
-        expiries.extend(std::iter::repeat_n(end, left as usize));
+        // No `clears`: what it resets is unknown, and then so are all kinds.
+        let clears: Option<Vec<&str>> =
+            g.get("clears").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect());
+        known_kinds &= clears.is_some();
+        let kind = ResetKind::from_clears(&clears.unwrap_or_default());
+        expiries.extend(std::iter::repeat_n((end, kind), left as usize));
     }
     // Grants none of which could be read: the shape changed, not "none held".
     if readable == 0 && !grants.is_empty() {
         return None;
     }
-    expiries.sort();
+    expiries.sort_by_key(|(t, _)| *t);
     expiries.truncate(ResetCredits::MAX_EXPIRIES);
-    Some(ResetCredits { held, expiries })
+    let (expiries, kinds): (Vec<_>, Vec<_>) = expiries.into_iter().unzip();
+    let kinds = if known_kinds { kinds } else { Vec::new() };
+    Some(ResetCredits { held, expiries, kinds })
 }
 
 /// Read one account's grants (blocking). The token is only read, never
@@ -160,6 +168,9 @@ pub struct Entry {
     /// Each held one's end (unix s), soonest first.
     #[serde(default)]
     pub expiries: Vec<i64>,
+    /// What each resets ([`ResetKind::code`]), in step with `expiries`.
+    #[serde(default)]
+    pub kinds: String,
 }
 
 impl Entry {
@@ -168,6 +179,7 @@ impl Entry {
         Some(ResetCredits {
             held: self.held?,
             expiries: self.expiries.iter().filter_map(|t| DateTime::from_timestamp(*t, 0)).collect(),
+            kinds: self.kinds.chars().map(ResetKind::from_code).collect(),
         })
     }
 }
@@ -192,7 +204,9 @@ impl GrantsCache {
         std::fs::rename(tmp, path)
     }
 
-    /// `dir` hasn't been asked in [`EVERY_SECS`].
+    /// `dir` hasn't been asked in [`EVERY_SECS`]. Nothing else asks
+    /// sooner: an answer without kinds (a grant with no `clears`) waits its
+    /// day like any other.
     pub fn due(&self, dir: &Path, now: i64) -> bool {
         self.accounts.get(dir).is_none_or(|e| now - e.asked_at >= EVERY_SECS)
     }
@@ -204,6 +218,7 @@ impl GrantsCache {
             asked_at: now,
             held: credits.map(|c| c.held),
             expiries: credits.map(|c| c.expiries.iter().map(DateTime::timestamp).collect()).unwrap_or_default(),
+            kinds: credits.map(|c| c.kinds.iter().map(|k| k.code()).collect()).unwrap_or_default(),
         };
         self.accounts.insert(dir.to_path_buf(), entry);
     }
@@ -211,7 +226,12 @@ impl GrantsCache {
     /// Note an ask that told nothing new (a failure, an unreadable answer):
     /// what was known stays, and the next ask waits a day.
     pub fn touch(&mut self, dir: &Path, now: i64) {
-        let e = self.accounts.entry(dir.to_path_buf()).or_insert(Entry { asked_at: now, held: None, expiries: vec![] });
+        let e = self.accounts.entry(dir.to_path_buf()).or_insert(Entry {
+            asked_at: now,
+            held: None,
+            expiries: vec![],
+            kinds: String::new(),
+        });
         e.asked_at = now;
     }
 }
@@ -231,7 +251,7 @@ mod tests {
         {"id":"full-reset-2611","label":"One full limit reset (November 2026)","resets_total":1,"resets_left":1,
          "starts_at":"2026-11-10T21:30:00+00:00","ends_at":"2026-12-10T22:00:00+00:00","clears":["seven_day"],"paused":false,"type":"weekly"},
         {"id":"launch-2610-fable","resets_total":1,"resets_left":0,"starts_at":"2026-11-09T18:00:00+00:00",
-         "ends_at":"2027-03-09T07:59:00+00:00","type":"full"},
+         "ends_at":"2027-03-09T07:59:00+00:00","clears":["seven_day_overage_included"],"type":"full"},
         {"id":"later","resets_left":2,"starts_at":"2026-12-01T00:00:00+00:00","ends_at":"2027-01-01T00:00:00+00:00"},
         {"id":"paused","resets_left":1,"paused":true,"starts_at":"2026-11-01T00:00:00+00:00","ends_at":"2027-01-01T00:00:00+00:00"},
         {"id":"broken","resets_left":"1","starts_at":"2026-11-01T00:00:00+00:00","ends_at":"2027-01-01T00:00:00+00:00"}],
@@ -240,13 +260,15 @@ mod tests {
     #[test]
     fn reads_the_grants_held() {
         let now = at("2026-11-21T12:00:00Z");
-        let held = |held, ends: &[&str]| Some(ResetCredits { held, expiries: ends.iter().map(|s| at(s)).collect() });
+        let held = |held, ends: &[&str], k: ResetKind| {
+            Some(ResetCredits { held, expiries: ends.iter().map(|s| at(s)).collect(), kinds: vec![k; ends.len()] })
+        };
         let ineligible = r#"{"cedar_ember":{"eligible":false,"ineligible_reason":"surface","grants":[]}}"#;
         let many = r#"{"cedar_ember":{"eligible":true,"grants":[{"resets_left":51,"starts_at":"2026-11-01T00:00:00Z","ends_at":"2027-01-01T00:00:00Z"}]}}"#;
         // (body, what it says)
         let cases: Vec<(&str, Option<ResetCredits>)> = vec![
-            (ANSWER, held(1, &["2026-12-10T22:00:00Z"])),
-            (r#"{"cedar_ember":{"eligible":true,"grants":[]}}"#, held(0, &[])),
+            (ANSWER, held(1, &["2026-12-10T22:00:00Z"], ResetKind::Weekly)),
+            (r#"{"cedar_ember":{"eligible":true,"grants":[]}}"#, held(0, &[], ResetKind::Weekly)),
             (ineligible, None),
             (r#"{"seven_day":{"utilization":3}}"#, None),
             (r#"{"cedar_ember":{"eligible":true}}"#, None),
@@ -261,9 +283,18 @@ mod tests {
         assert_eq!(parse_grants(renamed, now), None);
         assert_eq!(parse_answer(renamed, now), Answer::Unreadable);
         assert_eq!(parse_answer(ineligible, now), Answer::Ineligible("surface".into()));
-        assert_eq!(parse_answer(ANSWER, now), Answer::Held(held(1, &["2026-12-10T22:00:00Z"]).unwrap()));
+        assert_eq!(
+            parse_answer(ANSWER, now),
+            Answer::Held(held(1, &["2026-12-10T22:00:00Z"], ResetKind::Weekly).unwrap())
+        );
+        // What each resets, from its `clears`.
+        let kinds = |body: &str| parse_grants(body, at("2026-12-11T00:00:00Z")).map(|c| c.kinds);
+        let mixed = ANSWER.replace("\"resets_left\":0", "\"resets_left\":1");
+        assert_eq!(parse_grants(&mixed, now).map(|c| c.kinds), Some(vec![ResetKind::Weekly, ResetKind::Fable]));
+        assert_eq!(kinds(&mixed), Some(vec![]), "a grant without clears: kinds unknown");
         // After the end date the grant no longer counts.
-        assert_eq!(parse_grants(ANSWER, at("2026-12-11T00:00:00Z")), held(2, &["2027-01-01T00:00:00Z"; 2]));
+        let later = parse_grants(ANSWER, at("2026-12-11T00:00:00Z")).unwrap();
+        assert_eq!((later.held, later.expiries.len(), later.kinds.len()), (2, 2, 0), "no clears: kinds unknown");
         assert_eq!(cli_user_agent("2.1.330"), "claude-cli/2.1.330 (external, cli)");
         assert_eq!(parse_version("2.1.330 (Claude Code)\n").as_deref(), Some("2.1.330"));
         assert_eq!(parse_version("error: no"), None);
@@ -274,9 +305,13 @@ mod tests {
         let dir = Path::new("/h/.claude");
         let mut c = GrantsCache::default();
         assert!(c.due(dir, 1_000));
-        let one = ResetCredits { held: 1, expiries: vec![at("2026-12-10T22:00:00Z")] };
+        let one = ResetCredits { held: 1, expiries: vec![at("2026-12-10T22:00:00Z")], kinds: vec![ResetKind::Fable] };
         c.record(dir, 1_000, Some(&one));
         assert!(!c.due(dir, 1_000 + EVERY_SECS - 1) && c.due(dir, 1_000 + EVERY_SECS));
+        // Kinds unknown (a grant with no `clears`): still once a day.
+        let mut unknown = c.clone();
+        unknown.accounts.get_mut(dir).unwrap().kinds.clear();
+        assert!(!unknown.due(dir, 1_001));
         // A failed ask waits a day too, and keeps the last answer.
         c.touch(dir, 1_000 + EVERY_SECS);
         assert!(!c.due(dir, 1_000 + EVERY_SECS + 60));

@@ -60,6 +60,7 @@ pub struct AccountError {
     pub retrying: bool,
 }
 
+
 /// The window-facing view of [`Status`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StatusSnapshot {
@@ -150,6 +151,10 @@ pub struct StatusSnapshot {
     /// `ResetCredits::MAX_EXPIRIES`); empty when unknown.
     #[serde(default)]
     pub resets_expiries: Vec<i64>,
+    /// What each of `resets_expiries` resets, one `ResetKind::code` letter
+    /// each (`w` weekly, `f` Fable only); empty when all alike (Codex).
+    #[serde(default)]
+    pub resets_kinds: String,
 }
 
 impl StatusSnapshot {
@@ -218,6 +223,7 @@ impl StatusSnapshot {
                 .map(|t| t.timestamp()),
             codex: reading.is_some_and(|r| r.provider == clawdmeter_core::usage::Provider::Codex),
             resets_held: resets.as_ref().map(|c| c.held),
+            resets_kinds: resets.as_ref().map(|c| c.kinds.iter().map(|k| k.code()).collect()).unwrap_or_default(),
             resets_expiries: resets.map(|c| c.expiries.iter().map(|t| t.timestamp()).collect()).unwrap_or_default(),
         }
     }
@@ -504,6 +510,7 @@ mod tests {
     use clawdmeter_core::usage::{SessionLimit, UsageReading, Window};
     use clawdmeter_core::EngineStatus;
 
+
     fn status(link: LinkState, reading: bool, last_write: Option<i64>) -> Status {
         Status {
             link,
@@ -534,7 +541,7 @@ mod tests {
             week: Some(Window { pct: 20, resets_at: None }),
             session_limit: SessionLimit::Absent,
             provider: Provider::Codex,
-            resets: Some(ResetCredits { held: 3, expiries: vec![day(1), day(5), day(12)] }),
+            resets: Some(ResetCredits { held: 3, expiries: vec![day(1), day(5), day(12)], kinds: vec![] }),
             ..Default::default()
         });
         let snap = StatusSnapshot::from_status(&s, day(1).timestamp() - 60);

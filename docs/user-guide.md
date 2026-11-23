@@ -214,8 +214,10 @@ accounts does the same.
 Anthropic has granted each account, the ones Claude Code's `/limit-reset`
 uses. A weekly-only account then shows them as Codex's credits are shown:
 the count and each one's end date in a Resets card on the device and the
-Overview, under the meter in the macOS panel, and as a row in the Linux and
-Windows menu. Clawdmeter only reads them; it never uses one. The endpoint
+Overview. A reset that only clears Fable's own limit (a model-launch grant)
+is drawn in Fable's violet; the others reset the weekly limit. The rows and
+menus say it in words: "2 resets (1 weekly, 1 Fable)". The macOS panel shows
+the same chips under the meter, and the Linux and Windows menu has a row. Clawdmeter only reads them; it never uses one. The endpoint
 answers only Claude Code's own User-Agent, so that one call sends it. It's
 read-only, but Anthropic may stop answering it or object to it.
 

@@ -401,7 +401,7 @@ fn chip_cols(inner_w: f32) -> usize {
 /// soonest first and highlighted, in at most two rows of equal chips across
 /// the card; the last cell is "+N more" when they don't all fit or a date
 /// isn't known. `inner_w` is the card's width inside its padding.
-fn resets_card(t: &Theme, held: u32, expires_at: &[i64], inner_w: f32) -> impl IntoElement {
+fn resets_card(t: &Theme, held: u32, expires_at: &[i64], kinds: &str, inner_w: f32) -> impl IntoElement {
     let cols = chip_cols(inner_w);
     let ResetChips { dates, more, note } = reset_chips(held, expires_at, cols * CHIP_ROWS, &chrono::Local);
     let fg = if held == 0 { t.dim } else { t.text };
@@ -436,19 +436,40 @@ fn resets_card(t: &Theme, held: u32, expires_at: &[i64], inner_w: f32) -> impl I
             .text_size(px(14.))
             .child(text)
     };
+    // A Claude grant that resets only Fable's limit wears Fable's violet, as
+    // on the device; the soonest of the others is highlighted.
+    let violet = rgb(fable_color(t.dark));
+    let fable = |i: usize| kinds.chars().nth(i) == Some('f');
+    let shown = dates.len();
+    let soonest = (0..shown).find(|i| !fable(*i));
+    let any_fable = (0..shown).any(fable);
     let chips = dates.into_iter().enumerate().map(|(i, d)| {
-        if i == 0 {
+        if fable(i) {
+            chip(d).bg(violet).text_color(rgb(0xffffff))
+        } else if Some(i) == soonest {
             chip(d).bg(t.text).text_color(t.panel)
         } else {
             chip(d).bg(t.track).text_color(t.text)
         }
+    });
+    let legend = any_fable.then(|| {
+        div().mt(px(10.)).text_size(px(13.)).text_color(t.dim).child("Violet: resets only Fable's own limit.")
     });
     let more = (more > 0).then(|| chip(format!("+{more} more")).bg(t.track).text_color(t.dim));
     let body = match note {
         Some(n) => div().mt(px(12.)).text_size(px(15.)).text_color(t.dim).child(n),
         None => div().mt(px(12.)).grid().grid_cols(cols as u16).gap(px(CHIP_GAP)).children(chips).children(more),
     };
-    div().flex().flex_col().p(px(16.)).rounded(px(R_M)).bg(t.panel).font_family(FONT_BODY).child(header).child(body)
+    div()
+        .flex()
+        .flex_col()
+        .p(px(16.))
+        .rounded(px(R_M))
+        .bg(t.panel)
+        .font_family(FONT_BODY)
+        .child(header)
+        .child(body)
+        .children(legend)
 }
 
 impl Render for OverviewView {
@@ -578,9 +599,9 @@ impl Render for OverviewView {
             let session_reset = reset_text(s.session_resets_at, now, "Not started");
             let week_reset = reset_text(s.week_resets_at, now, "---");
             page = page.child(if s.no_session_limit {
-                meters
-                    .child(codex_meter(&t, "Codex", s.week_pct, week_reset))
-                    .children(s.shown_resets().map(|h| resets_card(&t, h, &s.resets_expiries, card_w - 32.)))
+                meters.child(codex_meter(&t, "Codex", s.week_pct, week_reset)).children(
+                    s.shown_resets().map(|h| resets_card(&t, h, &s.resets_expiries, &s.resets_kinds, card_w - 32.)),
+                )
             } else {
                 meters
                     .child(codex_meter(&t, "Codex", s.session_pct, session_reset))
@@ -604,14 +625,9 @@ impl Render for OverviewView {
             // card a Codex plan's credits use.
             let card_w = (f32::from(window.viewport_size().width) - super::SIDEBAR_W).min(super::PAGE_MAX_W)
                 - 2. * super::PAGE_PAD_X;
-            page = page.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(12.))
-                    .children(meters)
-                    .children(s.shown_resets().map(|h| resets_card(&t, h, &s.resets_expiries, card_w - 32.))),
-            );
+            page = page.child(div().flex().flex_col().gap(px(12.)).children(meters).children(
+                s.shown_resets().map(|h| resets_card(&t, h, &s.resets_expiries, &s.resets_kinds, card_w - 32.)),
+            ));
         }
         if let Some(tag) = self.firmware_nudge() {
             let v = tag.trim_start_matches('v').to_owned();

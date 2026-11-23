@@ -848,11 +848,19 @@ static void draw_resets_card(const UsageData* d) {
         lv_obj_set_size(c, x1 - x0, L.resets_chip_h);
         ThemeColor bg = TH_BAR_BG, text = TH_TEXT;
         bool mono_pill = false;
+        bool fable_chip = false;
+        // The soonest chip that isn't Fable-only gets the highlight.
+        bool first_other = true;
+        for (int j = 0; j < i && j < (int)strlen(d->resets_kind); j++) first_other = first_other && d->resets_kind[j] == 'f';
         if (i < shown) {
             lv_label_set_text(label, d->resets_expiry[i]);
-            // The soonest, inverted. Paper text on ink prints broken in 1 bit,
-            // so a mono panel gives it the pill's grey instead (make_pill).
-            if (i == 0) {
+            // A Claude grant that resets only Fable's limit wears Fable's
+            // violet (`rf` 'f', the overlay's `fc`); else the soonest,
+            // inverted. Paper text on ink prints broken in 1 bit, so a mono
+            // panel gives it the pill's grey instead (make_pill).
+            if (!mono && i < (int)strlen(d->resets_kind) && d->resets_kind[i] == 'f') {
+                fable_chip = true;
+            } else if (first_other) {
                 if (mono) { mono_pill = true; text = TH_BG; }
                 else      { bg = TH_TEXT; text = TH_PANEL; }
             }
@@ -864,8 +872,8 @@ static void draw_resets_card(const UsageData* d) {
             lv_label_set_text(label, buf);
             text = TH_DIM;
         }
-        lv_obj_set_style_bg_color(c, mono_pill ? THEME_MONO_PILL : theme_color(bg), 0);
-        lv_obj_set_style_text_color(label, theme_color(text), 0);
+        lv_obj_set_style_bg_color(c, fable_chip ? lv_color_hex(theme_fable_hex()) : mono_pill ? THEME_MONO_PILL : theme_color(bg), 0);
+        lv_obj_set_style_text_color(label, fable_chip ? lv_color_hex(0xFFFFFF) : theme_color(text), 0);
         lv_obj_center(label);
         lv_obj_clear_flag(c, LV_OBJ_FLAG_HIDDEN);
     }

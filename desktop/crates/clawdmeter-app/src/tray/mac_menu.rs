@@ -848,7 +848,10 @@ impl MenuHeader {
             };
             let x = PAD + i as f64 * (chip_w + CHIP_GAP);
             chip.setFrame(rect(x, row_y, chip_w, CHIP_H));
-            let soonest = i == 0 && !data.chips.dates.is_empty();
+            // The soonest that isn't Fable-only is the highlighted one.
+            let soonest = i < data.chips.dates.len()
+                && (0..i).all(|j| data.kinds.chars().nth(j) == Some('f'))
+                && data.kinds.chars().nth(i) != Some('f');
             let is_more = more.is_some() && i == cells.len() - 1;
             text.setStringValue(&NSString::from_str(cell));
             // "+N more" shortens to "+N" where it doesn't fit, as on the device.
@@ -856,7 +859,12 @@ impl MenuHeader {
                 text.setStringValue(&NSString::from_str(&format!("+{}", data.chips.more)));
             }
             text.setFrame(rect(x, row_y + (CHIP_H - 14.0) / 2.0, chip_w, 14.0));
-            if soonest {
+            // A Claude grant that resets only Fable's limit wears Fable's violet.
+            let fable = !is_more && data.kinds.chars().nth(i) == Some('f');
+            if fable {
+                chip.setFillColor(&fable_color(dark));
+                text.setTextColor(Some(&NSColor::whiteColor()));
+            } else if soonest {
                 chip.setFillColor(&fill_color(None, dark));
                 text.setTextColor(Some(&rgba_color(theme.panel)));
             } else {
