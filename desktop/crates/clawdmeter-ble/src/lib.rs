@@ -22,6 +22,9 @@
 //! * Windows: a bonded device the OS isn't currently connected to is reached
 //!   by address: `CLAWDMETER_BLE_ADDRESS`, the cached address, or the
 //!   address in the Bluetooth PnP table.
+//! * macOS: when the system hasn't taken the keyboard link back itself, the
+//!   cached device is retrieved by its CoreBluetooth identifier and connected
+//!   to directly (a pending connect that completes once it advertises).
 //! * `CLAWDMETER_BLE_ADDRESS` (every OS) names the device to try first.
 //! * Everywhere: writes that keep failing on a link that still reports
 //!   itself connected (a half-open "zombie" link) make
@@ -456,8 +459,14 @@ impl DeviceLink {
         // daemon's DEVICE_MAC, the Windows daemon's override); else the cache.
         let cached = pinned_address().or_else(|| cache.load());
         let mut cands = known_devices(adapter).await;
+        // Bonded but not connected to the OS: a connect that times out means
+        // the device is away, not that the cache is wrong.
+        // (macOS only: on Windows a timed-out cached MAC must still be
+        // dropped, so the PnP table is asked for a swapped board's address.)
+        let mut reaching = false;
         if cands.is_empty() {
             cands = bonded_by_address(adapter, cached.as_deref()).await;
+            reaching = cfg!(target_os = "macos") && !cands.is_empty();
         }
         if cands.is_empty() && opts.allow_scan {
             cands = scan(adapter, opts.scan_time).await;
@@ -471,13 +480,24 @@ impl DeviceLink {
                     }
                     return Ok(ok);
                 }
+                Err(LinkError::Timeout("connect")) if reaching => {
+                    // Off or out of range: keep the cache, and stay NotFound
+                    // so the daemon doesn't log every attempt.
+                    log::debug!("{} didn't answer a connect", cand.key);
+                }
                 Err(e) => {
                     log::warn!("connect to {} failed: {e}", cand.key);
-                    if cfg!(target_os = "macos") && is_encryption_error(&e.to_string()) {
+                    let stale_bond = cfg!(target_os = "macos") && is_encryption_error(&e.to_string());
+                    if stale_bond {
                         log::warn!("encryption failed: likely a stale macOS bond; trying to unpair it");
                         let _ = tokio::task::spawn_blocking(macos_unpair_stale_bond).await;
                     }
-                    cache.invalidate(&cand.key);
+                    // The identifier names the bonded board, so a transient
+                    // failure (edge of range, a reboot) doesn't make it wrong;
+                    // dropping it would leave nothing to retry with.
+                    if !reaching || stale_bond {
+                        cache.invalidate(&cand.key);
+                    }
                     last_err = e;
                 }
             }
@@ -507,8 +527,10 @@ impl DeviceLink {
                     log::debug!("connect failed ({e}), but the device is connected; carrying on");
                 } else {
                     // Cancel BlueZ's pending Connect, or the next attempt
-                    // fails with "Operation already in progress".
-                    let _ = p.disconnect().await;
+                    // fails with "Operation already in progress". Bounded: on
+                    // macOS it waits for a disconnect callback that a cancelled
+                    // pending connect may never get.
+                    let _ = tokio::time::timeout(Duration::from_secs(5), p.disconnect()).await;
                     return Err(e);
                 }
             }
@@ -624,12 +646,34 @@ impl DeviceLink {
 /// Windows: a bonded device that Windows isn't connected to right now is
 /// absent from `known_devices` (which lists connected peripherals only), but
 /// WinRT can still connect to it by address. Addresses come from
-/// `CLAWDMETER_BLE_ADDRESS`, then the cache, then the PnP table. Elsewhere
-/// this finds nothing: BlueZ already lists paired devices, and macOS has no
-/// way to reach a peripheral the OS doesn't hold.
-#[cfg(not(windows))]
+/// `CLAWDMETER_BLE_ADDRESS`, then the cache, then the PnP table. On Linux
+/// this finds nothing: BlueZ already lists paired devices.
+#[cfg(not(any(windows, target_os = "macos")))]
 async fn bonded_by_address(_adapter: &Adapter, _cached: Option<&str>) -> Vec<Candidate> {
     Vec::new()
+}
+
+/// macOS: the bonded device by its CoreBluetooth identifier (`CLAWDMETER_BLE_ADDRESS`
+/// or the cache). `known_devices` lists only peripherals the system holds
+/// connected, and macOS doesn't always take the keyboard link back after a
+/// drop; without this a board left advertising was never found again.
+/// Connecting to the retrieved peripheral waits until it advertises (bounded
+/// by `connect_timeout`), and macOS keeps the bond, so there is no prompt.
+#[cfg(target_os = "macos")]
+async fn bonded_by_address(adapter: &Adapter, cached: Option<&str>) -> Vec<Candidate> {
+    use btleplug::platform::PeripheralId;
+    let Some(id) = cached.and_then(|k| Uuid::parse_str(k).ok()) else {
+        return Vec::new();
+    };
+    let options = RetrievePeripheralsOptions { identifiers: Some(vec![PeripheralId::from(id)]), services: None };
+    let found = adapter.retrieve_peripherals(options).await.unwrap_or_default();
+    found
+        .into_iter()
+        .map(|p| {
+            log::debug!("trying the cached device {id}");
+            Candidate { key: peripheral_key(&p), peripheral: p, name: Some(DEVICE_NAME.into()), has_service: false }
+        })
+        .collect()
 }
 
 #[cfg(windows)]
