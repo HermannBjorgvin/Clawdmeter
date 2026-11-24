@@ -526,7 +526,9 @@ void ble_tick(void) {
     // `state` still said ADVERTISING, so no host could reconnect until a
     // reboot (seen on the Core2 overnight). Check the radio itself.
     static uint32_t adv_off_since = 0;
-    if (server && server->getConnectedCount() < CONFIG_BT_NIMBLE_MAX_CONNECTIONS &&
+    // Not while the host is resyncing after a reset: NimBLE restarts
+    // advertising itself on sync, from its own task.
+    if (server && ble_hs_synced() && server->getConnectedCount() < CONFIG_BT_NIMBLE_MAX_CONNECTIONS &&
         !NimBLEDevice::getAdvertising()->isAdvertising()) {
         if (adv_off_since == 0) {
             adv_off_since = millis() | 1;
