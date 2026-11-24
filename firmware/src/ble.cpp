@@ -520,6 +520,24 @@ void ble_tick(void) {
         need_advertise = false;
         start_advertising();
     }
+    // NimBLE stops advertising on every incoming connection and starts again
+    // only through our callbacks. A connect it can't finish (neither onConnect
+    // nor onDisconnect runs) or a controller reset left the board silent while
+    // `state` still said ADVERTISING, so no host could reconnect until a
+    // reboot (seen on the Core2 overnight). Check the radio itself.
+    static uint32_t adv_off_since = 0;
+    if (server && server->getConnectedCount() < CONFIG_BT_NIMBLE_MAX_CONNECTIONS &&
+        !NimBLEDevice::getAdvertising()->isAdvertising()) {
+        if (adv_off_since == 0) {
+            adv_off_since = millis() | 1;
+        } else if (millis() - adv_off_since >= 3000) {
+            adv_off_since = 0;
+            Serial.println("BLE: advertising had stopped; restarting");
+            start_advertising();
+        }
+    } else {
+        adv_off_since = 0;
+    }
     if (state != BLE_STATE_CONNECTED) {
         kbd_retry_due = consumer_retry_due = false;
     } else {
@@ -582,8 +600,9 @@ void ble_clear_bonds(void) {
 
 void ble_print_status(void) {
     static const char* names[] = {"INIT", "ADVERTISING", "CONNECTED", "DISCONNECTED"};
-    Serial.printf("BLE status: state=%s bonds=%d owner=%s\n",
-        names[state], NimBLEDevice::getNumBonds(), owner_set ? owner_addr : "none");
+    Serial.printf("BLE status: state=%s adv=%d bonds=%d owner=%s\n",
+        names[state], NimBLEDevice::getAdvertising()->isAdvertising() ? 1 : 0,
+        NimBLEDevice::getNumBonds(), owner_set ? owner_addr : "none");
     if (!server) return;
     for (uint8_t i = 0; i < server->getConnectedCount(); i++) {
         NimBLEConnInfo ci = server->getPeerInfo(i);
