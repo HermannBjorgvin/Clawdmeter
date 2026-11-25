@@ -196,7 +196,7 @@ static void output_on(bool on) {
     } else {
         if (es) es8311_voice_mute(es, true);
         if (cfg.amp_enable) {
-            if (es) delay(2);  // let the mute ramp finish before the amp goes off
+            if (es) delay(2);  // let the muted output settle before the amp goes off
             cfg.amp_enable(false);
         }
     }
