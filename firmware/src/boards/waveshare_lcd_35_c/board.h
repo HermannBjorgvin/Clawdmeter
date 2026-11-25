@@ -44,7 +44,7 @@
 #define SND_I2S_DIN          14
 #define SND_SAMPLE_RATE      44100
 #define SND_ES8311_ADDR      0x18
-#define SND_VOLUME           65    // ES8311 0..100
+#define SND_VOLUME           70    // ES8311 0..100
 
 #define BOARD_HAS_SECONDARY_BUTTON 0
 #define BOARD_HAS_ROTATION         1
