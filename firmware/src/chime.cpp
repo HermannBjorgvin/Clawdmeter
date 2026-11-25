@@ -72,18 +72,7 @@ static bool es8311_setup(void) {
     const es8311_clock_config_t clk = {
         false, false, true, cfg.sample_rate * 256, cfg.sample_rate
     };
-    // A write right after the codec switches its clocks on can fail at boot
-    // (I2C ESP_ERR_INVALID_STATE, seen on the LCD-3.5-C): init again, which
-    // starts over from the codec's reset.
-    bool ok = false;
-    for (int attempt = 1; attempt <= 3 && !ok; attempt++) {
-        ok = es8311_init(es, &clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16) == ESP_OK;
-        if (!ok) {
-            Serial.printf("chime: ES8311 init attempt %d failed\n", attempt);
-            delay(10);
-        }
-    }
-    if (!ok) return false;
+    if (es8311_init(es, &clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16) != ESP_OK) return false;
     es8311_sample_frequency_config(es, clk.mclk_frequency, clk.sample_frequency);
     es8311_microphone_config(es, false);
     es8311_voice_volume_set(es, cfg.volume, NULL);
@@ -242,16 +231,20 @@ bool chime_init(const ChimeConfig& c) {
     cfg = c;
     if (cfg.amp_enable) cfg.amp_enable(false);   // amp off until we play
 
-    i2s.setPins(cfg.bclk, cfg.ws, cfg.dout, cfg.din, cfg.mclk);
-    if (!i2s.begin(I2S_MODE_STD, cfg.sample_rate, I2S_DATA_BIT_WIDTH_16BIT,
-                   I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) {
-        Serial.println("chime: I2S init failed");
-        return false;
-    }
+    // The codec is set up before I2S starts its MCLK: rewriting its clock
+    // tree while MCLK runs made it NACK about one boot in three on the
+    // LCD-3.5-C (ESP_ERR_INVALID_STATE in es8311_clock_config), leaving the
+    // board silent. Its registers don't need MCLK to be written.
     if (cfg.es8311_addr == 0) {
         sample_vol = (cfg.volume > 100 ? 100 : cfg.volume) / 100.0f;
     } else if (!es8311_setup()) {
         Serial.println("chime: ES8311 init failed");
+        return false;
+    }
+    i2s.setPins(cfg.bclk, cfg.ws, cfg.dout, cfg.din, cfg.mclk);
+    if (!i2s.begin(I2S_MODE_STD, cfg.sample_rate, I2S_DATA_BIT_WIDTH_16BIT,
+                   I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) {
+        Serial.println("chime: I2S init failed");
         return false;
     }
     ready = true;
