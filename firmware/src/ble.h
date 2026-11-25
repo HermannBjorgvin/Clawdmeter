@@ -26,6 +26,8 @@ void ble_request_refresh(void);
 
 void ble_set_battery_level(int pct);
 
-// BLE HID keyboard
-void ble_keyboard_press(uint8_t key, uint8_t modifier);
-void ble_keyboard_release(void);
+// BLE HID keyboard: a whole report: [modifiers, 0, key1..key6]
+void ble_keyboard_report(const uint8_t report[8]);
+// BLE HID consumer control (media keys): one usage down, then 0 = released
+void ble_consumer_press(uint16_t usage);
+void ble_consumer_release(void);

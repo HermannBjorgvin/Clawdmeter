@@ -9,8 +9,8 @@
 // Three tuned designs (large 480x480, compact 368x448, small 240x240) set
 // the type and spacing. A panel takes the largest design that fits it, then
 // a few rules adapt it: narrow panels shorten labels and tighten spacing,
-// tall ones share out their spare height, a short one squeezes, and a round
-// one keeps inside its circle. See docs/porting/adding-a-board.md.
+// tall ones share out their spare height, a short one squeezes, a landscape
+// strip puts the cards side by side, and a round one keeps inside its circle. See docs/porting/adding-a-board.md.
 
 // The panel: its pixel size, and whether the glass is a circle inscribed in
 // that rectangle (BoardCaps.round_panel).
@@ -37,7 +37,7 @@ struct Layout {
     const lv_font_t* title_font[2];
     int16_t title_y[2];
 
-    // The two usage cards, stacked.
+    // The two usage cards, stacked (side by side on a landscape strip).
     LayoutRect card[2];
     int16_t pad_x, pad_y;            // card padding
     int16_t bar_y, bar_h;            // bar top, inside the padding
@@ -51,6 +51,19 @@ struct Layout {
     bool    period_short;            // no room for its pace word: "Resets <date>" in the pace colour
     const lv_font_t* pace_font;
     const char* const* pills;        // PILL_TEXT or PILL_TEXT_SHORT (ui_text.h)
+
+    // Codex Resets card, drawn in card[1] (ui.cpp draw_resets_card). A
+    // header row pinned to the top like the first card's value row: the
+    // title on the left (pill font, the pill text's baseline) and a count
+    // pill with a ticket on the right; then a grid of date chips under it.
+    // Worked out after everything else, so it never moves the rest.
+    const char* resets_title;        // RESETS_TITLE[...] that fits beside the pill
+    int8_t  resets_ticket;           // ticket art by the pill font's cap height: 0 20 px, 1 10 px, 2 8 px
+    int16_t resets_icon_gap;         // ticket to number in the count pill
+    int16_t resets_chips_y;          // first chip row's top, inside the padding
+    int16_t resets_chip_h, resets_gap;   // chip height; gap across and down
+    int8_t  resets_cols, resets_rows;    // the grid (cells = cols * rows)
+    const lv_font_t* resets_font;    // chip dates (and the empty-state line)
 
     // Status line, centred at the bottom.
     const lv_font_t* status_font;
@@ -67,6 +80,11 @@ struct Layout {
 };
 
 Layout layout_compute(const LayoutShape& shape);
+
+// The first card's position when it's shown alone (an account with no 5-hour
+// limit, acct "week"): centred on the space the two cards take.
+int16_t layout_lone_card_x(const Layout& L);
+int16_t layout_lone_card_y(const Layout& L);
 
 // Corner icon sizes the layout plans with (ui.cpp checks them against the art).
 #define LAYOUT_LOGO_SLOT        80   // logo.h LOGO_HEIGHT

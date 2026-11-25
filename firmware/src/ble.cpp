@@ -2,6 +2,11 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
+#ifdef USING_NIMBLE_ARDUINO_HEADERS
+#include "nimble/nimble/host/include/host/ble_hs.h"
+#else
+#include "host/ble_hs.h"
+#endif
 #include <Preferences.h>
 
 #define DEVICE_NAME "Clawdmeter"
@@ -14,10 +19,12 @@
 
 #define BLE_BUF_SIZE 512
 
-// HID keyboard report descriptor (standard 6-KRO boot-protocol-compatible).
-// Includes the LED output report (Num/Caps/Scroll Lock indicators) — without
-// it macOS's Keyboard Setup Assistant flags the device as "unidentifiable"
-// because the descriptor doesn't look like a complete keyboard.
+// HID report descriptor: a keyboard (report ID 1, standard 6-KRO
+// boot-protocol-compatible) and a consumer control (report ID 2, media keys).
+// The keyboard includes the LED output report (Num/Caps/Scroll Lock
+// indicators) — without it macOS's Keyboard Setup Assistant flags the device
+// as "unidentifiable" because the descriptor doesn't look like a complete
+// keyboard. Its key array covers usages 0..0x73 (A..F24, button_action.h).
 static const uint8_t HID_REPORT_MAP[] = {
     0x05, 0x01,  // Usage Page (Generic Desktop)
     0x09, 0x06,  // Usage (Keyboard)
@@ -47,17 +54,38 @@ static const uint8_t HID_REPORT_MAP[] = {
     0x95, 0x06,  //   Report Count (6)
     0x75, 0x08,  //   Report Size (8)
     0x15, 0x00,  //   Logical Minimum (0)
-    0x25, 0x65,  //   Logical Maximum (101)
+    0x25, 0x73,  //   Logical Maximum (115) - F24
     0x05, 0x07,  //   Usage Page (Key Codes)
     0x19, 0x00,  //   Usage Minimum (0)
-    0x29, 0x65,  //   Usage Maximum (101)
+    0x29, 0x73,  //   Usage Maximum (115)
     0x81, 0x00,  //   Input (Data, Array) - Key array (6 keys)
     0xC0,        // End Collection
+
+    // Consumer control: one 16-bit usage (0 = released), for media keys.
+    0x05, 0x0C,        // Usage Page (Consumer)
+    0x09, 0x01,        // Usage (Consumer Control)
+    0xA1, 0x01,        // Collection (Application)
+    0x85, 0x02,        //   Report ID (2)
+    0x15, 0x00,        //   Logical Minimum (0)
+    0x26, 0xFF, 0x03,  //   Logical Maximum (0x3FF)
+    0x19, 0x00,        //   Usage Minimum (0)
+    0x2A, 0xFF, 0x03,  //   Usage Maximum (0x3FF)
+    0x75, 0x10,        //   Report Size (16)
+    0x95, 0x01,        //   Report Count (1)
+    0x81, 0x00,        //   Input (Data, Array, Absolute)
+    0xC0,              // End Collection
 };
+
+// Bump when the GATT table changes (services, characteristics, the report
+// map). On the first boot with a new value the device sends Service Changed,
+// which NimBLE delivers to bonded hosts when they next connect, so they
+// rediscover instead of using a cached table.
+#define GATT_REVISION 3
 
 static NimBLEServer* server = nullptr;
 static NimBLEHIDDevice* hid_dev = nullptr;
 static NimBLECharacteristic* input_kbd = nullptr;
+static NimBLECharacteristic* input_consumer = nullptr;
 static NimBLECharacteristic* tx_char = nullptr;
 static NimBLECharacteristic* rx_char = nullptr;
 static NimBLECharacteristic* req_char = nullptr;
@@ -182,6 +210,59 @@ static void start_advertising() {
         server ? (unsigned)server->getConnectedCount() : 0);
 }
 
+// Who gets an HID input report: the peers that subscribed to it over an
+// encrypted link, so a central in the spare connection slot that never paired
+// gets no keystrokes. NimBLE reports a bonded host's stored subscriptions when
+// it reconnects as well as new ones. Each report goes out with its own bytes:
+// a bare notify() only queues an update and NimBLE reads the characteristic
+// when it sends, so reports set in quick succession (modifiers, key, release)
+// would all go out as the last.
+class HidReportSubscribers : public NimBLECharacteristicCallbacks {
+public:
+    HidReportSubscribers() {
+        for (uint16_t& h : handles) h = CONN_HANDLE_NONE;
+    }
+
+    void onSubscribe(NimBLECharacteristic* chr, NimBLEConnInfo& info, uint16_t subValue) override {
+        (void)chr;
+        drop(info.getConnHandle());
+        if (!(subValue & 1)) return;
+        for (uint16_t& h : handles) {
+            if (h == CONN_HANDLE_NONE) {
+                h = info.getConnHandle();
+                return;
+            }
+        }
+    }
+
+    void drop(uint16_t conn) {
+        for (uint16_t& h : handles) {
+            if (h == conn) h = CONN_HANDLE_NONE;
+        }
+    }
+
+    // False if a subscribed peer didn't take it (no buffer free), to retry.
+    bool send(NimBLECharacteristic* chr, const uint8_t* report, size_t len) const {
+        bool ok = true;
+        for (uint16_t h : handles) {
+            if (h == CONN_HANDLE_NONE || !server->getPeerInfoByHandle(h).isEncrypted()) continue;
+            ok = chr->notify(report, len, h) && ok;
+        }
+        return ok;
+    }
+
+private:
+    uint16_t handles[CONFIG_BT_NIMBLE_MAX_CONNECTIONS];
+};
+
+static HidReportSubscribers kbd_subscribers, consumer_subscribers;
+
+// The last report of each kind that a subscriber didn't take; ble_tick()
+// sends it again. A report is the whole state, so a resend can't reorder.
+static uint8_t kbd_retry[8];
+static uint8_t consumer_retry[2];
+static bool kbd_retry_due = false, consumer_retry_due = false;
+
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* s, NimBLEConnInfo& info) override {
         state = BLE_STATE_CONNECTED;
@@ -221,6 +302,8 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         // reuses conn handles, so stale state would leak onto the next link.
         if (param_fix_handle == info.getConnHandle()) param_fix_handle = CONN_HANDLE_NONE;
         if (param_fix_spent  == info.getConnHandle()) param_fix_spent  = CONN_HANDLE_NONE;
+        kbd_subscribers.drop(info.getConnHandle());
+        consumer_subscribers.drop(info.getConnHandle());
         Serial.printf("BLE: disconnected (reason=%d, remaining=%u)\n",
             reason, (unsigned)s->getConnectedCount());
     }
@@ -315,6 +398,52 @@ class ReqCallbacks : public NimBLECharacteristicCallbacks {
     }
 };
 
+// Collects the stored subscriptions (CCCDs) to drop: every one but Service
+// Changed's and the keyboard report's, whose handles every revision kept.
+struct StaleCccds {
+    uint16_t keep[2];
+    int count;
+    ble_store_key_cccd keys[MYNEWT_VAL(BLE_STORE_MAX_CCCDS)];
+};
+
+static int collect_stale_cccd(int obj_type, union ble_store_value* val, void* cookie) {
+    (void)obj_type;
+    StaleCccds* s = (StaleCccds*)cookie;
+    if (val->cccd.chr_val_handle == s->keep[0] || val->cccd.chr_val_handle == s->keep[1]) return 0;
+    if (s->count < (int)(sizeof(s->keys) / sizeof(s->keys[0])))
+        ble_store_key_from_value_cccd(&s->keys[s->count++], &val->cccd);
+    return 0;
+}
+
+// A firmware with a different GATT table than the one bonded hosts saw:
+// drop their stored subscriptions to handles that moved, which would
+// otherwise fill the CCCD store, then tell them (Service Changed, held by
+// NimBLE for each bonded host that subscribed to it until it reconnects).
+// Hosts re-subscribe after rediscovering. Hosts that don't act on Service
+// Changed need the board forgotten and paired again (docs/user-guide.md).
+static void gatt_revision_check() {
+    prefs.begin("clawd", true);
+    const int seen = prefs.getInt("gatt_rev", 1);
+    prefs.end();
+    if (seen == GATT_REVISION) return;
+    static StaleCccds stale;
+    stale.count = 0;
+    stale.keep[1] = input_kbd->getHandle();
+    const NimBLEUUID gatt_svc((uint16_t)0x1801), service_changed((uint16_t)0x2A05);
+    if (ble_gatts_find_chr(gatt_svc.getBase(), service_changed.getBase(), nullptr, &stale.keep[0]) != 0) {
+        Serial.println("BLE: no Service Changed characteristic; GATT revision check skipped");
+        return;
+    }
+    ble_store_iterate(BLE_STORE_OBJ_TYPE_CCCD, collect_stale_cccd, &stale);
+    for (int i = 0; i < stale.count; i++) ble_store_delete_cccd(&stale.keys[i]);
+    server->sendServiceChangedIndication();
+    prefs.begin("clawd", false);
+    prefs.putInt("gatt_rev", GATT_REVISION);
+    prefs.end();
+    Serial.printf("BLE: GATT revision %d -> %d, dropped %d stale subscriptions, Service Changed sent to bonded hosts\n",
+                  seen, GATT_REVISION, stale.count);
+}
+
 void ble_init(void) {
     NimBLEDevice::init(DEVICE_NAME);
     NimBLEDevice::setSecurityAuth(true, false, true);  // bonding, no MITM, SC
@@ -347,11 +476,14 @@ void ble_init(void) {
     hid_dev->setPnp(0x01, 0x02E5, 0x0001, 0x0100);
     // country=33 (US ANSI). Setting this to 0 ("not supported") causes macOS
     // to launch the Keyboard Setup Assistant on first pair asking the user
-    // to identify the layout — we only ever send Space / Shift+Tab so the
-    // physical layout is irrelevant; advertise a known one to skip the wizard.
+    // to identify the layout. Keys are HID usages (key positions); the host
+    // applies its own layout, and the app records shortcuts as US positions.
     hid_dev->setHidInfo(33, 0x02);
     hid_dev->setBatteryLevel(100);
-    input_kbd = hid_dev->getInputReport(1);  // report ID 1
+    input_kbd = hid_dev->getInputReport(1);       // report ID 1
+    input_consumer = hid_dev->getInputReport(2);  // report ID 2
+    input_kbd->setCallbacks(&kbd_subscribers);
+    input_consumer->setCallbacks(&consumer_subscribers);
 
     // --- Custom data service ---
     NimBLEService* svc = server->createService(SERVICE_UUID);
@@ -377,6 +509,7 @@ void ble_init(void) {
 
     svc->start();
     server->start();
+    gatt_revision_check();
     start_advertising();
 
     Serial.printf("BLE: init complete, MAC=%s\n", mac_str);
@@ -386,6 +519,13 @@ void ble_tick(void) {
     if (need_advertise) {
         need_advertise = false;
         start_advertising();
+    }
+    if (state != BLE_STATE_CONNECTED) {
+        kbd_retry_due = consumer_retry_due = false;
+    } else {
+        if (kbd_retry_due) kbd_retry_due = !kbd_subscribers.send(input_kbd, kbd_retry, sizeof(kbd_retry));
+        if (consumer_retry_due)
+            consumer_retry_due = !consumer_subscribers.send(input_consumer, consumer_retry, sizeof(consumer_retry));
     }
     // Deferred one-shot supervision-timeout pushback (see onConnParamsUpdate).
     if (param_fix_handle != CONN_HANDLE_NONE &&
@@ -513,17 +653,21 @@ void ble_request_refresh(void) {
     }
 }
 
-void ble_keyboard_press(uint8_t key, uint8_t modifier) {
+void ble_keyboard_report(const uint8_t report[8]) {
     if (state != BLE_STATE_CONNECTED || !input_kbd) return;
-    // HID report: [modifier, reserved, key1, key2, key3, key4, key5, key6]
-    uint8_t report[8] = {modifier, 0, key, 0, 0, 0, 0, 0};
-    input_kbd->setValue(report, sizeof(report));
-    input_kbd->notify();
+    input_kbd->setValue(report, 8);
+    memcpy(kbd_retry, report, sizeof(kbd_retry));
+    kbd_retry_due = !kbd_subscribers.send(input_kbd, report, 8);
 }
 
-void ble_keyboard_release(void) {
-    if (state != BLE_STATE_CONNECTED || !input_kbd) return;
-    uint8_t report[8] = {0};
-    input_kbd->setValue(report, sizeof(report));
-    input_kbd->notify();
+void ble_consumer_press(uint16_t usage) {
+    if (state != BLE_STATE_CONNECTED || !input_consumer) return;
+    uint8_t report[2] = {(uint8_t)(usage & 0xFF), (uint8_t)(usage >> 8)};
+    input_consumer->setValue(report, sizeof(report));
+    memcpy(consumer_retry, report, sizeof(consumer_retry));
+    consumer_retry_due = !consumer_subscribers.send(input_consumer, report, sizeof(report));
+}
+
+void ble_consumer_release(void) {
+    ble_consumer_press(0);
 }

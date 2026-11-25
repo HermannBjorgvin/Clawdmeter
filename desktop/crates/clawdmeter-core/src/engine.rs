@@ -11,13 +11,14 @@ use chrono::{DateTime, TimeZone, Utc};
 use crate::attention::{Alert, AttentionState};
 use crate::backoff::SavedBlock;
 use crate::cadence::{heartbeat_due, AccountClock, Cadence, PollReason, Scheduler};
-use crate::config::Settings;
+use crate::config::{ButtonAction, Palette, Settings};
 use crate::events::{Activity, HookEvent, Signal};
 use crate::payload::{clock_fields, Payload};
+use crate::platform::Appearance;
 use crate::probe::{self, Plan as ProbePlan, Source};
 use crate::rate::{Mood, RateTracker};
 use crate::selector::PlanSelector;
-use crate::usage::{AccountState, UsageError, UsageReading};
+use crate::usage::{AccountState, Provider, UsageError, UsageReading, STALE_AFTER_MISSES};
 
 /// `a` changes are sent at most this often (s).
 pub const ACTIVITY_MIN_INTERVAL: i64 = 5;
@@ -129,8 +130,26 @@ pub struct Engine {
     selector: PlanSelector<PathBuf>,
     accounts: BTreeMap<PathBuf, AccountState>,
     in_flight: Vec<PathBuf>,
+    /// Codex accounts being polled ([`Engine::begin_codex_poll`]).
+    codex_in_flight: Vec<PathBuf>,
+    /// The shown Codex account's sign-in died and no account has a reading
+    /// left: the device gets "no data" rather than keep its numbers.
+    codex_gone: bool,
+    /// The shown account: [`Engine::shown_choice`].
     active: Option<PathBuf>,
+    /// The selector's pick: the account whose usage rose most recently.
+    auto_active: Option<PathBuf>,
+    /// The shown account changed to numbers read earlier (a new choice for
+    /// the device, an account removed, the shown one dropping out), or
+    /// a reconnect resends an account the device never had as a poll: the
+    /// next write sends them as a replay.
+    shown_changed: bool,
+    /// The account whose numbers last went out as a poll, so in the
+    /// device's rate math.
+    polled_account: Option<PathBuf>,
     rate: RateTracker,
+    /// The Claude account whose readings are in `rate`.
+    rate_account: Option<PathBuf>,
     hooks_installed: bool,
     fresh_poll: bool,
     logged_out: bool,
@@ -145,6 +164,14 @@ pub struct Engine {
     sent_aa: Option<u16>,
     /// The pace marker the device last got (`pm`).
     sent_pm: Option<u8>,
+    /// The button actions the device last got (`k1`, `k2`, `k3`).
+    sent_k: Option<[u32; 3]>,
+    /// Last `th` sent.
+    sent_th: Option<Palette>,
+    /// The OS's light/dark mode, which picks System's or Solarized's palette.
+    appearance: Appearance,
+    /// The clock's hour format the device last got (`tf`; 0 = no clock).
+    sent_tf: Option<u8>,
     last_event_ts: Option<i64>,
     /// Latest prompt or tool activity that names no configured account.
     unattributed_activity: Option<i64>,
@@ -152,6 +179,12 @@ pub struct Engine {
     claude_found: bool,
     /// A new alert should chime on this computer (`desktop_chime`).
     desktop_chime_due: bool,
+}
+
+/// A Codex account that can't be read until its sign-in is renewed: no
+/// sign-in, or a token that has expired or was refused (never refreshed here).
+fn codex_signed_out(e: &UsageError) -> bool {
+    e.is_auth() || matches!(e, UsageError::TokenExpired | UsageError::TokenRejected)
 }
 
 fn utc(now: i64) -> DateTime<Utc> {
@@ -170,8 +203,14 @@ impl Engine {
             selector: PlanSelector::default(),
             accounts: BTreeMap::new(),
             in_flight: Vec::new(),
+            codex_in_flight: Vec::new(),
+            codex_gone: false,
             active: None,
+            auto_active: None,
+            shown_changed: false,
+            polled_account: None,
             rate: RateTracker::default(),
+            rate_account: None,
             hooks_installed: false,
             fresh_poll: false,
             logged_out: false,
@@ -183,6 +222,10 @@ impl Engine {
             sent_lv: None,
             sent_aa: None,
             sent_pm: None,
+            sent_k: None,
+            sent_th: None,
+            appearance: Appearance::default(),
+            sent_tf: None,
             last_event_ts: None,
             unattributed_activity: None,
             claude_found: true,
@@ -195,6 +238,17 @@ impl Engine {
         &self.settings
     }
 
+    /// The OS's light/dark mode. With a theme that follows it (System,
+    /// Solarized), a change goes out as a new `th` on the next write check.
+    pub fn set_appearance(&mut self, appearance: Appearance) {
+        self.appearance = appearance;
+    }
+
+    /// The palette the device gets as `th`, a following theme resolved.
+    pub fn colors(&self) -> Palette {
+        self.settings.colors(self.appearance)
+    }
+
     /// Apply re-read settings (the config is re-read every few seconds).
     pub fn update_settings(&mut self, settings: Settings) {
         if settings == self.settings {
@@ -202,10 +256,28 @@ impl Engine {
         }
         self.scheduler.cadence = Cadence::from_settings(settings.poll_interval, settings.poll_interval_explicit);
         // A newly added account has never been polled, so it is due at once.
-        if settings.config_dirs != self.settings.config_dirs {
-            self.accounts.retain(|k, _| settings.config_dirs.contains(k));
+        let accounts_changed =
+            settings.config_dirs != self.settings.config_dirs || settings.codex_dirs != self.settings.codex_dirs;
+        if accounts_changed {
+            self.accounts.retain(|k, _| settings.config_dirs.contains(k) || settings.codex_dirs.contains(k));
         }
         self.settings = settings;
+        // A removed account leaves the automatic choice now, not at the next
+        // poll. The others' values haven't changed, so no rise is recorded.
+        if accounts_changed {
+            self.auto_active = self.pick_auto();
+        }
+        // A new choice on the Overview or in the tray, or the shown account removed,
+        // shows at once with the numbers already read for that account. They
+        // go out as a replay: they aren't a new reading.
+        let shown = self.shown_choice();
+        if shown != self.active {
+            if let Some(a) = &shown {
+                log::info!("active plan: {}", a.display());
+            }
+            self.shown_changed |= shown.is_some();
+            self.active = shown;
+        }
     }
 
     /// Whether events.log exists.
@@ -280,8 +352,20 @@ impl Engine {
         self.sent_lv = None;
         self.sent_aa = None;
         self.sent_pm = None;
+        self.sent_k = None;
+        self.sent_th = None;
+        self.sent_tf = None;
+        // A fresh poll still waiting for its write goes out as one.
+        let resend = !self.fresh_poll;
         if self.active.is_some() || self.logged_out {
             self.fresh_poll = true;
+        }
+        // A resend is the numbers already read: as a poll only for the
+        // account the device last had as one (the firmware keeps its rate
+        // math across a reconnect), else as a replay. Before any poll write
+        // there's nothing to compare with, as before.
+        if resend && self.active.is_some() && self.polled_account.is_some() && self.active != self.polled_account {
+            self.shown_changed = true;
         }
     }
 
@@ -297,7 +381,7 @@ impl Engine {
     pub fn blocks(&self, now: i64) -> BTreeMap<PathBuf, SavedBlock> {
         self.accounts
             .iter()
-            .filter(|(_, a)| a.last_error.as_ref().is_some_and(UsageError::is_throttle))
+            .filter(|(_, a)| a.backoff.throttled())
             .filter_map(|(d, a)| {
                 let until = a.backoff.until().filter(|u| *u > now)?;
                 Some((d.clone(), SavedBlock { strikes: a.backoff.strikes(), until }))
@@ -309,11 +393,91 @@ impl Engine {
     /// rest keep the endpoint and `claude -p /usage` away from that account
     /// until they pass, whatever asks.
     pub fn restore_blocks(&mut self, blocks: &BTreeMap<PathBuf, SavedBlock>, now: i64) {
-        for (d, b) in blocks.iter().filter(|(d, b)| b.until > now && self.settings.config_dirs.contains(d)) {
+        let restore: Vec<(&PathBuf, &SavedBlock)> =
+            blocks.iter().filter(|(d, b)| b.until > now && self.is_account(d)).collect();
+        for (d, b) in restore {
             let st = self.accounts.entry(d.clone()).or_default();
             st.backoff = crate::backoff::Backoff::restore(b.strikes, b.until);
             st.last_error.get_or_insert(UsageError::Throttled { retry_after_secs: None });
         }
+    }
+
+    /// A configured account, Claude or Codex.
+    fn is_account(&self, dir: &PathBuf) -> bool {
+        self.settings.config_dirs.contains(dir) || self.is_codex(dir)
+    }
+
+    /// A Codex account ([`crate::codex`]); the rest are Claude config dirs.
+    fn is_codex(&self, dir: &PathBuf) -> bool {
+        self.settings.codex_dirs.contains(dir)
+    }
+
+    fn provider(&self, dir: &PathBuf) -> Provider {
+        if self.is_codex(dir) {
+            Provider::Codex
+        } else {
+            Provider::Claude
+        }
+    }
+
+    /// When a Codex account is next due ([`crate::codex::due_at`]).
+    fn codex_due(&self, dir: &PathBuf) -> i64 {
+        let st = self.accounts.get(dir);
+        crate::codex::due_at(
+            st.and_then(|a| a.last_attempt_at),
+            self.active.as_ref().is_none_or(|a| a == dir),
+            st.and_then(|a| a.last.as_ref())
+                .and_then(|r| if r.no_session_limit() { r.week.as_ref() } else { r.session.as_ref() })
+                .and_then(|w| w.resets_at)
+                .map(|t| t.timestamp()),
+            self.scheduler.requested_at(),
+            st.and_then(|a| a.backoff.until()),
+        )
+    }
+
+    /// Start a Codex poll: the Codex accounts due now, stamped as attempted.
+    /// `None` when none is due. Hand the results to
+    /// [`Engine::on_codex_results`]. It runs beside the Claude poll, so a
+    /// slow Codex endpoint never holds up a Claude account.
+    pub fn begin_codex_poll(&mut self, now: i64) -> Option<Vec<PathBuf>> {
+        let due: Vec<PathBuf> = self.settings.codex_dirs.iter().filter(|d| self.codex_due(d) <= now).cloned().collect();
+        if due.is_empty() {
+            return None;
+        }
+        for d in &due {
+            self.accounts.entry(d.clone()).or_default().last_attempt_at = Some(now);
+        }
+        self.codex_in_flight = due.clone();
+        Some(due)
+    }
+
+    /// Results of one Codex poll. They join the Claude accounts' readings in
+    /// the choice of the shown account; the Claude poll's own bookkeeping
+    /// is left as it is.
+    pub fn on_codex_results(&mut self, now: i64, results: Vec<(PathBuf, probe::Polled)>) {
+        let polled = !results.is_empty();
+        let in_flight = std::mem::take(&mut self.codex_in_flight);
+        let dirs: Vec<PathBuf> = results.iter().map(|(d, _)| d.clone()).collect();
+        let (ok_dirs, rekinded) = self.record_results(now, results, &in_flight);
+        // A dead Codex sign-in is no data, not the last numbers kept: the
+        // account leaves the choice until it reads again.
+        let mut dropped_shown = false;
+        for d in &dirs {
+            let st = self.accounts.get_mut(d);
+            if let Some(st) = st.filter(|a| a.last.is_some() && a.last_error.as_ref().is_some_and(codex_signed_out)) {
+                st.last = None;
+                st.last_ok_at = None;
+                self.selector.forget(d);
+                dropped_shown |= self.active.as_ref() == Some(d);
+            }
+        }
+        let active_fresh = self.choose_active(now, &ok_dirs, &rekinded);
+        self.logged_out = self.all_auth();
+        // With nothing left to show, say so once.
+        let gone = dropped_shown && self.active.is_none();
+        self.codex_gone |= gone;
+        // A Claude poll's results may still be waiting for their write.
+        self.fresh_poll |= active_fresh || (self.logged_out && polled) || gone;
     }
 
     /// Where this account's next reading would come from at `now`.
@@ -335,9 +499,10 @@ impl Engine {
             // The backoff is `/usage`'s (its endpoint's rate limit).
             blocked_until: st.and_then(|a| a.backoff.until()).filter(|_| source == Source::Usage),
             usage_only: source == Source::Usage,
+            // With no 5-hour limit the week's reset is the one to catch.
             wake_at: st
                 .and_then(|a| a.last.as_ref())
-                .and_then(|r| r.session.as_ref())
+                .and_then(|r| if r.no_session_limit() { r.week.as_ref() } else { r.session.as_ref() })
                 .and_then(|w| w.resets_at)
                 .map(|t| t.timestamp()),
         }
@@ -389,33 +554,69 @@ impl Engine {
     pub fn on_poll_results<R: Into<probe::Polled>>(&mut self, now: i64, results: Vec<(PathBuf, R)>) {
         let results: Vec<(PathBuf, probe::Polled)> = results.into_iter().map(|(d, r)| (d, r.into())).collect();
         let polled = !results.is_empty();
+        let in_flight = self.in_flight.clone();
+        let (ok_dirs, rekinded) = self.record_results(now, results, &in_flight);
+        let active_fresh = self.choose_active(now, &ok_dirs, &rekinded);
+        self.in_flight.clear();
+        self.logged_out = self.all_auth();
+        self.fresh_poll = active_fresh || (self.logged_out && polled);
+    }
+
+    /// Store each account's result. Returns the accounts that answered and
+    /// those whose main meter now measures something else.
+    fn record_results(
+        &mut self,
+        now: i64,
+        results: Vec<(PathBuf, probe::Polled)>,
+        in_flight: &[PathBuf],
+    ) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        // An account removed while it was being polled stays removed.
+        let s = &self.settings;
+        let results: Vec<(PathBuf, probe::Polled)> =
+            results.into_iter().filter(|(d, _)| s.config_dirs.contains(d) || s.codex_dirs.contains(d)).collect();
         let ok_dirs: Vec<PathBuf> = results.iter().filter(|(_, r)| r.result.is_ok()).map(|(d, _)| d.clone()).collect();
+        // Accounts whose main meter now measures something else (session,
+        // week or spend: verified for no 5-hour limit, or a first reading
+        // that couldn't tell). The jump is neither a rise nor a reset.
+        let mut rekinded: Vec<PathBuf> = Vec::new();
         for (dir, r) in results {
             let st = self.accounts.entry(dir.clone()).or_default();
             // Results without a `begin_poll` (`--once`) count as attempted now.
-            if !self.in_flight.contains(&dir) {
+            if !in_flight.contains(&dir) {
                 st.last_attempt_at = Some(now);
             }
+            let kind = st.last.as_ref().map(UsageReading::meter_kind);
             st.record_polled(now, r);
+            if kind.is_some_and(|k| st.last.as_ref().is_some_and(|l| l.meter_kind() != k)) {
+                rekinded.push(dir.clone());
+            }
             if let (Some(left), Some(e)) = (st.backoff.remaining(now), &st.last_error) {
                 log::info!("{}: {e}; not polling it for {left}s", dir.display());
             }
         }
-        // Every configured account's latest answer is a login problem.
-        let all_auth = !self.settings.config_dirs.is_empty()
-            && self
-                .settings
-                .config_dirs
-                .iter()
-                .all(|d| self.accounts.get(d).and_then(|a| a.last_error.as_ref()).is_some_and(UsageError::is_auth));
-        // Accounts that missed (or weren't polled) keep their last values,
-        // which don't count as a rise, so a miss, a rate limit or a backoff
-        // never flips the shown account. Only an account with no reading at
-        // all is left out.
-        let sessions: Vec<(PathBuf, u32)> =
-            self.accounts.iter().filter_map(|(k, a)| a.last.as_ref().map(|r| (k.clone(), r.session_pct()))).collect();
+        for d in &rekinded {
+            self.selector.forget(d);
+        }
+        (ok_dirs, rekinded)
+    }
+
+    /// Every configured account's latest answer is a login problem, Codex
+    /// accounts included (for them an expired or refused token is one too).
+    fn all_auth(&self) -> bool {
+        let error = |d: &PathBuf| self.accounts.get(d).and_then(|a| a.last_error.as_ref());
+        !self.settings.config_dirs.is_empty()
+            && self.settings.config_dirs.iter().all(|d| error(d).is_some_and(UsageError::is_auth))
+            && self.settings.codex_dirs.iter().all(|d| error(d).is_some_and(codex_signed_out))
+    }
+
+    /// Pick the shown account after new results. Returns whether it has
+    /// numbers read in this cycle (a real poll).
+    fn choose_active(&mut self, now: i64, ok_dirs: &[PathBuf], rekinded: &[PathBuf]) -> bool {
         let prev_active = self.active.clone();
-        self.active = self.selector.choose(&sessions);
+        // The selector runs with an account chosen too, so going back to
+        // automatic picks up from the latest rise.
+        self.auto_active = self.pick_auto();
+        self.active = self.shown_choice();
         if self.active != prev_active && self.settings.config_dirs.len() > 1 {
             if let Some(a) = &self.active {
                 log::info!("active plan: {}", a.display());
@@ -426,15 +627,61 @@ impl Engine {
         // must not enter the rate math, here or on the device: no `Poll`
         // write, so they would only ride along on a replay.
         let active_fresh = self.active.as_ref().is_some_and(|a| ok_dirs.contains(a));
+        // A switch to numbers read earlier (the shown account dropped out,
+        // or the chosen one can't be shown) still goes out at once, as a
+        // replay.
+        if self.active.is_some() && self.active != prev_active && !active_fresh {
+            self.shown_changed = true;
+        }
+        if self.active.is_some() {
+            self.codex_gone = false;
+        }
         if active_fresh {
-            if let Some(r) = self.active_reading() {
+            // Only Claude readings feed the tracker, so only theirs restart
+            // it: a meter that now measures something else, or another
+            // Claude account's numbers (a jump between accounts isn't usage).
+            if let Some(a) = self.active.clone().filter(|a| !self.is_codex(a)) {
+                if rekinded.contains(&a) || self.rate_account.as_ref() != Some(&a) {
+                    self.rate = RateTracker::default();
+                    self.rate_account = Some(a);
+                }
+            }
+            // Codex numbers aren't Claude's: the mood follows Claude only,
+            // as the device's rate math does.
+            if let Some(r) = self.active_reading().filter(|r| r.provider == Provider::Claude) {
                 let pct = r.session_pct();
                 self.rate.sample(now, pct, false);
             }
         }
-        self.in_flight.clear();
-        self.logged_out = all_auth;
-        self.fresh_poll = active_fresh || (all_auth && polled);
+        active_fresh
+    }
+
+    /// The selector's pick over every account's latest reading. Accounts
+    /// that missed (or weren't polled) keep their last values, which don't
+    /// count as a rise, so a miss, a rate limit or a backoff never flips the
+    /// shown account. Only an account with no reading at all is left out.
+    /// A Codex account is picked once its own meter rises, never just for a
+    /// higher % than a Claude account's (a trial: Claude comes first).
+    fn pick_auto(&mut self) -> Option<PathBuf> {
+        let sessions: Vec<(PathBuf, u32)> =
+            self.accounts.iter().filter_map(|(k, a)| a.last.as_ref().map(|r| (k.clone(), r.session_pct()))).collect();
+        let codex = &self.settings.codex_dirs;
+        self.selector.choose_preferring(&sessions, |k| !codex.contains(k))
+    }
+
+    /// The account to show: the one chosen for the device
+    /// ([`Settings::chosen_account`]) while it is readable, else the
+    /// selector's pick, which is what the device would show with no choice
+    /// (it can be the chosen account itself). Readable: it has a reading,
+    /// and its last [`STALE_AFTER_MISSES`] polls didn't all miss (signed
+    /// out, failing). A miss or two keeps it, as a miss never moves the
+    /// automatic choice: each move between accounts is a jump in the
+    /// device's rate math.
+    fn shown_choice(&self) -> Option<PathBuf> {
+        let s = &self.settings;
+        let readable =
+            |d: &PathBuf| self.accounts.get(d).is_some_and(|a| a.last.is_some() && a.misses < STALE_AFTER_MISSES);
+        s.chosen_account().filter(|d| readable(d)).cloned().or_else(|| self.auto_active.clone())
     }
 
     fn active_state(&self) -> Option<&AccountState> {
@@ -465,10 +712,18 @@ impl Engine {
         // A changed device setting goes out right away, like an event.
         let aa = self.settings.attention_anim.seconds();
         let pm = u8::from(self.settings.pace_marker);
-        let prefs_changed =
-            self.sent_lv != Some(self.settings.liveliness) || self.sent_aa != Some(aa) || self.sent_pm != Some(pm);
+        let k = self.settings.buttons.map(ButtonAction::code);
+        let th = self.colors();
+        let clock = clock_fields(self.settings.clock, utc(now), host.utc_offset_secs, host.prefers_12h);
+        let tf = clock.as_ref().map_or(0, |cf| cf.hour_format);
+        let prefs_changed = self.sent_lv != Some(self.settings.liveliness)
+            || self.sent_aa != Some(aa)
+            || self.sent_pm != Some(pm)
+            || self.sent_k != Some(k)
+            || self.sent_th != Some(th)
+            || self.sent_tf != Some(tf);
 
-        let (mut payload, kind) = if self.logged_out {
+        let (mut payload, kind) = if self.logged_out || (self.codex_gone && self.active.is_none()) {
             if !(self.fresh_poll || self.attention.pending()) {
                 return None;
             }
@@ -476,14 +731,20 @@ impl Engine {
         } else {
             // Nothing to show until the first good poll.
             let reading = self.active_reading()?.clone();
-            let kind = if self.fresh_poll {
+            // Right after a switch the device gets the shown account's
+            // numbers as a replay first, even fresh ones (a poll still
+            // waiting from before the switch, or a reconnect's resend): the
+            // jump from another account's numbers isn't usage.
+            let kind = if self.fresh_poll && !self.shown_changed {
                 WriteKind::Poll
             } else if self.attention.pending() {
                 WriteKind::Attention
-            } else if (new_event || a_changed || n_changed || prefs_changed) && !self.stale(now) {
+            } else if (new_event || a_changed || n_changed || prefs_changed) && !self.stale(now) || self.shown_changed {
                 // Any ok payload refreshes the device's DATA_FRESH_MS, so
                 // while the numbers are stale only alerts and polls go out
-                // and the device can show its stale state.
+                // and the device can show its stale state. A switch goes out
+                // even then, once, so the device shows the account the app
+                // does; it goes stale on its own when nothing follows.
                 WriteKind::Event
             } else if !self.stale(now) && heartbeat_due(self.last_write, self.settings.heartbeat_interval, now) {
                 WriteKind::Heartbeat
@@ -494,7 +755,7 @@ impl Engine {
             if self.settings.reset_chime {
                 p.c = Some(1);
             }
-            if let Some(cf) = clock_fields(self.settings.clock, utc(now), host.utc_offset_secs, host.prefers_12h) {
+            if let Some(cf) = clock {
                 p.t = Some(cf.local_epoch);
                 p.tf = Some(cf.hour_format);
             }
@@ -504,6 +765,13 @@ impl Engine {
             p.lv = Some(self.settings.liveliness);
             p.aa = Some(aa);
             p.pm = Some(pm);
+            [p.k1, p.k2, p.k3] = k.map(Some);
+            p.th = Some(th);
+            // The Fable overlay's colour goes with Claude's numbers only; the
+            // device keeps the last one, and the Codex screen draws no strip.
+            if p.pv.is_none() {
+                p.fc = Some(th.fable());
+            }
             (p, kind)
         };
 
@@ -556,6 +824,22 @@ impl Engine {
         if let Some(pm) = w.payload.pm {
             self.sent_pm = Some(pm);
         }
+        if let (Some(k1), Some(k2), Some(k3)) = (w.payload.k1, w.payload.k2, w.payload.k3) {
+            self.sent_k = Some([k1, k2, k3]);
+        }
+        if let Some(th) = w.payload.th {
+            self.sent_th = Some(th);
+        }
+        // Every data payload carries the clock (no `tf` means it's off).
+        if w.kind != WriteKind::NoData {
+            self.sent_tf = Some(w.payload.tf.unwrap_or(0));
+        }
+        // The switch reached the device: the shown account's numbers, or
+        // "no data", after which it shows no account's.
+        self.shown_changed = false;
+        if w.kind == WriteKind::Poll {
+            self.polled_account = self.active.clone();
+        }
     }
 
     /// Snapshot for the UI.
@@ -571,16 +855,18 @@ impl Engine {
                 .accounts
                 .iter()
                 .filter_map(|(k, a)| {
-                    a.last_error.as_ref().map(|e| AccountError {
-                        dir: k.clone(),
-                        message: match a.backoff.until().filter(|u| *u > now) {
-                            Some(until) if e.is_throttle() => {
-                                crate::usage::paused_message(until, crate::platform::utc_offset_secs())
-                            }
-                            _ => e.user_message(a.backoff.remaining(now)),
-                        },
-                        retrying: e.is_transient(),
-                    })
+                    // A 429's pause comes from the backoff, as the Overview's
+                    // does: a probe's answer clears the error, not the pause.
+                    let paused = a.backoff.until().filter(|u| a.backoff.throttled() && *u > now);
+                    let provider = self.provider(k);
+                    let (message, retrying) = match (paused, &a.last_error) {
+                        (Some(until), _) => {
+                            (crate::usage::paused_message_by(provider, until, crate::platform::utc_offset_secs()), true)
+                        }
+                        (None, Some(e)) => (e.user_message_for(provider, a.backoff.remaining(now)), e.is_transient()),
+                        (None, None) => return None,
+                    };
+                    Some(AccountError { dir: k.clone(), message, retrying })
                 })
                 .collect(),
             attention: self.attention.active(),
@@ -588,18 +874,34 @@ impl Engine {
             sessions: self.activity.sessions_active(now),
             hooks: self.activity.hooks_seen,
             mood: st.and_then(|a| a.last.as_ref()).map(|_| self.rate.mood(self.activity.level(now))),
-            next_poll_at: self.next_due(now).map(|(t, _)| t),
-            refresh_at: self.active.as_ref().and_then(|a| self.refresh_at(a, now)),
+            next_poll_at: self
+                .next_due(now)
+                .map(|(t, _)| t)
+                .into_iter()
+                .chain(self.settings.codex_dirs.iter().map(|d| self.codex_due(d).max(now)))
+                .min(),
+            refresh_at: self.active.as_ref().and_then(|a| {
+                if self.is_codex(a) {
+                    let st = self.accounts.get(a)?;
+                    let gap = st.last_attempt_at.map(|t| t + crate::codex::MIN_GAP_SECS);
+                    gap.max(st.backoff.until())
+                } else {
+                    self.refresh_at(a, now)
+                }
+            }),
             // The shown account, or the first one while nothing is shown yet.
             paused_until: self
                 .active
                 .as_ref()
                 .or(self.settings.config_dirs.first())
                 .and_then(|d| self.accounts.get(d))
-                .filter(|a| a.last_error.as_ref().is_some_and(UsageError::is_throttle))
+                .filter(|a| a.backoff.throttled())
                 .and_then(|a| a.backoff.until())
                 .filter(|u| *u > now),
-            polling: self.active.as_ref().is_some_and(|a| self.in_flight.contains(a)),
+            polling: self
+                .active
+                .as_ref()
+                .is_some_and(|a| self.in_flight.contains(a) || self.codex_in_flight.contains(a)),
         }
     }
 }
@@ -625,6 +927,9 @@ mod tests {
         UsageReading {
             session: Some(Window { pct: s, resets_at: Some(utc(T0 + 3600)) }),
             week: Some(Window { pct: 10, resets_at: Some(utc(T0 + 86_400)) }),
+            // As `AccountState::record` labels a reading with a session
+            // window, so recorded readings compare equal.
+            session_limit: crate::usage::SessionLimit::Applies,
             ..Default::default()
         }
     }
@@ -649,9 +954,33 @@ mod tests {
         assert_eq!(w.kind, WriteKind::Poll);
         assert_eq!(
             w.payload.to_json(),
-            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0}"#
+            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7"}"#
         );
         assert!(write(&mut e, T0 + 1).is_none());
+    }
+
+    // No 5-hour limit: "week" on the wire with the session left "not
+    // started" for older firmware, and the weekly reset wakes the account.
+    #[test]
+    fn no_session_limit_payload_and_weekly_wake() {
+        let mut e = Engine::new(settings(""));
+        let dir = PathBuf::from("/h/.claude");
+        let ultra = UsageReading {
+            week: Some(Window { pct: 48, resets_at: Some(utc(T0 + 86_400)) }),
+            session_limit: crate::usage::SessionLimit::Absent,
+            ..Default::default()
+        };
+        e.on_poll_results(T0, vec![(dir.clone(), Ok(ultra))]);
+        assert_eq!(e.clock(&dir, T0 + 60).wake_at, Some(T0 + 86_400));
+        assert_eq!(e.source(&dir, T0 + 60), Source::Usage);
+        let w = write(&mut e, T0).unwrap();
+        assert_eq!(
+            w.payload.to_json(),
+            r#"{"s":0,"sr":-1,"w":48,"wr":1440,"st":"allowed","acct":"week","ok":true,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7"}"#
+        );
+        // An account with the limit still wakes at its session reset.
+        e.on_poll_results(T0 + 200, vec![(dir.clone(), Ok(reading(5)))]);
+        assert_eq!(e.clock(&dir, T0 + 260).wake_at, Some(T0 + 3600));
     }
 
     // Heartbeat replays (bash parity + rp marker), and none once stale.
@@ -666,7 +995,7 @@ mod tests {
         assert_eq!(hb.kind, WriteKind::Heartbeat);
         assert_eq!(
             hb.payload.to_json(),
-            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120,"pm":0}"#
+            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7"}"#
         );
         // Three misses: stale, heartbeats stop so the device's freshness lapses.
         for i in 1..=3 {
@@ -694,6 +1023,32 @@ mod tests {
         // B tokenless/logged out doesn't matter while A works.
         e.on_poll_results(T0 + 180, vec![(a.clone(), Ok(reading(20))), (b, Err(UsageError::NotLoggedIn("x".into())))]);
         assert!(!e.status(T0 + 180).logged_out);
+    }
+
+    // An account whose main meter changes kind (verified for no 5-hour
+    // limit, or a first reading that couldn't tell): its jump from the
+    // session's 0 % to the week's 48 % is not a rise, so the shown account
+    // stays, and the rate math starts over rather than read it as heavy use.
+    #[test]
+    fn a_change_of_meter_kind_is_not_a_rise() {
+        use crate::usage::SessionLimit;
+        let week = |pct| UsageReading { week: Some(Window { pct, resets_at: None }), ..Default::default() };
+        let ultra = |pct| UsageReading { session_limit: SessionLimit::Absent, ..week(pct) };
+        let mut e = Engine::new(settings("config_dirs = ~/.claude, ~/.claude-work\n"));
+        let a = PathBuf::from("/h/.claude");
+        let b = PathBuf::from("/h/.claude-work");
+        e.on_poll_results(T0, vec![(a.clone(), Ok(reading(10))), (b.clone(), Ok(week(48)))]);
+        e.on_poll_results(T0 + 60, vec![(a.clone(), Ok(reading(12))), (b.clone(), Ok(week(48)))]);
+        assert_eq!(e.status(T0 + 60).active_account, Some(a.clone()));
+        e.on_poll_results(T0 + 120, vec![(a.clone(), Ok(reading(12))), (b.clone(), Ok(ultra(48)))]);
+        assert_eq!(e.status(T0 + 120).active_account, Some(a.clone()), "B's 0 → 48 isn't activity");
+        e.on_poll_results(T0 + 180, vec![(a.clone(), Ok(reading(12))), (b.clone(), Ok(ultra(49)))]);
+        assert_eq!(e.status(T0 + 180).active_account, Some(b), "B's week moving is");
+        // One account: the change doesn't read as 48 points in ten minutes.
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(a.clone(), Ok(week(48)))]);
+        e.on_poll_results(T0 + 600, vec![(a, Ok(ultra(48)))]);
+        assert_eq!(e.status(T0 + 600).mood, Some(Mood::Idle));
     }
 
     // A miss on the shown account is never a poll, even when another
@@ -1076,6 +1431,35 @@ mod tests {
         assert_eq!(plans(&mut e, T0 + 4500), vec![ProbePlan::Probe { usage_fallback: true }]);
     }
 
+    // A probe answering (or missing) during a 429 block leaves it in place:
+    // still saved for a restart and shown as a pause, on the Overview and
+    // the Accounts page alike, until it runs out.
+    #[test]
+    fn a_probe_result_keeps_the_saved_block() {
+        let mut e = Engine::new(settings(""));
+        let a = PathBuf::from("/h/.claude");
+        e.on_poll_results(T0, vec![(a.clone(), Err(UsageError::Throttled { retry_after_secs: Some(3600) }))]);
+        let probe = |result: Result<UsageReading, UsageError>| {
+            let run = if result.is_ok() { probe::ProbeRun::Answered } else { probe::ProbeRun::Missed };
+            probe::Polled { result, idle: false, probe: run, idle_miss: None }
+        };
+        let paused = |e: &Engine, now| {
+            let errors = e.status(now).errors;
+            let [err] = errors.as_slice() else { panic!("{errors:?}") };
+            assert!(err.message.starts_with("Usage paused by Anthropic until ") && err.retrying, "{err:?}");
+        };
+        e.on_poll_results(T0 + 120, vec![(a.clone(), probe(Ok(reading(5))))]);
+        assert_eq!(e.blocks(T0 + 130).get(&a).map(|b| b.until), Some(T0 + 3600));
+        assert_eq!(e.status(T0 + 130).paused_until, Some(T0 + 3600));
+        assert_eq!(e.accounts[&a].last_error, None, "the probe's reading is fresh");
+        paused(&e, T0 + 130);
+        e.on_poll_results(T0 + 300, vec![(a.clone(), probe(Err(UsageError::Timeout)))]);
+        assert_eq!(e.blocks(T0 + 310).get(&a).map(|b| b.until), Some(T0 + 3600));
+        paused(&e, T0 + 310);
+        assert!(e.blocks(T0 + 3600).is_empty(), "until it runs out");
+        assert!(e.status(T0 + 3600).errors[0].message.starts_with("Claude Code took too long"));
+    }
+
     // Only a 429 is saved as a block (and called a pause by Anthropic); a
     // timeout or odd output backs off in memory only.
     #[test]
@@ -1153,6 +1537,27 @@ mod tests {
     }
 
     #[test]
+    fn button_actions_go_out_with_the_data_and_when_they_change() {
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        let w = write(&mut e, T0).unwrap();
+        assert_eq!((w.payload.k1, w.payload.k2, w.payload.k3), (Some(1), Some(2), Some(6)), "every data payload");
+        assert!(write(&mut e, T0 + 1).is_none(), "nothing new");
+        e.update_settings(settings("button_secondary = enter\n"));
+        let w = write(&mut e, T0 + 2).expect("a new setting is sent right away");
+        assert_eq!((w.kind, w.payload.k1, w.payload.k2), (WriteKind::Event, Some(1), Some(4)));
+        e.update_settings(settings("button_secondary = enter\nbutton_pwr = ctrl+shift+m\n"));
+        let w = write(&mut e, T0 + 3).expect("a PWR change too");
+        assert_eq!((w.kind, w.payload.k3), (WriteKind::Event, Some(0x10310)));
+        assert!(write(&mut e, T0 + 4).is_none(), "nothing new");
+        e.update_settings(settings("button_secondary = enter\nbutton_pwr = ctrl+shift+m hold\n"));
+        assert_eq!(write(&mut e, T0 + 5).unwrap().payload.k3, Some(0x11310), "the hold switch alone is a change");
+        e.on_connected();
+        let w = write(&mut e, T0 + 6).unwrap();
+        assert_eq!((w.payload.k2, w.payload.k3), (Some(4), Some(0x11310)), "resent on a reconnect");
+    }
+
+    #[test]
     fn pace_marker_goes_out_with_the_data_and_when_it_changes() {
         let mut e = Engine::new(settings(""));
         e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
@@ -1167,10 +1572,507 @@ mod tests {
     }
 
     #[test]
+    fn colors_go_out_with_the_data_and_when_they_change() {
+        use crate::config::ColorToken;
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        let w = write(&mut e, T0).unwrap();
+        assert_eq!(w.payload.th, Some(Palette::default()), "every data payload carries it");
+        assert!(write(&mut e, T0 + 1).is_none(), "nothing new");
+        e.update_settings(settings("theme = custom\ncolor_accent = 647d99\n"));
+        let w = write(&mut e, T0 + 2).expect("a new colour is sent right away");
+        assert_eq!((w.kind, w.payload.rp), (WriteKind::Event, Some(1)));
+        assert_eq!(w.payload.th.unwrap().get(ColorToken::Accent), 0x647d99);
+        assert!(write(&mut e, T0 + 3).is_none());
+        // Fable's colour rides beside th, and a change to it alone goes out too.
+        e.update_settings(settings("theme = custom\ncolor_accent = 647d99\ncolor_fable = 112233\n"));
+        let w = write(&mut e, T0 + 3).expect("a new Fable colour is sent right away");
+        assert_eq!(w.payload.fc, Some(crate::config::Rgb(0x112233)));
+        assert!(w.payload.to_json().contains(r#""fc":"112233""#));
+        assert!(write(&mut e, T0 + 3).is_none());
+        e.on_connected();
+        let resent = write(&mut e, T0 + 4).unwrap().payload.th.unwrap();
+        assert_eq!(resent.get(ColorToken::Accent), 0x647d99, "resent on a reconnect");
+    }
+
+    #[test]
+    fn the_system_theme_follows_the_os_at_once() {
+        use crate::themes;
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.th, Some(themes::default_preset().colors), "dark until told");
+        e.set_appearance(Appearance::Dark);
+        assert!(write(&mut e, T0 + 1).is_none(), "no change, nothing new");
+        e.set_appearance(Appearance::Light);
+        let w = write(&mut e, T0 + 2).expect("the OS went light: sent right away");
+        assert_eq!((w.kind, w.payload.rp, w.payload.th), (WriteKind::Event, Some(1), Some(themes::light().colors)));
+        assert!(write(&mut e, T0 + 3).is_none());
+        e.set_appearance(Appearance::Dark);
+        assert_eq!(write(&mut e, T0 + 4).expect("and back").payload.th, Some(themes::default_preset().colors));
+
+        // A chosen preset doesn't follow the OS.
+        e.update_settings(settings("theme = dracula\n"));
+        let dracula = themes::find("dracula").unwrap().colors;
+        let w = write(&mut e, T0 + 5).unwrap();
+        assert_eq!((w.payload.th, w.payload.fc), (Some(dracula), Some(crate::config::Rgb(0xbd93f9))));
+        e.set_appearance(Appearance::Light);
+        assert!(write(&mut e, T0 + 6).is_none(), "Dracula stays");
+
+        // Solarized follows it too, between its own Dark and Light.
+        e.update_settings(settings("theme = solarized\n"));
+        let w = write(&mut e, T0 + 7).expect("the theme changed");
+        assert_eq!(w.payload.th, Some(themes::find("solarized_light").unwrap().colors));
+        e.set_appearance(Appearance::Dark);
+        let w = write(&mut e, T0 + 8).expect("the OS went dark: sent right away");
+        assert_eq!((w.kind, w.payload.th), (WriteKind::Event, Some(themes::find("solarized_dark").unwrap().colors)));
+        assert!(write(&mut e, T0 + 9).is_none());
+    }
+
+    #[test]
     fn clock_fields_included() {
         let mut e = Engine::new(settings("clock = 12\n"));
         e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
         let w = e.next_write(T0, HostClock { utc_offset_secs: -3600, prefers_12h: false }).unwrap();
         assert_eq!((w.payload.t, w.payload.tf), (Some(T0 - 3600), Some(12)));
+    }
+
+    #[test]
+    fn clock_goes_out_when_it_changes() {
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.tf, None, "off by default");
+        assert!(write(&mut e, T0 + 1).is_none(), "nothing new");
+        e.update_settings(settings("clock = 24\n"));
+        let w = write(&mut e, T0 + 2).expect("a new clock mode is sent right away");
+        assert_eq!((w.kind, w.payload.tf, w.payload.rp), (WriteKind::Event, Some(24), Some(1)));
+        assert!(w.payload.t.is_some());
+        assert!(write(&mut e, T0 + 3).is_none(), "the ticking time alone doesn't resend");
+        e.update_settings(settings("clock = 12\n"));
+        assert_eq!(write(&mut e, T0 + 4).expect("12h ↔ 24h too").payload.tf, Some(12));
+        e.update_settings(settings("clock = off\n"));
+        let w = write(&mut e, T0 + 5).expect("turning it off too");
+        assert_eq!((w.payload.t, w.payload.tf), (None, None));
+        assert!(write(&mut e, T0 + 6).is_none());
+        e.update_settings(settings("clock = 12\n"));
+        assert!(write(&mut e, T0 + 7).is_some());
+        e.on_connected();
+        assert_eq!(write(&mut e, T0 + 8).unwrap().payload.tf, Some(12), "resent on a reconnect");
+        // Stale: the change waits for the next good poll, like the others.
+        let dir = PathBuf::from("/h/.claude");
+        for i in 1..=3 {
+            e.on_poll_results(T0 + 8 + i, vec![(dir.clone(), Err(UsageError::Timeout))]);
+        }
+        e.update_settings(settings("clock = 24\n"));
+        assert!(write(&mut e, T0 + 20).is_none(), "no event write while stale");
+        e.on_poll_results(T0 + 30, vec![(dir.clone(), Ok(reading(15)))]);
+        let w = write(&mut e, T0 + 30).unwrap();
+        assert_eq!((w.kind, w.payload.tf), (WriteKind::Poll, Some(24)));
+        // A no-data write carries no clock and doesn't count as sending one.
+        e.on_poll_results(T0 + 40, vec![(dir, Err(UsageError::NotLoggedIn("x".into())))]);
+        assert_eq!(write(&mut e, T0 + 40).unwrap().kind, WriteKind::NoData);
+        assert_eq!(e.sent_tf, Some(24));
+    }
+
+    fn codex(pct: u32) -> UsageReading {
+        UsageReading {
+            week: Some(Window { pct, resets_at: Some(utc(T0 + 5 * 86_400)) }),
+            session_limit: crate::usage::SessionLimit::Absent,
+            provider: Provider::Codex,
+            resets: Some(crate::usage::ResetCredits { held: 2, expiries: vec![] }),
+            ..Default::default()
+        }
+    }
+
+    fn codex_ok(pct: u32) -> probe::Polled {
+        Ok::<_, UsageError>(codex(pct)).into()
+    }
+
+    // A Codex account polls on its own track (never in the Claude plan),
+    // is shown once its own meter rises (Claude comes first before that,
+    // whatever the %), and goes out with `pv`.
+    #[test]
+    fn codex_account_joins_the_selector() {
+        let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
+        let (claude, cx) = (PathBuf::from("/h/.claude"), PathBuf::from("/h/.codex"));
+        assert_eq!(e.begin_poll(T0).unwrap().accounts, vec![claude.clone()], "Claude's plan is Claude's");
+        assert_eq!(e.begin_codex_poll(T0), Some(vec![cx.clone()]));
+        assert!(!e.status(T0).polling, "nothing shown yet");
+        e.on_poll_results(T0, vec![(claude.clone(), Ok(reading(10)))]);
+        e.on_codex_results(T0 + 1, vec![(cx.clone(), codex_ok(30))]);
+        assert_eq!(e.status(T0 + 1).active_account, Some(claude.clone()), "Claude until Codex rises");
+        assert_eq!(write(&mut e, T0 + 1).unwrap().payload.pv, None);
+        // Not shown: every 10 minutes.
+        assert_eq!(e.begin_codex_poll(T0 + 300), None);
+        assert_eq!(e.begin_codex_poll(T0 + 601), Some(vec![cx.clone()]));
+        assert!(!e.status(T0 + 601).polling, "the shown account (Claude) isn't the one polled");
+        e.on_codex_results(T0 + 602, vec![(cx.clone(), codex_ok(31))]);
+        assert_eq!(e.status(T0 + 602).active_account, Some(cx.clone()), "Codex rose");
+        let w = write(&mut e, T0 + 602).unwrap();
+        assert_eq!(w.kind, WriteKind::Poll);
+        assert_eq!(
+            (w.payload.acct.as_deref(), w.payload.pv.as_deref(), w.payload.w, w.payload.rc),
+            (Some("week"), Some("codex"), Some(31), Some(2))
+        );
+        assert_eq!((w.payload.wf, w.payload.fc), (None, None), "Fable is Claude's: no strip, no colour");
+        assert!(w.payload.th.is_some(), "the palette still goes");
+        // Claude's meter moves: back to Claude, and no `pv`; the Fable
+        // colour rides with Claude's numbers again.
+        e.on_poll_results(T0 + 700, vec![(claude.clone(), Ok(reading(12)))]);
+        assert_eq!(e.status(T0 + 700).active_account, Some(claude.clone()));
+        let w = write(&mut e, T0 + 700).unwrap();
+        assert_eq!(w.payload.pv, None);
+        assert!(w.payload.fc.is_some());
+        // Codex moves: Codex again; shown, it polls every 5 minutes, and a
+        // refresh waits out the 2-minute gap.
+        assert_eq!(e.begin_codex_poll(T0 + 1202), Some(vec![cx.clone()]));
+        e.on_codex_results(T0 + 1202, vec![(cx.clone(), codex_ok(32))]);
+        assert_eq!(e.status(T0 + 1202).active_account, Some(cx.clone()));
+        assert_eq!(e.begin_codex_poll(T0 + 1202 + 299), None);
+        e.request_refresh(T0 + 1250);
+        assert_eq!(e.begin_codex_poll(T0 + 1300), None, "the gap");
+        assert_eq!(e.begin_codex_poll(T0 + 1322), Some(vec![cx]));
+    }
+
+    // Two Claude accounts: `~/.claude` and `~/b`.
+    const TWO: &str = "config_dirs = ~/.claude, ~/b\n";
+
+    fn two() -> (PathBuf, PathBuf) {
+        (PathBuf::from("/h/.claude"), PathBuf::from("/h/b"))
+    }
+
+    // An account picked for the device stays on it whatever
+    // the other accounts' meters do. The switch goes out at once as a
+    // replay (numbers read earlier aren't a new reading), and going back to
+    // automatic picks up from the latest rise.
+    #[test]
+    fn a_chosen_account_holds_the_device() {
+        let auto = "codex_dirs = ~/.codex\n";
+        let chosen = "codex_dirs = ~/.codex\ndevice_account = ~/.claude\n";
+        let mut e = Engine::new(settings(auto));
+        let (claude, cx) = (PathBuf::from("/h/.claude"), PathBuf::from("/h/.codex"));
+        e.on_poll_results(T0, vec![(claude.clone(), Ok(reading(10)))]);
+        e.on_codex_results(T0, vec![(cx.clone(), codex_ok(30))]);
+        e.on_codex_results(T0 + 600, vec![(cx.clone(), codex_ok(31))]);
+        assert_eq!(e.status(T0 + 600).active_account, Some(cx.clone()), "Codex rose");
+        write(&mut e, T0 + 600).unwrap();
+
+        e.update_settings(settings(chosen));
+        assert_eq!(e.status(T0 + 601).active_account, Some(claude.clone()));
+        let w = write(&mut e, T0 + 601).unwrap();
+        assert_eq!(
+            (w.kind, w.payload.rp, w.payload.pv.as_deref(), w.payload.s),
+            (WriteKind::Event, Some(1), None, Some(10)),
+            "Claude's last numbers, as a replay"
+        );
+        assert!(write(&mut e, T0 + 602).is_none(), "once");
+
+        // Codex keeps rising: Claude stays, and only Claude's own poll is
+        // a real one.
+        e.on_codex_results(T0 + 1200, vec![(cx.clone(), codex_ok(35))]);
+        assert_eq!(e.status(T0 + 1200).active_account, Some(claude.clone()));
+        let w = write(&mut e, T0 + 1200).unwrap();
+        assert_eq!((w.kind, w.payload.pv), (WriteKind::Heartbeat, None));
+        e.on_poll_results(T0 + 1300, vec![(claude.clone(), Ok(reading(10)))]);
+        assert_eq!(write(&mut e, T0 + 1300).unwrap().kind, WriteKind::Poll);
+
+        e.update_settings(settings(auto));
+        assert_eq!(e.status(T0 + 1301).active_account, Some(cx.clone()), "Codex rose last");
+        let w = write(&mut e, T0 + 1301).unwrap();
+        assert_eq!((w.kind, w.payload.rp, w.payload.pv.as_deref()), (WriteKind::Event, Some(1), Some("codex")));
+    }
+
+    // A chosen account that can't be read (not yet, signed out, failing,
+    // not listed) leaves the automatic choice on the device, and takes the
+    // device back once it reads. A miss or two isn't enough: every move
+    // between accounts is a jump in the device's rate math.
+    #[test]
+    fn a_chosen_account_that_cant_be_read_falls_back() {
+        let (claude, cx) = (PathBuf::from("/h/.claude"), PathBuf::from("/h/.codex"));
+        let mut e = Engine::new(settings("codex_dirs = ~/.codex\ndevice_account = ~/.codex\n"));
+        e.on_poll_results(T0, vec![(claude.clone(), Ok(reading(10)))]);
+        assert_eq!(e.status(T0).active_account, Some(claude.clone()), "Codex not read yet");
+        assert_eq!(write(&mut e, T0).unwrap().kind, WriteKind::Poll);
+        e.on_codex_results(T0 + 5, vec![(cx.clone(), codex_ok(30))]);
+        assert_eq!(e.status(T0 + 5).active_account, Some(cx.clone()), "its first reading takes the device");
+        let w = write(&mut e, T0 + 5).unwrap();
+        assert_eq!((w.kind, w.payload.pv.as_deref()), (WriteKind::Poll, Some("codex")));
+        // A dead Codex sign-in drops its reading: Claude's numbers, right
+        // away and as a replay.
+        e.on_codex_results(T0 + 300, vec![(cx.clone(), Err::<UsageReading, _>(UsageError::TokenExpired).into())]);
+        assert_eq!(e.status(T0 + 300).active_account, Some(claude.clone()));
+        let w = write(&mut e, T0 + 300).unwrap();
+        assert_eq!((w.kind, w.payload.rp, w.payload.pv), (WriteKind::Event, Some(1), None));
+
+        // A Claude account keeps its last reading when it misses: it holds
+        // the device through two misses and hands it over at the third.
+        // `~/b/` is the listed `~/b`.
+        let (a, b) = two();
+        let mut e = Engine::new(settings(&format!("{TWO}device_account = ~/b/\n")));
+        e.on_poll_results(T0, vec![(a.clone(), Ok(reading(10))), (b.clone(), Ok(reading(5)))]);
+        assert_eq!(e.status(T0).active_account, Some(b.clone()));
+        write(&mut e, T0).unwrap();
+        for t in [T0 + 200, T0 + 320] {
+            e.on_poll_results(t, vec![(b.clone(), Err(UsageError::NotLoggedIn("x".into())))]);
+            assert_eq!(e.status(t).active_account, Some(b.clone()));
+        }
+        e.on_poll_results(T0 + 440, vec![(b.clone(), Err(UsageError::NotLoggedIn("x".into())))]);
+        assert_eq!(e.status(T0 + 440).active_account, Some(a.clone()));
+        let w = write(&mut e, T0 + 440).unwrap();
+        assert_eq!((w.kind, w.payload.rp, w.payload.s), (WriteKind::Event, Some(1), Some(10)));
+        e.on_poll_results(T0 + 600, vec![(b.clone(), Ok(reading(6)))]);
+        assert_eq!(e.status(T0 + 600).active_account, Some(b));
+        assert_eq!(write(&mut e, T0 + 600).unwrap().kind, WriteKind::Poll);
+
+        // A folder that isn't an account is ignored.
+        let mut e = Engine::new(settings("device_account = ~/elsewhere\n"));
+        e.on_poll_results(T0, vec![(claude.clone(), Ok(reading(10)))]);
+        assert_eq!(e.status(T0).active_account, Some(claude));
+    }
+
+    // A chosen account that has missed three polls leaves the automatic
+    // one on the device (and in the app) until it reads again. Stale by
+    // age with a single miss, it stays: the app shows it stale, as the
+    // device does.
+    #[test]
+    fn a_stale_chosen_account_waits_for_its_reading() {
+        let (a, b) = two();
+        let mut e = Engine::new(settings(TWO));
+        e.on_poll_results(T0, vec![(a.clone(), Ok(reading(10))), (b.clone(), Ok(reading(5)))]);
+        write(&mut e, T0).unwrap();
+        for i in 1..=3 {
+            e.on_poll_results(T0 + i, vec![(b.clone(), Err(UsageError::Timeout))]);
+        }
+        e.update_settings(settings(&format!("{TWO}device_account = ~/b\n")));
+        assert_eq!(e.status(T0 + 10).active_account, Some(a.clone()));
+        assert!(write(&mut e, T0 + 10).is_none(), "no switch");
+        e.on_poll_results(T0 + 200, vec![(b.clone(), Ok(reading(5)))]);
+        assert_eq!(e.status(T0 + 200).active_account, Some(b.clone()));
+        assert_eq!(write(&mut e, T0 + 200).unwrap().kind, WriteKind::Poll);
+
+        e.on_poll_results(T0 + 500, vec![(b.clone(), Err(UsageError::Timeout))]);
+        let late = T0 + 200 + crate::usage::STALE_AFTER_SECS + 1;
+        assert!(write(&mut e, late).is_none(), "stale: nothing goes out");
+        assert_eq!((e.status(late).active_account, e.stale(late)), (Some(b.clone()), true));
+        for i in 1..=2 {
+            e.on_poll_results(late + i, vec![(b.clone(), Err(UsageError::Timeout))]);
+        }
+        assert_eq!(e.status(late + 2).active_account, Some(a));
+        let w = write(&mut e, late + 3).unwrap();
+        assert_eq!((w.kind, w.payload.rp, w.payload.s), (WriteKind::Event, Some(1), Some(10)));
+    }
+
+    // A switch to an account that's stale (here: back to automatic) still
+    // goes out, once, so the device shows the account the app does; then
+    // nothing, and the device goes stale on its own.
+    #[test]
+    fn a_switch_to_a_stale_account_goes_out_once() {
+        let (a, b) = two();
+        let mut e = Engine::new(settings(&format!("{TWO}device_account = ~/b\n")));
+        e.on_poll_results(T0, vec![(a.clone(), Ok(reading(10))), (b.clone(), Ok(reading(5)))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.s, Some(5));
+        for i in 1..=3 {
+            e.on_poll_results(T0 + i, vec![(a.clone(), Err(UsageError::Timeout))]);
+        }
+        e.update_settings(settings(TWO));
+        assert_eq!(e.status(T0 + 10).active_account, Some(a));
+        assert!(e.stale(T0 + 10));
+        let w = write(&mut e, T0 + 10).unwrap();
+        assert_eq!((w.kind, w.payload.rp, w.payload.s), (WriteKind::Event, Some(1), Some(10)));
+        assert!(write(&mut e, T0 + 100).is_none());
+    }
+
+    // Removing the shown account moves the device to another one at once,
+    // not at the next poll; a poll that was running then doesn't bring the
+    // removed account back.
+    #[test]
+    fn removing_the_shown_account_switches_at_once() {
+        let (a, b) = two();
+        let mut e = Engine::new(settings(TWO));
+        e.on_poll_results(T0, vec![(a.clone(), Ok(reading(10))), (b.clone(), Ok(reading(5)))]);
+        write(&mut e, T0).unwrap();
+        assert_eq!(e.status(T0).active_account, Some(a.clone()));
+        e.update_settings(settings("config_dirs = ~/b\n"));
+        assert_eq!(e.status(T0 + 1).active_account, Some(b.clone()));
+        let w = write(&mut e, T0 + 1).unwrap();
+        assert_eq!((w.kind, w.payload.rp, w.payload.s), (WriteKind::Event, Some(1), Some(5)));
+        e.on_poll_results(T0 + 5, vec![(a.clone(), Ok(reading(31))), (b.clone(), Ok(reading(5)))]);
+        assert_eq!(e.status(T0 + 5).active_account, Some(b.clone()));
+
+        // The selector's pick removed while another account was chosen,
+        // then automatic again: the remaining account, not the removed one.
+        let mut e = Engine::new(settings(TWO));
+        e.on_poll_results(T0, vec![(a.clone(), Ok(reading(10))), (b.clone(), Ok(reading(5)))]);
+        e.update_settings(settings(&format!("{TWO}device_account = ~/b\n")));
+        e.update_settings(settings("config_dirs = ~/b\ndevice_account = ~/b\n"));
+        e.update_settings(settings("config_dirs = ~/b\n"));
+        assert_eq!(e.status(T0 + 2).active_account, Some(b));
+    }
+
+    // A switch never sends numbers read before it as a poll: not a poll
+    // still waiting for its write, nor a reconnect's resend of an account
+    // the device hasn't had as a poll.
+    #[test]
+    fn a_switch_never_goes_out_as_a_poll() {
+        let (a, b) = two();
+        let chosen = format!("{TWO}device_account = ~/b\n");
+        let mut e = Engine::new(settings(TWO));
+        e.on_poll_results(T0, vec![(a.clone(), Ok(reading(10))), (b.clone(), Ok(reading(5)))]);
+        // `a`'s poll write fails (it isn't marked written), then `b` is chosen.
+        assert_eq!(e.next_write(T0, HostClock::default()).unwrap().kind, WriteKind::Poll);
+        e.update_settings(settings(&chosen));
+        let w = write(&mut e, T0 + 1).unwrap();
+        assert_eq!((w.kind, w.payload.rp, w.payload.s), (WriteKind::Event, Some(1), Some(5)));
+        // Chosen while the board is away: the reconnect sends a replay.
+        e.update_settings(settings(TWO));
+        assert_eq!(write(&mut e, T0 + 2).unwrap().payload.s, Some(10));
+        e.update_settings(settings(&chosen));
+        e.on_connected();
+        let w = write(&mut e, T0 + 4).unwrap();
+        assert_eq!((w.kind, w.payload.rp, w.payload.s), (WriteKind::Event, Some(1), Some(5)));
+
+        // After the switch's replay, a reconnect before the chosen
+        // account's next poll replays again; once it has polled, a
+        // reconnect resends it as a poll.
+        let mut e = Engine::new(settings(TWO));
+        e.on_poll_results(T0, vec![(a.clone(), Ok(reading(10))), (b.clone(), Ok(reading(5)))]);
+        assert_eq!(write(&mut e, T0).unwrap().kind, WriteKind::Poll);
+        e.update_settings(settings(&chosen));
+        assert_eq!(write(&mut e, T0 + 1).unwrap().kind, WriteKind::Event);
+        e.on_connected();
+        let w = write(&mut e, T0 + 2).unwrap();
+        assert_eq!((w.kind, w.payload.rp, w.payload.s), (WriteKind::Event, Some(1), Some(5)));
+        e.on_poll_results(T0 + 200, vec![(b.clone(), Ok(reading(6)))]);
+        assert_eq!(write(&mut e, T0 + 200).unwrap().kind, WriteKind::Poll);
+        e.on_connected();
+        assert_eq!(write(&mut e, T0 + 201).unwrap().kind, WriteKind::Poll);
+    }
+
+    // Another Claude account's numbers start the mood over, as on the
+    // device a meter that measures something else does: a jump between
+    // accounts isn't usage.
+    #[test]
+    fn another_claude_account_starts_the_mood_over() {
+        let (a, b) = two();
+        let mut e = Engine::new(settings(TWO));
+        e.on_poll_results(T0, vec![(a.clone(), Ok(reading(5))), (b.clone(), Ok(reading(62)))]);
+        e.on_poll_results(T0 + 300, vec![(a.clone(), Ok(reading(8)))]);
+        assert_eq!(e.status(T0 + 300).active_account, Some(a), "a rose");
+        e.update_settings(settings(&format!("{TWO}device_account = ~/b\n")));
+        write(&mut e, T0 + 301).unwrap();
+        e.on_poll_results(T0 + 600, vec![(b.clone(), Ok(reading(62)))]);
+        assert_eq!(e.status(T0 + 600).active_account, Some(b));
+        assert_eq!(e.status(T0 + 600).mood, Some(Mood::Idle), "not 8 % to 62 % in five minutes");
+    }
+
+    // With no account chosen, fresh numbers still go out as a poll: after
+    // a "no data" stretch (the device then shows no account's numbers), and
+    // for an automatic switch made while the board was away.
+    #[test]
+    fn fresh_numbers_after_no_data_or_a_reconnect_are_a_poll() {
+        let (claude, cx) = (PathBuf::from("/h/.claude"), PathBuf::from("/h/.codex"));
+        let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
+        e.on_poll_results(T0, vec![(claude.clone(), Ok(reading(40)))]);
+        write(&mut e, T0).unwrap();
+        e.on_codex_results(T0, vec![(cx.clone(), codex_ok(30))]);
+        e.on_codex_results(T0 + 600, vec![(cx.clone(), codex_ok(31))]);
+        assert_eq!(e.status(T0 + 600).active_account, Some(cx.clone()));
+        write(&mut e, T0 + 600).unwrap();
+        e.on_poll_results(T0 + 700, vec![(claude.clone(), Err(UsageError::NotLoggedIn("x".into())))]);
+        let _ = write(&mut e, T0 + 700);
+        e.on_codex_results(T0 + 900, vec![(cx, Err::<UsageReading, _>(UsageError::TokenExpired).into())]);
+        assert_eq!(write(&mut e, T0 + 900).unwrap().kind, WriteKind::NoData);
+        e.on_poll_results(T0 + 1000, vec![(claude, Ok(reading(3)))]);
+        let w = write(&mut e, T0 + 1000).unwrap();
+        assert_eq!((w.kind, w.payload.rp, w.payload.s), (WriteKind::Poll, None, Some(3)));
+
+        let (a, b) = two();
+        let mut e = Engine::new(settings(TWO));
+        e.on_poll_results(T0, vec![(a.clone(), Ok(reading(10))), (b.clone(), Ok(reading(5)))]);
+        assert_eq!(write(&mut e, T0).unwrap().kind, WriteKind::Poll);
+        e.on_poll_results(T0 + 300, vec![(a, Ok(reading(10))), (b.clone(), Ok(reading(8)))]);
+        assert_eq!(e.status(T0 + 300).active_account, Some(b), "b rose while the board was away");
+        e.on_connected();
+        assert_eq!(write(&mut e, T0 + 310).unwrap().kind, WriteKind::Poll);
+    }
+
+    // With no Codex home, nothing changes: no Codex poll, no `pv`.
+    #[test]
+    fn no_codex_home_no_codex() {
+        let mut e = Engine::new(settings(""));
+        assert_eq!(e.begin_codex_poll(T0), None);
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(10)))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.pv, None);
+    }
+
+    // Claude signed out but Codex reading: the device shows Codex, not
+    // "no data"; both signed out is no data. Codex numbers never reach
+    // the mood, which follows Claude like the device's rate math.
+    #[test]
+    fn codex_and_no_data() {
+        let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
+        let (claude, cx) = (PathBuf::from("/h/.claude"), PathBuf::from("/h/.codex"));
+        e.on_poll_results(T0, vec![(claude.clone(), Err(UsageError::NotLoggedIn("x".into())))]);
+        e.on_codex_results(T0, vec![(cx.clone(), codex_ok(30))]);
+        let w = write(&mut e, T0).unwrap();
+        assert_eq!((w.kind, w.payload.pv.as_deref()), (WriteKind::Poll, Some("codex")));
+        e.on_codex_results(T0 + 600, vec![(cx.clone(), codex_ok(90))]);
+        assert_eq!(e.status(T0 + 600).mood, Some(Mood::Idle), "60 points of Codex isn't Claude activity");
+        e.on_codex_results(
+            T0 + 1200,
+            vec![(cx.clone(), Err::<UsageReading, _>(UsageError::NotLoggedIn("x".into())).into())],
+        );
+        assert_eq!(write(&mut e, T0 + 1200).unwrap().kind, WriteKind::NoData);
+        // An expired or refused Codex token is no data too, never its old
+        // numbers kept on the device.
+        for dead in [UsageError::TokenExpired, UsageError::TokenRejected] {
+            let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
+            e.on_poll_results(T0, vec![(claude.clone(), Err(UsageError::NotLoggedIn("x".into())))]);
+            e.on_codex_results(T0, vec![(cx.clone(), codex_ok(30))]);
+            write(&mut e, T0).unwrap();
+            e.on_codex_results(T0 + 300, vec![(cx.clone(), Err::<UsageReading, _>(dead).into())]);
+            assert_eq!(e.status(T0 + 300).reading, None);
+            assert_eq!(write(&mut e, T0 + 300).unwrap().kind, WriteKind::NoData);
+        }
+        // Nothing else to show (Claude blocked, no reading yet): the dead
+        // token still ends in "no data", once, not frozen numbers.
+        let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
+        e.on_poll_results(T0, vec![(claude.clone(), Err(UsageError::Throttled { retry_after_secs: Some(3600) }))]);
+        e.on_codex_results(T0, vec![(cx.clone(), codex_ok(30))]);
+        assert_eq!(write(&mut e, T0).unwrap().payload.pv.as_deref(), Some("codex"));
+        e.on_codex_results(T0 + 300, vec![(cx.clone(), Err::<UsageReading, _>(UsageError::TokenExpired).into())]);
+        assert!(!e.status(T0 + 300).logged_out, "Claude isn't signed out");
+        assert_eq!(write(&mut e, T0 + 300).unwrap().kind, WriteKind::NoData);
+        assert!(write(&mut e, T0 + 400).is_none(), "once");
+        e.on_codex_results(T0 + 600, vec![(cx.clone(), codex_ok(31))]);
+        assert_eq!(write(&mut e, T0 + 600).unwrap().kind, WriteKind::Poll, "back");
+        // With Claude working, a dead Codex token hands the device back.
+        let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
+        e.on_poll_results(T0, vec![(claude.clone(), Ok(reading(10)))]);
+        e.on_codex_results(T0, vec![(cx.clone(), codex_ok(30))]);
+        e.on_codex_results(T0 + 600, vec![(cx.clone(), codex_ok(31))]);
+        assert_eq!(e.status(T0 + 600).active_account, Some(cx.clone()));
+        e.on_codex_results(T0 + 900, vec![(cx, Err::<UsageReading, _>(UsageError::TokenRejected).into())]);
+        assert_eq!(e.status(T0 + 900).active_account, Some(claude));
+    }
+
+    // A Codex 429 parks the account for its retry-after, is kept across a
+    // restart, and reads as OpenAI's pause.
+    #[test]
+    fn codex_block_is_openais() {
+        let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
+        let cx = PathBuf::from("/h/.codex");
+        e.begin_codex_poll(T0);
+        e.on_codex_results(T0, vec![(cx.clone(), codex_ok(30))]);
+        e.begin_codex_poll(T0 + 300);
+        let throttled = Err::<UsageReading, _>(UsageError::Throttled { retry_after_secs: Some(1800) });
+        e.on_codex_results(T0 + 300, vec![(cx.clone(), throttled.into())]);
+        assert_eq!(e.begin_codex_poll(T0 + 2000), None, "parked");
+        assert!(e.status(T0 + 400).errors[0].message.starts_with("Usage paused by OpenAI until "));
+        let blocks = e.blocks(T0 + 400);
+        assert_eq!(blocks.get(&cx).map(|b| b.until), Some(T0 + 2100));
+        let mut fresh = Engine::new(settings("codex_dirs = ~/.codex\n"));
+        fresh.restore_blocks(&blocks, T0 + 500);
+        assert_eq!(fresh.begin_codex_poll(T0 + 500), None, "restored");
+        assert_eq!(fresh.begin_codex_poll(T0 + 2100), Some(vec![cx]));
     }
 }

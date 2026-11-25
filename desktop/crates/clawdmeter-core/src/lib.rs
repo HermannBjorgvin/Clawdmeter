@@ -5,6 +5,7 @@
 //! * [`paths`], [`config`]: the shared state dir (`~/.config/clawdmeter`) and its files.
 //! * [`usage`]: run and parse `claude --output-format json -p /usage`.
 //! * [`oauth`]: usage from Claude's usage endpoint with Claude Code's stored sign-in.
+//! * [`codex`]: OpenAI Codex usage (a trial), an account like a Claude config dir.
 //! * [`probe`]: usage from one message's rate-limit headers, and when that is allowed.
 //! * [`events`]: the hook events log (fast clock) and the activity tracker.
 //! * [`attention`]: the attention hook's alert / clear files (written by
@@ -12,7 +13,8 @@
 //! * [`cadence`]: when to poll, when to heartbeat.
 //! * [`backoff`]: how long an account waits after a failed poll.
 //! * [`selector`]: which account to show.
-//! * [`payload`]: the JSON the firmware parses.
+//! * [`payload`]: the JSON the firmware parses; [`buttons`]: what its buttons do.
+//! * [`themes`]: the device's colour presets.
 //! * [`rate`]: the slow-clock mood.
 //! * [`engine`]: all of the above as one I/O-free state machine.
 //! * [`autostart`], [`launch`], [`platform`]: start-at-login, the path to
@@ -23,7 +25,9 @@
 pub mod attention;
 pub mod autostart;
 pub mod backoff;
+pub mod buttons;
 pub mod cadence;
+pub mod codex;
 pub mod config;
 pub mod engine;
 pub mod events;
@@ -35,6 +39,7 @@ pub mod platform;
 pub mod probe;
 pub mod rate;
 pub mod selector;
+pub mod themes;
 pub mod usage;
 
 pub use config::{ConfigFile, Settings};

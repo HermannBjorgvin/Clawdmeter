@@ -28,30 +28,71 @@ is faked behind `FlashHardware`.
   optional year; fixtures in `tests/fixtures/` are real or derived from the
   CLI source), `probe` / `oauth` (usage sources), `cadence` (when to poll),
   `backoff`, `selector` (which account is shown), `events` (tails
-  `events.log`), `attention`, `payload`, `rate`, `engine` (I/O-free state
+  `events.log`), `attention`, `payload`, `buttons` (device button actions,
+  their config spelling and `k1`–`k3` codes), `rate`, `engine` (I/O-free state
   machine: `next_write` / `mark_written`), `autostart` (systemd / XDG /
   LaunchAgent / Run key, legacy-daemon detection + `disable_legacy`),
   `launch`, `platform`.
-- `clawdmeter-ble`: btleplug link. Adapters come from one `Bluetooth` handle
-  per runtime: on Linux every btleplug `Manager` is a D-Bus connection that
-  is never closed, so never make one per attempt. On a failed `adapters()`
-  a throwaway connection checks whether a new one would fare better; only
-  then, and if a retry on the same connection fails too (bluetoothd may
-  just have come back), is the manager replaced and the loss counted. The
-  watcher reopens on a bump, and dead streams are leaked, not dropped
-  (`MessageStream::drop` unwraps a `RemoveMatch`, which panics on a dead
-  connection and aborts release builds). Connects only to OS-known
+- `clawdmeter-ble`: btleplug link. The manager and adapter come from one
+  `Bluetooth` handle per runtime (`bluetooth.rs`), kept for good: on Linux
+  every btleplug `Manager` is a D-Bus connection that is never closed, on
+  macOS every `adapters()` call a CoreBluetooth thread that never exits.
+  On a failed `adapters()` a throwaway connection checks whether a new one
+  would fare better; only then, and if a retry on the same connection fails
+  too (bluetoothd may just have come back), is the manager replaced and the
+  loss counted. An adapter reading off is relisted on Linux/Windows and
+  replaced only by a different one. The watcher reopens on either. A
+  finished BlueZ stream (the watcher's, a dropped link's notifications) is
+  dropped once its connection answers a listing and leaked once it is known
+  dead; while bluetoothd doesn't answer over a live bus it asks again every
+  5 s (`MessageStream::drop` unwraps a `RemoveMatch`, which panics on a dead
+  connection and aborts release builds; upstream fixes in #271). Each
+  link's notification forwarder stops when its `DeviceLink` drops (each
+  holds a match rule, capped at 512 per connection). Windows clears the
+  adapter's peripherals before each attempt; macOS never does (its clear
+  cancels every tracked connection). Connects only to OS-known
   devices (custom service, or HID + exact name); address cache, REQ
-  subscription, zombie-write breaker, BlueZ trust, macOS stale-bond unpair via `blueutil`,
+  subscription, zombie-write breaker (a zombie link is disconnected before
+  it's dropped), BlueZ trust, macOS stale-bond unpair via `blueutil`,
   Windows bonded-address fallback (PnP / `CLAWDMETER_BLE_ADDRESS`).
 - `clawdmeter-flash`: downloads the release `manifest.json`, matches boards by
   chip + flash size, writes with espflash.
-- `clawdmeter-app`: the `clawdmeter` binary. Tray (`tray/`, ksni on Linux),
+- `clawdmeter-app`: the `clawdmeter` binary. Tray (`tray/`, ksni on Linux;
+  on macOS the menu is one AppKit panel, `tray/mac_menu.rs`, put into
+  muda's NSMenu: the device's home screen, a reload button in its corner,
+  and a footer with Open Clawdmeter and icons for an update (`tray::
+  update_offer`: while the app is behind, its update, to the Update page,
+  when the sidebar would announce it, else nothing; once the app is current,
+  the board's firmware, to Flash; the Linux/Windows item does the same), the computer's chime (switches `desktop_chime` like
+  the Overview; the Linux/Windows item "Chime on this computer" is the
+  same switch), Settings
+  and Quit. The panel's buttons set
+  `mac_menu::take_actions` flags for the tick; the panel itself isn't
+  clickable. Its content is `tray/header.rs`, and `--example tray_header --
+  <dir>` renders it to PNGs. Icons are the window's bundled Lucide SVGs,
+  through resvg, as template images. Linux and Windows list native items;
+  muda inserts and removes by position, so the tray never edits the item
+  set but builds a new menu when `tray::MenuShape` changes; their ids are
+  fixed strings (`"open"`, `"quit"`, …), so a click still matches after a
+  rebuild. `Items` is per platform: on macOS the menu and the panel, plus
+  the one native part, the "Show on device" submenu between the panel's
+  body and its footer (muda appends it, then `MenuHeader::install` puts the
+  body at index 0 and the footer at the end; muda never inserts or removes
+  there, since it counts positions without the panel, so a change in the
+  accounts builds the whole menu again). That submenu (`device_menu`,
+  `device_choices`, ids `device-auto` / `device-<index>` into
+  `Settings::accounts`, title "Show on device: <choice>") is on every
+  platform with two or more accounts (`MenuShape::device_accounts` on
+  Linux/Windows); a pick saves `device_account` through `write_settings`,
+  like the chime.
+  `StatusSnapshot::spend` marks a spend-capped account, drawn as one Spend
+  meter in the panel, the rows and the Overview),
   window (`ui/`), `daemon.rs` (drives the engine on its own thread: 0.5 s
-  tick, config re-read every 5 s), `hooks/` (`clawdmeter hook
-  alert|clear|event` and the settings.json installer), `ipc.rs`
-  (single-instance lock, status file, command queues, window lock),
-  `onboarding.rs`, `boards.rs` (names, buy links, illustrations), `chime.rs`.
+  tick, config re-read every 5 s and on `Command::ReloadSettings`),
+  `hooks/` (`clawdmeter hook alert|clear|event` and the settings.json
+  installer), `ipc.rs` (single-instance lock, status file, command queues,
+  window lock), `onboarding.rs`, `boards.rs` (names, buy links,
+  illustrations), `chime.rs`.
 
 ## Running
 
@@ -59,20 +100,89 @@ is faked behind `FlashHardware`.
   headless; `--once` (poll + print payload, no BLE); `--window [PAGE]
   [--manifest PATH]`; `--ports`; `--info PORT`; `hook MODE [event]`.
 - Env: `CLAWDMETER_LOG`, `CLAWDMETER_NO_TRAY`, `POLL_INTERVAL`,
-  `CLAUDE_CONFIG_DIR` (default account), `CLAWDMETER_BLE_ADDRESS`,
-  `CLAWDMETER_DECORATIONS`.
+  `CLAUDE_CONFIG_DIR` (default account), `CODEX_HOME` (the default Codex
+  account), `CLAWDMETER_BLE_ADDRESS`,
+  `CLAWDMETER_DECORATIONS`, `CLAWDMETER_BUTTON_LAYOUT`,
+  `CLAWDMETER_DEMO_FIRMWARE_UPDATE` (debug builds: pretend that firmware
+  release is out and the board older, for the tray's update icon),
+  `CLAWDMETER_DEMO_USAGE=1` (debug builds: the tray shows made-up usage,
+  the same on every OS; with the pace marker on, `--example tray_header`'s
+  `compare` render matches it, for side-by-side screenshots).
 - State lives in one dir, `~/.config/clawdmeter/` (Windows:
   `%LOCALAPPDATA%\Clawdmeter\`): `config`, `events.log`, `attention`,
   `clear-<sid>`, `ble-address`, `daemon.log`, `usage-blocks.json`, app
   state and locks.
-- Config keys: `config_dirs`, `poll_interval`, `heartbeat_interval`,
+- Config keys: `config_dirs`, `codex_dirs` (Codex homes; absent = the
+  discovered default, empty = none: `Settings::apply_codex_default`),
+  `device_account` (the account the device shows, from the Overview's
+  drop-down, `ui/overview.rs` `account_control`, or the tray's "Show on
+  device" submenu; both list `Settings::accounts` and show with two or
+  more; absent or `auto` = the selector's pick, "Latest active account".
+  Removing the account on the Accounts page clears it. `Engine::shown_choice` uses it while it's a listed folder with a
+  reading (a dead Codex sign-in drops it) whose last 3 polls didn't all
+  miss, else the selector's pick (which
+  keeps running underneath, and can be the chosen account itself). A miss
+  or two never moves it, as a miss never moves the automatic choice. A switch
+  to numbers read earlier goes out at once as an `rp:1` replay, even while
+  stale (once, so the board shows the app's account), and so does a
+  reconnect's resend of an account the board last had only as a replay
+  (`polled_account`); a switch made by that account's own fresh poll is a
+  poll, as automatic switches always were. The app's rate tracker starts
+  over on another Claude account's numbers (`rate_account`). The board can't
+  tell accounts apart: another Claude account's next real poll reaches its
+  rate ring, so a drop over 5 points reads as a reset there (chime if on, and
+  Clawd's reaction) and a rise as heavy use, as automatic switches always
+  did. Known gap: the shown account's cadence follows every account's
+  prompts, so a chosen account with a window running is probed as often as
+  every 2 min while another account works),
+  `poll_interval`, `heartbeat_interval`,
   `reset_chime` and `alert_chime` (device chimes; the old `chime` / `beep`
   keys are read when these are absent), `desktop_chime` (the same ding on
   this computer via rodio, ALSA on Linux), `clock`, `liveliness` (1–5,
   default 3: the Device page's Animation silliness slider, sent as `lv`),
   `attention_anim` (`off`/`10s`/`30s`/`2m`, default `2m`, sent as `aa`
-  seconds), `pace_marker` (default off, sent as `pm`), `claude_path`,
-  `release_repo`, `update_check`, `onboarding_done`, `alert_on` (alert kinds
+  seconds), `pace_marker` (default off, sent as `pm`), `menu_bar_usage`
+  (default off; macOS only: the higher of the session and weekly
+  percentages as the status item's title, `tray::menu_bar_title`), `button_primary`
+  (default `space`), `button_secondary` (default `shift-tab`) and
+  `button_pwr` (default `brightness`): `none`, `space`, `shift-tab`, `tab`,
+  `enter`, `escape`, `brightness`, a media key (`play-pause`,
+  `previous-track`, `next-track`, `volume-down`, `volume-up`, `mute`) or a
+  shortcut, modifiers and a key joined by `+` with an optional `hold`
+  (`ctrl+shift+m`, `super+alt+k`, `ctrl+space hold`; `tap` marks one
+  that would read as a preset, `space tap`). `clawdmeter_core::buttons` has
+  the grammar, the key table and the keystroke→HID mapping; sent as
+  `k1`/`k2`/`k3`. The Device page's Controls field draws a keycap per button
+  the board has, in the order and under the names in `BoardInfo.buttons`
+  (checked against the firmware's `caps.cpp`, as is `pwr_button`); a
+  keycap opens its editor underneath, which records a shortcut from the
+  next key press.
+  `theme` (`system`, the
+  default, or `solarized`: the OS-following themes in `themes::FOLLOWING`; a
+  preset id from `themes::PRESETS`; or `custom`; the old default
+  `clawd` and unknown values read as `system`) and `color_<token>`
+  (`rrggbb`, no `#`; the custom theme's colours, all twelve written once it
+  has been chosen, which is how it knows not to start from the current theme
+  again); the chosen palette's
+  first eleven colours are sent as `th` and the twelfth, `color_fable` (the
+  Fable overlay; each preset has its scheme's own purple), as `fc`
+  (`Settings::colors`; System resolves to
+  Dark or Light, Solarized to Solarized Dark or Light, by the OS appearance,
+  `platform::AppearanceWatch`: the xdg-desktop-portal `color-scheme` over
+  D-Bus, macOS `AppleInterfaceStyle`,
+  Windows `AppsUseLightTheme`; portal "no preference" is GNOME's light
+  default, unreadable = Dark. A background thread keeps it (Linux: one read,
+  then the portal's `SettingChanged` signal; macOS polls every 10 s, Windows
+  every 2 s), so neither the daemon's runtime nor the UI thread blocks; the
+  window watches only while the Device page shows; the
+  daemon hands changes to `Engine::set_appearance`, which sends them like any
+  device setting), `claude_path`,
+  `release_repo`, `update_check`, `skipped_update` (the app release tag the
+  Update page was told to skip), `skipped_firmware` (the firmware release
+  the Overview's "Skip this update" quiets: no nudge there and no Flash
+  badge; the Device page and the tray menu still offer it. Only a plain
+  version, `release_tag`, is nudged about or saved, since it comes from the
+  release's manifest), `onboarding_done`, `alert_on` (alert kinds
   the daemon lets through: the hook records `k` from `hook_event_name` /
   `notification_type` and `engine.on_attention` drops the rest; default all
   but `idle`).
@@ -109,12 +219,102 @@ Per account (`probe.rs`, `oauth.rs`):
   `transcript_path`). A window that ends with no activity since becomes
   "not started" with no call. Anything uncertain (first run, unattributed
   activity, near a reset) uses the idle source, which sends no message.
-  Spend-capped accounts always use the idle source.
+  Spend-capped accounts always use the idle source, and so do accounts with
+  no 5-hour limit.
+- **No 5-hour limit** (e.g. verified Ultra, formerly Max 20x): the endpoint
+  answers `"five_hour": null`, where an account with the limit and no window
+  running gets `{"utilization": 0, "resets_at": null}` (`usage::SessionLimit`).
+  Only the endpoint can tell: a probe answer without `five_hour` makes the
+  same poll ask the endpoint, never `/usage` (while it's backing off, has no
+  readable or unexpired token, or misses, the answer is kept as not started,
+  so the probe waits for the next prompt; any miss, a refused token included,
+  still backs the account off), and `/usage` drops the session line when no window runs,
+  so it leaves `Unknown` and `AccountState::record` keeps the last answer. A
+  missing `five_hour` key is `Unknown` too; `record` makes a reading with a
+  session window `Applies` (the parsers leave it). An `Absent` answer while
+  the last reading's window still runs is taken as `Applies` once: the next
+  answer confirms it, so verifying an account costs one poll. The payload is
+  `acct:"week"` with `s`/`sr` left "not started" for older firmware; the
+  Overview, tray and device drop the session meter, `session_pct()` is the
+  week (the selector follows it; before any rise it compares it with other
+  accounts' session %, as it does spend %), and the weekly reset wakes the
+  account.
+  When `meter_kind()` changes (session, week, spend) the selector forgets
+  that account's last value, and the rate tracker starts over if it's the
+  shown one, so the jump is never a rise.
+  The plan name (`planDisplayName`, `rate_limit_tier`) isn't used: an
+  unverified Ultra account still has a temporary 5-hour limit.
+- **Fable's weekly window** (`UsageReading::fable`, sent as `wf`): the
+  endpoint's `limits[]` `weekly_scoped` row scoped to the model named
+  Fable, the `/usage` line `Current week (Fable)`, or the probe's
+  `seven_day_overage_included` window (Claude Code's "Fable limit"; Haiku
+  answers rarely carry it). A probe reading without it keeps the last one
+  (`probe::carry_models`, rolled over like `not_started`'s weeks); nothing
+  asks the endpoint for it.
 - `claude` is found via `claude_path` → `PATH` / install dirs → the newest
   Claude-desktop-bundled build (`<userData>/claude-code/<version>/<hash>/claude`;
   verified on Linux, the macOS/Windows paths come from the desktop app's code
   and Electron's userData locations). With no `claude` there's no probe: the
   endpoint is polled every 12 min, window or not.
+
+## Codex accounts (a trial)
+
+`clawdmeter-core::codex`. A Codex home (`$CODEX_HOME` or `~/.codex` with an
+`auth.json`, found by `Settings::load`; others added on the Accounts page,
+whose picker sorts a folder with `auth.json` into `codex_dirs`) is an account
+keyed by its path, beside the Claude config dirs. Without one nothing Codex
+runs or shows (bar the Accounts page's trial note).
+
+- **Source**: `GET chatgpt.com/backend-api/wham/usage` with
+  `tokens.access_token` / `tokens.account_id` from `auth.json`, 30 s
+  timeout (the endpoint is slow; a short one hands every poll to the
+  fallback). **Never refreshed**: an expired JWT (`exp`) isn't sent
+  (`TokenExpired`), a 401/403 is `TokenRejected` (backs off on the ladder);
+  both are no data, never the log. A 429 parks it for its `retry-after`,
+  saved with the Claude blocks ("paused by OpenAI").
+- **Account limit only**: the top-level `rate_limit`, never
+  `additional_rate_limits` (per-model buckets such as Spark). Windows are
+  classified by length (`codex::classify`: 4–6 h session, 6–8 days week),
+  never by `primary`/`secondary`. No 5-hour window = `SessionLimit::Absent`
+  (`acct:"week"`).
+- **Session-log fallback** on a transient miss: the newest
+  `limit_id:"codex"` `rate_limits` record in the two newest
+  `sessions/YYYY/MM/DD/` folders, refused when over an hour old or when a
+  window has reset since, or not newer than the endpoint's last answer
+  (`codex::reading_from_log`; `CodexCache` remembers it). It rides as a
+  `Polled` with `idle: false` and the miss in `idle_miss`, so the endpoint
+  still backs off.
+- **Reset credits**: `rate_limit_reset_credits.available_count` is the count
+  held. `wham/rate-limit-reset-credits` (expiries of `available` ones) gives
+  their dates, fetched hourly or when the count changes (`CodexCache`, carried through the daemon's Codex
+  task). Read-only; nothing ever consumes a credit. A credit that expires
+  after the endpoint's last answer leaves the dates and the count, on a
+  kept reading (`ResetCredits::at`, in the payload and the status
+  snapshot) and on a session-log reading (`CodexCache::last_known`). A
+  board already showing stale gets no writes, so it keeps its last dates
+  until data returns. Every surface shows them under one rule,
+  `StatusSnapshot::shown_resets`.
+- **Engine**: `begin_codex_poll` / `on_codex_results`, a track of its own
+  (`codex::due_at`: shown 5 min, others 10 min, a reset or refresh sooner,
+  never within 2 min, backoff honoured) on its own blocking task, so a slow
+  call never holds up Claude's poll; Claude's plan, probe rules and cadence
+  never see a Codex dir. The results join `PlanSelector`, but through
+  `choose_preferring`: before any rise a Claude account is shown over a
+  Codex one whatever the %, so Codex takes the device only when its own
+  meter rises (or it's the `device_account`). Codex readings never feed the rate tracker (the mood is
+  Claude's). A Codex sign-in failure (none, expired, refused) drops that
+  account's reading, so it leaves the choice, and counts toward "every
+  account logged out" (`codex_signed_out`).
+- **Payload**: `Provider::Codex` adds `pv:"codex"`, `rc` and `rx` (each
+  held credit's local expiry date, ≤ 10; both absent when unknown), and
+  never `wf` or `fc` (Fable is Claude's; `Payload::from_reading_in`,
+  `Engine::next_write`), so no Fable strip on a Codex screen. The
+  Overview and tray label the main meter "Codex" and draw it neutral; the
+  Overview's Resets expire card lists the dates as chips, like the device
+  (`ui/overview.rs` `resets_card`, at most two rows), and so does the macOS
+  tray panel in the second meter's place (`tray::header::Resets`, one row
+  of `RESET_CHIPS` through the same `reset_chips`); the Linux/Windows menu
+  has one `resets_row` line.
 
 ## Cadence and backoff
 
@@ -130,14 +330,17 @@ Per account (`probe.rs`, `oauth.rs`):
 - Backoff (`backoff.rs`, idle source only): a 429 parks the account for
   exactly its `retry-after`; other transient misses (no 429 header, offline,
   `/usage` printing no `Current …` lines, timeouts) park it 10 → 20 → 30 min,
-  reset on success. Nothing bypasses it (Refresh now, device REQ and prompts
-  included); the probe is a separate path and stays allowed.
+  reset when the idle source answers. Nothing bypasses it (Refresh now, device
+  REQ and prompts included); the probe is a separate path and stays allowed.
+  Its answers don't end a pause that's still running; once it has run out
+  they clear its strikes, unless the endpoint missed again in that poll.
 - Calls during a block make the server lengthen it (589 → 1353 → 2721 →
   3600 s seen), so blocks are saved to `<state>/usage-blocks.json` and
   restored at start-up (`--once` honours them too). Only 429-type misses
-  persist; probe misses don't. The Overview and Accounts pages say "Usage
-  paused by Anthropic until HH:MM"; a parked shown account keeps its last
-  values.
+  persist (`Backoff::throttled`), until they run out or the idle source
+  answers; probe misses and answers don't touch them. The Overview and
+  Accounts pages say "Usage paused by Anthropic until HH:MM"; a parked shown
+  account keeps its last values.
 - Heartbeat replays (`rp:1`) every `heartbeat_interval` (60 s) keep the
   firmware's 90 s `DATA_FRESH_MS` open and stop after 3 consecutive misses,
   so the device shows stale. **A failed poll is never a zero.**
@@ -149,8 +352,19 @@ Per account (`probe.rs`, `oauth.rs`):
   window is a `clawdmeter --window [PAGE]` child process.
 - `ui/app.rs` is the root: a sidebar (Overview, Device, Flash, Accounts,
   Hooks, Settings) or the setup wizard (`ui/setup.rs`) filling the window.
+  `Page::Update` has no sidebar item: the "Update available" pill
+  (`widgets::update_pill`) in the footer and beside the Settings heading
+  opens it.
   Pages are `crate::Page`; `Page::parse` also accepts the old
   `background`/`flasher`/`status`/`alerts` names.
+- The window saves settings through `ui::settings::write_settings`, which
+  also queues `settings-changed` on `<state>/app-commands`; the tray (it
+  takes the queue every 200 ms) forwards it as `Command::ReloadSettings`, so
+  a device setting goes out within about a second. `Engine::next_write` sends
+  a changed `lv`/`aa`/`pm`/`k1`–`k3`/`th`/`fc` or clock format (`tf`, off
+  included) at once, unless the numbers are stale (then it waits for the
+  next good poll).
+  The 5 s re-read stays for hand edits and `--daemon` without a tray.
 - Only one window process runs (`<state>/window.lock`). The tray, or a second
   `--window` launch, appends `show <page>` to `<state>/window-commands`; the
   window switches page and raises itself. Child views ask for another page by
@@ -158,6 +372,39 @@ Per account (`probe.rs`, `oauth.rs`):
 - Nothing competes for the serial port: the flasher (`ui/flasher.rs`) touches
   USB only while on screen (`set_active`), the Device page probes only while
   shown, and the sidebar locks while a board is being written.
+- App updates (`ui/update.rs`, `Page::Update`): when the update check's tag
+  (every 6 h, an hour after one that couldn't reach GitHub:
+  `release::UpdateCheck`;
+  `StatusSnapshot::app_update`, or the check's cache file with no tray) is
+  newer than a release build's version, the sidebar footer shows "Update
+  available" until that release is skipped (`skipped_update`; a later one
+  is announced again). It opens the Update page, which the same pill
+  beside the Settings heading opens too, a skipped release included:
+  the notes of every release up to the new one (`release::release_notes`,
+  Markdown drawn as headings, bullets and text), the download, "Skip this
+  update" and a link to the release page. The download takes this install's
+  package to `~/Downloads` (`release::fetch_app_package`; the package only
+  where installing it replaces the running copy, `AppPackage::for_install`:
+  `.dmg` from `/Applications/Clawdmeter.app`, `.msi` from its install
+  folder, `.deb` for a `/usr/bin/clawdmeter` that dpkg lists as its
+  package's, AppImage under `$APPIMAGE`; on x86_64 Linux the button is a
+  menu of the `.deb` and AppImage instead, `AppPackage::for_linux`, with the
+  detected one marked "This install"), fetched in 2 MB range requests
+  that are asked for again from the byte reached when one fails or stalls
+  (ureq has no idle timeout, only a cap per body), checks it against the
+  release's `SHA256SUMS`, marks it as
+  downloaded (macOS quarantine, Windows `Zone.Identifier`) and opens the
+  installer (a `.deb` or AppImage is shown in the file manager). The mark
+  makes Gatekeeper and SmartScreen treat it like a browser download: the
+  builds aren't notarized or signed, so the user approves each update (Open
+  Anyway / Run anyway). A verified copy already in the folder is reused as
+  it is. Other installs get a button to the release page. Builds without
+  `CLAWDMETER_VERSION` are never offered one, nor is a prerelease whose own
+  tag is published (the check stores that tag), and with `update_check` off
+  nothing is announced. Off screen the page re-reads the status and config
+  every 5 s, not every tick. The demo's `--app-update`
+  shows each download state with made-up notes (`linux`, `linux-menu`: the
+  Linux menu closed or open); clicking Download there fetches for real.
 - The wizard reuses the flasher (`FlashMode::Setup`: no step header,
   up-to-date boards can skip) and the Hooks page
   (`SettingsView::show(Page::Hooks, embedded)`). First run = no
@@ -172,7 +419,17 @@ Per account (`probe.rs`, `oauth.rs`):
   decorations and `ui::chrome` draws an Adwaita-style header bar. gpui 0.2.2
   reports "server" even with no decoration manager, so
   `decorations::wanted()` probes the Wayland registry itself.
-  `CLAWDMETER_DECORATIONS=client|server` overrides.
+  `CLAWDMETER_DECORATIONS=client|server` overrides. The bar's minimize,
+  maximize/restore and close buttons follow GNOME's `button-layout` (sides
+  and order), live: `platform::SettingWatch` follows it on a background
+  thread (one read, then `SettingChanged`, misses retried like the
+  appearance watch's), started before GPUI for client decorations or any
+  Wayland compositor (one offering server decorations may still answer
+  client-side); a window asking for client decorations waits up to 250 ms
+  for the first answer, else opens with GTK's default,
+  `menu:minimize,maximize,close`, and the root's 500 ms poll redraws when
+  it changes. `CLAWDMETER_BUTTON_LAYOUT=<layout>` overrides it (reference
+  screenshots; empty = unset, `:` = no buttons).
 - Board art is bundled by `ui::Assets` and drawn with
   `img(board.illustration())`. Use `img()`, not `svg()`: `svg()` renders a
   monochrome mask, `img()` renders the SVG through resvg in full colour.

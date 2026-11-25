@@ -32,17 +32,23 @@ Nested `CLAUDE.md` files load when you read or edit a file in their folder.
 | `waveshare_amoled_18_c6` | Waveshare ESP32-C6-Touch-AMOLED-1.8 | C6 (no PSRAM), SH8601 368×448 |
 | `waveshare_amoled_206` | Waveshare ESP32-S3-Touch-AMOLED-2.06 | CO5300 410×502 watch, 32 MB flash |
 | `waveshare_lcd_154` | Waveshare ESP32-S3-Touch-LCD-1.54 | ST7789 SPI TFT 240×240, no PMU |
-| `waveshare_lcd_4` | Waveshare ESP32-S3-Touch-LCD-4 | ST7701 RGB 480×480, one button |
+| `waveshare_lcd_147` | Waveshare ESP32-S3-Touch-LCD-1.47 | JD9853 SPI TFT 320×172 landscape, no PMU, BOOT-as-PWR |
+| `waveshare_lcd_147_c6` | Waveshare ESP32-C6-Touch-LCD-1.47 | C6 (no PSRAM), JD9853 SPI TFT 320×172 landscape, BOOT (GPIO 9) as PWR |
+| `waveshare_lcd_4` | Waveshare ESP32-S3-Touch-LCD-4 | ST7701 RGB 480×480, one button; CH32V003 expander (V4.0: buzzer, opt-in battery via `BOARD_HAS_BATTERY`) or TCA9554 (earlier) |
+| `waveshare_lcd_21` | Waveshare ESP32-S3-Touch-LCD-2.1 / 2.1B | ST7701S RGB 480×480 round, CST820 touch, TCA9554, one button |
+| `waveshare_lcd_28c` | Waveshare ESP32-S3-Touch-LCD-2.8C | ST7701S RGB 480×480 round, GT911 touch, TCA9554, one button |
 | `lilygo_t4s3` | LILYGO T4-S3 | RM690B0 AMOLED 450×600, CST226SE touch, SY6970 charger |
 | `waveshare_lcd_183` | Waveshare ESP32-S3-Touch-LCD-1.83 | ST7789P SPI 240×284, CST816 touch, AXP2101 |
 | `waveshare_lcd_35_c` | Waveshare ESP32-S3-Touch-LCD-3.5-C | ST7796 SPI 320×480, FT6336 touch, AXP2101, QMI8658, ES8311 |
 | `esp32_s3_4848s040` | Guition-style ESP32-S3 4848S040 | ST7701S RGB 480×480, GT911 touch, no buttons readable |
 | `waveshare_amoled_143` | Waveshare ESP32-S3-Touch-AMOLED-1.43 | CO5300/SH8601 466×466 round, two revisions detected at boot, no PWR button |
 | `waveshare_amoled_132` | Waveshare ESP32-S3-Touch-AMOLED-1.32 | CO5300 466×466 round, CST820 touch, BOOT rotates the UI |
+| `waveshare_amoled_175c` | Waveshare ESP32-S3-Touch-AMOLED-1.75C | CO5300 466×466 round, CST9217 touch, AXP2101 |
 | `esp32_2432s024c`, `esp32_2432s024c_landscape` | Sunton ESP32-2432S024C | classic ESP32, no PSRAM, ST7789 SPI 240×320 / 320×240, CST820 touch |
 | `esp32_2432s028r`, `esp32_2432s028r_landscape` | Sunton ESP32-2432S028R (CYD) | classic ESP32, no PSRAM, ILI9341 SPI 240×320 / 320×240, resistive XPT2046 touch |
 | `m5sticks3` | M5Stack M5StickS3 | ST7789P3 SPI 135×240, no touch, M5PM1 PMIC, ES8311 chime |
 | `m5stack_fire` | M5Stack FIRE | ESP32 (classic, no S3), ILI9342C SPI 320×240, no touch, 3 buttons, IP5306 |
+| `m5stack_core2` | M5Stack Core2 (v1.0 / v1.1) | ESP32 (classic), ILI9342C SPI 320×240, FT6336U touch + 3 touch buttons, AXP192 or AXP2101 detected at boot, NS4168 I2S speaker |
 | `lilygo_t_display_s3` | LILYGO T-Display S3 (non-touch) | ST7789 i80 parallel 170×320, BOOT + a PWR-role key |
 | `waveshare_lcd_2` | Waveshare ESP32-S3-Touch-LCD-2 | ST7789T3 SPI 240×320, CST816D touch, no usable buttons |
 | `waveshare_epaper_154` | Waveshare ESP32-S3-ePaper-1.54 | SSD1681 e-paper 200×200, no touch, `minimal_ui` |
@@ -68,6 +74,11 @@ python3 tools/simgrid/simgrid.py serve               # every panel at once (docs
 python3 -m unittest discover -s tools/ci/tests        # release/manifest scripts
 ```
 
+One test: `pio test -d firmware -e native -f test_layout` (a `firmware/test/`
+folder name), `(cd desktop && cargo test -p clawdmeter-core <name>)`. The
+`native` env compiles only the Arduino-free sources listed in its
+`build_src_filter`; add a new pure source file there before testing it.
+
 A bare `pio test` runs every default env, hardware included. If `pio` isn't on
 PATH, use `~/.platformio/penv/bin/pio` (or `brew install platformio`). On
 Linux, `nix develop` gives Rust, PlatformIO and SDL2. Flashing and serial
@@ -79,18 +90,33 @@ The app writes one complete JSON object per write to RX
 (`4c41555a-…-0002`); the firmware buffer is 512 B and the app caps writes at
 500. Every write is a full update. Fields and UUIDs: `docs/protocol.md`.
 
-- Usage: `s sr w wr st acct tp pd rd t tf c ok`. `sr`/`wr` = -1 means not
-  started or unknown. `acct:"ent"` is a spend-capped account: `s` is spend %,
-  `tp/pd/rd` the billing period. `{"ok":false}` means no data.
+- Usage: `s sr w wr wf st acct tp pd rd t tf c ok`. `sr`/`wr` = -1 means not
+  started or unknown. `wf` is Fable's weekly % of its own limit, drawn
+  inside the weekly bar at half its width (`FABLE_WEEKLY_SHARE_PCT` on both
+  sides); absent = unknown, never 0. `acct:"ent"` is a spend-capped
+  account: `s` is spend %, `tp/pd/rd` the billing period. `acct:"week"` has no 5-hour limit (verified
+  Ultra, the endpoint's `five_hour: null`): `s`/`sr` stay 0/-1 for older
+  firmware, and the device shows `w`/`wr` alone as its main meter.
+  `{"ok":false}` means no data.
+- Codex (a trial): `pv:"codex"` marks a Codex account's numbers (same usage
+  keys; the device draws its Codex screen and keeps them out of Clawd's rate
+  math), `rc`/`rx` its reset credits held and each held one's expiry date
+  (≤ 10; absent = unknown). Fable is Claude's: `wf`/`fc` are never sent
+  with `pv`, and the Codex screen never draws the strip.
 - Attention: `b` (alert chime), `m` (ASCII message), `x` (clear).
 - Fast clock: `a` (activity 0–3), `e` + `es` (event `p`/`s`/`b` and its
   sequence), `n` (active sessions). `rp:1` marks the usage numbers as a replay
   (heartbeats and writes between polls): the rate math and reset detector skip
   them, but a new `es` in the same write still fires.
-- Device settings, on every data payload: `lv` (liveliness 1–5), `aa`
+- Device settings, on every data payload: `k1`/`k2`/`k3` (what the
+  primary, secondary and PWR buttons do: presets 0–6, keyboard shortcuts
+  and media keys as bit fields, `button_action.h`), `lv` (liveliness 1–5), `aa`
   (attention animation seconds: 120, 30, 10, 0 = off; only his animation,
-  not the alert) and `pm` (pace marker on the usage bars, `pace.h`). The
-  device keeps them in NVS (`clawd_prefs.cpp`) so they apply from boot.
+  not the alert), `pm` (pace marker on the usage bars, `pace.h`), `th`
+  (the palette, 11 hex colours run together, `theme_palette.h`; never any
+  other length, or older firmware drops it) and `fc` (the Fable overlay's
+  colour, 6 hex digits, `fable.h`). The device keeps them in NVS
+  (`clawd_prefs.cpp`) so they apply from boot.
 - Device → app: `0x01` on REQ (`…-0004`) when it has no data yet;
   `{"dismiss":true}` on TX (`…-0003`) when a tap or the 2-minute timeout ends
   an alert. The app clears its own alert and doesn't echo a clear back. Alerts
@@ -117,7 +143,9 @@ Adding or renaming a key means changing both sides: `clawdmeter-core`'s
   attack/strike/ring) in code, docs, commits and PRs. Never name or hint at
   what inspired it, and add no credit line for it.
 - **Clawd sprite art comes only from the official animations** in
-  `research/clawd-official/`; never draw or retouch sprite frames. The large
+  `research/clawd-official/`; never draw or retouch sprite frames. The
+  palette's Clawd colour swaps his body orange at draw time
+  (`theme_clawd_art`) and leaves the frames as published. The large
   screensaver face is the exception: it's built from LVGL shapes and may be
   embellished. Board illustrations are original SVGs, never copied photos.
 - **Check UI changes yourself** before handing over: the
@@ -161,7 +189,7 @@ Workflows in `.github/workflows/`:
 - `firmware.yml`: builds every hardware env plus merged images, runs native
   tests, captures a headless sim screenshot, runs `tools/ci` unittests.
 - `desktop.yml`: fmt, clippy and workspace tests on Linux; core tests on
-  macOS and Windows.
+  macOS and Windows, plus workspace clippy on macOS.
 - `release.yml`: runs on `v*` tags; see the `cutting-a-release` skill.
 
 ## Skills

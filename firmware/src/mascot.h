@@ -56,3 +56,4 @@ void mascot_attention(bool on, bool to_seat = true);
 bool mascot_in_attention(void);      // anything of the attention beat still on screen
 
 void mascot_set_minimal(bool on);    // still frame only, no autonomy
+void mascot_repaint(void);           // redraw the frame on screen (a new TH_CLAWD)

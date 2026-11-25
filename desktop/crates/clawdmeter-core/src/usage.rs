@@ -70,30 +70,177 @@ pub struct Spend {
     pub period: Option<SpendPeriod>,
 }
 
+/// Whether the account has a 5-hour (session) limit at all.
+///
+/// Verified Ultra (formerly Max 20x) accounts have none: the usage endpoint
+/// answers `"five_hour": null` for them, where an account with the limit and
+/// no window running gets `{"utilization": 0, "resets_at": null}`. Only the
+/// endpoint can say so: `/usage` omits the session line both when no window
+/// is running and when there is no limit, and a probe answer without the
+/// session window makes the poll ask the endpoint ([`crate::probe::poll`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionLimit {
+    /// This source can't tell: [`AccountState::record`] keeps what the last
+    /// reading said.
+    #[default]
+    Unknown,
+    /// The account has a 5-hour limit, running or not.
+    Applies,
+    /// The account has no 5-hour limit, only weekly ones.
+    Absent,
+}
+
+/// What [`UsageReading::session_pct`] measures, as the firmware's
+/// `usage_meter_kind`. Numbers of different kinds aren't comparable: a
+/// change of kind is never a rise or a reset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeterKind {
+    /// The 5-hour session (not started reads 0).
+    Session,
+    /// The week, for an account with no 5-hour limit.
+    Week,
+    /// The spend cap, for a spend-capped account.
+    Spend,
+}
+
+/// Whose usage a reading is: the account is a Claude config dir or a Codex
+/// home ([`crate::codex`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Provider {
+    /// Claude Code.
+    #[default]
+    Claude,
+    /// OpenAI Codex (a trial).
+    Codex,
+}
+
+impl Provider {
+    /// Who runs the usage endpoint, for "Usage paused by … until …".
+    pub fn company(self) -> &'static str {
+        match self {
+            Provider::Claude => "Anthropic",
+            Provider::Codex => "OpenAI",
+        }
+    }
+}
+
+/// Codex's rate-limit reset credits: one-shot resets of the usage limit that
+/// OpenAI grants and that expire after a while.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResetCredits {
+    /// Credits still held (the usage endpoint's `available_count`).
+    pub held: u32,
+    /// When each held credit expires, soonest first, those still ahead and
+    /// at most [`ResetCredits::MAX_EXPIRIES`]; empty when unknown.
+    pub expiries: Vec<DateTime<Utc>>,
+}
+
+impl ResetCredits {
+    /// The most expiries kept (and sent as `rx`).
+    pub const MAX_EXPIRIES: usize = 10;
+
+    /// When the soonest held credit expires, when known.
+    pub fn next_expiry(&self) -> Option<DateTime<Utc>> {
+        self.expiries.first().copied()
+    }
+
+    /// The credits still held at `now`: those whose expiry has passed are
+    /// gone, from the dates and the count. A reading stays shown while its
+    /// account is parked or offline, so an expiry can pass before the next
+    /// poll drops it; the device, the Overview and the tray all take this.
+    pub fn at(&self, now: DateTime<Utc>) -> ResetCredits {
+        let ahead: Vec<_> = self.expiries.iter().copied().filter(|t| *t > now).collect();
+        let gone = (self.expiries.len() - ahead.len()) as u32;
+        ResetCredits { held: self.held.saturating_sub(gone), expiries: ahead }
+    }
+}
+
+/// The model-scoped weekly limit drawn inside the weekly meter, matched by
+/// display name, ignoring case.
+pub const FABLE_MODEL: &str = "Fable";
+
+/// Fable's weekly limit as a share of the overall weekly limit, in percent
+/// (the owner's figure; the endpoint's `weekly_scoped_shares` says the same,
+/// `allowance_percent_of_weekly: 50`). The meters draw Fable's own % times
+/// this share: a used-up Fable limit fills half the weekly bar. The firmware
+/// has the same constant, `FABLE_WEEKLY_SHARE_PCT` in `firmware/src/fable.h`.
+pub const FABLE_WEEKLY_SHARE_PCT: u32 = 50;
+
+/// How close (hundredths of a point of the bar) the Fable overlay may come to
+/// the end of the weekly fill and still be drawn as reaching it. Fable usage
+/// is part of the weekly usage, but `wf` and `w` are rounded apart (week
+/// 31 %, Fable 61 %: 30.5 % of the bar), so a week spent only on Fable fills
+/// the whole fill rather than leaving a sliver of it. A fixed number of
+/// points, so it means the same on every bar width. The firmware has the
+/// same rule, `fable_reaches_fill` in `firmware/src/fable.h`.
+pub const FABLE_SNAP_HUNDREDTHS: u32 = 150;
+
+/// Whether the Fable overlay (Fable at `fable_pct` of its own limit) runs to
+/// the end of a weekly fill at `week_pct`: Fable's share of the bar is
+/// within [`FABLE_SNAP_HUNDREDTHS`] of it, or past it. Integer arithmetic,
+/// as on the device.
+pub fn fable_reaches_week(fable_pct: u32, week_pct: u32) -> bool {
+    fable_pct.min(100) * FABLE_WEEKLY_SHARE_PCT + FABLE_SNAP_HUNDREDTHS >= week_pct.min(100) * 100
+}
+
 /// Everything `/usage` told us for one account.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UsageReading {
-    /// `Current session` (5-hour window). `None` = window not started.
+    /// `Current session` (5-hour window). `None` = window not started, or no
+    /// 5-hour limit at all ([`UsageReading::no_session_limit`]).
     pub session: Option<Window>,
     /// `Current week (all models)`.
     pub week: Option<Window>,
-    /// `Current week (<model>)` lines, in order. Not sent to the device yet.
+    /// Model-scoped weekly windows (`Current week (<model>)` lines, the
+    /// endpoint's `weekly_scoped` limits), in order. Only Fable's is sent to
+    /// the device ([`UsageReading::fable`]).
     pub models: Vec<(String, Window)>,
     /// `Spend limit:` (spend-capped accounts, sent as the enterprise view).
     pub spend: Option<Spend>,
     /// The CLI says extra usage ("overages") is paying for requests.
     pub overage: bool,
+    /// Whether the account has a 5-hour limit at all.
+    pub session_limit: SessionLimit,
+    /// Whose usage this is.
+    pub provider: Provider,
+    /// Codex's reset credits, when the reading came with them.
+    pub resets: Option<ResetCredits>,
 }
 
 impl UsageReading {
     /// The device's main meter (`s`): session % used (0 when the window
-    /// hasn't started), or the spend % for a spend-capped account.
+    /// hasn't started), the spend % for a spend-capped account, or the week
+    /// % for an account with no 5-hour limit.
     pub fn session_pct(&self) -> u32 {
         match (&self.session, &self.spend) {
             (Some(w), _) => w.pct,
             (None, Some(sp)) if self.week.is_none() => sp.pct,
+            (None, _) if self.no_session_limit() => self.week.as_ref().map_or(0, |w| w.pct),
             _ => 0,
         }
+    }
+
+    /// The Fable weekly window ([`FABLE_MODEL`]), when this reading has one.
+    /// `None` means unknown or no such limit, never 0 %.
+    pub fn fable(&self) -> Option<&Window> {
+        self.models.iter().find(|(m, _)| m.eq_ignore_ascii_case(FABLE_MODEL)).map(|(_, w)| w)
+    }
+
+    /// What [`UsageReading::session_pct`] measures.
+    pub fn meter_kind(&self) -> MeterKind {
+        if self.is_spend_only() {
+            MeterKind::Spend
+        } else if self.no_session_limit() {
+            MeterKind::Week
+        } else {
+            MeterKind::Session
+        }
+    }
+
+    /// The account has no 5-hour limit (verified Ultra): only the weekly
+    /// windows apply, and the session meter is hidden.
+    pub fn no_session_limit(&self) -> bool {
+        self.session_limit == SessionLimit::Absent
     }
 
     /// True when a 5-hour window is running (a session line with a reset).
@@ -213,17 +360,31 @@ impl UsageError {
         }
     }
 
+    /// [`UsageError::user_message`] for an account of `provider`.
+    pub fn user_message_for(&self, provider: Provider, retry_in: Option<i64>) -> String {
+        if provider == Provider::Claude {
+            return self.user_message(retry_in);
+        }
+        let again = again(retry_in);
+        match self {
+            UsageError::Timeout => format!("Codex's usage took too long to answer. {again}"),
+            UsageError::BadOutput(_) => format!("Couldn't read Codex's usage response. {again}"),
+            UsageError::NotLoggedIn(_) => "Sign in to Codex for this folder (codex login).".into(),
+            UsageError::NoUsageLines(_) => format!("Codex didn't report a usage limit for this account. {again}"),
+            UsageError::TokenExpired => "Codex's sign-in has expired. Running Codex renews it.".into(),
+            UsageError::TokenRejected => {
+                format!("OpenAI refused Codex's sign-in. Running Codex or codex login renews it. {again}")
+            }
+            UsageError::Offline(_) => format!("Couldn't reach OpenAI. {again}"),
+            e => e.user_message(retry_in),
+        }
+    }
+
     /// One or two short sentences for the app's UI; `Display` keeps the
     /// details for logs. `retry_in` is how long the account's backoff has
     /// left (s), when it is backing off.
     pub fn user_message(&self, retry_in: Option<i64>) -> String {
-        let again = match retry_in.filter(|s| *s > 0) {
-            Some(s) => {
-                let m = (s + 59) / 60;
-                format!("Trying again in about {m} minute{}.", if m == 1 { "" } else { "s" })
-            }
-            None => "Retrying.".to_owned(),
-        };
+        let again = again(retry_in);
         match self {
             UsageError::Spawn(_) => {
                 "Couldn't run Claude Code. Check its installation and the claude_path setting.".into()
@@ -245,11 +406,33 @@ impl UsageError {
     }
 }
 
+/// "Trying again in about N minutes." for a backoff with `retry_in` (s)
+/// left, else "Retrying.".
+fn again(retry_in: Option<i64>) -> String {
+    match retry_in.filter(|s| *s > 0) {
+        Some(s) => {
+            let m = (s + 59) / 60;
+            format!("Trying again in about {m} minute{}.", if m == 1 { "" } else { "s" })
+        }
+        None => "Retrying.".to_owned(),
+    }
+}
+
 /// "Usage paused by Anthropic until 14:05." for a block ending at `until`
 /// (unix seconds), shown at `utc_offset` (seconds east of UTC).
 pub fn paused_message(until: i64, utc_offset: i64) -> String {
+    paused_message_by(Provider::Claude, until, utc_offset)
+}
+
+/// [`paused_message`] naming the company whose endpoint paused the account.
+pub fn paused_message_by(provider: Provider, until: i64, utc_offset: i64) -> String {
+    format!("Usage paused by {} until {}.", provider.company(), paused_clock(until, utc_offset))
+}
+
+/// The local time a pause ends, `HH:MM` (the time in [`paused_message`]).
+pub fn paused_clock(until: i64, utc_offset: i64) -> String {
     let t = DateTime::<Utc>::from_timestamp(until + utc_offset, 0).unwrap_or_default();
-    format!("Usage paused by Anthropic until {}.", t.format("%H:%M"))
+    t.format("%H:%M").to_string()
 }
 
 fn snippet(s: &str) -> String {
@@ -859,21 +1042,60 @@ pub struct AccountState {
 
 impl AccountState {
     /// Record one [`crate::probe::Polled`]: an idle-source result as
-    /// [`AccountState::record`]; a probe's own miss counts as a miss but
-    /// doesn't back off the idle source, whose rate limit it never touched.
+    /// [`AccountState::record`]. The probe never touches the idle source's
+    /// rate limit: its miss counts as a miss without backing the idle source
+    /// off, and its answer doesn't end a pause that's still running. An
+    /// endpoint miss next to a probe's reading backs off all the same.
     pub fn record_polled(&mut self, now: i64, polled: crate::probe::Polled) {
-        if polled.probe_missed {
-            self.probe_misses = self.probe_misses.saturating_add(1);
-        } else if !polled.idle && polled.result.is_ok() {
-            self.probe_misses = 0;
+        match polled.probe {
+            crate::probe::ProbeRun::Missed => self.probe_misses = self.probe_misses.saturating_add(1),
+            crate::probe::ProbeRun::Answered => self.probe_misses = 0,
+            crate::probe::ProbeRun::NotRun => {}
         }
         match polled.result {
             Err(e) if !polled.idle => {
                 self.misses = self.misses.saturating_add(1);
                 self.last_error = Some(e);
             }
+            // The endpoint stays parked until it answers itself or the pause
+            // runs out, so a probe answer without five_hour can't send the
+            // fallback into a 429 block (which the server would lengthen).
+            // Once the pause has run out a probe answer ends it, so hours on
+            // the probe don't lengthen the next one, unless the endpoint
+            // missed again in this poll: misses in a row still climb.
+            Ok(mut r) if !polled.idle => {
+                crate::probe::carry_models(&mut r, self.last.as_ref(), now);
+                self.store(now, r);
+                if !self.backoff.active(now) && polled.idle_miss.is_none() {
+                    self.backoff.on_success();
+                }
+            }
             r => self.record(now, r),
         }
+        // The probe's reading stands, but the endpoint, asked after it,
+        // missed: the miss backs the account off as the idle source's would
+        // (a 429 is kept and saved, a refused token waits on the ladder),
+        // without making the fresh reading a miss.
+        if let Some(e) = polled.idle_miss {
+            self.back_off(now, &e);
+            self.last_error = Some(e);
+        }
+    }
+
+    /// Start or extend the backoff for an idle-source miss.
+    fn back_off(&mut self, now: i64, e: &UsageError) {
+        match e {
+            // The endpoint said exactly how long: no more, no less.
+            UsageError::Throttled { retry_after_secs: Some(s) } => self.backoff.park_exact(now, *s),
+            // A refused token is retried on the ladder too, not every poll.
+            _ if e.is_transient() || *e == UsageError::TokenRejected => {
+                self.backoff.on_miss(now, e.retry_after());
+            }
+            _ => return,
+        }
+        // Only a 429's pause is Anthropic's: saved for a restart and shown
+        // as a pause until it runs out, even after a probe has answered.
+        self.backoff.set_throttled(e.is_throttle());
     }
 
     /// Record a poll outcome. A transient miss starts or extends the
@@ -881,33 +1103,47 @@ impl AccountState {
     pub fn record(&mut self, now: i64, result: Result<UsageReading, UsageError>) {
         match result {
             Ok(r) => {
-                self.last = Some(r);
-                self.last_ok_at = Some(now);
-                self.read_started_at = Some(self.last_attempt_at.unwrap_or(now).min(now));
-                let anchor = crate::probe::anchor(self);
-                self.first_activity = self.first_activity.filter(|t| anchor.is_some_and(|a| *t > a));
-                if self.first_activity.is_none() {
-                    self.probe_misses = 0;
-                }
-                self.misses = 0;
-                self.last_error = None;
+                self.store(now, r);
                 self.backoff.on_success();
             }
             Err(e) => {
                 self.misses = self.misses.saturating_add(1);
-                match e {
-                    // The endpoint said exactly how long: no more, no less.
-                    UsageError::Throttled { retry_after_secs: Some(s) } => self.backoff.park_exact(now, s),
-                    // A refused token is retried on the ladder too, not
-                    // every poll.
-                    _ if e.is_transient() || e == UsageError::TokenRejected => {
-                        self.backoff.on_miss(now, e.retry_after());
-                    }
-                    _ => {}
-                }
+                self.back_off(now, &e);
                 self.last_error = Some(e);
             }
         }
+    }
+
+    /// Keep a good reading: everything [`AccountState::record`] does with
+    /// one except ending the backoff.
+    fn store(&mut self, now: i64, mut r: UsageReading) {
+        // A session window is the limit, whatever the source (the parsers
+        // leave this to here). Without one, a source that can't tell keeps
+        // the last answer; only a reading with a week can be weekly-only (a
+        // spend-capped one keeps its own meter).
+        let running =
+            |l: &UsageReading| l.session.as_ref().and_then(|w| w.resets_at).is_some_and(|t| t.timestamp() > now);
+        if r.session.is_some() {
+            r.session_limit = SessionLimit::Applies;
+        } else if r.session_limit == SessionLimit::Unknown && r.week.is_some() {
+            r.session_limit = self.last.as_ref().map_or(SessionLimit::Unknown, |l| l.session_limit);
+        } else if r.session_limit == SessionLimit::Absent && self.last.as_ref().is_some_and(running) {
+            // "No 5-hour limit" in the middle of a running window waits for
+            // the next answer: this reading has no window, so a second one
+            // says it, and one odd answer doesn't drop the session meter or
+            // stop the probe. Verifying an account costs one poll.
+            r.session_limit = SessionLimit::Applies;
+        }
+        self.last = Some(r);
+        self.last_ok_at = Some(now);
+        self.read_started_at = Some(self.last_attempt_at.unwrap_or(now).min(now));
+        let anchor = crate::probe::anchor(self);
+        self.first_activity = self.first_activity.filter(|t| anchor.is_some_and(|a| *t > a));
+        if self.first_activity.is_none() {
+            self.probe_misses = 0;
+        }
+        self.misses = 0;
+        self.last_error = None;
     }
 
     /// Three misses in a row (or never read at all after three tries), or a
@@ -935,6 +1171,35 @@ mod tests {
 
     fn at(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn reset_credits_past_their_expiry_are_gone() {
+        let c = ResetCredits {
+            held: 3,
+            expiries: vec![at("2026-11-30T19:56:00Z"), at("2026-12-01T12:00:00Z"), at("2026-12-12T12:00:00Z")],
+        };
+        assert_eq!(c.at(at("2026-11-16T17:00:00Z")), c, "all ahead");
+        let dec1 = c.at(at("2026-12-01T00:00:00Z"));
+        assert_eq!((dec1.held, dec1.expiries.len(), dec1.next_expiry()), (2, 2, Some(at("2026-12-01T12:00:00Z"))));
+        assert_eq!(c.at(at("2026-11-30T19:56:00Z")).held, 2, "gone at its expiry");
+        assert_eq!(c.at(at("2027-01-01T00:00:00Z")), ResetCredits { held: 0, expiries: vec![] });
+        // Undated credits (more held than dates known) stay counted.
+        let more = ResetCredits { held: 12, ..c.clone() };
+        assert_eq!(more.at(at("2026-12-01T00:00:00Z")).held, 11);
+        let undated = ResetCredits { held: 2, expiries: vec![] };
+        assert_eq!(undated.at(at("2027-01-01T00:00:00Z")), undated);
+    }
+
+    #[test]
+    fn fable_snaps_to_the_fill_within_a_point_and_a_half() {
+        // (week, Fable): Fable's half within 1.5 points of the week, or past it.
+        for (w, wf) in [(31, 61), (30, 60), (30, 58), (40, 78), (49, 96), (7, 12), (40, 77), (50, 250), (3, 50)] {
+            assert!(fable_reaches_week(wf, w), "{w}/{wf}");
+        }
+        for (w, wf) in [(40, 76), (40, 70), (60, 40), (100, 100)] {
+            assert!(!fable_reaches_week(wf, w), "{w}/{wf}");
+        }
     }
 
     #[cfg(unix)]
@@ -1182,6 +1447,75 @@ mod tests {
         std::fs::write(dbg.join("latest"), "2026-10-13T15:40:00Z [DEBUG] fine\n").unwrap();
         assert_eq!(rate_limit_from_debug_log(&root, now), None, "latest wins over mtimes");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_source_that_cant_tell_keeps_the_session_limit() {
+        let now = at("2026-10-13T12:00:00Z");
+        let week = "Current week (all models): 38% used · resets Oct 14, 2:59pm (UTC)";
+        let ultra = UsageReading {
+            week: Some(Window { pct: 30, resets_at: None }),
+            session_limit: SessionLimit::Absent,
+            ..Default::default()
+        };
+        let mut st = AccountState::default();
+        st.record(1000, Ok(ultra));
+        // `/usage` with no session line (the token had expired): still none.
+        let text = parse_usage_text(week, now).unwrap();
+        assert_eq!(text.session_limit, SessionLimit::Unknown);
+        st.record(2000, Ok(text));
+        let last = st.last.as_ref().unwrap();
+        assert!(last.no_session_limit());
+        assert_eq!(last.session_pct(), 38, "the new week %");
+        // A session line says the limit is back.
+        let both = parse_usage_text(&format!("Current session: 5% used · resets Oct 13, 3pm (UTC)\n{week}"), now);
+        st.record(3000, both);
+        assert_eq!(st.last.as_ref().unwrap().session_limit, SessionLimit::Applies);
+        assert_eq!(st.last.as_ref().unwrap().session_pct(), 5);
+        // A spend-capped reading after it (another login in that folder)
+        // keeps its own meter.
+        st.last.as_mut().unwrap().session_limit = SessionLimit::Absent;
+        let spend =
+            UsageReading { spend: Some(Spend { pct: 21, resets_at: None, period: None }), ..Default::default() };
+        st.record(4000, Ok(spend));
+        let last = st.last.as_ref().unwrap();
+        assert!(!last.no_session_limit() && last.is_spend_only());
+        assert_eq!(last.session_pct(), 21);
+        // With no reading before, unknown stays unknown: the usual session meter.
+        let mut fresh = AccountState::default();
+        fresh.record(1000, parse_usage_text(week, now));
+        assert!(!fresh.last.as_ref().unwrap().no_session_limit());
+        assert_eq!(fresh.last.as_ref().unwrap().session_pct(), 0);
+    }
+
+    // One "no 5-hour limit" answer while the last reading's window still
+    // runs waits for the next answer; with no window running it counts at
+    // once.
+    #[test]
+    fn no_limit_in_a_running_window_waits_for_the_next_answer() {
+        let pro = UsageReading {
+            session: Some(Window { pct: 30, resets_at: DateTime::from_timestamp(5000, 0) }),
+            week: Some(Window { pct: 40, resets_at: None }),
+            ..Default::default()
+        };
+        let ultra = || UsageReading {
+            week: Some(Window { pct: 48, resets_at: None }),
+            session_limit: SessionLimit::Absent,
+            ..Default::default()
+        };
+        let mut st = AccountState::default();
+        st.record(1000, Ok(pro.clone()));
+        st.record(2000, Ok(ultra()));
+        let last = st.last.as_ref().unwrap();
+        assert!(!last.no_session_limit() && last.session.is_none(), "{last:?}");
+        assert_eq!(last.session_pct(), 0, "not started meanwhile");
+        st.record(2600, Ok(ultra()));
+        assert!(st.last.as_ref().unwrap().no_session_limit(), "the next answer says it");
+        // The window over: at once.
+        let mut st = AccountState::default();
+        st.record(1000, Ok(pro));
+        st.record(6000, Ok(ultra()));
+        assert!(st.last.as_ref().unwrap().no_session_limit());
     }
 
     #[test]

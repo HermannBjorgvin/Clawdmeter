@@ -70,4 +70,3 @@
 #define BOARD_HAS_IMU              1    // present + initialized, but rotation off
 #define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      1
-#define BOARD_HAS_SOUND            1

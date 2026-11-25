@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="114" height="124" viewBox="-3 -3 114 124">
+  <title>Waveshare ESP32-S3-Touch-AMOLED-1.75C</title>
+  <ellipse cx="53" cy="113.7" rx="48.5" ry="4.5" fill="#000" opacity=".14"/>
+  <g transform="matrix(2 0.2 0 2.1 0 0)">
+    <circle cx="28" cy="23.2" r="25.45" fill="#252729"/>
+    <path d="M52.4 15.4l1.5-.3.6 3.8-1.5.3zm1.1 9.5 1.5-.3.2 4.5-1.5.3z" fill="#54585b" stroke="#292b2d" stroke-width=".4"/>
+    <circle cx="25" cy="25" r="25.45" fill="#4a4e50"/>
+    <circle cx="25" cy="25" r="24.8" fill="#9a9d9e"/>
+    <circle cx="25" cy="25" r="23.6" fill="#202223"/>
+    <circle cx="25" cy="25" r="22.2" fill="#000"/>
+    <circle cx="25" cy="4.3" r=".65" fill="#454a4d"/>
+    <g transform="translate(18.36 14.88) scale(1.349) translate(-20.08 -15.5)">
+      <path d="M21.72 15.5h6.57v0.82h-6.57zM21.72 16.32h0.82v0.82h-0.82zM23.36 16.32h3.28v0.82h-3.28zM27.46 16.32h0.82v0.82h-0.82zM20.08 17.14h9.85v0.82h-9.85zM20.08 17.96h9.85v0.82h-9.85zM21.72 18.78h6.57v0.82h-6.57zM21.72 19.6h6.57v0.82h-6.57zM21.72 20.42h0.82v0.82h-0.82zM23.36 20.42h0.82v0.82h-0.82zM25.82 20.42h0.82v0.82h-0.82zM27.46 20.42h0.82v0.82h-0.82zM21.72 21.24h0.82v0.82h-0.82zM23.36 21.24h0.82v0.82h-0.82zM25.82 21.24h0.82v0.82h-0.82zM27.46 21.24h0.82v0.82h-0.82z" fill="#d97757"/>
+      <path d="M22.54 16.32h0.82v0.82h-0.82zM26.64 16.32h0.82v0.82h-0.82z" fill="#141413"/>
+    </g>
+    <rect x="15.51" y="28.8" width="18.98" height="1.11" rx=".55" fill="#2a2a28"/>
+    <rect x="15.51" y="28.8" width="6.45" height="1.11" rx=".55" fill="#788c5d"/>
+    <rect x="15.51" y="32.34" width="18.98" height="1.11" rx=".55" fill="#2a2a28"/>
+    <rect x="15.51" y="32.34" width="11.77" height="1.11" rx=".55" fill="#d97757"/>
+  </g>
+</svg>

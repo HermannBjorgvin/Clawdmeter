@@ -12,6 +12,8 @@ unsigned long millis(void);
 unsigned long micros(void);
 void delay(unsigned long ms);
 
+#define ARDUINO_ISR_FLAG 0   // esp32-hal.h: the flags attachInterrupt() installs with
+
 class SimSerial {
 public:
     void begin(unsigned long baud) { (void)baud; }

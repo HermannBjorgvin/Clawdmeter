@@ -22,7 +22,7 @@ struct ClawdAnim {
     uint8_t         ox, oy;            // crop origin on the 55x37 art stage
     uint16_t        frame_count;
     uint16_t        loop_start, loop_end;
-    const uint16_t* palette;           // RGB565, index 0 = background
+    const uint16_t* palette;           // RGB565, index 0 = background; Clawd in TH_CLAWD
     const uint8_t*  frames;            // frame_count x (w*h) palette indices
     const uint16_t* holds;             // ms per frame
 };
@@ -31,6 +31,10 @@ int              clawd_anim_count(void);
 const ClawdAnim* clawd_anim_at(int index);          // NULL when out of range
 const ClawdAnim* clawd_anim(const char* name);      // NULL when not found
 int              clawd_anim_index(const char* name); // -1 when not found
+// Repaint the palettes in the live TH_CLAWD (theme_palette.h) after a new
+// palette; whoever has a frame on screen redraws it (mascot_repaint,
+// performer_repaint).
+void             clawd_anim_recolor(void);
 
 static inline const uint8_t* clawd_frame(const ClawdAnim* a, uint16_t frame) {
     return &a->frames[(uint32_t)frame * a->w * a->h];

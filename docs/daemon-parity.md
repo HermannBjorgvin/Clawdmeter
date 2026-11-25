@@ -45,14 +45,14 @@ token is readable.
 | Model weekly lines | — | Parsed into `UsageReading::models`, not sent | The device has two meters. |
 | Reset countdowns (`sr`, `wr`) | Minutes to the header epoch, rounded, clamped at 0; 0 when the header is missing | Minutes to the parsed reset (`payload.rs` `minutes_until`), clamped at 0; **-1** when there is no window or no reset | Firmware reads `sr < 0` as "window not started" (the director's screensaver gate). Reset text with a year (`Jan 2, 2027, 9:59pm`) is parsed; the CLI prints one only across a year boundary. |
 | Status (`st`) | Header value: `5h-status` (Pro) or `unified-status` (Enterprise): `allowed` / `allowed_warning` / `rejected`; `unknown` when missing | `allowed`, `limited` (session, week or spend cap at 100 % and no extra usage), `overage` (the CLI says "using your overages") | The firmware stores `st` and never shows it. |
-| Account kind (`acct`) | `pro` when the 5h header exists, else `ent` | `pro`, or `ent` when the account only has a `Spend limit:` line (`UsageReading::is_spend_only`) | |
+| Account kind (`acct`) | `pro` when the 5h header exists, else `ent` | `pro`; `ent` when the account only has a `Spend limit:` line (`UsageReading::is_spend_only`); `week` when the usage endpoint says the account has no 5-hour limit (`UsageReading::no_session_limit`) | The bash/Python daemons had no `week`. |
 | Enterprise spend % | `round(overage-utilization × 100)` as `s` | `Spend limit: $X / $Y spent <period> (N%)` or `Spend limit: N% used` → `s` | Format taken from the `/usage` command in Claude Code 2.1.296. Spend amounts aren't sent. |
 | Billing period (`tp`, `pd`, `rd`) | Period = one calendar month before the overage reset (day clamped), host-local; `tp` clamped 0–100; `{tp:0, pd:30, rd:""}` on a missing or garbage reset | `payload::billing_period`: same rule, plus `today` = 1 day and `this week` = 7 days when the line names the period | Ported cases: month clamping, January rollover, before/after clamps, host-local date. |
 | Seat-based Enterprise / Team | Same 5h/7d headers as Pro | Same `Current …` lines | Week-only output (no session line) works: `sr = -1`. |
 | Account with no limits in `/usage` | Whatever the headers said | A miss (`UsageError::NoUsageLines`, or `RateLimited` when Claude Code's debug log shows a 429); the account backs off; the device shows stale after three misses or once the last good reading is over 20 min old | This is what a rate-limited usage endpoint looks like: Claude Code drops the `Current …` lines and remembers the 429 for ~600 s per token. Missing usage stays missing. |
 | Logged out / expired token | M, W: `{"ok":false}` when every dir fails auth · L: logged, nothing sent | `{"ok":false}` once per poll when every account fails with a login or not-a-subscription error (`engine.rs`) | |
-| Transient failure (network, 429, 5xx) | M, W: silent retry · L: logged | Per-account backoff (`clawdmeter-core/src/backoff.rs`): 10 min after a miss, then 20, then 30 (cap), reset on success; device refresh requests and "Refresh now" don't bypass it. The account keeps its last values (and stays shown) and goes stale after three misses in a row, or once its last good reading is over 20 min old. Accounts shows "Retrying" with the wait | Misses never feed the rate math. The 10-minute floor is Claude Code's own 429 memory; a longer "not asking again for Ns" from `<config dir>/debug/latest` wins. A missing CLI or a login problem doesn't back off; it retries after 2 min. |
-| Several accounts (`config_dirs`) | L, M; W: one account | Every listed dir is polled; the plan whose session % rose most recently is shown, else the highest (`selector.rs`) | Ported tests: startup pick, switch on rise, sticky, reset is not activity, larger rise wins. |
+| Transient failure (network, 429, 5xx) | M, W: silent retry · L: logged | Per-account backoff (`clawdmeter-core/src/backoff.rs`): 10 min after a miss, then 20, then 30 (cap), reset when the endpoint (or `/usage`) answers, not by a probe answer; device refresh requests and "Refresh now" don't bypass it. The account keeps its last values (and stays shown) and goes stale after three misses in a row, or once its last good reading is over 20 min old. Accounts shows "Retrying" with the wait | Misses never feed the rate math. The 10-minute floor is Claude Code's own 429 memory; a longer "not asking again for Ns" from `<config dir>/debug/latest` wins. A missing CLI or a login problem doesn't back off; it retries after 2 min. |
+| Several accounts (`config_dirs`) | L, M; W: one account | Every listed dir is polled; the plan whose main meter % (session, or the week / spend on accounts measured that way) rose most recently is shown, else the highest (`selector.rs`), unless one is picked on the Overview or in the tray (`device_account`) | Ported tests: startup pick, switch on rise, sticky, reset is not activity, larger rise wins. |
 | Default account | `~/.claude` (W: `CLAUDE_CONFIG_DIR` when set) | `~/.claude`, or `$CLAUDE_CONFIG_DIR` when the config has no `config_dirs` (`Settings::apply_env_config_dir`) | Only the daemon applies the env default; the settings window shows and saves the file's value. |
 
 ## Config file
@@ -61,8 +61,8 @@ Config lives at `~/.config/clawdmeter/config` on Linux and
 macOS, `%LOCALAPPDATA%\Clawdmeter\config` on Windows; `key = value`, `#`
 comments, last key wins, case-insensitive keys (`clawdmeter-core/src/config.rs`).
 The app uses only the current state folder and ignores the legacy directory.
-The app re-reads config every 5 s and the settings window edits it in place,
-keeping comments and unknown keys.
+The app re-reads config every 5 s, and at once when the settings window
+saves it; the window edits it in place, keeping comments and unknown keys.
 
 | Key | Old daemons | Rust | Notes |
 |---|---|---|---|
@@ -72,7 +72,7 @@ keeping comments and unknown keys.
 | `reset_chime` | L, M, W (as `chime`) | Yes (`c:1`; `chime` is read when `reset_chime` is absent) | |
 | `alert_chime` | L, M (as `beep`) | Yes (`b:1` with an alert; `beep` is read when `alert_chime` is absent) | |
 | `clock` (`off`/`auto`/`12`/`24`) | L, M, W | Yes (`t`, `tf`) | `auto`: macOS `AppleICUForce24HourTime`/`12HourTime`, else `locale -k LC_TIME`; Windows `iTime` (`clawdmeter-core/src/platform.rs`). |
-| `desktop_chime`, `alert_on`, `release_repo`, `claude_path`, `update_check`, `onboarding_done` | — | New | The ding on this computer, which alert kinds get through, flasher source, CLI location override, daily firmware check, setup-wizard completion. |
+| `desktop_chime`, `alert_on`, `release_repo`, `claude_path`, `update_check`, `onboarding_done` | — | New | The ding on this computer, which alert kinds get through, flasher source, CLI location override, firmware and app update check (every 6 hours), setup-wizard completion. |
 
 ## Environment
 
@@ -143,7 +143,7 @@ keeping comments and unknown keys.
 
 | Behaviour | Old daemons | Rust | Notes |
 |---|---|---|---|
-| Tray | W only: green/amber/red bubble, "Connected · last update HH:MM", Start at login, Quit | Every OS: status, account and both meters, Refresh usage, Mute chimes, Open Clawdmeter, Flash firmware (Update firmware when a newer release exists), Settings, Quit (`clawdmeter-app/src/tray/`) | |
+| Tray | W only: green/amber/red bubble, "Connected · last update HH:MM", Start at login, Quit | Every OS: status, account and both meters with their reset countdowns. Linux/Windows: native items (with two or more accounts, a Show on device submenu), then Refresh usage, Chime on this computer (the Overview's switch), Open Clawdmeter, Settings, Update Clawdmeter or Update firmware (while one is behind the latest release), Quit. macOS: one drawn panel, as on the device, with a reload button and a footer (Open Clawdmeter; update, computer-chime switch, Settings and Quit icons), a native Show on device submenu between its body and its footer with two or more accounts, and optionally the higher % beside the icon (`clawdmeter-app/src/tray/`) | |
 | Error notification | W: toast when entering the error state | None; the tray state and status window show it | |
 | Daemon thread crash | W: supervised, restarted with backoff | Release builds abort on panic; the LaunchAgent and `clawdmeter.service` restart it, the XDG entry and Run value don't | |
 | Log file | L: journal · M: `~/Library/Logs/claude-usage-daemon.{out,err}.log` · W: `%LOCALAPPDATA%\Clawdmeter\daemon.log`, 512 KB × 3 | Tray: `~/.config/clawdmeter/daemon.log` (previous run kept as `.log.1`) · `--daemon`: stderr (journal) · LaunchAgent: `~/Library/Logs/clawdmeter.log` | No size cap within one run. |

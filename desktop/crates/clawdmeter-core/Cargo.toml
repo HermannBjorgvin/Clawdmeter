@@ -16,3 +16,10 @@ log.workspace = true
 unicode-normalization.workspace = true
 ureq.workspace = true
 sha2.workspace = true
+
+# The OS's light/dark mode for the System theme (`platform::AppearanceWatch`).
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = "0.9"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_System_Registry"] }

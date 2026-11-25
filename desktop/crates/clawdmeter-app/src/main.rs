@@ -76,7 +76,9 @@ fn main() {
             let name = opt("--tab").or_else(|| args.get(1).filter(|a| !a.starts_with("--")).cloned());
             match name.as_deref().map(Page::parse) {
                 Some(None) => {
-                    eprintln!("--window takes one of: overview, device, flash, accounts, hooks, settings, setup");
+                    eprintln!(
+                        "--window takes one of: overview, device, flash, accounts, hooks, settings, update, setup"
+                    );
                     2
                 }
                 page => ui::run(page.flatten(), paths, ui::WindowArgs { manifest: opt("--manifest").map(Into::into) }),

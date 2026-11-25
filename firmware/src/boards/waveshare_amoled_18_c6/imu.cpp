@@ -2,7 +2,7 @@
 #include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
-#include <SensorQMI8658.hpp>
+#include <ImuDrv.hpp>
 
 // QMI8658 is populated but rotation is disabled (BOARD_HAS_ROTATION=0, and
 // the C6 has no PSRAM headroom for the rotation strip). We still initialize
@@ -11,7 +11,9 @@
 static SensorQMI8658 imu;
 
 void imu_hal_init(void) {
-    if (!imu.begin(Wire, QMI8658_L_SLAVE_ADDRESS, IIC_SDA, IIC_SCL)) {
+    // No pins: board_init() already started Wire, and SensorLib would
+    // call Wire.setPins() on the running bus (an [E] log line).
+    if (!imu.begin(Wire, QMI8658_L_SLAVE_ADDRESS)) {
         Serial.println("QMI8658 init failed");
         return;
     }

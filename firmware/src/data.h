@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "theme_palette.h"
 
 // Plain data, no Arduino types, so payload parsing and the signal logic can be
 // unit-tested on the host (test/test_signals).
@@ -9,12 +10,25 @@ struct UsageData {
     int session_reset_mins;  // minutes until reset
     float weekly_pct;        // 7-day utilization (Pro/Max only; 0 for Enterprise)
     int weekly_reset_mins;   // minutes until weekly reset (Pro/Max only)
+    int16_t fable_pct;       // `wf` Fable's weekly % of its own limit (0-999); -1 = absent
+                             //   (unknown or no Fable limit): no overlay (fable.h)
     char status[16];         // "allowed", "limited", etc.
     bool chime;              // play the session-reset chime; false unless the app opts in
     bool beep;               // Claude needs attention: play the chime once for this packet
     char alert_msg[128];     // attention message for the status line; empty = no alert
     bool alert_clear;        // the session moved on: end the alert
     bool enterprise;         // true = Enterprise spending-limit account
+    bool weekly_only;        // true = no 5-hour limit (acct "week", verified Ultra):
+                             //   session_pct / session_reset_mins carry the week,
+                             //   copied from w / wr by payload_parse
+    bool codex;              // `pv` "codex": an OpenAI Codex account (a trial). The
+                             //   numbers are drawn on the Codex screen (white bars,
+                             //   "Codex" pill) and never reach Clawd's rate math
+    int16_t resets_held;     // `rc` Codex reset credits held (0-999); -1 = absent:
+                             //   no Resets card
+    int8_t  resets_expiry_n; // `rx` how many expiry dates came (0-10); -1 = absent
+    char    resets_expiry[10][8]; // `rx` each held credit's expiry, host-local
+                             //   ("Dec 1"), soonest first
     int time_pct;            // 0-100: fraction of billing period elapsed (Enterprise)
     int period_days;         // total billing period length in days (Enterprise)
     char reset_date[12];     // formatted reset date e.g. "Jul 1" (Enterprise)
@@ -35,6 +49,19 @@ struct UsageData {
     int8_t   liveliness;     // `lv` 1-5 (clamped); -1 = absent (keep the saved level)
     int16_t  attn_anim_s;    // `aa` attention animation, seconds 0-120 (0 = off); -1 = absent
     int8_t   pace_marker;    // `pm` 1 = pace marker on the usage bars, 0 = off; -1 = absent
+    int32_t  btn_primary;    // `k1` PRIMARY button action (button_action.h); -1 = absent
+    int32_t  btn_secondary;  // `k2` the same for SECONDARY; -1 = absent
+    int32_t  btn_pwr;        // `k3` the same for a PWR short press; -1 = absent
+    bool     has_theme;      // `th` present and well-formed
+    uint32_t theme[TH_COUNT];// `th` the palette, 0xRRGGBB per token (theme_palette.h)
+    bool     has_fable_color;// `fc` present and well-formed
+    uint32_t fable_color;    // `fc` the Fable overlay's colour, 0xRRGGBB (fable.h)
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
 };
+
+// What session_pct measures: 0 the 5-hour session, 1 the week (weekly_only),
+// 2 the spend (enterprise). A change of kind is not a reset or a rise.
+static inline int usage_meter_kind(const UsageData* d) {
+    return d->enterprise ? 2 : d->weekly_only ? 1 : 0;
+}

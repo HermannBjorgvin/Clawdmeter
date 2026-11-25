@@ -12,13 +12,23 @@ static const char* const PAIR_TEXT_CLEARED[3] = { "Ready to pair", "choose Clawd
 static const char* const PAIR_TEXT_HOLDING    = "keep holding...";
 
 // Card pills: session, weekly, then the spend-capped account's spending and
-// period. The short set is for panels too narrow for the long one.
-static const char* const PILL_TEXT[4]       = { "Session", "Weekly", "Spending", "Period" };
-static const char* const PILL_TEXT_SHORT[4] = { "5h", "7d", "Spend", "Period" };
+// period, then a Codex account's main meter. The short set is for panels
+// too narrow for the long one.
+static const char* const PILL_TEXT[5]       = { "Session", "Weekly", "Spending", "Period", "Codex" };
+static const char* const PILL_TEXT_SHORT[5] = { "5h", "7d", "Spend", "Period", "Codex" };
 
 // Widest text a card's reset line shows: the weekly window's last day, the
 // spend-capped account's caption, and its period line (its widest pace word and date).
 static const char* const RESET_TEXT_WIDEST[] = { "Resets in 23h 59m", "Resets in 6d 23h", "of spending limit" };
+// Codex Resets card (layout.cpp fit_resets). The title steps down to fit
+// beside the count pill; chips hold a date ("Sep 30") or "+N more", sized
+// for these widest ones (a two-digit N that doesn't fit drops " more"); the
+// line in the first chip row's place steps down to the first that fits.
+static const char* const RESETS_TITLE[]    = { "Resets expire", "Resets", "" };
+#define RESETS_COUNT_WIDEST  "99"
+static const char* const RESETS_CHIP_WIDEST[] = { "May 31", "Sep 30", "Nov 30", "Dec 31", "+9 more" };
+static const char* const RESETS_EMPTY[]    = { "No resets available", "None available", "None" };
+static const char* const RESETS_UNDATED[]  = { "Expiry dates unknown", "Dates unknown", "---" };
 #define PERIOD_TEXT_WIDEST "Under pace - Resets May 30"
 #define PERIOD_TEXT_SHORT_WIDEST "Resets May 30"   // where no size fits the pace word too
 

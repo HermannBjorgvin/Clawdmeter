@@ -37,9 +37,16 @@ frames.
 | `--status off` | The daemon not running |
 | `--accounts retrying` | A second, rate-limited account |
 | `--refresh wait\|checking` | Overview refresh button waiting out the gap / mid-check |
-| `--session idle` | Session not started |
+| `--session idle\|week` | Session not started / no 5-hour limit (weekly meter only) |
+| `--codex week\|5h\|listed` | A Codex account (`~/.codex`): shown weekly-only with reset credits / shown with a 5-hour window / listed while Claude is shown |
+| `--account-menu` | The Overview's account drop-down open (needs two or more accounts, e.g. `--codex week`) |
+| `--resets N` | How many reset credits the `--codex week` account holds (default 3; past ten, the rest have no date) |
+| `--fable PCT` | A Fable weekly window at PCT % of its limit: the purple strip in the Overview's weekly meter (half the bar at 100) |
+| `--week PCT` | The weekly meter at PCT % (default 62) |
 | `--hooks-preview`, `--shop`, `--advanced` | Hooks file preview, board shop links, advanced settings |
-| `--height PX` | A taller window (default 640) so a long page fits one capture |
+| `--buttons custom`, `--edit primary\|secondary\|pwr`, `--record` | A held shortcut on the secondary button and a media key on PWR; a button's editor open; it listening for a shortcut |
+| `--firmware-skipped` | The fake firmware release skipped, as the Overview's "Skip this update" does: no Overview nudge or Flash badge, the Device page still offers it |
+| `--width PX`, `--height PX` | A wider or narrower window (default 880, at least 720), or a taller one (default 640) so a long page fits one capture |
 
 `demo.rs`'s header comment is the source of truth if these drift.
 
@@ -48,9 +55,21 @@ frames.
 `desktop/docs/screenshots/` is made with this script. File names map to the
 flags (`setup-2-board-shop.png` = `--setup board --shop`,
 `overview-refresh-wait.png` = `--refresh wait`, …). `device.png` is taken
-with `--height 1160` so the whole settings list shows.
+with `--height 1300` so the settings down to Colors show.
 `overview-gnome-header.png` is the client-drawn Adwaita header bar: run with
-`CLAWDMETER_DECORATIONS=client` in the environment.
+`CLAWDMETER_DECORATIONS=client CLAWDMETER_BUTTON_LAYOUT=:minimize,maximize,close`
+in the environment. Without the second variable the buttons follow the
+capturing desktop's GNOME `button-layout`.
+
+## README images
+
+The README's app screenshots show a release build: build the demo with
+`CLAWDMETER_VERSION` set to the latest tag (the footer shows it, and the
+sidebar's "Update available" pill only appears for a release older than the
+demo's fake one, v2.6.0), then:
+
+- `docs/images/app-overview.png`: `--page overview --app-update download --firmware-skipped`
+- `docs/images/app-device.png`: `--page device --app-update download --firmware-skipped`
 
 Don't add `observe_window_appearance` while working on the UI: on X11, GPUI
 0.2.2 redraws inside the portal callback and panics. The root polls the

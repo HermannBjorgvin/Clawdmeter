@@ -86,7 +86,7 @@ static void apply_rotation(uint8_t q) {
 // new orientation, then ramp brightness back up over ~125 ms (same feel as
 // the S3 port).
 void display_hal_tick(void) {
-    static uint8_t  last_rotation = 0;
+    static uint8_t  last_rotation = 3;   // init writes MADCTL 0x30, quadrant 3
     static uint8_t  ramp_step = 0;     // 0=idle, 1..4=ramping
     static uint32_t ramp_last = 0;
 

@@ -3,7 +3,8 @@
 #
 #   capture.sh OUT.png [demo flags...]
 #   capture.sh /tmp/device.png --page device
-#   CLAWDMETER_DECORATIONS=client capture.sh /tmp/gnome.png --page overview
+#   CLAWDMETER_DECORATIONS=client CLAWDMETER_BUTTON_LAYOUT=:minimize,maximize,close \
+#     capture.sh /tmp/gnome.png --page overview
 #
 # Runs the demo example from a throwaway HOME (with the binary copied into it,
 # so hook commands in the Hooks preview show no personal paths), waits for the

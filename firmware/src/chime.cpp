@@ -7,8 +7,8 @@
 #include <soc/soc_caps.h>
 #include "ding.h"
 
-// Shared ES8311 chime engine. See chime.h. Every ES8311 board shares one copy
-// of the codec setup and the non-blocking playback task.
+// Shared chime engine. See chime.h. Every board with sound shares one copy of
+// the codec setup (ES8311 boards) and the non-blocking playback task.
 //
 // The ding is rendered once into a mono buffer and streamed from there, so
 // nothing is computed while the DMA waits: computing it live starved the DMA
@@ -24,9 +24,11 @@
 // resort for chips with an FPU; without one (the C6) it can't keep up, so a
 // ding with no buffer is skipped and logged.
 //
-// The codec's DAC is muted between dings on every board: an always-on amp
-// (amp_enable null) doesn't hiss, and a switched amp never powers up or down
-// into a live signal, which pops.
+// A codec board mutes its DAC between dings: an always-on amp (amp_enable
+// null) doesn't hiss, and a switched amp never powers up or down into a live
+// signal, which pops. A board with no codec (es8311_addr 0, a plain I2S amp)
+// scales the samples by its volume instead; with no amp_enable either, its
+// amp stays on and the I2S driver's auto-clear feeds it silence between dings.
 
 // Share of the ding's own level (it peaks just under full scale): headroom
 // for the codec and the small amp. ChimeConfig.volume sets the loudness.
@@ -52,9 +54,12 @@ static volatile bool playing = false;
 static es8311_handle_t es    = nullptr;
 
 static float    gain       = DING_GAIN;
+static float    sample_vol = 1.0f;      // volume applied to the samples (no codec only)
 static int16_t* pcm        = nullptr;   // mono samples of the rendered ding
 static uint32_t pcm_frames = 0;         // how many fit (may be < ding_frames)
 static float    pcm_gain   = -1.0f;     // gain `pcm` was rendered at
+// The level the ding renders at: its gain, times the volume when there's no codec.
+static float level(void) { return gain * sample_vol; }
 static volatile bool render_started = false;
 static volatile bool rendering = false;  // the background render is running
 static volatile bool pending   = false;  // play when the render finishes
@@ -104,17 +109,17 @@ static bool render(void) {
     if (!pcm && !allocate()) return false;
     const uint32_t rate = (uint32_t)cfg.sample_rate, full = ding_frames(rate), frames = pcm_frames;
     const uint32_t fade = frames < full ? (uint32_t)(CHIME_FADE_S * rate) : 0;
-    const float g = gain;                       // chime_tune may change it meanwhile
+    const float g = level();                    // chime_tune may change it meanwhile
     const uint32_t t0 = millis();
     for (uint32_t n = 0; n < frames; n++) {
-        float s = (float)ding_sample(n, rate, g);
+        float s = (float)ding_sample_style(n, rate, g, (DingStyle)cfg.style);
         if (n + fade >= frames) s *= (float)(frames - n) / (float)(fade + 1);
         pcm[n] = (int16_t)s;
         if ((n & 2047) == 2047) vTaskDelay(1);  // let the idle task (and its watchdog) run
     }
     pcm_gain = g;
-    Serial.printf("chime: rendered %u frames at %d Hz, gain %.2f, in %lu ms (at %lu ms since boot)\n",
-                  (unsigned)frames, cfg.sample_rate, g, (unsigned long)(millis() - t0),
+    Serial.printf("chime: rendered %u frames at %d Hz, gain %.2f x volume %.2f, in %lu ms (at %lu ms since boot)\n",
+                  (unsigned)frames, cfg.sample_rate, gain, sample_vol, (unsigned long)(millis() - t0),
                   (unsigned long)millis());
     return true;
 }
@@ -128,7 +133,7 @@ static void render_task(void* arg) {
         portENTER_CRITICAL(&state_lock);
         // Again if chime_tune changed the gain meanwhile (checked under the
         // lock, so a tune can't land between this and `rendering = false`).
-        if (ok && pcm_gain != gain) {
+        if (ok && pcm_gain != level()) {
             portEXIT_CRITICAL(&state_lock);
             continue;
         }
@@ -160,7 +165,7 @@ static void stream_live(void) {
     for (uint32_t n = 0; n < frames;) {
         uint32_t k = 0;
         for (; k < CHUNK_FRAMES && n < frames; k++, n++) {
-            const int16_t s = ding_sample(n, rate, gain);
+            const int16_t s = ding_sample_style(n, rate, level(), (DingStyle)cfg.style);
             chunk[2 * k] = s;
             chunk[2 * k + 1] = s;
         }
@@ -176,11 +181,11 @@ static void output_on(bool on) {
             cfg.amp_enable(true);
             delay(2);  // let the amp leave shutdown before unmuting
         }
-        es8311_voice_mute(es, false);
+        if (es) es8311_voice_mute(es, false);
     } else {
-        es8311_voice_mute(es, true);
+        if (es) es8311_voice_mute(es, true);
         if (cfg.amp_enable) {
-            delay(2);  // let the mute ramp finish before the amp goes off
+            if (es) delay(2);  // let the mute ramp finish before the amp goes off
             cfg.amp_enable(false);
         }
     }
@@ -232,13 +237,15 @@ bool chime_init(const ChimeConfig& c) {
         Serial.println("chime: I2S init failed");
         return false;
     }
-    if (!es8311_setup()) {
+    if (cfg.es8311_addr == 0) {
+        sample_vol = (cfg.volume > 100 ? 100 : cfg.volume) / 100.0f;
+    } else if (!es8311_setup()) {
         Serial.println("chime: ES8311 init failed");
         return false;
     }
     ready = true;
     pending = true;   // the boot ding, once the render is done
-    Serial.println("chime: ES8311 ready");
+    Serial.println(es ? "chime: ES8311 ready" : "chime: I2S amp ready (no codec)");
     return true;
 }
 
@@ -277,11 +284,15 @@ void chime_tick(void) {
 void chime_tune(float g, int volume) {
     if (!ready || playing) return;
     gain = !(g >= 0.0f) ? 0.0f : (g > 1.0f ? 1.0f : g);   // NaN too
-    if (volume >= 0 && es) es8311_voice_volume_set(es, volume > 100 ? 100 : volume, NULL);
+    if (volume >= 0) {
+        const int v = volume > 100 ? 100 : volume;
+        if (es) es8311_voice_volume_set(es, v, NULL);
+        else    sample_vol = v / 100.0f;
+    }
     // A new gain renders again in the background and plays when it's done
     // (a render already running picks the new gain up itself).
     portENTER_CRITICAL(&state_lock);
-    const bool rerender = render_started && !rendering && !playing && pcm_gain != gain;
+    const bool rerender = render_started && !rendering && !playing && pcm_gain != level();
     if (rerender) {
         rendering = true;
         pending = true;

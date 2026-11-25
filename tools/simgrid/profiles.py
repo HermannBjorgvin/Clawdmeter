@@ -3,7 +3,7 @@ board capabilities, labelled with the boards it stands for.
 
 Each cell runs the simulator built at its size (SIM_LCD_W / SIM_LCD_H) with
 the capability overrides the sim understands (SIM_CIRCLE, SIM_NO_PWR,
-SIM_NO_TOUCH, SIM_MINIMAL, SIM_BUTTONS). Add a board here when its panel size
+SIM_NO_TOUCH, SIM_MINIMAL, SIM_MONO, SIM_BUTTONS). Add a board here when its panel size
 or capabilities aren't covered yet; boards that only share a cell go in its
 `boards` list. A cell for a port that is still an open PR is marked
 `on_main=False`.
@@ -23,6 +23,7 @@ class Profile:
     buttons: int = 1        # BoardCaps.button_count (1 = BOOT only)
     minimal: bool = False   # BoardCaps.minimal_ui
     touch: bool = True      # BoardCaps.has_touch
+    mono: bool = False      # BoardCaps.mono_panel (shown as printed: black on white)
     on_main: bool = True    # False for a port that is still a PR
 
     @property
@@ -44,6 +45,8 @@ class Profile:
             e["SIM_MINIMAL"] = "1"
         if not self.touch:
             e["SIM_NO_TOUCH"] = "1"
+        if self.mono:
+            e["SIM_MONO"] = "1"
         return e
 
 
@@ -56,8 +59,9 @@ PROFILES = (
     Profile("206", 410, 502, ("AMOLED-2.06",)),
     Profile("154", 240, 240, ("LCD-1.54",), buttons=2),
     Profile("154s", 240, 240, ("SpotPear S3 LCD-1.54",), pwr=False),
-    Profile("round", 466, 466, ("AMOLED-1.32",), round=True),
+    Profile("round", 466, 466, ("AMOLED-1.32", "AMOLED-1.75C"), round=True),
     Profile("round143", 466, 466, ("AMOLED-1.43",), round=True, pwr=False),
+    Profile("lcd21", 480, 480, ("LCD-2.1", "LCD-2.8C"), round=True, pwr=False),
     Profile("t4s3", 450, 600, ("LilyGO T4-S3",), pwr=False),
     Profile("cyd", 320, 240, ("ESP32-2432S028R", "ESP32-2432S024C")),
     Profile("fire", 320, 240, ("M5Stack FIRE",), buttons=2, touch=False),
@@ -67,8 +71,9 @@ PROFILES = (
     Profile("cube", 284, 240, ("Xingzhi Cube 1.83",), buttons=2, touch=False),
     Profile("lcd183", 240, 284, ("Waveshare LCD-1.83",)),
     Profile("tdisplay", 170, 320, ("LilyGO T-Display S3",), touch=False),
+    Profile("lcd147", 320, 172, ("Waveshare LCD-1.47", "LCD-1.47 C6"), buttons=0),
     Profile("stick", 135, 240, ("M5StickS3",), touch=False),
-    Profile("epaper", 200, 200, ("ePaper 1.54",), minimal=True, touch=False),
+    Profile("epaper", 200, 200, ("ePaper 1.54",), minimal=True, touch=False, mono=True),
 )
 
 

@@ -2,7 +2,7 @@
 #include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
-#include <SensorQMI8658.hpp>
+#include <ImuDrv.hpp>
 
 // QMI8658 on the 2.16 carrier PCB drives auto-rotation. Same poll/hysteresis
 // logic as the S3 AMOLED-2.16 port; the C6 applies the resulting quadrant via
@@ -14,11 +14,14 @@
 #define TILT_THRESHOLD    0.5f   // ~30° from axis (sin 30° ≈ 0.5)
 
 static SensorQMI8658 imu;
-static uint8_t  current_rotation   = 0;
-static uint8_t  candidate_rotation = 0;
+// Start in quadrant 3, the upright desk-stand orientation the base MADCTL
+// (0x30) is tuned for: if the IMU never comes up, display and touch agree.
+static uint8_t  current_rotation   = 3;
+static uint8_t  candidate_rotation = 3;
 static uint32_t candidate_since    = 0;
 static uint32_t last_poll_ms       = 0;
 static bool     imu_ok             = false;
+static float    accel_scale        = 0;      // g per LSB, set by configAccel()
 
 // Dead zone: the dominant axis must beat the other by 25 % before we commit,
 // otherwise (near 45°, e.g. a tilted stand) the current quadrant is kept.
@@ -35,18 +38,34 @@ static uint8_t accel_to_rotation(float ax, float ay) {
     return 255;      // too close to a diagonal — keep what we have
 }
 
+// SensorLib 0.5's begin() also fails when the QMI8658's USID handshake
+// times out, which 0.2.6 ignored; a failed begin() clears its own state,
+// so a short bounded retry is safe.
+#define IMU_BEGIN_TRIES   3
+
 void imu_hal_init(void) {
-    if (!imu.begin(Wire, QMI8658_L_SLAVE_ADDRESS, IIC_SDA, IIC_SCL)) {
+    bool found = false;
+    for (int i = 0; i < IMU_BEGIN_TRIES && !found; i++) {
+        if (i) delay(10);
+        // No pins: board_init() already started Wire, and SensorLib would
+        // call Wire.setPins() on the running bus (an [E] log line).
+        found = imu.begin(Wire, QMI8658_L_SLAVE_ADDRESS);
+    }
+    if (!found) {
         Serial.println("QMI8658 init failed");
         return;
     }
-    Serial.println("QMI8658 init OK (auto-rotation via MADCTL)");
-    imu.configAccelerometer(
-        SensorQMI8658::ACC_RANGE_4G,
-        SensorQMI8658::ACC_ODR_LOWPOWER_21Hz,
-        SensorQMI8658::LPF_MODE_3);
-    imu.enableAccelerometer();
+    // SensorLib 0.5 has no low-power ODR for plain reads; 28 Hz is the
+    // lowest normal-mode rate, still well above the 10 Hz poll.
+    if (!imu.configAccel(AccelFullScaleRange::FS_4G, 28.0f,
+                         SensorQMI8658::LpfMode::MODE_3) ||
+        !imu.enableAccel()) {
+        Serial.println("QMI8658 accel config failed");
+        return;
+    }
+    accel_scale = imu.getAccelScale();
     imu_ok = true;
+    Serial.println("QMI8658 init OK (auto-rotation via MADCTL)");
 }
 
 void imu_hal_tick(void) {
@@ -55,8 +74,10 @@ void imu_hal_tick(void) {
     if (now - last_poll_ms < IMU_POLL_MS) return;
     last_poll_ms = now;
 
-    float ax, ay, az;
-    if (!imu.getAccelerometer(ax, ay, az)) return;
+    int16_t rx, ry, rz;
+    if (!imu.readAccelRaw(rx, ry, rz)) return;
+    float ax = rx * accel_scale;  // g
+    float ay = ry * accel_scale;
 
     uint8_t target = accel_to_rotation(ax, ay);
     if (target == 255 || target == current_rotation) {

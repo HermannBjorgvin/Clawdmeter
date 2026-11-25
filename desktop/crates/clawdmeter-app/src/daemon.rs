@@ -14,8 +14,10 @@ use clawdmeter_ble::{
 };
 use clawdmeter_core::attention::AttentionInbox;
 use clawdmeter_core::backoff;
+use clawdmeter_core::codex::{self, CodexCache};
 use clawdmeter_core::engine::PollPlan;
 use clawdmeter_core::events::EventTail;
+use clawdmeter_core::platform::AppearanceWatch;
 use clawdmeter_core::probe;
 use clawdmeter_core::usage;
 use clawdmeter_core::{unix_now, Engine, EngineStatus, HostClock, Paths, Settings, WriteKind};
@@ -38,9 +40,9 @@ pub enum Command {
     Reconnect,
     /// Forget the cached device address, then look again (after swapping boards).
     Forget,
-    /// Mute the alert chimes (device and this computer) for this run,
-    /// whatever the config says.
-    SetChimesMuted(bool),
+    /// Re-read the config now (the window saved it), not at the next
+    /// periodic re-read.
+    ReloadSettings,
     /// Stop the daemon thread.
     Shutdown,
 }
@@ -113,7 +115,21 @@ pub fn spawn(paths: Paths) -> DaemonHandle {
     DaemonHandle { commands: cmd_tx, status: st_rx, thread: Some(thread) }
 }
 
+/// Re-read the config into the engine, finding `claude` again when its path
+/// changed (or it wasn't found). An unreadable file keeps the settings in
+/// use.
+fn reload_settings(paths: &Paths, engine: &mut Engine, claude: &mut Option<PathBuf>) {
+    let Ok(s) = Settings::load(paths) else { return };
+    if s.claude_path != engine.settings().claude_path || claude.is_none() {
+        *claude = usage::find_claude(s.claude_path.as_deref(), &paths.home);
+    }
+    engine.update_settings(s);
+    engine.set_claude_found(claude.is_some());
+}
+
 type PollResults = Vec<(PathBuf, probe::Polled)>;
+/// A Codex poll's results, and the reset-credit cache it carried.
+type CodexResults = (PollResults, CodexCache);
 type ConnectResult = Result<(DeviceLink, DeviceEvents), LinkError>;
 
 /// Read each account of a poll plan: the probe, `/usage`, or a reading known
@@ -130,6 +146,13 @@ fn poll_all(claude: Option<PathBuf>, plan: PollPlan, home: PathBuf, cwd: PathBuf
         .collect()
 }
 
+/// Read each Codex account due (blocking; the endpoint is slow).
+fn poll_codex(dirs: Vec<PathBuf>, mut cache: CodexCache) -> CodexResults {
+    let now = chrono::Utc::now();
+    let results = dirs.into_iter().map(|d| (d.clone(), codex::poll(&d, now, &mut cache))).collect();
+    (results, cache)
+}
+
 /// The daemon loop. Returns on [`Command::Shutdown`] or when every command
 /// sender is dropped.
 pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, status: watch::Sender<Status>) {
@@ -141,12 +164,23 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         "accounts: {}",
         settings.config_dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
     );
+    if !settings.codex_dirs.is_empty() {
+        log::info!(
+            "Codex accounts (trial): {}",
+            settings.codex_dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
+        );
+    }
     let mut engine = Engine::new(settings);
     // Blocks the usage endpoint set survive restarts (a call during one
     // lengthens it).
     engine.restore_blocks(&backoff::load_blocks(&paths.usage_blocks_file()), unix_now());
     let mut saved_blocks = engine.blocks(unix_now());
     let host = HostClock { utc_offset_secs: 0, prefers_12h: clawdmeter_core::platform::prefers_12h() };
+    // System's Dark or Light (and Solarized's) follows the OS.
+    // The engine has Dark until the first answer (no write goes out before a
+    // link and a poll anyway).
+    let appearance = AppearanceWatch::spawn();
+    let mut shown_appearance = None;
     let inbox = AttentionInbox::new(&paths.state_dir);
     let (mut tail, seed) = EventTail::open(paths.events_log());
     engine.seed_events(&seed);
@@ -168,6 +202,10 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let mut device_events: Option<DeviceEvents> = None;
     let mut connecting: Option<JoinHandle<ConnectResult>> = None;
     let mut polling: Option<JoinHandle<PollResults>> = None;
+    // Codex accounts poll on their own task, so a slow endpoint never holds
+    // up a Claude account. The credits cache travels with it.
+    let mut codex_polling: Option<JoinHandle<CodexResults>> = None;
+    let mut credits = Some(CodexCache::default());
     let mut link_state = LinkState::Starting;
     let mut reconnect = Reconnect::default();
     let bt = Bluetooth::default();
@@ -175,7 +213,6 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let mut last_settings = unix_now();
     let mut last_link_check = unix_now();
     let mut last_write_at = None;
-    let mut chimes_muted = false;
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -200,16 +237,10 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     link_state = LinkState::Searching;
                     reconnect.retry_in(now, 0);
                 }
-                Ok(Command::SetChimesMuted(m)) => {
-                    chimes_muted = m;
-                    let mut s = engine.settings().clone();
-                    if m {
-                        s.alert_chime = false;
-                        s.desktop_chime = false;
-                    } else if let Ok(fresh) = Settings::load(&paths) {
-                        s = fresh;
-                    }
-                    engine.update_settings(s);
+                Ok(Command::ReloadSettings) => {
+                    // This tick's write check sees the new settings.
+                    last_settings = now;
+                    reload_settings(&paths, &mut engine, &mut claude);
                 }
                 Ok(Command::Shutdown) | Err(mpsc::error::TryRecvError::Disconnected) => {
                     if let Some(l) = link.take() {
@@ -222,23 +253,19 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             }
         }
 
-        // ---- config (re-read every SETTINGS_EVERY) ----
+        // ---- config (re-read every SETTINGS_EVERY, and on ReloadSettings:
+        // this catches hand edits and a `--daemon` with no tray) ----
         if now - last_settings >= SETTINGS_EVERY {
             last_settings = now;
-            if let Ok(mut s) = Settings::load(&paths) {
-                if chimes_muted {
-                    s.alert_chime = false;
-                    s.desktop_chime = false;
-                }
-                if s.claude_path != engine.settings().claude_path || claude.is_none() {
-                    claude = usage::find_claude(s.claude_path.as_deref(), &paths.home);
-                }
-                engine.update_settings(s);
-                engine.set_claude_found(claude.is_some());
-            }
+            reload_settings(&paths, &mut engine, &mut claude);
         }
 
         // ---- fast clock ----
+        if let Some(a) = appearance.known().filter(|a| shown_appearance != Some(*a)) {
+            log::info!("system appearance: {a:?}");
+            shown_appearance = Some(a);
+            engine.set_appearance(a);
+        }
         for ev in tail.poll() {
             log::debug!("hook {:?} {}", ev.kind, ev.session);
             engine.on_hook_event(&ev, now);
@@ -299,6 +326,39 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                 polling = Some(tokio::task::spawn_blocking(move || poll_all(c, plan, home, cwd)));
             }
         }
+        if codex_polling.as_ref().is_some_and(JoinHandle::is_finished) {
+            match codex_polling.take().expect("checked").await {
+                Ok((results, cache)) => {
+                    credits = Some(cache);
+                    for (d, r) in &results {
+                        if let Err(e) = &r.result {
+                            log::warn!("{}: {e}", d.display());
+                        } else if let Some(e) = &r.idle_miss {
+                            log::warn!("{}: {e}; using the Codex session log", d.display());
+                        }
+                    }
+                    engine.on_codex_results(unix_now(), results);
+                    let blocks = engine.blocks(unix_now());
+                    if blocks != saved_blocks {
+                        if let Err(e) = backoff::save_blocks(&paths.usage_blocks_file(), &blocks) {
+                            log::warn!("couldn't save usage blocks: {e}");
+                        }
+                        saved_blocks = blocks;
+                    }
+                }
+                Err(e) => {
+                    log::error!("Codex poll task failed: {e}");
+                    credits = Some(CodexCache::default());
+                }
+            }
+        }
+        if codex_polling.is_none() {
+            if let Some(dirs) = engine.begin_codex_poll(now) {
+                log::debug!("polling Codex: {dirs:?}");
+                let cache = credits.take().unwrap_or_default();
+                codex_polling = Some(tokio::task::spawn_blocking(move || poll_codex(dirs, cache)));
+            }
+        }
 
         // ---- link ----
         if connecting.as_ref().is_some_and(JoinHandle::is_finished) {
@@ -317,7 +377,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                         LinkError::NoAdapter(s) => LinkState::NoAdapter(s.clone()),
                         _ => LinkState::Searching,
                     };
-                    let wait = reconnect.failed(now);
+                    let wait = reconnect.failed(now, e.reached_device());
                     if !matches!(e, LinkError::NotFound) || wait == 1 {
                         log::info!("{e}; retrying in {wait}s");
                     }
@@ -331,31 +391,27 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             if link.is_some() || !should_wake(&w, cache.load().as_deref()) {
                 continue;
             }
-            if connecting.is_none() && !reconnect.due(now) {
+            if reconnect.wake(now, connecting.is_some(), w.sighting) {
                 let how = match w.sighting {
                     Sighting::Connected => "connected at the OS level",
                     Sighting::Advertising => "advertising",
                 };
                 log::info!("device {} {how}; reconnecting now", w.key);
             }
-            reconnect.wake(now, connecting.is_some());
         }
         if link.is_none() && connecting.is_none() && reconnect.due(now) {
             if link_state == LinkState::Starting {
                 link_state = LinkState::Connecting;
             }
             let (bt, cache, opts) = (bt.clone(), cache.clone(), link_opts.clone());
-            connecting = Some(tokio::spawn(async move {
-                let adapter = bt.adapter().await?;
-                DeviceLink::open(&adapter, &cache, &opts).await
-            }));
+            connecting = Some(tokio::spawn(async move { DeviceLink::open(&bt, &cache, &opts).await }));
         }
         if let Some(l) = &link {
             if now - last_link_check >= LINK_CHECK_EVERY {
                 last_link_check = now;
                 if !l.is_connected().await {
                     log::info!("device disconnected, reconnecting...");
-                    link = None;
+                    drop_link(&mut link).await;
                     device_events = None;
                     link_state = LinkState::Searching;
                     reconnect.retry_in(now, 2);
@@ -385,7 +441,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     Err(e) => {
                         log::warn!("write failed: {e}");
                         if !l.is_connected().await {
-                            link = None;
+                            drop_link(&mut link).await;
                             device_events = None;
                             link_state = LinkState::Searching;
                             reconnect.retry_in(now, 2);
@@ -404,6 +460,15 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     }
 }
 
+/// Drop a link that stopped working. BlueZ still reports a zombie
+/// connected, so it is disconnected first (bounded at 5 s), or the next
+/// attempt would find it connected and reuse it.
+async fn drop_link(link: &mut Option<DeviceLink>) {
+    if let Some(l) = link.take().filter(DeviceLink::is_zombie) {
+        l.close().await;
+    }
+}
+
 /// One poll of every account, printed as the payload the device would get
 /// (`clawdmeter --once`). No BLE.
 pub fn once(paths: &Paths) -> i32 {
@@ -417,11 +482,14 @@ pub fn once(paths: &Paths) -> i32 {
     let claude = usage::find_claude(settings.claude_path.as_deref(), &paths.home);
     let now = unix_now();
     let mut engine = Engine::new(settings.clone());
+    engine.set_appearance(clawdmeter_core::platform::system_appearance().unwrap_or_default());
     engine.restore_blocks(&backoff::load_blocks(&paths.usage_blocks_file()), now);
     // A blocked account isn't asked: a call during a block lengthens it.
     let blocked = engine.blocks(now);
     for (d, b) in &blocked {
-        println!("{}: {}", d.display(), usage::paused_message(b.until, clawdmeter_core::platform::utc_offset_secs()));
+        let provider = if settings.codex_dirs.contains(d) { usage::Provider::Codex } else { usage::Provider::Claude };
+        let paused = usage::paused_message_by(provider, b.until, clawdmeter_core::platform::utc_offset_secs());
+        println!("{}: {paused}", d.display());
     }
     // Nothing is known yet, so the idle source for every account (no message).
     let accounts: Vec<PathBuf> = settings.config_dirs.iter().filter(|d| !blocked.contains_key(*d)).cloned().collect();
@@ -431,12 +499,18 @@ pub fn once(paths: &Paths) -> i32 {
         accounts,
     };
     let results = poll_all(claude, plan, paths.home.clone(), paths.state_dir.clone());
+    let codex_dirs: Vec<PathBuf> = settings.codex_dirs.iter().filter(|d| !blocked.contains_key(*d)).cloned().collect();
+    let (codex_results, _) = poll_codex(codex_dirs, CodexCache::default());
     let mut ok = false;
     for (d, r) in &results {
         match &r.result {
             Ok(r) if r.is_spend_only() => {
                 ok = true;
                 println!("{}: spend limit {}% used", d.display(), r.session_pct());
+            }
+            Ok(r) if r.no_session_limit() => {
+                ok = true;
+                println!("{}: no 5-hour limit, week {}%", d.display(), r.session_pct());
             }
             Ok(r) => {
                 ok = true;
@@ -451,7 +525,39 @@ pub fn once(paths: &Paths) -> i32 {
             Err(e) => println!("{}: {e}", d.display()),
         }
     }
+    for (d, polled) in &codex_results {
+        match &polled.result {
+            Ok(r) => {
+                ok = true;
+                let resets = r.resets.as_ref().map_or_else(
+                    || "reset credits unknown".to_owned(),
+                    |c| {
+                        let mut s = format!("{} reset credit(s) held", c.held);
+                        if let Some(t) = c.next_expiry() {
+                            s += &format!(", next expires {}", t.format("%Y-%m-%d %H:%M UTC"));
+                        }
+                        s
+                    },
+                );
+                let windows = match &r.session {
+                    Some(w) => format!("5-hour {}%, week {}%", w.pct, r.week.as_ref().map_or(0, |w| w.pct)),
+                    None => format!("no 5-hour limit, week {}%", r.session_pct()),
+                };
+                let source = match &polled.idle_miss {
+                    Some(e) => format!(" (from the session log: {e})"),
+                    None => String::new(),
+                };
+                println!("{} (Codex): {windows}, {resets}{source}", d.display());
+                println!(
+                    "  Codex payload: {}",
+                    clawdmeter_core::Payload::from_reading(r, chrono::Utc::now()).to_json()
+                );
+            }
+            Err(e) => println!("{} (Codex): {e}", d.display()),
+        }
+    }
     engine.on_poll_results(now, results);
+    engine.on_codex_results(now, codex_results);
     if let Err(e) = backoff::save_blocks(&paths.usage_blocks_file(), &engine.blocks(unix_now())) {
         eprintln!("couldn't save usage blocks: {e}");
     }

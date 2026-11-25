@@ -377,6 +377,11 @@ void performer_release(void) {
 
 bool performer_visible(void) { return cells_any; }
 
+void performer_repaint(void) {
+    drawn_palette = NULL;   // every cell repaints in the recoloured palette
+    redraw();
+}
+
 bool performer_busy(void) { return pst == P_WALK || pst == P_SCENE || pst == P_CHOREO; }
 
 // ─── Tick ────────────────────────────────────────────────────────────────────

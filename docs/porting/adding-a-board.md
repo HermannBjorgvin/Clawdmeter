@@ -73,6 +73,9 @@ title and status line fit, measured with the real fonts. Then, by shape:
   cards, a wider gap and a lower start.
 - **Short** (under the small design's 240 px): the status line, cards and
   gaps squeeze.
+- **Landscape strip** (wider than tall, and stacking doesn't fit): the cards
+  sit side by side, taller or squeezed to the strip's height like the
+  stacked ones.
 - **Round** (`round_panel`): the cards are centred and as wide as the
   circle allows at their corners; the header sits right above them and the
   status line right under them, both inside the circle (the small header
@@ -94,8 +97,6 @@ stale data, attention and minimal mode.
 Add a rule to `layout.cpp` only when a whole class of panel looks wrong and
 the test can say why. Key it on shape (narrow, short, aspect, round), never
 on exact dimensions or a board name, and add a `PANELS` entry that needs it.
-A landscape strip with side-by-side cards would be such a rule: another
-arrangement of the cards, chosen when stacking them doesn't fit.
 
 ## Include the board in the app and docs
 
@@ -109,8 +110,8 @@ A new port must include:
   `desktop/crates/clawdmeter-app/src/boards.rs`, plus the SVG registration
   in `desktop/crates/clawdmeter-app/src/ui/mod.rs`.
 - An entry with the display name and buy link in the README's
-  **Supported boards** table (new ports start under **Experimental**; a
-  report in the "Board support reports" discussion moves them to Stable).
+  **Experimental** table, under **Other supported boards** (a report in the
+  "Board support reports" discussion moves it to Stable).
   Waveshare product links must include
   `?aff_id=149786` (or `&aff_id=149786` when a query already exists).
   Other vendors use a plain product link to the maker's own store. When

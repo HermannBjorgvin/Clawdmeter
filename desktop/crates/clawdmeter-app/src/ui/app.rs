@@ -3,16 +3,19 @@
 //! second launches do it through `window-commands` ([`crate::ipc`]).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clawdmeter_core::Paths;
 use gpui::{div, prelude::*, px, Context, Entity, SharedString, Window};
 
+use super::decorations::{self, ButtonLayout};
 use super::flasher::FlasherView;
 use super::overview::OverviewView;
 use super::settings::SettingsView;
 use super::setup::{SetupEvent, SetupView};
 use super::theme::{Theme, R_ITEM, R_PILL};
-use super::widgets::icon;
+use super::update::UpdateView;
+use super::widgets::{icon, update_pill};
 use super::{chrome, Navigate, REFRESH};
 use crate::{ipc, Page};
 
@@ -21,11 +24,14 @@ pub struct AppView {
     page: Page,
     /// Dark appearance as last drawn.
     dark: Option<bool>,
+    /// Header bar buttons as last drawn.
+    layout: Arc<ButtonLayout>,
     /// The setup wizard fills the window.
     setup: bool,
     overview: Entity<OverviewView>,
     settings: Entity<SettingsView>,
     flasher: Entity<FlasherView>,
+    update: Entity<UpdateView>,
     wizard: Entity<SetupView>,
 }
 
@@ -59,6 +65,9 @@ impl AppView {
         cx.subscribe(&overview, |v, _, n: &Navigate, cx| v.go(n.0, cx)).detach();
         cx.subscribe(&settings, |v, _, n: &Navigate, cx| v.go(n.0, cx)).detach();
         cx.subscribe(&flasher, |v, _, n: &Navigate, cx| v.go(n.0, cx)).detach();
+        let update = cx.new(|cx| UpdateView::new(paths.clone(), cx));
+        cx.subscribe(&update, |v, _, n: &Navigate, cx| v.go(n.0, cx)).detach();
+        settings.update(cx, |s, cx| s.follow_update(update.clone(), cx));
         cx.subscribe(&wizard, |v, _, e: &SetupEvent, cx| match e {
             SetupEvent::Finished => {
                 v.setup = false;
@@ -74,7 +83,22 @@ impl AppView {
             let r = this.update_in(cx, |v, window, cx| {
                 if let Some(page) = pages.last() {
                     v.go(*page, cx);
+                    if !window.is_window_active() {
+                        log::debug!(
+                            "asked to show {}: raising the window (a Wayland compositor may refuse, \
+                             and then a minimized window stays minimized)",
+                            page.as_str()
+                        );
+                    }
                     window.activate_window();
+                }
+                // The desktop's button layout can change while we're open
+                // (GNOME Tweaks).
+                let layout = decorations::button_layout();
+                if v.layout != layout {
+                    log::debug!("header bar buttons now {layout:?}");
+                    v.layout = layout;
+                    cx.notify();
                 }
                 // Light/dark can change after the first frame (on X11 it
                 // arrives from the settings portal). Polled rather than
@@ -91,9 +115,24 @@ impl AppView {
             }
         })
         .detach();
-        let mut v = AppView { dark: None, page: Page::Overview, setup: false, overview, settings, flasher, wizard };
+        let mut v = AppView {
+            dark: None,
+            layout: decorations::button_layout(),
+            page: Page::Overview,
+            setup: false,
+            overview,
+            settings,
+            flasher,
+            update,
+            wizard,
+        };
         v.go(page, cx);
         v
+    }
+
+    /// The Update page.
+    pub fn update_view(&self) -> &Entity<UpdateView> {
+        &self.update
     }
 
     /// The setup wizard.
@@ -116,6 +155,14 @@ impl AppView {
         if self.flasher.read(cx).flashing() && page != self.page() {
             return;
         }
+        // An open account drop-down closes with any page switch (the tray's
+        // `show <page>` included), as the Update page's menu does.
+        self.overview.update(cx, |o, cx| {
+            if o.account_menu_open() {
+                o.set_account_menu_open(false);
+                cx.notify();
+            }
+        });
         if page == Page::Setup {
             self.setup = true;
             self.wizard.update(cx, |w, cx| w.restart(cx));
@@ -128,8 +175,19 @@ impl AppView {
             self.page = page;
             self.settings.update(cx, |s, cx| s.show(page, false, cx));
             self.flasher.update(cx, |f, cx| f.set_active(page == Page::Flash, cx));
+            self.update.update(cx, |u, cx| u.set_active(page == Page::Update, cx));
         }
         cx.notify();
+    }
+
+    /// The footer's notice of a newer release, until it is skipped: a row
+    /// that opens the Update page.
+    fn update_notice(&self, t: &Theme, tag: &str, locked: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let on = self.page == Page::Update;
+        let enabled = on || !locked;
+        update_pill(t, "app-update", tag, on, enabled)
+            .mt(px(4.))
+            .when(enabled && !on, |d| d.on_click(cx.listener(|v, _, _, cx| v.go(Page::Update, cx))))
     }
 
     fn nav_item(
@@ -197,6 +255,7 @@ impl AppView {
         let pending_hooks = self.settings.read(cx).pending_hooks();
         let update = self.overview.read(cx).update_available();
         let locked = self.flasher.read(cx).flashing();
+        let app_update = self.update.read(cx).announced().map(str::to_owned);
         let badge = |page: Page| -> Option<SharedString> {
             match page {
                 Page::Hooks if pending_hooks > 0 => Some(pending_hooks.to_string().into()),
@@ -235,11 +294,12 @@ impl AppView {
                         .child("@HermannBjorgvin"),
                 ),
             )
-            .child(format!("Version {}", crate::version()));
+            .child(format!("Version {}", crate::version()))
+            .when_some(app_update, |d, tag| d.child(self.update_notice(t, &tag, locked, cx)));
         div()
             .flex()
             .flex_col()
-            .w(px(216.))
+            .w(px(super::SIDEBAR_W))
             .flex_shrink_0()
             .px(px(8.))
             .pt(px(12.))
@@ -267,6 +327,7 @@ fn page_icon(page: Page) -> &'static str {
         Page::Accounts => "users",
         Page::Hooks => "webhook",
         Page::Settings => "settings",
+        Page::Update => "arrow-down-to-line",
         Page::Setup => "rotate-ccw",
     }
 }
@@ -280,6 +341,7 @@ impl Render for AppView {
             let content = match self.page {
                 Page::Overview => self.overview.clone().into_any_element(),
                 Page::Flash => self.flasher.clone().into_any_element(),
+                Page::Update => self.update.clone().into_any_element(),
                 _ => self.settings.clone().into_any_element(),
             };
             let header = match window.window_decorations() {
@@ -301,15 +363,15 @@ impl Render for AppView {
                             .flex()
                             .flex_col()
                             .min_h(page_h)
-                            .max_w(px(720.))
-                            .px(px(32.))
+                            .max_w(px(super::PAGE_MAX_W))
+                            .px(px(super::PAGE_PAD_X))
                             .pt(px(28.))
                             .pb(px(24.))
                             .child(content),
                     ),
             )
         };
-        chrome(&t, window, body)
+        chrome(&t, window, cx, body)
     }
 }
 
@@ -356,6 +418,291 @@ mod tests {
         click(cx, "skip-setup");
         view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Overview));
         assert!(!crate::onboarding::needed(&paths), "skipping counts as done");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    fn a_newer_release_is_announced_until_skipped(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("cm-app-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths::under(&root);
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let status = |latest: &str| {
+            let snap = ipc::StatusSnapshot {
+                updated_at: clawdmeter_core::unix_now(),
+                latest_firmware: Some(latest.into()),
+                ..Default::default()
+            };
+            ipc::write_status(&paths, &snap).unwrap();
+        };
+        status(crate::version());
+        let p = paths.clone();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));
+            let settings = cx.new(|cx| SettingsView::with_usb(p.clone(), Page::Device, false, cx));
+            let flasher = cx.new(|cx| FlasherView::with_hardware(p.clone(), None, Arc::new(FakeBoard::default()), cx));
+            AppView::build(p, Page::Overview, overview, settings, flasher, window, cx)
+        });
+        let update = view.read_with(cx, |v, _| v.update_view().clone());
+        // Notes are given, so opening the page asks GitHub nothing.
+        let notes = |tag: &str| {
+            vec![clawdmeter_flash::release::ReleaseNotes {
+                tag: tag.into(),
+                published: "2026-11-10".into(),
+                body: "## New\n- A thing".into(),
+            }]
+        };
+        update.update(cx, |u, _| {
+            u.offer(true);
+            u.set_package(None);
+            u.show_notes("v999.0.0", notes("v999.0.0"));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("app-update").is_none(), "this version is the latest");
+
+        // Off screen, the page looks every few seconds.
+        status("v999.0.0");
+        cx.executor().advance_clock(REFRESH * 12);
+        cx.run_until_parked();
+        click(cx, "app-update");
+        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Update));
+        assert!(cx.debug_bounds("update-download").is_some());
+
+        click(cx, "update-skip");
+        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Overview));
+        // (gpui 0.2.2 never forgets a `debug_bounds` entry, so the footer row
+        // going away can only be checked through what it is drawn from.)
+        update.read_with(cx, |u, _| {
+            assert_eq!(u.available(), Some("v999.0.0"), "still there for Settings to open");
+            assert_eq!(u.announced(), None);
+        });
+        let saved = clawdmeter_core::Settings::load(&paths).unwrap().skipped_update;
+        assert_eq!(saved.as_deref(), Some("v999.0.0"));
+
+        // The release after the skipped one is announced again.
+        status("v999.1.0");
+        update.update(cx, |u, _| u.show_notes("v999.1.0", notes("v999.1.0")));
+        cx.executor().advance_clock(REFRESH * 12);
+        cx.run_until_parked();
+        update.read_with(cx, |u, _| assert_eq!(u.announced(), Some("v999.1.0")));
+
+        // With "Check for updates" off, a release found before isn't offered.
+        crate::ui::settings::write_settings(&paths, |s, _| s.update_check = false).unwrap();
+        cx.executor().advance_clock(REFRESH * 12);
+        cx.run_until_parked();
+        update.read_with(cx, |u, _| assert_eq!((u.available(), u.announced()), (None, None)));
+
+        // A skipped release is still there beside the Settings heading.
+        crate::ui::settings::write_settings(&paths, |s, _| {
+            s.update_check = true;
+            s.skipped_update = Some("v999.1.0".into());
+        })
+        .unwrap();
+        cx.executor().advance_clock(REFRESH * 12);
+        cx.run_until_parked();
+        update.read_with(cx, |u, _| assert_eq!((u.available(), u.announced()), (Some("v999.1.0"), None)));
+        view.update(cx, |v, cx| v.go(Page::Settings, cx));
+        click(cx, "settings-app-update");
+        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Update));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The app window on the Overview, under `root`, with `config` and a
+    /// status showing `shown`.
+    fn overview_window<'a>(
+        cx: &'a mut TestAppContext,
+        root: &std::path::Path,
+        config: &str,
+        shown: &std::path::Path,
+    ) -> (Paths, Entity<AppView>, Entity<OverviewView>, &'a mut VisualTestContext) {
+        let _ = std::fs::remove_dir_all(root);
+        let paths = Paths::under(root);
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        std::fs::write(&paths.config_file, config).unwrap();
+        let snap = ipc::StatusSnapshot {
+            updated_at: clawdmeter_core::unix_now(),
+            account: Some(shown.display().to_string()),
+            ..Default::default()
+        };
+        ipc::write_status(&paths, &snap).unwrap();
+        let p = paths.clone();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));
+            let settings = cx.new(|cx| SettingsView::with_usb(p.clone(), Page::Device, false, cx));
+            let flasher = cx.new(|cx| FlasherView::with_hardware(p.clone(), None, Arc::new(FakeBoard::default()), cx));
+            AppView::build(p, Page::Overview, overview, settings, flasher, window, cx)
+        });
+        let overview = view.read_with(cx, |v, _| v.overview.clone());
+        (paths, view, overview, cx)
+    }
+
+    // With two or more accounts, the Overview's drop-down picks the one the
+    // device shows: a folder, or back to the latest active one. Escape or a
+    // click outside closes it.
+    #[gpui::test]
+    fn the_overview_picks_the_device_account(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("cm-app-device-account-{}", std::process::id()));
+        let (claude, codex) = (root.join("acct"), root.join("cx"));
+        let config = format!("config_dirs = {}\ncodex_dirs = {}\n", claude.display(), codex.display());
+        let (paths, view, overview, cx) = overview_window(cx, &root, &config, &claude);
+        let saved = || clawdmeter_core::Settings::load(&paths).unwrap().device_account;
+        let open = |cx: &mut VisualTestContext| overview.read_with(cx, |o, _| o.account_menu_open());
+
+        click(cx, "device-account");
+        assert!(open(cx));
+        click(cx, "device-account-1");
+        assert!(!open(cx), "a pick closes it");
+        assert_eq!(saved(), Some(codex.clone()));
+        assert!(std::fs::read_to_string(&paths.config_file).unwrap().contains("device_account = ~/cx\n"));
+        click(cx, "device-account");
+        click(cx, "device-account-auto");
+        assert_eq!(saved(), None);
+        assert!(!std::fs::read_to_string(&paths.config_file).unwrap().contains("device_account"));
+
+        click(cx, "device-account");
+        cx.simulate_keystrokes("escape");
+        assert!(!open(cx), "Escape closes it");
+        click(cx, "device-account");
+        click(cx, "nav-accounts");
+        assert!(!open(cx), "a click outside closes it");
+        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Overview, "and doesn't land on what's under it"));
+        click(cx, "device-account");
+        view.update(cx, |v, cx| v.go(Page::Settings, cx));
+        assert!(!open(cx), "a page switch (the tray's `show settings`) closes it");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // In the narrowest window, with a long folder chosen, the drop-down's
+    // label gives way: the title keeps its room (Clawd, then at least 150
+    // px) and the refresh button stays in the window.
+    #[gpui::test]
+    fn a_long_choice_truncates_in_a_narrow_window(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("cm-app-narrow-{}", std::process::id()));
+        let (claude, long) = (root.join("acct"), root.join(".claude-work-account-with-a-long-name"));
+        let config = format!(
+            "config_dirs = {}, {}\ncodex_dirs =\ndevice_account = {}\n",
+            claude.display(),
+            long.display(),
+            long.display()
+        );
+        let (_paths, _view, _overview, cx) = overview_window(cx, &root, &config, &claude);
+        cx.simulate_resize(gpui::size(px(720.), px(640.)));
+        cx.run_until_parked();
+        let menu = cx.debug_bounds("device-account").expect("the drop-down");
+        let refresh = cx.debug_bounds("refresh").expect("the refresh button");
+        let page_left = cx.debug_bounds("nav-overview").expect("the sidebar").right() + px(32.);
+        assert!(menu.left() >= page_left + px(96. + 20. + 150.), "{menu:?} runs into the title");
+        assert!(refresh.right() <= px(720.), "{refresh:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // With one account there's nothing to pick: no drop-down.
+    #[gpui::test]
+    fn one_account_has_no_drop_down(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("cm-app-one-account-{}", std::process::id()));
+        let claude = root.join("acct");
+        let config = format!("config_dirs = {}\ncodex_dirs =\n", claude.display());
+        let (_paths, _view, _overview, cx) = overview_window(cx, &root, &config, &claude);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("device-account").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    fn firmware_nudge_can_be_skipped(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("cm-app-fw-skip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths::under(&root);
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let status = |latest: &str| {
+            let snap = ipc::StatusSnapshot {
+                updated_at: clawdmeter_core::unix_now(),
+                latest_firmware: Some(latest.into()),
+                device_firmware: Some("v1.0.0".into()),
+                ..Default::default()
+            };
+            ipc::write_status(&paths, &snap).unwrap();
+        };
+        status("v999.0.0");
+        let p = paths.clone();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));
+            let settings = cx.new(|cx| SettingsView::with_usb(p.clone(), Page::Device, false, cx));
+            let flasher = cx.new(|cx| FlasherView::with_hardware(p.clone(), None, Arc::new(FakeBoard::default()), cx));
+            AppView::build(p, Page::Overview, overview, settings, flasher, window, cx)
+        });
+        let overview = view.read_with(cx, |v, _| v.overview.clone());
+        overview.read_with(cx, |o, _| assert!(o.update_available()));
+
+        click(cx, "skip-firmware");
+        overview.read_with(cx, |o, _| assert!(!o.update_available(), "no nudge and no Flash badge"));
+        let saved = clawdmeter_core::Settings::load(&paths).unwrap().skipped_firmware;
+        assert_eq!(saved.as_deref(), Some("v999.0.0"));
+
+        // The same release written without its `v` is still skipped.
+        status("999.0.0");
+        cx.executor().advance_clock(REFRESH * 2);
+        cx.run_until_parked();
+        overview.read_with(cx, |o, _| assert!(!o.update_available()));
+
+        // A later release nudges again.
+        status("v999.1.0");
+        cx.executor().advance_clock(REFRESH * 2);
+        cx.run_until_parked();
+        overview.read_with(cx, |o, _| assert!(o.update_available()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    fn linux_picks_a_package_from_a_menu(cx: &mut TestAppContext) {
+        use clawdmeter_flash::release::{AppPackage, ReleaseNotes};
+        let root = std::env::temp_dir().join(format!("cm-app-linux-menu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths::under(&root);
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let snap = ipc::StatusSnapshot {
+            updated_at: clawdmeter_core::unix_now(),
+            latest_firmware: Some("v999.0.0".into()),
+            ..Default::default()
+        };
+        ipc::write_status(&paths, &snap).unwrap();
+        let p = paths.clone();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));
+            let settings = cx.new(|cx| SettingsView::with_usb(p.clone(), Page::Device, false, cx));
+            let flasher = cx.new(|cx| FlasherView::with_hardware(p.clone(), None, Arc::new(FakeBoard::default()), cx));
+            AppView::build(p, Page::Overview, overview, settings, flasher, window, cx)
+        });
+        let update = view.read_with(cx, |v, _| v.update_view().clone());
+        update.update(cx, |u, _| {
+            u.offer(true);
+            u.set_choices(AppPackage::for_linux("x86_64"), Some(AppPackage::Deb), false);
+            let notes = ReleaseNotes { tag: "v999.0.0".into(), published: String::new(), body: String::new() };
+            u.show_notes("v999.0.0", vec![notes]);
+        });
+        cx.executor().advance_clock(REFRESH * 2);
+        click(cx, "app-update");
+        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Update));
+
+        click(cx, "update-download");
+        update.read_with(cx, |u, _| assert!(u.menu_open()));
+        assert!(cx.debug_bounds("update-menu-deb").is_some());
+        assert!(cx.debug_bounds("update-menu-appimage").is_some());
+        // A click anywhere else closes it, and goes no further: not to the
+        // sidebar item under it.
+        click(cx, "nav-overview");
+        update.read_with(cx, |u, _| assert!(!u.menu_open()));
+        view.read_with(cx, |v, _| assert_eq!(v.page(), Page::Update));
+
+        click(cx, "update-download");
+        update.read_with(cx, |u, _| assert!(u.menu_open()));
+        cx.simulate_keystrokes("escape");
+        update.read_with(cx, |u, _| assert!(!u.menu_open(), "Escape closes it"));
+
+        // After a failed download the menu is back, to try another package.
+        update.update(cx, |u, _| u.show_download_state("v999.0.0", "failed"));
+        click(cx, "update-download");
+        update.read_with(cx, |u, _| assert!(u.menu_open()));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

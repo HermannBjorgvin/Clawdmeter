@@ -13,6 +13,12 @@
 //!    "seven_day":{"utilization":0.2,"resetsAt":1792360800}}}}
 //! ```
 //!
+//! Claude Code also reads a third window, `seven_day_overage_included` (the
+//! `anthropic-ratelimit-unified-7d_oi-*` headers), which it calls the "Fable
+//! limit"; it's read as Fable's weekly window when an answer carries it. A
+//! Haiku answer usually doesn't, so a probe reading keeps the last known
+//! model-scoped windows ([`carry_models`]).
+//!
 //! The probe ([`probe_command`]) sends one short Haiku message with no
 //! tools, hooks, MCP servers, memory or saved session, from a fixed working
 //! directory.
@@ -25,7 +31,8 @@
 //! ended with no activity since needs no call at all: the session is not
 //! started ([`not_started`]). Anything less certain goes to `/usage`, which
 //! answers locally and starts nothing, on a slower cadence
-//! ([`crate::cadence::Cadence::no_window`]).
+//! ([`crate::cadence::Cadence::no_window`]). An account with no 5-hour limit
+//! (verified Ultra) has no window to follow and never gets the probe.
 
 use std::path::Path;
 use std::process::Command;
@@ -34,7 +41,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::usage::{self, AccountState, UsageError, UsageReading, Window};
+use crate::usage::{self, AccountState, SessionLimit, UsageError, UsageReading, Window};
 
 /// The session window's length.
 pub const WINDOW_SECS: i64 = 5 * 3600;
@@ -77,8 +84,9 @@ pub fn anchor(st: &AccountState) -> Option<i64> {
 /// prompt or tool activity that couldn't be tied to an account.
 pub fn choose_source(st: &AccountState, unattributed: Option<i64>, now: i64) -> Source {
     let Some(last) = &st.last else { return Source::Usage };
-    // Spend-capped accounts: the headers carry no spend cap.
-    if last.is_spend_only() {
+    // Spend-capped accounts: the headers carry no spend cap. No 5-hour
+    // limit: no window to follow, and the endpoint has the weekly numbers.
+    if last.is_spend_only() || last.no_session_limit() {
         return Source::Usage;
     }
     let anchor = anchor(st).unwrap_or(now);
@@ -106,17 +114,40 @@ pub fn choose_source(st: &AccountState, unattributed: Option<i64>, now: i64) -> 
     Source::Usage
 }
 
+/// A weekly window as of `now`: back at 0 % with no reset once its reset has
+/// passed.
+fn rolled_over(w: &Window, now: i64) -> Window {
+    if w.resets_at.is_some_and(|t| t.timestamp() <= now) {
+        Window { pct: 0, resets_at: None }
+    } else {
+        w.clone()
+    }
+}
+
 /// `last` with the session window over: not started, and any weekly window
 /// whose reset has passed back at 0 % with no reset.
 pub fn not_started(last: &UsageReading, now: i64) -> UsageReading {
-    let over = |w: &Window| w.resets_at.is_some_and(|t| t.timestamp() <= now);
-    let reset = |w: &Window| if over(w) { Window { pct: 0, resets_at: None } } else { w.clone() };
+    let reset = |w: &Window| rolled_over(w, now);
     UsageReading {
         session: None,
         week: last.week.as_ref().map(reset),
         models: last.models.iter().map(|(m, w)| (m.clone(), reset(w))).collect(),
         spend: last.spend.clone(),
         overage: false,
+        session_limit: last.session_limit,
+        ..Default::default()
+    }
+}
+
+/// Give a probe reading the model-scoped weekly windows it lacks (the
+/// headers rarely carry Fable's) from `last`, the account's previous
+/// reading, rolled over like [`not_started`]'s. The idle sources list every
+/// scoped window the account has, so only probe readings take this.
+pub fn carry_models(r: &mut UsageReading, last: Option<&UsageReading>, now: i64) {
+    for (m, w) in last.map(|l| l.models.as_slice()).unwrap_or_default() {
+        if !r.models.iter().any(|(n, _)| n.eq_ignore_ascii_case(m)) {
+            r.models.push((m.clone(), rolled_over(w, now)));
+        }
     }
 }
 
@@ -167,10 +198,16 @@ pub fn parse_stream(stdout: &str) -> Result<UsageReading, UsageError> {
     };
     let reading = UsageReading {
         session: window("five_hour"),
+        // A session window means the limit applies (`AccountState::record`
+        // says so). Without one the answer can't say why (the window ended
+        // as it was sent, or the account has no 5-hour limit any more):
+        // [`poll`] asks the usage endpoint, which can tell.
+        session_limit: SessionLimit::Unknown,
         week: window("seven_day"),
-        models: Vec::new(),
+        models: window("seven_day_overage_included").map(|w| (usage::FABLE_MODEL.to_owned(), w)).into_iter().collect(),
         spend: None,
         overage: info.get("isUsingOverage").and_then(Value::as_bool).unwrap_or(false),
+        ..Default::default()
     };
     if reading.session.is_none() && reading.week.is_none() {
         return Err(UsageError::BadOutput("rate_limit_event without five_hour or seven_day".into()));
@@ -234,15 +271,44 @@ pub struct Polled {
     /// The result is the idle source's (the endpoint or `/usage`), whose
     /// misses back the account off.
     pub idle: bool,
-    /// The probe ran and missed (the idle source may have answered after).
-    pub probe_missed: bool,
+    /// What the probe did (the idle source may have answered after it).
+    pub probe: ProbeRun,
+    /// The usage endpoint missed after the probe had answered (an answer
+    /// without five_hour, see [`poll`]): `result` is the probe's reading,
+    /// and the miss still backs the account off.
+    pub idle_miss: Option<UsageError>,
+}
+
+/// What the probe did in one poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProbeRun {
+    /// It didn't run.
+    #[default]
+    NotRun,
+    /// It answered, even if the endpoint's reading replaced its own.
+    Answered,
+    /// It missed.
+    Missed,
 }
 
 impl From<Result<UsageReading, UsageError>> for Polled {
     /// An idle-source result.
     fn from(result: Result<UsageReading, UsageError>) -> Self {
-        Polled { result, idle: true, probe_missed: false }
+        Polled { result, idle: true, probe: ProbeRun::NotRun, idle_miss: None }
     }
+}
+
+/// A probe answer without five_hour, and the usage endpoint's answer after
+/// it (`None`: no token to ask it with). The endpoint's reading replaces the
+/// probe's; when it can't give one, the probe's stands and the miss rides
+/// along.
+fn after_week_only_probe(probe: UsageReading, endpoint: Option<Result<UsageReading, UsageError>>) -> Polled {
+    let (result, idle, idle_miss) = match endpoint {
+        Some(Ok(r)) => (Ok(r), true, None),
+        Some(Err(e)) => (Ok(probe), false, Some(e)),
+        None => (Ok(probe), false, None),
+    };
+    Polled { result, idle, probe: ProbeRun::Answered, idle_miss }
 }
 
 /// Read one account by `plan`. `cwd` is where the probe runs; without a
@@ -255,16 +321,38 @@ pub fn poll(
     plan: &Plan,
     now: DateTime<Utc>,
 ) -> Polled {
-    let probe = |result, probe_missed| Polled { result, idle: false, probe_missed };
+    let probe = |result, probe| Polled { result, idle: false, probe, idle_miss: None };
     match (plan, claude) {
-        (Plan::Known(r), _) => probe(Ok(r.clone()), false),
+        (Plan::Known(r), _) => probe(Ok(r.clone()), ProbeRun::NotRun),
         (Plan::Usage, _) | (Plan::Probe { .. }, None) => poll_idle(claude, config_dir, home, now).into(),
         (Plan::Probe { usage_fallback }, Some(c)) => match run_probe(c, config_dir, home, cwd, usage::CLI_TIMEOUT) {
-            Ok(r) => probe(Ok(r), false),
-            Err(e) if e.is_auth() || !usage_fallback => probe(Err(e), true),
+            // No five_hour: the window just ended, or the account has no
+            // 5-hour limit any more. Only the usage endpoint can tell, so ask
+            // it when it may be asked; `/usage` drops the session line either
+            // way, so it isn't asked. While the endpoint is backing off, has
+            // no token to be asked with, or misses, the answer is kept as it
+            // is (not started), which stops the probe until the next prompt;
+            // the miss still backs the account off.
+            Ok(r) if r.session.is_none() && *usage_fallback => {
+                log::info!("{}: probe answer has no 5-hour window; asking the usage endpoint", config_dir.display());
+                let endpoint = crate::oauth::poll_endpoint(config_dir, home, now);
+                match &endpoint {
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        log::info!("{}: usage endpoint missed ({e}); keeping the probe's answer", config_dir.display());
+                    }
+                    None => log::info!(
+                        "{}: no token for the usage endpoint; keeping the probe's answer",
+                        config_dir.display()
+                    ),
+                }
+                after_week_only_probe(r, endpoint)
+            }
+            Ok(r) => probe(Ok(r), ProbeRun::Answered),
+            Err(e) if e.is_auth() || !usage_fallback => probe(Err(e), ProbeRun::Missed),
             Err(e) => {
                 log::info!("{}: probe missed ({e}); asking the usage endpoint", config_dir.display());
-                Polled { result: poll_idle(claude, config_dir, home, now), idle: true, probe_missed: true }
+                Polled { probe: ProbeRun::Missed, ..poll_idle(claude, config_dir, home, now).into() }
             }
         },
     }
@@ -275,14 +363,15 @@ mod tests {
     use super::*;
 
     // An expired token goes to `claude -p /usage` (a stand-in script here),
-    // which renews it; without a CLI the expiry is reported.
+    // which renews it; without a CLI the expiry is reported. The folder isn't
+    // `<home>/.claude`, whose Keychain entry is the real default one on macOS.
     #[cfg(unix)]
     #[test]
     fn expired_token_asks_the_cli() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("cm-idle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let cfg = dir.join(".claude");
+        let cfg = dir.join("cfg");
         std::fs::create_dir_all(&cfg).unwrap();
         std::fs::write(cfg.join(".credentials.json"), r#"{"claudeAiOauth":{"accessToken":"t","expiresAt":1000}}"#)
             .unwrap();
@@ -296,12 +385,138 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // A probe answer without five_hour asks the usage endpoint alone:
+    // `claude -p /usage` can't tell either, and would run on every prompt.
+    // With no token to ask it with, an expired one, or while it's backing
+    // off, the probe's own answer is kept (not started). The folder isn't
+    // `<home>/.claude` (the real default Keychain entry on macOS), so no
+    // token is found and nothing reaches the network.
+    #[cfg(unix)]
+    #[test]
+    fn probe_without_five_hour_asks_only_the_endpoint() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("cm-probe-week-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfg = dir.join("cfg");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let usage = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/not-started.json");
+        let stream = dir.join("stream.jsonl");
+        std::fs::write(
+            &stream,
+            "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"unifiedWindows\":{\"seven_day\":{\"utilization\":0.48,\"resetsAt\":1791990000}}}}\n",
+        )
+        .unwrap();
+        let ran_usage = dir.join("ran-usage");
+        let fake = dir.join("claude");
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in *\"/usage\"*) touch '{}'; cat '{}' ;; *) cat '{}' ;; esac\n",
+            ran_usage.display(),
+            usage.display(),
+            stream.display()
+        );
+        std::fs::write(&fake, script).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let now = Utc::now();
+        let week_only = |p: &Polled| {
+            let r = p.result.as_ref().unwrap();
+            (r.session.clone(), r.week.as_ref().map(|w| w.pct)) == (None, Some(48))
+        };
+        // No token.
+        let p = poll(Some(&fake), &cfg, &dir, &dir, &Plan::Probe { usage_fallback: true }, now);
+        assert!(!p.idle && p.probe == ProbeRun::Answered && p.idle_miss.is_none() && week_only(&p), "{p:?}");
+        // Backing off: the endpoint isn't asked.
+        let p = poll(Some(&fake), &cfg, &dir, &dir, &Plan::Probe { usage_fallback: false }, now);
+        assert!(!p.idle && p.probe == ProbeRun::Answered && p.idle_miss.is_none() && week_only(&p), "{p:?}");
+        // An expired token: the probe's answer stands, the expiry rides along.
+        std::fs::write(cfg.join(".credentials.json"), r#"{"claudeAiOauth":{"accessToken":"t","expiresAt":1000}}"#)
+            .unwrap();
+        let p = poll(Some(&fake), &cfg, &dir, &dir, &Plan::Probe { usage_fallback: true }, now);
+        assert!(!p.idle && p.idle_miss == Some(UsageError::TokenExpired) && week_only(&p), "{p:?}");
+        assert!(!ran_usage.exists(), "claude -p /usage never ran");
+        let pro =
+            UsageReading { session_limit: SessionLimit::Applies, ..reading(Some((30, Some(T0))), Some((40, None))) };
+        let mut st = state(pro, T0 - 600);
+        st.record_polled(T0 + 60, p);
+        let last = st.last.as_ref().unwrap();
+        assert_eq!((last.session.clone(), last.week.as_ref().map(|w| w.pct)), (None, Some(48)), "not started");
+        assert!(!last.no_session_limit(), "an account with the limit keeps it");
+        assert_eq!((st.misses, st.last_error.clone()), (0, Some(UsageError::TokenExpired)));
+        assert!(!st.backoff.active(T0 + 60), "an expired token never reached the endpoint");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // What the endpoint said after a probe answer without five_hour.
+    #[test]
+    fn the_endpoint_decides_after_a_week_only_probe() {
+        let probe = reading(None, Some((48, Some(T0 + 86_400))));
+        let pro =
+            || UsageReading { session_limit: SessionLimit::Applies, ..reading(Some((30, Some(T0))), Some((40, None))) };
+        // It answered: its reading, as the idle source's.
+        let ultra = UsageReading { session_limit: SessionLimit::Absent, ..reading(None, Some((48, None))) };
+        let p = after_week_only_probe(probe.clone(), Some(Ok(ultra)));
+        assert!(p.idle && p.probe == ProbeRun::Answered && p.idle_miss.is_none(), "{p:?}");
+        let mut st = state(pro(), T0 - 600);
+        st.record_polled(T0 + 60, p);
+        assert!(st.last.as_ref().unwrap().no_session_limit());
+        // The probe answered, so its earlier misses are over, even when an
+        // activity during the poll keeps the window inferred.
+        let mut st = state(pro(), T0 - 600);
+        st.last_attempt_at = Some(T0);
+        st.first_activity = Some(T0 + 30);
+        st.probe_misses = PROBE_MISS_LIMIT - 1;
+        let endpoint = UsageReading { session_limit: SessionLimit::Applies, ..reading(None, Some((48, None))) };
+        st.record_polled(T0 + 60, after_week_only_probe(probe.clone(), Some(Ok(endpoint))));
+        assert_eq!((st.first_activity, st.probe_misses), (Some(T0 + 30), 0));
+        // A transient miss, and a refused token, back the account off on the
+        // ladder and are reported; the probe's reading stands.
+        for e in [UsageError::Offline("down".into()), UsageError::TokenRejected] {
+            let mut st = state(pro(), T0 - 600);
+            st.record_polled(T0 + 60, after_week_only_probe(probe.clone(), Some(Err(e.clone()))));
+            assert_eq!(st.backoff.until(), Some(T0 + 660), "{e}");
+            assert_eq!((st.misses, st.last_error.clone()), (0, Some(e)));
+            assert_eq!(st.last.as_ref().unwrap().session, None);
+        }
+    }
+
+    // The endpoint is 429-parked after a probe answer without five_hour; the
+    // user keeps prompting, so the probe answers again. That answer doesn't
+    // end the block, or the next one would fall back to the endpoint inside
+    // it. Once a pause has run out, a probe answer clears its strikes, so
+    // hours on the probe don't lengthen the next one; endpoint misses in a
+    // row still climb the ladder.
+    #[test]
+    fn a_probe_answer_keeps_a_running_backoff() {
+        let week = || reading(None, Some((48, Some(T0 + 86_400))));
+        let answered = |idle_miss| Polled { result: Ok(week()), idle: false, probe: ProbeRun::Answered, idle_miss };
+        let mut st = state(reading(Some((30, Some(T0))), Some((48, Some(T0 + 86_400)))), T0 - 600);
+        st.record_polled(T0 + 60, answered(Some(UsageError::Throttled { retry_after_secs: Some(589) })));
+        assert_eq!(st.backoff.until(), Some(T0 + 649));
+        st.record_polled(T0 + 180, answered(None));
+        assert_eq!(st.backoff.until(), Some(T0 + 649), "still parked: no fallback to the endpoint");
+        assert!(st.backoff.throttled());
+        assert_eq!((st.misses, st.last_error.clone()), (0, None), "the probe's reading is fresh");
+        st.record_polled(T0 + 700, answered(None));
+        assert_eq!((st.backoff.until(), st.backoff.strikes()), (None, 0), "run out: its strikes go too");
+        // A timeout (strike 1); the endpoint missing again once that has run
+        // out is strike 2.
+        st.record_polled(T0 + 800, Polled { probe: ProbeRun::Missed, ..Err(UsageError::Timeout).into() });
+        assert_eq!(st.backoff.until(), Some(T0 + 1400));
+        st.record_polled(T0 + 1000, answered(None));
+        assert_eq!(st.backoff.until(), Some(T0 + 1400), "kept while it runs");
+        st.record_polled(T0 + 1500, answered(Some(UsageError::Offline("down".into()))));
+        assert_eq!((st.backoff.until(), st.backoff.strikes()), (Some(T0 + 2700), 2), "misses in a row climb");
+        // The endpoint's own answer ends it at once.
+        st.record_polled(T0 + 2000, Ok(week()).into());
+        assert_eq!((st.backoff.until(), st.backoff.strikes()), (None, 0));
+    }
+
     #[test]
     fn probe_misses_on_activity_alone_hand_over_to_the_idle_source() {
         let mut st = state(reading(None, Some((20, Some(T0 + 86_400)))), T0);
         st.first_activity = Some(T0 + 60);
         assert_eq!(choose_source(&st, None, T0 + 120), Source::Probe);
-        let miss = || Polled { result: Err(UsageError::Timeout), idle: false, probe_missed: true };
+        let miss =
+            || Polled { result: Err(UsageError::Timeout), idle: false, probe: ProbeRun::Missed, idle_miss: None };
         for _ in 0..PROBE_MISS_LIMIT {
             st.record_polled(T0 + 120, miss());
         }
@@ -341,6 +556,10 @@ mod tests {
         assert_eq!(r.week, Some(Window { pct: 20, resets_at: ts(1_792_360_800) }));
         assert!(!r.overage);
         assert!(r.window_started());
+        // The session window makes it `Applies` once recorded.
+        let mut st = AccountState::default();
+        st.record(T0, Ok(r));
+        assert_eq!(st.last.unwrap().session_limit, SessionLimit::Applies);
     }
 
     #[test]
@@ -356,6 +575,11 @@ mod tests {
         assert_eq!(r.session, Some(Window { pct: 105, resets_at: ts(20) }));
         assert_eq!(r.week, None);
         assert!(r.overage);
+        // The week alone can't say whether the limit is gone ([`poll`] asks
+        // the endpoint).
+        let week_only =
+            parse_stream(&ev(r#"{"unifiedWindows":{"seven_day":{"utilization":0.48,"resetsAt":30}}}"#)).unwrap();
+        assert_eq!((week_only.session, week_only.session_limit), (None, SessionLimit::Unknown));
         // No event, an event without windows, empty windows: a miss.
         assert!(matches!(parse_stream("{\"type\":\"result\"}\n"), Err(UsageError::BadOutput(_))));
         assert!(matches!(parse_stream(&ev(r#"{"status":"allowed"}"#)), Err(UsageError::BadOutput(_))));
@@ -366,6 +590,64 @@ mod tests {
     }
 
     #[test]
+    fn stream_reads_the_fable_window() {
+        let line = |windows: &str| {
+            format!(
+                r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"allowed","unifiedWindows":{windows}}}}}"#
+            )
+        };
+        // Claude Code's "Fable limit": seven_day_overage_included.
+        let windows = concat!(
+            r#"{"five_hour":{"utilization":0.32,"resetsAt":10},"seven_day":{"utilization":0.6,"resetsAt":30},"#,
+            r#""seven_day_overage_included":{"utilization":0.4,"resetsAt":30}}"#
+        );
+        let r = parse_stream(&line(windows)).unwrap();
+        assert_eq!(r.fable(), Some(&Window { pct: 40, resets_at: ts(30) }));
+        // The real probe answer (Haiku) has none.
+        let fixture = include_str!("../tests/fixtures/probe-stream.jsonl");
+        assert_eq!(parse_stream(fixture).unwrap().fable(), None);
+    }
+
+    #[test]
+    fn probe_answers_keep_the_last_fable_window() {
+        let fable = |pct, reset| ("Fable".to_owned(), Window { pct, resets_at: ts(reset) });
+        let probe_answer =
+            |r: UsageReading| Polled { result: Ok(r), idle: false, probe: ProbeRun::Answered, idle_miss: None };
+        let week = Some((60, Some(T0 + 86_400)));
+        // The endpoint's reading had Fable at 40 %.
+        let mut st = AccountState::default();
+        st.record(
+            T0,
+            Ok(UsageReading { models: vec![fable(40, T0 + 86_400)], ..reading(Some((30, Some(T0 + 3600))), week) }),
+        );
+        // A probe answer without the window keeps it, reset and all.
+        st.record_polled(T0 + 600, probe_answer(reading(Some((35, Some(T0 + 3600))), week)));
+        let last = st.last.clone().unwrap();
+        assert_eq!(
+            (last.session.as_ref().map(|w| w.pct), last.fable()),
+            (Some(35), Some(&Window { pct: 40, resets_at: ts(T0 + 86_400) }))
+        );
+        // One that carries it wins.
+        let with = UsageReading { models: vec![fable(45, T0 + 86_400)], ..reading(Some((36, Some(T0 + 3600))), week) };
+        st.record_polled(T0 + 900, probe_answer(with));
+        assert_eq!(st.last.as_ref().unwrap().fable().map(|w| w.pct), Some(45));
+        // Past Fable's reset: back at 0 % with no reset, like the week.
+        let after = reading(Some((5, Some(T0 + 86_400 + 3600))), Some((1, Some(T0 + 8 * 86_400))));
+        st.record_polled(T0 + 86_400 + 60, probe_answer(after));
+        assert_eq!(st.last.as_ref().unwrap().fable(), Some(&Window { pct: 0, resets_at: None }));
+        // Nothing known, nothing made up; the idle sources aren't topped up.
+        let mut fresh = AccountState::default();
+        fresh.record_polled(T0, probe_answer(reading(Some((30, Some(T0 + 3600))), week)));
+        assert_eq!(fresh.last.unwrap().fable(), None);
+        st.record(T0 + 86_400 + 120, Ok(reading(Some((5, Some(T0 + 86_400 + 3600))), week)));
+        assert_eq!(st.last.unwrap().fable(), None, "an idle reading without Fable has none");
+        // The window ending quietly keeps it too.
+        let ended = UsageReading { models: vec![fable(40, T0 + 86_400)], ..reading(Some((30, Some(T0))), week) };
+        let Source::NotStarted(r) = choose_source(&state(ended, T0 - 600), None, T0 + 60) else { panic!() };
+        assert_eq!(r.fable().map(|w| w.pct), Some(40));
+    }
+
+    #[test]
     fn unknown_or_spend_capped_accounts_use_usage() {
         assert_eq!(choose_source(&AccountState::default(), None, T0), Source::Usage);
         let spend = UsageReading {
@@ -373,6 +655,27 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(choose_source(&state(spend, T0 - 60), None, T0), Source::Usage);
+    }
+
+    #[test]
+    fn no_session_limit_never_probes() {
+        let ultra =
+            UsageReading { session_limit: SessionLimit::Absent, ..reading(None, Some((48, Some(T0 + 86_400)))) };
+        let mut st = state(ultra, T0 - 60);
+        // A prompt would open the probe for an account with the limit.
+        st.note_activity(T0 - 30);
+        assert_eq!(st.first_activity, Some(T0 - 30));
+        assert_eq!(choose_source(&st, None, T0), Source::Usage);
+        // The same activity on an account with the limit, no window running: the probe.
+        st.last.as_mut().unwrap().session_limit = SessionLimit::Applies;
+        assert_eq!(choose_source(&st, None, T0), Source::Probe);
+        // Verified while that window ran: the probe's answer has the week
+        // alone, so the endpoint answers in the same poll ([`poll`]).
+        let endpoint = UsageReading { session_limit: SessionLimit::Absent, ..reading(None, Some((48, None))) };
+        st.record_polled(T0 + 60, Ok(endpoint).into());
+        assert!(st.last.as_ref().unwrap().no_session_limit());
+        st.note_activity(T0 + 90);
+        assert_eq!(choose_source(&st, None, T0 + 120), Source::Usage);
     }
 
     #[test]
@@ -397,6 +700,10 @@ mod tests {
         // Past the weekly reset too: back at 0 % with no reset.
         let Source::NotStarted(r) = choose_source(&st, None, T0 + 86_400) else { panic!() };
         assert_eq!(r.week, Some(Window { pct: 0, resets_at: None }));
+        let mut limited = st.clone();
+        limited.last.as_mut().unwrap().session_limit = SessionLimit::Applies;
+        let Source::NotStarted(r) = choose_source(&limited, None, T0) else { panic!() };
+        assert_eq!(r.session_limit, SessionLimit::Applies, "kept");
         // Already not started at the last reading: /usage keeps watch.
         let idle = state(reading(None, Some((10, Some(T0 + 86_400)))), T0 - 600);
         assert_eq!(choose_source(&idle, None, T0), Source::Usage);

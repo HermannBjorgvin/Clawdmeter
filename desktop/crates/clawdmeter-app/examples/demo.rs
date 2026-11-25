@@ -8,8 +8,34 @@
 //!   cargo run -p clawdmeter-app --example demo -- [--page PAGE] [--status connected|off]
 //!   [--board none|fresh|current|old] [--setup welcome|board|flash|pair|hooks|done] [--hooks-preview]
 //!   [--flash-to identify|firmware|flash|done] [--shop] [--accounts retrying] [--refresh wait|checking]
-//!   [--advanced] [--session idle] [--height PX]
+//!   [--app-update download|downloading|ready|failed|none|linux|linux-menu]
+//!   [--advanced] [--session idle|week] [--buttons custom] [--edit primary|secondary|pwr] [--record]
+//!   [--firmware-skipped] [--codex week|5h|listed] [--resets N] [--fable PCT] [--week PCT]
+//!   [--account-menu] [--width PX] [--height PX]
 //! ```
+//!
+//! `--codex` adds a Codex account (`~/.codex` with an `auth.json`, found as
+//! the app finds it): `week` shows it on the device, weekly-only with reset
+//! credits like the $100 Pro plan; `5h` shows one with a 5-hour window;
+//! `listed` keeps Claude on the device. `--resets N` sets how many reset
+//! credits the `week` account holds (default 3); past ten, the rest have no
+//! date, as `rx` carries at most ten.
+//!
+//! `--fable PCT` gives the account a Fable weekly window at PCT % of its own
+//! limit, drawn inside the Overview's weekly meter (half the bar at 100).
+//!
+//! `--week PCT` sets the weekly meter (62 % by default).
+//!
+//! `--buttons custom` gives the secondary button a held shortcut and PWR a
+//! media key; `--edit` opens a button's editor on the Device page, and
+//! `--record` has it listening for a shortcut.
+//!
+//! `--firmware-skipped` skips the fake firmware release, as the Overview's
+//! "Skip this update" does: no nudge on the Overview and no Flash badge,
+//! while the Device page still offers it.
+//!
+//! `--account-menu` opens the Overview's drop-down that picks the account
+//! the device shows (it needs two or more accounts, e.g. `--codex week`).
 //!
 //! `--accounts retrying` adds a second account that is being rate-limited;
 //! `--refresh` shows the Overview's refresh button waiting out the
@@ -31,7 +57,9 @@ use clawdmeter_flash::release::sha256_hex;
 use clawdmeter_flash::BoardImage;
 use gpui::AppContext as _;
 
-const VERSION: &str = "1.9.0";
+const VERSION: &str = "2.6.0";
+/// The firmware the fake board runs, one release behind.
+const OLD_VERSION: &str = "2.5.0";
 const ENV: &str = "waveshare_amoled_216";
 
 /// A board on a fake port that takes its time.
@@ -51,7 +79,7 @@ impl FlashHardware for FakeBoard {
         std::thread::sleep(Duration::from_millis(600));
         let ver = match self.kind.as_str() {
             "current" => VERSION,
-            "old" => "1.8.2",
+            "old" => OLD_VERSION,
             _ => return None,
         };
         Some(FirmwareInfo { env: ENV.into(), ver: ver.into(), rev: String::new(), link: String::new() })
@@ -95,7 +123,7 @@ fn release(paths: &Paths) -> std::path::PathBuf {
         .iter()
         .map(|b| {
             let chip = if b.chip.contains("C6") { "esp32c6" } else { "esp32s3" };
-            let flash = if b.env == "waveshare_amoled_206" { "32MB" } else { "16MB" };
+            let flash = if matches!(b.env, "waveshare_amoled_206" | "waveshare_amoled_175c") { "32MB" } else { "16MB" };
             let (f, s) = if b.env == ENV { (file.clone(), sha.clone()) } else { (format!("{}.bin", b.env), "00".into()) };
             format!(
                 r#"{{"env":"{}","chip":"{chip}","flash_size":"{flash}","display_name":"{}","file":"{f}","sha256":"{s}"}}"#,
@@ -108,13 +136,31 @@ fn release(paths: &Paths) -> std::path::PathBuf {
     dir.join("manifest.json")
 }
 
-fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, idle: bool) {
+/// The made-up usage the status shows (`--session`, `--codex`, `--resets`,
+/// `--fable`, `--week`).
+struct FakeUsage {
+    session: Option<String>,
+    codex: Option<String>,
+    resets: u32,
+    fable: Option<u32>,
+    week_pct: Option<u32>,
+}
+
+fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, usage: FakeUsage) {
+    let FakeUsage { session, codex, resets, fable, week_pct } = usage;
+    // `idle`: session not started; `week`: no 5-hour limit (verified Ultra).
+    let idle = session.as_deref() == Some("idle");
+    let week = session.as_deref() == Some("week");
     let paths = paths.clone();
     let work = paths.home.join(".claude-work");
     if retrying {
         std::fs::create_dir_all(&work).unwrap();
         std::fs::write(&paths.config_file, "config_dirs = ~/.claude, ~/.claude-work\n").unwrap();
     }
+    // A Codex account on the device: weekly-only with its reset credits, or
+    // with a 5-hour window.
+    let codex_shown = matches!(codex.as_deref(), Some("week" | "5h"));
+    let codex_week = codex.as_deref() == Some("week");
     let started = unix_now();
     std::thread::spawn(move || loop {
         let now = unix_now();
@@ -127,32 +173,74 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, idle: boo
         } else {
             vec![]
         };
-        let snap = StatusSnapshot {
+        let mut snap = StatusSnapshot {
             updated_at: now,
             link: "connected".into(),
             device_key: Some("AA:BB:CC:DD:EE:FF".into()),
             device_name: Some("Clawdmeter".into()),
             account: Some(paths.home.join(".claude").display().to_string()),
             claude: Some(paths.home.join(".local/bin/claude").display().to_string()),
-            session_pct: Some(if idle { 0 } else { 34 }),
-            week_pct: Some(62),
-            window_started: !idle,
-            session_resets_at: (!idle).then_some(started + 177 * 60),
+            session_pct: (!week).then_some(if idle { 0 } else { 34 }),
+            week_pct: Some(week_pct.unwrap_or(62)),
+            window_started: !idle && !week,
+            no_session_limit: week,
+            session_resets_at: (!idle && !week).then_some(started + 177 * 60),
             week_resets_at: Some(started + (5 * 24 + 11) * 3600 + 30),
+            fable_pct: fable,
             read_at: Some(now - 15),
             hooks: true,
             last_write_at: Some(now - 5),
             latest_firmware: Some(VERSION.into()),
-            device_firmware: Some("1.8.2".into()),
+            device_firmware: Some(OLD_VERSION.into()),
             tray: "Connected".into(),
             errors,
             refresh_at: (refresh.as_deref() == Some("wait")).then_some(started + 100),
             polling: refresh.as_deref() == Some("checking"),
             ..Default::default()
         };
+        if codex_shown {
+            snap = StatusSnapshot {
+                account: Some(paths.home.join(".codex").display().to_string()),
+                codex: true,
+                session_pct: (!codex_week).then_some(21),
+                week_pct: Some(34),
+                window_started: !codex_week,
+                no_session_limit: codex_week,
+                session_resets_at: (!codex_week).then_some(started + 133 * 60),
+                week_resets_at: Some(started + (4 * 24 + 21) * 3600 + 30),
+                resets_held: codex_week.then_some(resets),
+                resets_expiries: if codex_week {
+                    // Spread over the next weeks, two on one day.
+                    [3, 4, 4, 8, 11, 16, 17, 23, 28, 29]
+                        .iter()
+                        .take(resets as usize)
+                        .map(|d| started + d * 86_400)
+                        .collect()
+                } else {
+                    vec![]
+                },
+                ..snap
+            };
+        }
         let _ = ipc::write_status(&paths, &snap);
         std::thread::sleep(Duration::from_secs(2));
     });
+}
+
+fn demo_notes() -> Vec<clawdmeter_flash::release::ReleaseNotes> {
+    let note = |tag: &str, published: &str, body: &str| clawdmeter_flash::release::ReleaseNotes {
+        tag: tag.into(),
+        published: published.into(),
+        body: body.into(),
+    };
+    vec![
+        note(
+            "v2.6.0",
+            "2026-11-10",
+            "## New\n- App updates: release notes, download and skip, from the sidebar\n- Remap the board's buttons from the Device page\n## Fixed\n- The weekly meter no longer jumps after a reset",
+        ),
+        note("v2.5.1", "2026-10-28", "## Fixed\n- Pairing on macOS after a firmware update\n- Start at login under an AppImage"),
+    ]
 }
 
 fn main() {
@@ -160,14 +248,24 @@ fn main() {
     let paths = Paths::for_user();
     std::fs::create_dir_all(paths.home.join(".claude")).unwrap();
     std::fs::create_dir_all(&paths.state_dir).unwrap();
+    if arg(&args, "--codex").is_some() {
+        std::fs::create_dir_all(paths.home.join(".codex")).unwrap();
+        std::fs::write(paths.home.join(".codex/auth.json"), "{}").unwrap();
+    }
     if arg(&args, "--status").as_deref() != Some("off") {
         fake_status(
             &paths,
             arg(&args, "--accounts").as_deref() == Some("retrying"),
             arg(&args, "--refresh"),
-            arg(&args, "--session").as_deref() == Some("idle"),
+            FakeUsage {
+                session: arg(&args, "--session"),
+                codex: arg(&args, "--codex"),
+                resets: arg(&args, "--resets").and_then(|n| n.parse().ok()).unwrap_or(3),
+                fable: arg(&args, "--fable").and_then(|p| p.parse().ok()),
+                week_pct: arg(&args, "--week").and_then(|p| p.parse().ok()),
+            },
         );
-        let _ = ipc::save_firmware_record(&paths, &FirmwareRecord { env: ENV.into(), ver: "1.8.2".into() });
+        let _ = ipc::save_firmware_record(&paths, &FirmwareRecord { env: ENV.into(), ver: OLD_VERSION.into() });
     } else {
         let _ = std::fs::remove_file(ipc::status_file(&paths));
     }
@@ -180,16 +278,63 @@ fn main() {
     let hooks_preview = args.iter().any(|a| a == "--hooks-preview");
     let shop = args.iter().any(|a| a == "--shop");
     let advanced = args.iter().any(|a| a == "--advanced");
+    let record = args.iter().any(|a| a == "--record");
+    let edit = arg(&args, "--edit").map(|b| match b.as_str() {
+        "secondary" => clawdmeter_core::config::Button::Secondary,
+        "pwr" => clawdmeter_core::config::Button::Pwr,
+        _ => clawdmeter_core::config::Button::Primary,
+    });
+    if arg(&args, "--buttons").as_deref() == Some("custom") {
+        use std::io::Write as _;
+        std::fs::create_dir_all(paths.config_file.parent().unwrap()).unwrap();
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&paths.config_file).unwrap();
+        writeln!(f, "button_secondary = ctrl+shift+m hold\nbutton_pwr = volume-up").unwrap();
+    }
+    if args.iter().any(|a| a == "--firmware-skipped") {
+        use std::io::Write as _;
+        std::fs::create_dir_all(paths.config_file.parent().unwrap()).unwrap();
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&paths.config_file).unwrap();
+        writeln!(f, "skipped_firmware = {VERSION}").unwrap();
+    }
     // A taller window, so a long page fits one screenshot.
+    let app_update = arg(&args, "--app-update");
     let height = arg(&args, "--height").and_then(|h| h.parse::<f32>().ok());
+    let width = arg(&args, "--width").and_then(|w| w.parse::<f32>().ok());
+    let account_menu = args.iter().any(|a| a == "--account-menu");
 
-    clawdmeter_app::ui::open_with_height(height, move |window, cx| {
+    clawdmeter_app::ui::open_with_size(width, height, move |window, cx| {
         let p = paths.clone();
         let hw: Arc<dyn FlashHardware> = Arc::new(FakeBoard { kind: board });
         let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));
         let settings = cx.new(|cx| SettingsView::with_usb(p.clone(), Page::Device, false, cx));
         let flasher = cx.new(|cx| FlasherView::with_hardware(p.clone(), Some(manifest), hw, cx));
-        let app = AppView::build(p, page, overview, settings.clone(), flasher.clone(), window, cx);
+        let app = AppView::build(p, page, overview.clone(), settings.clone(), flasher.clone(), window, cx);
+        if account_menu {
+            overview.update(cx, |o, _| o.set_account_menu_open(true));
+        }
+        // `--app-update` offers the fake release as an app update too, with
+        // made-up notes and the download in the given state (`none`: an
+        // install with no package to download).
+        if let Some(state) = app_update {
+            let tag = format!("v{VERSION}");
+            app.update_view().update(cx, |u, _| {
+                u.offer(true);
+                u.show_notes(&tag, demo_notes());
+                match state.as_str() {
+                    "none" => u.set_package(None),
+                    // Linux's package menu, closed or open, on a `.deb` install.
+                    "linux" | "linux-menu" => {
+                        use clawdmeter_flash::release::AppPackage;
+                        u.set_choices(AppPackage::for_linux("x86_64"), Some(AppPackage::Deb), state == "linux-menu");
+                    }
+                    state => {
+                        // Whatever this build would update from.
+                        u.set_package(Some(clawdmeter_flash::release::AppPackage::Dmg));
+                        u.show_download_state(&tag, state);
+                    }
+                }
+            });
+        }
         if shop {
             flasher.update(cx, |f, cx| f.show_shop(true, cx));
         }
@@ -198,6 +343,9 @@ fn main() {
         }
         if hooks_preview {
             settings.update(cx, |s, cx| s.review_hook_install(cx));
+        }
+        if let Some(b) = edit {
+            settings.update(cx, |s, cx| s.edit_button(b, record, window, cx));
         }
         let wizard = app.wizard().clone();
         if let Some(step) = setup_step {

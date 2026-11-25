@@ -31,7 +31,7 @@
 #define IIC_SDA              6
 #define IIC_SCL              7
 
-// ---- Touch (CST226SE via SensorLib TouchClassCST226) ----
+// ---- Touch (CST226SE via SensorLib TouchDrvCST226) ----
 #define TP_INT               8
 #define TP_RST               17
 #define CST226_ADDR          0x5A

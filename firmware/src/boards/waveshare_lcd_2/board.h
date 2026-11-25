@@ -29,7 +29,7 @@
 #define IIC_SDA              48
 #define IIC_SCL              47
 
-// ---- Touch (CST816D, SensorLib auto-detects the CST816 family) ----
+// ---- Touch (CST816D, SensorLib's TouchDrvCST816) ----
 #define TP_INT               46
 #define TP_RST               -1    // not wired; the chip self-resets at POR
 #define TOUCH_ADDR           0x15

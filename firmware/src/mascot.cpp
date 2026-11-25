@@ -139,6 +139,15 @@ static void draw_lurk(void) {
            right_edge(lurk_feet_y) - anim->w * lurk_cell, lurk_feet_y);
 }
 
+void mascot_repaint(void) {
+    switch (mode) {
+    case M_AWAY:                                      return;
+    case M_LURK:                                      draw_lurk(); return;
+    case M_BIG_IN: case M_BIG_ACT: case M_BIG_OUT:    draw_big(); return;
+    default:                                          draw_corner(); return;
+    }
+}
+
 static int  off_left_x(void) {
     return offstage_left_x(screen_w, screen_h, round_panel, feet_y, walk_anim ? walk_anim->w * cell : 100);
 }

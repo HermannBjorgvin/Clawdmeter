@@ -5,14 +5,21 @@
 # jobs: `dispatch` catches the owner's comment and re-runs this workflow as a
 # `workflow_dispatch` with the comment's node id; `claude` loads the thread
 # through the API and runs the action.
-#   - Only comments by the repo owner trigger it, and `claude` re-checks the
-#     author from the API, so a manual dispatch can't point it at someone
-#     else's comment. Other people's text in the thread is context, never
-#     instructions.
+#   - Only comments by the repo owner trigger it, and `claude` re-checks from
+#     the API that the owner wrote the comment and nobody else edited it, so a
+#     manual dispatch can't point it at someone else's words. Other people's
+#     text in the thread is context, never instructions.
+#   - The dispatch is made with GITHUB_TOKEN, so the `claude` job's actor is
+#     github-actions[bot]; `allowed_bots` lets the action run for it, which is
+#     safe because the author check above has already passed.
+#   - Claude's Bash is unrestricted, as in claude.yml, so it can build and
+#     test; the job's own GITHUB_TOKEN stays read-only apart from discussions.
 #   - Claude pushes a branch and opens the PR with the Claude GitHub App's
 #     token (fetched by the action), so CI runs on the PR; `main` is protected
-#     by the ruleset. The job's GITHUB_TOKEN only posts the reply, from a file
-#     Claude writes, after the action finishes.
+#     by the ruleset. The job's GITHUB_TOKEN only posts the replies: a "working
+#     on it" reply with the run link when the job starts, then Claude's answer
+#     (from a file Claude writes) as a second reply after the action finishes.
+#     GITHUB_TOKEN can't edit discussion comments, so the progress reply stays.
 name: Claude Discussions
 
 on:
@@ -71,6 +78,7 @@ jobs:
                 ... on DiscussionComment {
                   id url body
                   author { login }
+                  editor { login }
                   replyTo { id body author { login } }
                   discussion {
                     id number title body url
@@ -82,6 +90,11 @@ jobs:
           author=$(jq -r '.data.node.author.login // ""' "$THREAD_DIR/comment.json")
           if [ "$author" != "$OWNER" ]; then
             echo "::error::comment $COMMENT_ID is not by $OWNER (author: ${author:-none})"
+            exit 1
+          fi
+          editor=$(jq -r '.data.node.editor.login // ""' "$THREAD_DIR/comment.json")
+          if [ -n "$editor" ] && [ "$editor" != "$OWNER" ]; then
+            echo "::error::comment $COMMENT_ID was edited by $editor, not $OWNER"
             exit 1
           fi
           jq -r '.data.node |
@@ -97,6 +110,23 @@ jobs:
             echo "reply_to=$(jq -r '.data.node.replyTo.id // .data.node.id' "$THREAD_DIR/comment.json")"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Post a progress reply
+        continue-on-error: true   # a missing progress reply never stops the work
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISCUSSION_ID: ${{ steps.thread.outputs.discussion_id }}
+          REPLY_TO: ${{ steps.thread.outputs.reply_to }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body="Working on it. Progress: $RUN_URL"
+          # shellcheck disable=SC2016 # GraphQL variables, not shell
+          gh api graphql -f discussion="$DISCUSSION_ID" -f replyTo="$REPLY_TO" -f body="$body" -f query='
+            mutation($discussion: ID!, $replyTo: ID!, $body: String!) {
+              addDiscussionComment(input: {discussionId: $discussion, replyToId: $replyTo, body: $body}) {
+                comment { url }
+              }
+            }' --jq .data.addDiscussionComment.comment.url
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -106,6 +136,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: github-actions
           prompt: |
             The owner of ${{ github.repository }} asked for a change in a GitHub
             Discussion. The thread is in ${{ env.THREAD_DIR }}/thread.md. Only the
@@ -128,10 +159,11 @@ jobs:
             what the PR does, and its link. If you could not do it, say why
             instead. A later step posts the file; don't post it yourself.
           claude_args: |
-            --max-turns 60
+            --max-turns 80
             --add-dir ${{ env.THREAD_DIR }}
-            --allowedTools "Agent,Task,Read,Edit,Write,Glob,Grep,Bash(git:*),Bash(gh pr create:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh search:*)"
+            --allowedTools "Agent,Task,Read,Edit,Write,Glob,Grep,Bash"
             --disallowedTools "WebFetch,WebSearch"
+            --append-system-prompt "Bash is unrestricted, so build and test what you change, following CLAUDE.md's Build and test but only for what the change touches (pio run -d firmware -e ENV for the affected boards, never every env): the desktop's apt packages are in .github/actions/linux-desktop-deps, run rustup toolchain install in desktop/, install PlatformIO with pip install platformio==6.1.19 (the version .github/actions/setup-pio pins), and the simulator needs libsdl2-dev. Stage only the files you changed, by name; never git add -A or commit -a. The Claude app has no workflows permission, so a push that changes .github/workflows is rejected."
 
       - name: Reply in the thread
         if: always() && steps.thread.outputs.reply_to != ''

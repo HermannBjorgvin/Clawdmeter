@@ -234,7 +234,7 @@ bool idle_is_asleep(void) { return world.asleep; }
 bool minimal_mode(void) { return false; }
 int  usage_rate_base_group(void) { return RATE_ACTIVE; }
 int  signals_activity(void) { return world.activity; }
-int  clawd_anim_index(const char*) { return 0; }
+// clawd_anim_index is the real one (clawd_anim.cpp is in the native build).
 
 void fake_actors_tick(void) {
     performer_tick();

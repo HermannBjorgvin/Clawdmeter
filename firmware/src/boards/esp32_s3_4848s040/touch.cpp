@@ -2,7 +2,7 @@
 #include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
-#include <TouchDrvGT911.hpp>
+#include <TouchDrvGoodix.hpp>
 
 // GT911 via SensorLib — the same driver the LCD-4 port uses for this
 // controller.
@@ -23,7 +23,9 @@ void touch_hal_init(void) {
     if (Wire.endTransmission() == 0) gt_addr = GT911_ADDR_PRIMARY;
 
     touch.setPins(-1, -1);  // no RST, no INT on this board
-    if (!touch.begin(Wire, gt_addr, IIC_SDA, IIC_SCL)) {
+    // No pins: board_init() already started Wire, and SensorLib would
+    // call Wire.setPins() on the running bus (an [E] log line).
+    if (!touch.begin(Wire, gt_addr)) {
         Serial.printf("Touch GT911 init failed (tried 0x%02X and 0x%02X)\n",
                       GT911_ADDR_PRIMARY, GT911_ADDR_ALT);
         return;
@@ -39,12 +41,11 @@ void touch_hal_init(void) {
 
 void touch_hal_read(uint16_t* x, uint16_t* y, bool* pressed) {
     if (touch_ok) {
-        int16_t tx[5], ty[5];
-        uint8_t n = touch.getPoint(tx, ty, touch.getSupportTouchPoint());
-        if (n > 0) {
+        const TouchPoints &pts = touch.getTouchPoints();
+        if (pts.hasPoints()) {
             touch_pressed = true;
-            touch_x = (uint16_t)tx[0];
-            touch_y = (uint16_t)ty[0];
+            touch_x = pts.getPoint(0).x;
+            touch_y = pts.getPoint(0).y;
         } else {
             touch_pressed = false;
         }

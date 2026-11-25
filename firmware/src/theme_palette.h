@@ -1,0 +1,62 @@
+#pragma once
+#include <stdint.h>
+
+// The UI's colour tokens as 0xRRGGBB, changeable at run time: the app sends
+// the whole palette as `th`, eleven 6-digit hex colours run together in this
+// order (no '#', no separators). Pure: no LVGL, no Arduino, so the parser
+// runs in the native tests. theme.h wraps these as lv_color_t.
+enum ThemeColor : uint8_t {
+    TH_BG,       // screen background
+    TH_PANEL,    // card/zone fill
+    TH_TEXT,     // primary text
+    TH_DIM,      // secondary text
+    TH_ACCENT,   // status line, pairing notes
+    TH_GREEN,    // bars: under 50 % / on pace
+    TH_AMBER,    // bars: 50-80 % / ahead of pace
+    TH_RED,      // bars: 80 %+ / at the limit
+    TH_BAR_BG,   // unfilled bar track, pills
+    TH_CLAWD,    // Clawd: the sprite's body and the screensaver face
+    TH_EYE,      // the screensaver face's eyes
+    TH_COUNT
+};
+
+#define THEME_HEX_LEN (TH_COUNT * 6)
+
+extern const uint32_t THEME_DEFAULTS[TH_COUNT];
+
+// Not in the palette: a mono_panel board ignores `th` and draws each pill as
+// paper text (TH_BG) on this fixed grey (ui.cpp make_pill). Its luminance, 88,
+// prints as ink (hal/mono_panel.h: 64 or more) but stays close to that
+// threshold, so where a glyph's anti-aliased edge blends it toward the black
+// text the pixel drops to paper at about 27 % coverage. On the near-white
+// TH_TEXT (247) it would take 75 %, and the thin strokes of i, l and k would
+// print as ink and close up.
+#define THEME_MONO_PILL_HEX 0x585858
+
+// `s` must be exactly THEME_HEX_LEN hex digits (either case); anything else
+// returns false and leaves `out` untouched.
+bool theme_parse_hex(const char* s, uint32_t out[TH_COUNT]);
+void theme_format_hex(const uint32_t in[TH_COUNT], char out[THEME_HEX_LEN + 1]);
+
+// The live palette (starts at THEME_DEFAULTS).
+uint32_t theme_hex(ThemeColor c);
+// Replace the live palette; true when any colour changed.
+bool theme_palette_set(const uint32_t p[TH_COUNT]);
+
+uint16_t theme_rgb565(uint32_t rgb);
+
+// The Fable overlay's colour (payload `fc`, fable.h): not a `th` token, so
+// the palette keeps the length older firmware accepts. `s` must be exactly
+// six hex digits; anything else returns false and leaves `out` untouched.
+bool theme_parse_rgb(const char* s, uint32_t* out);
+uint32_t theme_fable_hex(void);           // starts at FABLE_COLOR_DEFAULT
+bool theme_fable_set(uint32_t rgb);       // true when it changed
+
+// The official Clawd art in TH_CLAWD: its body orange becomes `clawd` and
+// the shaded side of his body the same shade of it; every other colour in
+// the art (eyes, props, scenery) is unchanged. A palette swap at draw time,
+// so the frames themselves stay untouched. The default TH_CLAWD gives the
+// art's own colours back exactly.
+#define CLAWD_ART_BODY  0xDBAA   // RGB565 of 0xd97757
+#define CLAWD_ART_SHADE 0xBB49
+uint16_t theme_clawd_art(uint16_t art565, uint32_t clawd);
