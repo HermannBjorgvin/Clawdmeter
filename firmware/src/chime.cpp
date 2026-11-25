@@ -72,7 +72,18 @@ static bool es8311_setup(void) {
     const es8311_clock_config_t clk = {
         false, false, true, cfg.sample_rate * 256, cfg.sample_rate
     };
-    if (es8311_init(es, &clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16) != ESP_OK) return false;
+    // A write right after the codec switches its clocks on can fail at boot
+    // (I2C ESP_ERR_INVALID_STATE, seen on the LCD-3.5-C): init again, which
+    // starts over from the codec's reset.
+    bool ok = false;
+    for (int attempt = 1; attempt <= 3 && !ok; attempt++) {
+        ok = es8311_init(es, &clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16) == ESP_OK;
+        if (!ok) {
+            Serial.printf("chime: ES8311 init attempt %d failed\n", attempt);
+            delay(10);
+        }
+    }
+    if (!ok) return false;
     es8311_sample_frequency_config(es, clk.mclk_frequency, clk.sample_frequency);
     es8311_microphone_config(es, false);
     es8311_voice_volume_set(es, cfg.volume, NULL);
