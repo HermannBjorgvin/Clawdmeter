@@ -3,7 +3,7 @@
 //! Keys match `payload_parse()` in `firmware/src/payload.cpp`, in the order
 //! the old daemons wrote them, plus the Fable weekly % `wf`, the Codex keys
 //! `pv`, `rc`, `rx`, the additive fast-clock fields `a`, `e`, `es`, `n`, `rp`
-//! and the device settings `lv`, `aa`, `pm`, `k1`–`k3`, `th` and `fc` (old
+//! and the device settings `lv`, `aa`, `pm`, `ss`, `pk`, `k1`–`k3`, `th` and `fc` (old
 //! firmware ignores unknown keys).
 
 use chrono::{DateTime, Datelike, Months, TimeZone, Utc};
@@ -112,6 +112,14 @@ pub struct Payload {
     /// value it got.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm: Option<u8>,
+    /// Minutes of quiet before Clawd's face covers the meters, 0 = never.
+    /// The device keeps the last value it got.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ss: Option<u8>,
+    /// 1 = a tap on the meters brings Clawd's face up, 0 = it doesn't. The
+    /// device keeps the last value it got.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pk: Option<u8>,
     /// What the primary button does ([`crate::buttons::ButtonAction::code`]).
     /// The device keeps the last value it got.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,7 +145,7 @@ pub struct Payload {
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
     "s", "sr", "w", "wr", "wf", "st", "acct", "pv", "rc", "rx", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x",
-    "a", "e", "es", "n", "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th", "fc",
+    "a", "e", "es", "n", "rp", "lv", "aa", "pm", "ss", "pk", "k1", "k2", "k3", "th", "fc",
 ];
 
 /// The fast-clock keys added in v0.4 (old firmware ignores them).
@@ -635,25 +643,21 @@ mod tests {
         assert!(!j.contains("pv") && !j.contains("\"rc\""), "{j}");
     }
 
-    /// Every field at its widest, the longest alert line and three
-    /// shortcuts still fit the app's 500-byte write without trimming `m`.
+    /// Each kind of payload with every field it can carry at its widest,
+    /// the longest alert line and three shortcuts still fits the app's
+    /// 500-byte write without trimming `m`. The kinds don't mix: only
+    /// Claude's carries `wf`/`fc`, only Codex's `pv`/`rc`/`rx`, and only a
+    /// spend-only account's `tp`/`pd`/`rd`.
     #[test]
     fn widest_payload_fits() {
         let chord = 0x1_1F73; // hold, all four modifiers, F24
-        let pl = Payload {
+        let common = Payload {
             s: Some(100),
             sr: Some(300),
             w: Some(100),
             wr: Some(10_080),
-            wf: Some(999),
             st: Some("overage".into()),
             acct: Some("week".into()),
-            pv: Some("codex".into()),
-            rc: Some(999),
-            rx: Some(vec!["Sep 30".into(); ResetCredits::MAX_EXPIRIES]),
-            tp: Some(100),
-            pd: Some(31),
-            rd: Some("Sep 30".into()),
             t: Some(9_999_999_999),
             tf: Some(24),
             c: Some(1),
@@ -669,15 +673,28 @@ mod tests {
             lv: Some(5),
             aa: Some(120),
             pm: Some(1),
+            ss: Some(30),
+            pk: Some(1),
             k1: Some(chord),
             k2: Some(chord),
             k3: Some(chord),
             th: Some(Palette::default()),
-            fc: Some(Palette::default().fable()),
+            ..Default::default()
         };
-        let json = pl.to_json();
-        assert!(json.len() < 500, "{} bytes: {json}", json.len());
-        assert_eq!(pl.encode(500), json.into_bytes());
+        let claude = Payload { wf: Some(999), fc: Some(Palette::default().fable()), ..common.clone() };
+        let codex = Payload {
+            pv: Some("codex".into()),
+            rc: Some(999),
+            rx: Some(vec!["Sep 30".into(); ResetCredits::MAX_EXPIRIES]),
+            ..common.clone()
+        };
+        let spend =
+            Payload { acct: Some("ent".into()), tp: Some(100), pd: Some(31), rd: Some("Sep 30".into()), ..common };
+        for pl in [claude, codex, spend] {
+            let json = pl.to_json();
+            assert!(json.len() < 500, "{} bytes: {json}", json.len());
+            assert_eq!(pl.encode(500), json.into_bytes());
+        }
     }
 
     #[test]
@@ -711,6 +728,8 @@ mod tests {
             lv: Some(3),
             aa: Some(120),
             pm: Some(1),
+            ss: Some(0),
+            pk: Some(0),
             k1: Some(1),
             k2: Some(2),
             k3: Some(6),

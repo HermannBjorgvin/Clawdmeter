@@ -33,7 +33,7 @@ The simulator HAL and Arduino shims live in `firmware/src/boards/sim/`.
 
 | Input | Action |
 | --- | --- |
-| Mouse click or left-drag | Touch the screen. On the meters, bring up Clawd's face; tap again to return. During a show or the screensaver, send him back to his seat. A waking tap only wakes the panel. |
+| Mouse click or left-drag | Touch the screen. On the meters, bring up Clawd's face (unless Face on tap is off); tap again to return. During a show or the screensaver, send him back to his seat. A waking tap only wakes the panel. |
 | Space | Pause or resume scenario playback. |
 | Left / Right | Step to a scenario state and pause playback. |
 | 1–9 | Jump to the corresponding state, if present, and pause. |
@@ -116,7 +116,7 @@ SDL_VIDEODRIVER=dummy SIM_FAST=1 SIM_SCENARIO=sim/director.jsonl \
 | --- | --- |
 | `SIM_SHOTS` | `ms:path,ms:path`; ascending times, exit after the last shot. |
 | `SIM_TAPS` | `ms@x,y;ms@x,y`; a 120 ms press at each time. |
-| `SIM_CMDS` | `ms:command;ms:command`; serial commands, including `clawd peek <x>`, `liveliness <1-5>`, `attention_anim <seconds>` and `pace_marker <0|1>`. `pwr`, `prompt`, `stop`, `alert`, and `link` inject their corresponding input. |
+| `SIM_CMDS` | `ms:command;ms:command`; serial commands, including `clawd peek <x>`, `liveliness <1-5>`, `attention_anim <seconds>`, `pace_marker <0|1>`, `screensaver <minutes>` and `tap_face <0|1>`. `pwr`, `prompt`, `stop`, `alert`, and `link` inject their corresponding input. |
 | `SIM_MINIMAL=1` | Set the simulator's `BoardCaps.minimal_ui` at startup to preview a minimal-display board. |
 | `SIM_MONO=1` | Set `BoardCaps.mono_panel` to preview a 1-bit panel (the e-paper): the window and screenshots show each pixel as the panel prints it (`hal/mono_panel.h`), black ink on white paper, and brightness doesn't dim it. The ePaper-1.54 is a 200×200 build with `SIM_MINIMAL=1 SIM_MONO=1 SIM_NO_TOUCH=1 SIM_BUTTONS=1` (the sim grid's `epaper` cell). |
 | `SIM_BUTTONS=1` | Play a board with BOOT only (`BoardCaps.button_count = 1`); `N` does nothing. |

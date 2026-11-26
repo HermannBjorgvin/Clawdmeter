@@ -53,6 +53,11 @@ bool director_button(bool main_button);
 // what the new level rules out (a show, the screensaver, idle acts, a
 // pending reaction) stops.
 void director_set_liveliness(int level);
+// The screensaver's quiet time in minutes (0 = never); a screensaver it
+// rules out goes home at once.
+void director_set_screensaver(int minutes);
+// Off: a tap on the meters doesn't raise the face, and a peek leaves.
+void director_set_tap_face(bool on);
 
 // How long Clawd's attention animation runs, in seconds (clawd_policy.h;
 // 0 = off). The alert itself is unchanged.

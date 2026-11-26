@@ -26,15 +26,19 @@ void clawd_prefs_init(void) {
     const int lively = prefs.getUChar("lively", CLAWD_LIVELINESS_DEFAULT);
     const int attn = prefs.getUChar("attn_anim", CLAWD_ATTN_ANIM_DEFAULT_S);
     const bool pace = prefs.getUChar("pace_mark", 0) != 0;
+    const int saver = prefs.getUChar("ss_min", CLAWD_SCREENSAVER_DEFAULT_MIN);
+    const bool tap = prefs.getUChar("tap_face", 1) != 0;
     for (int i = 0; i < BTN_SLOT_COUNT; i++)
         btn_actions[i] = button_action_clamp(prefs.getInt(BTN_KEYS[i], BTN_DEFAULTS[i]), BTN_DEFAULTS[i]);
     prefs.end();
     director_set_liveliness(clawd_liveliness_clamp(lively));
     director_set_attn_anim(clawd_attn_anim_clamp(attn));
     pace_marker_set(pace);
-    Serial.printf("Device prefs init: liveliness %d, attention animation %d s, pace marker %s, "
+    director_set_screensaver(clawd_screensaver_clamp(saver));
+    director_set_tap_face(tap);
+    Serial.printf("Device prefs init: liveliness %d, attention animation %d s, pace marker %s, screensaver %d min, face on tap %s, "
                   "buttons 0x%lx 0x%lx 0x%lx\n",
-                  clawd_liveliness(), clawd_attn_anim(), pace ? "on" : "off",
+                  clawd_liveliness(), clawd_attn_anim(), pace ? "on" : "off", clawd_screensaver(), tap ? "on" : "off",
                   (unsigned long)btn_actions[0], (unsigned long)btn_actions[1], (unsigned long)btn_actions[2]);
 }
 
@@ -95,6 +99,25 @@ void pace_marker_set(bool on) {
 }
 
 bool pace_marker_get(void) { return pace_marker; }
+
+void screensaver_set(int minutes) {
+    minutes = clawd_screensaver_clamp(minutes);
+    if (minutes == clawd_screensaver()) return;
+    director_set_screensaver(minutes);
+    save("ss_min", (uint8_t)minutes);
+    Serial.printf("Screensaver: %d min\n", minutes);
+}
+
+int screensaver_get(void) { return clawd_screensaver(); }
+
+void tap_face_set(bool on) {
+    if (on == clawd_tap_face()) return;
+    director_set_tap_face(on);
+    save("tap_face", on ? 1 : 0);
+    Serial.printf("Face on tap: %s\n", on ? "on" : "off");
+}
+
+bool tap_face_get(void) { return clawd_tap_face(); }
 
 void button_action_set(ButtonSlot slot, int32_t action) {
     if (slot < 0 || slot >= BTN_SLOT_COUNT) return;

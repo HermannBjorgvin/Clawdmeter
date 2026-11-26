@@ -142,6 +142,23 @@ static void test_pace_marker(void) {
     TEST_ASSERT_EQUAL_INT(1, d.pace_marker);
 }
 
+static void test_screensaver(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.screensaver);      // absent: keep the saved setting
+    TEST_ASSERT_EQUAL_INT(-1, d.tap_face);
+    TEST_ASSERT_TRUE(payload_parse("{\"ss\":0}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(0, d.screensaver);       // never
+    TEST_ASSERT_TRUE(payload_parse("{\"ss\":30}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(30, d.screensaver);
+    TEST_ASSERT_TRUE(payload_parse("{\"ss\":999}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(60, d.screensaver);
+    TEST_ASSERT_TRUE(payload_parse("{\"pk\":0}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(0, d.tap_face);
+    TEST_ASSERT_TRUE(payload_parse("{\"pk\":1}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(1, d.tap_face);
+}
+
 static void test_button_actions(void) {
     UsageData d;
     TEST_ASSERT_TRUE(payload_parse("{\"ok\":true}", &d, nullptr));
@@ -325,6 +342,7 @@ int main(void) {
     RUN_TEST(test_liveliness);
     RUN_TEST(test_attention_animation);
     RUN_TEST(test_pace_marker);
+    RUN_TEST(test_screensaver);
     RUN_TEST(test_button_actions);
     RUN_TEST(test_theme);
     RUN_TEST(test_fable_weekly);

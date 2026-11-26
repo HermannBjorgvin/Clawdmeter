@@ -233,6 +233,67 @@ impl AttentionAnim {
     }
 }
 
+/// `screensaver`: how long the device sits quiet before Clawd's face covers
+/// the meters, or never.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScreensaverAfter {
+    /// Never.
+    Off,
+    /// 2 minutes.
+    Min2,
+    /// 5 minutes.
+    Min5,
+    /// 10 minutes (default).
+    #[default]
+    Min10,
+    /// 30 minutes.
+    Min30,
+}
+
+impl ScreensaverAfter {
+    /// Every option, in the order the Device page shows them.
+    pub const ALL: [ScreensaverAfter; 5] = [
+        ScreensaverAfter::Off,
+        ScreensaverAfter::Min2,
+        ScreensaverAfter::Min5,
+        ScreensaverAfter::Min10,
+        ScreensaverAfter::Min30,
+    ];
+
+    /// Parse a config value; anything unknown (`on` included) is the default.
+    pub fn parse(v: &str) -> Self {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "off" => ScreensaverAfter::Off,
+            "2m" => ScreensaverAfter::Min2,
+            "5m" => ScreensaverAfter::Min5,
+            "30m" => ScreensaverAfter::Min30,
+            _ => ScreensaverAfter::Min10,
+        }
+    }
+
+    /// The config-file spelling, also the Device page's label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScreensaverAfter::Off => "off",
+            ScreensaverAfter::Min2 => "2m",
+            ScreensaverAfter::Min5 => "5m",
+            ScreensaverAfter::Min10 => "10m",
+            ScreensaverAfter::Min30 => "30m",
+        }
+    }
+
+    /// The payload's `ss`: minutes, 0 = never.
+    pub fn minutes(self) -> u8 {
+        match self {
+            ScreensaverAfter::Off => 0,
+            ScreensaverAfter::Min2 => 2,
+            ScreensaverAfter::Min5 => 5,
+            ScreensaverAfter::Min10 => 10,
+            ScreensaverAfter::Min30 => 30,
+        }
+    }
+}
+
 /// One of the device's UI colours: the eleven the payload's `th` carries, in
 /// its order (`firmware/src/theme_palette.h`), then the Fable overlay's,
 /// which goes out on its own as `fc` so `th` stays the length older firmware
@@ -515,6 +576,11 @@ pub struct Settings {
     pub attention_anim: AttentionAnim,
     /// Pace marker on the device's usage bars (`pm`, default off).
     pub pace_marker: bool,
+    /// How long the device sits quiet before Clawd's face covers the meters
+    /// (`ss` minutes, default 10).
+    pub screensaver: ScreensaverAfter,
+    /// A tap on the device's meters brings Clawd's face up (`pk`, default on).
+    pub tap_face: bool,
     /// The main meter's percentage beside the macOS menu bar icon
     /// (`menu_bar_usage`, default off).
     pub menu_bar_usage: bool,
@@ -705,6 +771,8 @@ impl Settings {
             liveliness: cfg.get("liveliness").map(parse_liveliness).unwrap_or(DEFAULT_LIVELINESS),
             attention_anim: cfg.get("attention_anim").map(AttentionAnim::parse).unwrap_or_default(),
             pace_marker: on_off(cfg.get("pace_marker"), false),
+            screensaver: cfg.get("screensaver").map(ScreensaverAfter::parse).unwrap_or_default(),
+            tap_face: on_off(cfg.get("tap_face"), true),
             menu_bar_usage: on_off(cfg.get("menu_bar_usage"), false),
             buttons: Button::ALL.map(|b| {
                 cfg.get(b.config_key()).map_or(b.default_action(), |v| ButtonAction::parse(v, b.default_action()))
@@ -814,6 +882,7 @@ impl Settings {
             ("alert_chime", "beep", self.alert_chime, current.alert_chime),
             ("desktop_chime", "", self.desktop_chime, current.desktop_chime),
             ("pace_marker", "", self.pace_marker, current.pace_marker),
+            ("tap_face", "", self.tap_face, current.tap_face),
             ("menu_bar_usage", "", self.menu_bar_usage, current.menu_bar_usage),
         ] {
             if now != was {
@@ -858,6 +927,9 @@ impl Settings {
         }
         if current.attention_anim != self.attention_anim {
             cfg.set("attention_anim", self.attention_anim.as_str());
+        }
+        if current.screensaver != self.screensaver {
+            cfg.set("screensaver", self.screensaver.as_str());
         }
         for b in Button::ALL {
             let a = self.buttons[b.index()];
@@ -1366,6 +1438,41 @@ mod tests {
         s.pace_marker = true;
         s.apply_to(&mut cfg, &paths());
         assert_eq!(cfg.get("pace_marker"), Some("on"));
+    }
+
+    #[test]
+    fn screensaver() {
+        assert_eq!(settings("").screensaver, ScreensaverAfter::Min10);
+        assert_eq!(settings("screensaver = off\n").screensaver, ScreensaverAfter::Off);
+        assert_eq!(settings("screensaver = 30M\n").screensaver, ScreensaverAfter::Min30);
+        assert_eq!(settings("screensaver = on\n").screensaver, ScreensaverAfter::Min10);
+        let mins: Vec<u8> = ScreensaverAfter::ALL.iter().map(|a| a.minutes()).collect();
+        assert_eq!(mins, [0, 2, 5, 10, 30]);
+        for a in ScreensaverAfter::ALL {
+            assert_eq!(ScreensaverAfter::parse(a.as_str()), a, "round trip");
+        }
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("screensaver").is_none(), "the default stays out of the file");
+        s.screensaver = ScreensaverAfter::Min5;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("screensaver"), Some("5m"));
+    }
+
+    #[test]
+    fn tap_face() {
+        assert!(settings("").tap_face, "on by default");
+        assert!(!settings("tap_face = off\n").tap_face);
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("tap_face").is_none(), "the default stays out of the file");
+        s.tap_face = false;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("tap_face"), Some("off"));
     }
 
     #[test]

@@ -233,6 +233,16 @@ static void check_serial_cmd() {
                 if (cmd_buf[11] == ' ') pace_marker_set(atoi(cmd_buf + 12) != 0);
                 Serial.printf("{\"pace_marker\":%s}\n", pace_marker_get() ? "true" : "false");
             }
+            else if (strcmp(cmd_buf, "screensaver") == 0 || strncmp(cmd_buf, "screensaver ", 12) == 0) {
+                // QA: `screensaver [minutes]` (0 = never; until the app sends its own).
+                if (cmd_buf[11] == ' ') screensaver_set(atoi(cmd_buf + 12));
+                Serial.printf("{\"screensaver\":%d}\n", screensaver_get());
+            }
+            else if (strcmp(cmd_buf, "tap_face") == 0 || strncmp(cmd_buf, "tap_face ", 9) == 0) {
+                // QA: `tap_face [0|1]` (until the app sends its own).
+                if (cmd_buf[8] == ' ') tap_face_set(atoi(cmd_buf + 9) != 0);
+                Serial.printf("{\"tap_face\":%s}\n", tap_face_get() ? "true" : "false");
+            }
             else if (strcmp(cmd_buf, "theme") == 0 || strncmp(cmd_buf, "theme ", 6) == 0) {
                 // QA: `theme [hex]`, the `th` string (theme_palette.h; until the app sends its own).
                 uint32_t p[TH_COUNT];
@@ -603,6 +613,8 @@ void loop() {
                 sound_hal_chime();
             }
             if (usage.pace_marker >= 0) pace_marker_set(usage.pace_marker != 0);
+            if (usage.screensaver >= 0) screensaver_set(usage.screensaver);
+            if (usage.tap_face >= 0)    tap_face_set(usage.tap_face != 0);
             if (usage.btn_primary >= 0)   button_action_set(BTN_SLOT_PRIMARY, usage.btn_primary);
             if (usage.btn_secondary >= 0) button_action_set(BTN_SLOT_SECONDARY, usage.btn_secondary);
             if (usage.btn_pwr >= 0)       button_action_set(BTN_SLOT_PWR, usage.btn_pwr);

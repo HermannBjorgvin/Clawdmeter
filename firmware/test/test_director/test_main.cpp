@@ -106,6 +106,8 @@ static void fresh_director(void) {
     clawd_tuning_fast(&fast);
     clawd_tuning_set_base(&fast);
     clawd_set_liveliness(CLAWD_LIVELINESS_DEFAULT);
+    clawd_set_screensaver(CLAWD_SCREENSAVER_DEFAULT_MIN);
+    clawd_set_tap_face(true);
     clawd_set_attn_anim(fuzz_attn_s);
     director_init();
     // Hooks installed: one activity reading is enough for signals to know.
@@ -130,7 +132,7 @@ static void fuzz(uint32_t seed, uint32_t total_ms, bool has_big) {
         t += gap;
         UsageData d = live_payload();
         SignalsUpdate sig = no_signal();
-        switch (fz_next() % 16) {
+        switch (fz_next() % 17) {
         case 0: case 1:  world.activity = (int)fz_range(0, 3); break;
         case 2:          world.activity = 3; break;
         case 3: case 4:  sig.event_fired = true; sig.event = "psb"[fz_next() % 3]; sig.event_seq = ++es; break;
@@ -147,12 +149,22 @@ static void fuzz(uint32_t seed, uint32_t total_ms, bool has_big) {
             continue;
         }
         case 14:         director_set_liveliness((int)fz_range(1, 5)); continue;
+        case 15:
+            if (fz_next() % 2) {
+                static const int MINUTES[] = { 0, 2, 5, 10, 30 };
+                director_set_screensaver(MINUTES[fz_next() % 5]);
+            } else {
+                director_set_tap_face(fz_next() % 3 != 0);
+            }
+            continue;
         default:         break;                   // a quiet stretch
         }
         d.session_pct = pct;
         send(d, sig);
     }
     assert_one_clawd();
+    director_set_screensaver(CLAWD_SCREENSAVER_DEFAULT_MIN);
+    director_set_tap_face(true);
     // Left alone afterwards, nothing hangs: whatever was running finishes
     // and he ends up home or in the screensaver.
     director_alert_clear();
@@ -225,6 +237,77 @@ static void test_fuzz_one_clawd_at_every_liveliness(void) {
     for (fuzz_level = 1; fuzz_level <= 5 && !broke; fuzz_level++)
         for (uint32_t seed = 1; seed <= 6 && !broke; seed++) fuzz(seed * 97u + fuzz_level, 20 * 60 * 1000, true);
     fuzz_level = CLAWD_LIVELINESS_DEFAULT;
+    assert_one_clawd();
+}
+
+// Screensaver Off and Face on tap off: the face never comes up, whether he's
+// left alone, tapped mid-hop as the switch goes off, or an alert that cut
+// the screensaver short times out with nobody around. Each holds alone.
+static bool face_during(uint32_t ms) {
+    bool up = false;
+    for (uint32_t t = 0; t < ms; t += TICK_MS) {
+        run_for(TICK_MS);
+        if (fake_on_screen().face) up = true;
+    }
+    return up;
+}
+
+static void test_screensaver_off_keeps_the_face_away(void) {
+    fresh_director();
+    director_set_screensaver(0);
+    TEST_ASSERT_FALSE_MESSAGE(face_during(60 * 1000), "the screensaver came up");
+    director_tap(300);                            // Face on tap is still on
+    run_for(3000);
+    TEST_ASSERT_EQUAL_STRING("peek", director_beat_name());
+    director_set_screensaver(CLAWD_SCREENSAVER_DEFAULT_MIN);
+    assert_one_clawd();
+}
+
+static void test_tap_face_off_absorbs_the_tap_but_keeps_the_screensaver(void) {
+    fresh_director();
+    director_set_tap_face(false);
+    director_tap(300);
+    TEST_ASSERT_FALSE_MESSAGE(face_during(5 * 1000), "a tap raised the face");
+    TEST_ASSERT_EQUAL_STRING("home", director_beat_name());
+    run_for(15 * 1000);                           // quiet: the screensaver still comes
+    TEST_ASSERT_EQUAL_STRING("screensaver", director_beat_name());
+    director_set_tap_face(true);
+    assert_one_clawd();
+}
+
+static void test_longer_screensaver_waits_longer(void) {
+    fresh_director();
+    director_set_screensaver(30);                 // 3x the fast tuning's 15 s
+    run_for(15 * 1000 + 2000);
+    TEST_ASSERT_EQUAL_STRING("home", director_beat_name());
+    run_for(30 * 1000);
+    TEST_ASSERT_EQUAL_STRING("screensaver", director_beat_name());
+    director_set_screensaver(CLAWD_SCREENSAVER_DEFAULT_MIN);
+    assert_one_clawd();
+}
+
+static void test_tap_face_off_mid_peek_hop(void) {
+    fresh_director();
+    director_tap(300);
+    run_for(100);
+    TEST_ASSERT_EQUAL_STRING("peek", director_beat_name());
+    director_set_tap_face(false);
+    TEST_ASSERT_FALSE_MESSAGE(face_during(10 * 1000), "the peek's face came up");
+    TEST_ASSERT_EQUAL_STRING("home", director_beat_name());
+    director_set_tap_face(true);
+    assert_one_clawd();
+}
+
+static void test_screensaver_off_during_attention_from_the_screensaver(void) {
+    fresh_director();
+    run_for(15 * 1000 + 2000);
+    TEST_ASSERT_EQUAL_STRING("screensaver", director_beat_name());
+    director_alert("needs you");
+    run_for(3000);
+    director_set_screensaver(0);
+    TEST_ASSERT_FALSE_MESSAGE(face_during(60 * 1000), "the screensaver came back");
+    TEST_ASSERT_EQUAL_STRING("home", director_beat_name());
+    director_set_screensaver(CLAWD_SCREENSAVER_DEFAULT_MIN);
     assert_one_clawd();
 }
 
@@ -349,5 +432,10 @@ int main(int, char**) {
     RUN_TEST(test_short_attention_animation_with_full_size_sprite);
     RUN_TEST(test_short_attention_animation_without_full_size_sprite);
     RUN_TEST(test_fuzz_one_clawd_at_every_attention_animation);
+    RUN_TEST(test_screensaver_off_keeps_the_face_away);
+    RUN_TEST(test_tap_face_off_absorbs_the_tap_but_keeps_the_screensaver);
+    RUN_TEST(test_longer_screensaver_waits_longer);
+    RUN_TEST(test_tap_face_off_mid_peek_hop);
+    RUN_TEST(test_screensaver_off_during_attention_from_the_screensaver);
     return UNITY_END();
 }

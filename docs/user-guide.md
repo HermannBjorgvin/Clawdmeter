@@ -140,7 +140,7 @@ entry on Windows.
 **Animation silliness** on the Device page sets how lively Clawd is. **No-nonsense**
 keeps him still in his corner: no shows, no screensaver, no idle acts or
 reactions, and the status line changes its word once a minute with a still
-spinner. Taps and alerts still get their reaction. **Some-nonsense** (the
+spinner. Taps (unless **Face on tap** is off) and alerts still get their reaction. **Some-nonsense** (the
 default) is the behaviour described here. **All-nonsense** earns shows
 sooner, on lighter work, and has him act up far more often. A line under
 the slider says what the chosen level does. **Attention animation** sets how
@@ -231,7 +231,9 @@ The device boots to the meters. Clawd performs his shows right on them,
 in front of the panels. Tap a show or the screensaver to send him back to
 his seat.
 Tap the meters to bring Clawd's face up to the glass; tap again to send him
-back. A tap that wakes a sleeping panel only wakes it.
+back. **Face on tap** on the Device page turns that off, and **Screensaver**
+sets how long the device sits quiet before his face comes up on its own
+(Off, 2, 5, 10 or 30 minutes). A tap that wakes a sleeping panel only wakes it.
 
 The device names what the session is waiting for in one short line:
 **Question for you**, **Permission needed!**, **Waiting for you!** (an idle
@@ -332,6 +334,8 @@ seconds and preserves comments and unknown keys when saving.
 | `liveliness` | `3` | How lively Clawd is, `1` (No-nonsense) to `5` (All-nonsense). Set with **Animation silliness** on the Device page. |
 | `attention_anim` | `2m` | How long Clawd points and waves for an alert: `off`, `10s`, `30s` or `2m`. The alert itself is unchanged. Set with **Attention animation** on the Device page. |
 | `pace_marker` | `off` | `on` marks the elapsed share of each usage window on the device's bars and colours them by pace. Set with **Pace marker** on the Device page. |
+| `screensaver` | `10m` | How long the device sits quiet before Clawd's face covers the meters: `2m`, `5m`, `10m`, `30m`, or `off` for never. Set with **Screensaver** on the Device page. |
+| `tap_face` | `on` | `off` stops a tap on the meters from bringing Clawd's face up. Set with **Face on tap** on the Device page. |
 | `menu_bar_usage` | `off` | macOS: `on` shows the higher of the session and weekly percentages beside the menu bar icon (spend, on a spend-capped account), so the limit closest to stopping you. Set with **Show usage in the menu bar** on the Settings page. |
 | `theme` | `system` | The device's colours, Clawd's included: `system` (Dark or Light, following this computer's light or dark mode, and switching when it does; `clawd`, the old default, means the same), `dark` (the board's own palette), `light`, `catppuccin_mocha`, `dracula`, `gruvbox`, `monokai`, `nord`, `one_dark`, `solarized` (Solarized Dark or Light, following the mode like `system`), `solarized_dark`, `solarized_light`, `tokyo_night`, or `custom` for the `color_*` keys below. Set with **Colors** on the Device page. |
 | `color_<name>` | the default palette | The custom theme's colours as `rrggbb` (no `#`, which starts a comment): `color_bg`, `color_panel`, `color_text`, `color_dim`, `color_accent`, `color_green`, `color_amber`, `color_red`, `color_bar_bg`, `color_clawd`, `color_eye`, `color_fable` (the Fable strip in the weekly bar). Used only with `theme = custom` and kept while a preset is chosen. Set with **Custom +** under **Colors** on the Device page (a swatch or a typed hex code). The first time, Custom starts from the theme you're on and writes all twelve keys; from then on it keeps its own colours. A custom theme saved before `color_fable` existed starts it at the Dark theme's violet. |

@@ -202,7 +202,7 @@ static void test_corner_seat_leaves_headroom_for_the_jump(void) {
 
 // ─── A tap on the meters ─────────────────────────────────────────────────────
 static TapInput tap_in(CornerState c) {
-    TapInput in = { true, false, c };
+    TapInput in = { true, false, c, true };
     return in;
 }
 
@@ -224,6 +224,9 @@ static void test_tap_keeps_its_meaning_off_the_meters_and_in_minimal(void) {
     TEST_ASSERT_EQUAL_INT(TAP_NONE, clawd_tap_react(&in));
     in = tap_in(CORNER_FREE);
     in.minimal = true;                             // minimal: he stays still
+    TEST_ASSERT_EQUAL_INT(TAP_NONE, clawd_tap_react(&in));
+    in = tap_in(CORNER_FREE);
+    in.peek = false;                               // Face on tap off
     TEST_ASSERT_EQUAL_INT(TAP_NONE, clawd_tap_react(&in));
 }
 
@@ -361,6 +364,67 @@ static void test_liveliness_clamps_and_rebuilds_from_the_base(void) {
     clawd_tuning_set_base(&T);
 }
 
+// The screensaver's minutes and Face on tap hold at every liveliness level,
+// each on its own, and come back with the level's own answer.
+static void test_screensaver_minutes_and_tap_face_hold_at_every_level(void) {
+    clawd_tuning_set_base(&T);
+    clawd_set_liveliness(5);
+    TEST_ASSERT_TRUE(clawd_tuning().screensaver);
+    TEST_ASSERT_EQUAL_UINT32(10 * MIN, clawd_tuning().quiet_ms);
+    clawd_set_screensaver(30);
+    for (int level = 2; level <= 5; level++) {
+        clawd_set_liveliness(level);
+        TEST_ASSERT_TRUE(clawd_tuning().screensaver);
+        TEST_ASSERT_EQUAL_UINT32(30 * MIN, clawd_tuning().quiet_ms);
+        TEST_ASSERT_TRUE(clawd_tuning().peek);
+    }
+    clawd_set_screensaver(0);
+    clawd_set_tap_face(false);
+    for (int level = 1; level <= 5; level++) {
+        clawd_set_liveliness(level);
+        TEST_ASSERT_FALSE(clawd_tuning().screensaver);
+        TEST_ASSERT_FALSE(clawd_tuning().peek);
+    }
+    clawd_set_screensaver(CLAWD_SCREENSAVER_DEFAULT_MIN);
+    TEST_ASSERT_TRUE(clawd_tuning().screensaver);
+    TEST_ASSERT_FALSE(clawd_tuning().peek);           // the two are separate
+    clawd_set_tap_face(true);
+    TEST_ASSERT_TRUE(clawd_tuning().peek);
+    clawd_set_liveliness(1);
+    TEST_ASSERT_FALSE(clawd_tuning().screensaver);    // no-nonsense still rules it out
+    TEST_ASSERT_TRUE(clawd_tuning().peek);
+    clawd_set_liveliness(3);
+}
+
+// The minutes are a share of the base quiet time: the default is all of it,
+// so the fast tuning (15 s) keeps its proportions; out-of-range values clamp.
+static void test_screensaver_minutes_scale_the_quiet_time(void) {
+    TEST_ASSERT_EQUAL_UINT32(2 * MIN, clawd_screensaver_quiet_ms(2, 10 * MIN));
+    TEST_ASSERT_EQUAL_UINT32(30 * MIN, clawd_screensaver_quiet_ms(30, 10 * MIN));
+    TEST_ASSERT_EQUAL_UINT32(45 * SEC, clawd_screensaver_quiet_ms(30, 15 * SEC));
+    TEST_ASSERT_EQUAL_UINT32(60 * MIN, clawd_screensaver_quiet_ms(999, 10 * MIN));
+    TEST_ASSERT_EQUAL_INT(0, clawd_screensaver_clamp(-5));
+    TEST_ASSERT_EQUAL_INT(60, clawd_screensaver_clamp(61));
+}
+
+// A screensaver no longer than the peek's curiosity halves the curiosity,
+// so the peek goes back and the meters show before the screensaver comes.
+static void test_short_screensaver_caps_the_peek(void) {
+    clawd_tuning_set_base(&T);
+    clawd_set_screensaver(10);
+    TEST_ASSERT_EQUAL_UINT32(5 * MIN, clawd_tuning().peek_curious_ms);
+    clawd_set_screensaver(5);
+    TEST_ASSERT_EQUAL_UINT32(150 * SEC, clawd_tuning().peek_curious_ms);
+    clawd_set_screensaver(2);
+    TEST_ASSERT_EQUAL_UINT32(1 * MIN, clawd_tuning().peek_curious_ms);
+    static const int MINUTES[] = { 2, 5, 10, 30 };
+    for (int m : MINUTES) {
+        clawd_set_screensaver(m);
+        TEST_ASSERT_TRUE(clawd_tuning().peek_curious_ms < clawd_tuning().quiet_ms);
+    }
+    clawd_set_screensaver(CLAWD_SCREENSAVER_DEFAULT_MIN);
+}
+
 // The attention animation is a share of the alert: 120 s is all of it,
 // 0 is none, and it follows the alert timeout (the sim's 20 s alert).
 static void test_attention_animation_is_a_share_of_the_alert(void) {
@@ -410,6 +474,9 @@ int main(int, char**) {
     RUN_TEST(test_all_nonsense_earns_shows_sooner_and_on_lighter_work);
     RUN_TEST(test_levels_in_between_interpolate);
     RUN_TEST(test_liveliness_clamps_and_rebuilds_from_the_base);
+    RUN_TEST(test_screensaver_minutes_and_tap_face_hold_at_every_level);
+    RUN_TEST(test_screensaver_minutes_scale_the_quiet_time);
+    RUN_TEST(test_short_screensaver_caps_the_peek);
     RUN_TEST(test_attention_animation_is_a_share_of_the_alert);
     return UNITY_END();
 }

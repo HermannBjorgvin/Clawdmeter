@@ -145,8 +145,8 @@ static void to_meters(bool noticed) {
         go(B_FACE_HOME);
     } else if (performing) {
         go(B_RUN_HOME);
-    } else if (beat == B_SHOW || beat == B_SCREENSAVER) {
-        // Still on the meters (pointing / walking off): turn around.
+    } else if (beat == B_SHOW || beat == B_SCREENSAVER || beat == B_PEEK) {
+        // Still on the meters (pointing / walking off / the peek's hop): turn around.
         if (attention_on) { go(B_ATTENTION); return; }
         mascot_return(-1, 150);
         go(B_CORNER);
@@ -167,7 +167,7 @@ static void end_attention(AttnEnd how) {
     attention_on = false;
     if (attention_end_tells_host(how)) attention_dismissed = true;
     const bool engaged = attn_engaged || (int32_t)(last_engagement - attn_mark) > 0;
-    resume_screensaver = attention_resumes_screensaver(attn_from, how, engaged);
+    resume_screensaver = clawd_tuning().screensaver && attention_resumes_screensaver(attn_from, how, engaged);
     ui_set_alert_text(NULL);
     mascot_attention(false, !resume_screensaver);
     Serial.printf("[%lu] director: attention over (%s)%s\n", (unsigned long)now_ms(),
@@ -224,14 +224,16 @@ bool director_take_dismissed(void) {
 #define PEEK_HOP_PCT    250
 #define PEEK_LEAVE_PCT  500
 
-// A tap while he's on the meters: tapping the aquarium always brings the face
-// up (clawd_tap_react). Seated, he hops first (the act opens on its crouch, so
-// he reacts on the next frame); otherwise he heads straight out.
+// A tap while he's on the meters: tapping the aquarium brings the face up
+// unless Face on tap is off (clawd_tap_react). Seated, he hops first (the
+// act opens on its crouch, so he reacts on the next frame); otherwise he
+// heads straight out.
 static void tap_home(int x) {
     TapInput in;
     in.on_meters = beat == B_HOME || beat == B_CORNER;
     in.minimal = minimal;
     in.corner = mascot_free() ? CORNER_FREE : mascot_out() ? CORNER_OUT : CORNER_BUSY;
+    in.peek = clawd_tuning().peek;
     TapReact r = clawd_tap_react(&in);
     if (r == TAP_PEEK_HOP && !mascot_act("jumping", 1, true, PEEK_HOP_PCT)) r = TAP_PEEK;
     if (r == TAP_PEEK) mascot_leave(PEEK_LEAVE_PCT);
@@ -284,13 +286,28 @@ void director_set_attn_anim(int seconds) {
     clawd_set_attn_anim(seconds);             // a running alert follows it on the next tick
 }
 
-void director_set_liveliness(int level) {
-    clawd_set_liveliness(level);
+static void apply_tuning(void) {
     const ClawdTuning& t = clawd_tuning();
     if (!t.reactions) { react_anim = NULL; joy_pending = false; }
     if (!t.screensaver) resume_screensaver = false;
-    if ((beat == B_SHOW && !t.shows) || (beat == B_SCREENSAVER && !t.screensaver)) to_meters(false);
+    if ((beat == B_SHOW && !t.shows) || (beat == B_SCREENSAVER && !t.screensaver) || (beat == B_PEEK && !t.peek))
+        to_meters(false);
     mascot_autonomy(beat == B_HOME && !minimal && t.idle_acts);
+}
+
+void director_set_liveliness(int level) {
+    clawd_set_liveliness(level);
+    apply_tuning();
+}
+
+void director_set_screensaver(int minutes) {
+    clawd_set_screensaver(minutes);
+    apply_tuning();
+}
+
+void director_set_tap_face(bool on) {
+    clawd_set_tap_face(on);
+    apply_tuning();
 }
 
 static void indev_cb(lv_event_t* e) {
