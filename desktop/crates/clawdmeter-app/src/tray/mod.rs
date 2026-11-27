@@ -406,7 +406,7 @@ impl Items {
         let pace = pace(snap.week_pct, snap.week_resets_at, pace::WEEK_WINDOW_SECS);
         self.weekly.set_text(meter_row(weekly, snap.week_pct, true, snap.week_resets_at, pace, now));
         if let Some(held) = snap.shown_resets() {
-            self.resets.set_text(resets_row(held, &snap.resets_expiries, &chrono::Local));
+            self.resets.set_text(resets_row(held, &snap.resets_expiries, &snap.resets_kinds, &chrono::Local));
         }
         let (refresh, can_refresh) = refresh_item(snap, pressed, now);
         self.refresh.set_text(refresh);
@@ -486,7 +486,7 @@ fn refresh_item(snap: &StatusSnapshot, pressed: bool, now: i64) -> (String, bool
 /// Dec 1" (the soonest held one's local date, as the device shows `rx`),
 /// "2 resets" with no dates known, "No resets available" with none.
 #[cfg(any(not(target_os = "macos"), test))]
-fn resets_row<Tz: chrono::TimeZone>(held: u32, expiries: &[i64], tz: &Tz) -> String
+fn resets_row<Tz: chrono::TimeZone>(held: u32, expiries: &[i64], kinds: &str, tz: &Tz) -> String
 where
     Tz::Offset: std::fmt::Display,
 {
@@ -494,7 +494,7 @@ where
     if held == 0 {
         return "No resets available".into();
     }
-    let mut row = format!("{held} reset{}", if held == 1 { "" } else { "s" });
+    let mut row = crate::ipc::resets_words(held, kinds);
     if let Some(t) = expiries.first().and_then(|t| chrono::DateTime::from_timestamp(*t, 0)) {
         let l = t.with_timezone(tz);
         row.push_str(&format!(" · next expires {} {}", l.format("%b"), l.day()));
@@ -1258,13 +1258,17 @@ mod tests {
         let utc = chrono::Utc;
         let dec1 = chrono::NaiveDate::from_ymd_opt(2026, 12, 1).unwrap().and_hms_opt(22, 28, 0).unwrap().and_utc();
         let dec12 = dec1 + chrono::Duration::days(11);
-        assert_eq!(resets_row(2, &[dec1.timestamp(), dec12.timestamp()], &utc), "2 resets · next expires Dec 1");
-        assert_eq!(resets_row(1, &[dec12.timestamp()], &utc), "1 reset · next expires Dec 12");
-        assert_eq!(resets_row(3, &[], &utc), "3 resets", "no dates known");
-        assert_eq!(resets_row(0, &[], &utc), "No resets available");
+        let both = [dec1.timestamp(), dec12.timestamp()];
+        assert_eq!(resets_row(2, &both, "", &utc), "2 resets · next expires Dec 1");
+        assert_eq!(resets_row(1, &[dec12.timestamp()], "", &utc), "1 reset · next expires Dec 12");
+        assert_eq!(resets_row(3, &[], "", &utc), "3 resets", "no dates known");
+        assert_eq!(resets_row(0, &[], "", &utc), "No resets available");
+        // Claude's grants by kind.
+        assert_eq!(resets_row(2, &both, "wf", &utc), "1 weekly + 1 Fable resets · next expires Dec 1");
+        assert_eq!(resets_row(1, &[dec12.timestamp()], "f", &utc), "1 Fable reset · next expires Dec 12");
         // Local time picks the day, as `rx` does.
         let east = chrono::FixedOffset::east_opt(3 * 3600).unwrap();
-        assert_eq!(resets_row(1, &[dec1.timestamp()], &east), "1 reset · next expires Dec 2");
+        assert_eq!(resets_row(1, &[dec1.timestamp()], "", &east), "1 reset · next expires Dec 2");
     }
 
     #[test]

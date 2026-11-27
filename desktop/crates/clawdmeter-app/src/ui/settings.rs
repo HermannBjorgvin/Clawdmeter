@@ -1917,6 +1917,24 @@ impl SettingsView {
             ));
         }
 
+        // Claude's limit-reset grants: one read-only call a day per account
+        // that sends Claude Code's User-Agent (`clawdmeter_core::grants`).
+        let me = cx.entity().downgrade();
+        let on = self.settings.claude_resets;
+        pane = pane.child(field(
+            t,
+            "Show Claude's free limit resets",
+            "Once a day per account, Clawdmeter asks the usage endpoint which limit resets you hold, as Claude Code's \
+             own User-Agent: the endpoint answers only that. It reads, never uses a reset. Anthropic may stop \
+             answering it or object to it.",
+            toggle(t, "claude-resets", on, true, move |_, _, cx| {
+                let _ = me.update(cx, |v, cx| {
+                    v.save(|s, _| s.claude_resets = !on);
+                    cx.notify();
+                });
+            }),
+        ));
+
         let poll = if self.settings.poll_interval_explicit {
             PollChoice::Every(self.settings.poll_interval)
         } else {

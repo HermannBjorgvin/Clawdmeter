@@ -518,6 +518,10 @@ pub struct Settings {
     /// The main meter's percentage beside the macOS menu bar icon
     /// (`menu_bar_usage`, default off).
     pub menu_bar_usage: bool,
+    /// Read Claude's limit-reset grants once a day per account
+    /// (`claude_resets`, default off): that one read-only call sends Claude
+    /// Code's User-Agent (`crate::grants`).
+    pub claude_resets: bool,
     /// What the device's primary, secondary and PWR buttons do, by
     /// [`Button::index`] (`button_primary`, `button_secondary`, `button_pwr`;
     /// sent as `k1`, `k2`, `k3`).
@@ -706,6 +710,7 @@ impl Settings {
             attention_anim: cfg.get("attention_anim").map(AttentionAnim::parse).unwrap_or_default(),
             pace_marker: on_off(cfg.get("pace_marker"), false),
             menu_bar_usage: on_off(cfg.get("menu_bar_usage"), false),
+            claude_resets: on_off(cfg.get("claude_resets"), false),
             buttons: Button::ALL.map(|b| {
                 cfg.get(b.config_key()).map_or(b.default_action(), |v| ButtonAction::parse(v, b.default_action()))
             }),
@@ -815,6 +820,7 @@ impl Settings {
             ("desktop_chime", "", self.desktop_chime, current.desktop_chime),
             ("pace_marker", "", self.pace_marker, current.pace_marker),
             ("menu_bar_usage", "", self.menu_bar_usage, current.menu_bar_usage),
+            ("claude_resets", "", self.claude_resets, current.claude_resets),
         ] {
             if now != was {
                 cfg.set(key, oo(now));

@@ -135,6 +135,23 @@ is faked behind `FlashHardware`.
   did. Known gap: the shown account's cadence follows every account's
   prompts, so a chosen account with a window running is probed as often as
   every 2 min while another account works),
+  `claude_resets` (default off; Settings → "Show Claude's free limit resets"):
+  right after the idle source answered a weekly-only account (no miss, no
+  probe, not parked), at most once a day, a task of its own reads its
+  limit-reset grants (`clawdmeter-core::grants`,
+  `GET /api/oauth/usage?cedar_ember=1&skip_spend=1`). That one read-only call
+  sends Claude Code's User-Agent (`claude-cli/<claude --version> (external,
+  cli)`), because the endpoint answers no other; no version means no call.
+  Parsing follows CodexBar's rules, and grant ids are never read. Answers go
+  to `<state>/claude-grants.json` (a failed ask also waits a day; a 429 also parks
+  the account like a poll's; `eligible:false` clears the
+  count; an unreadable answer keeps the last; an expired token waits for
+  Claude Code; `claude --version` is read in that task, again daily). `Engine::set_claude_resets` puts them on that
+  account's readings as `resets`, so `rc`/`rx`, the Resets card and the tray
+  show them like Codex credits (`StatusSnapshot::shown_resets`: weekly-only,
+  not spend). Every other call keeps `oauth::user_agent`,
+  `clawdmeter/<version>` (the `honest_user_agent` test). A grant used with
+  `/limit-reset` stays shown until the next daily read.
   `poll_interval`, `heartbeat_interval`,
   `reset_chime` and `alert_chime` (device chimes; the old `chime` / `beep`
   keys are read when these are absent), `desktop_chime` (the same ding on

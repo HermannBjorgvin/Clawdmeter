@@ -150,6 +150,10 @@ pub struct StatusSnapshot {
     /// `ResetCredits::MAX_EXPIRIES`); empty when unknown.
     #[serde(default)]
     pub resets_expiries: Vec<i64>,
+    /// What each of `resets_expiries` resets, one `ResetKind::code` letter
+    /// each (`w` weekly, `f` Fable only); empty when all alike (Codex).
+    #[serde(default)]
+    pub resets_kinds: String,
 }
 
 impl StatusSnapshot {
@@ -218,15 +222,17 @@ impl StatusSnapshot {
                 .map(|t| t.timestamp()),
             codex: reading.is_some_and(|r| r.provider == clawdmeter_core::usage::Provider::Codex),
             resets_held: resets.as_ref().map(|c| c.held),
+            resets_kinds: resets.as_ref().map(|c| c.kinds.iter().map(|k| k.code()).collect()).unwrap_or_default(),
             resets_expiries: resets.map(|c| c.expiries.iter().map(|t| t.timestamp()).collect()).unwrap_or_default(),
         }
     }
 
     /// The reset credits held, where every surface shows them (the device's
-    /// Resets card, the Overview, both trays): a weekly-only Codex plan
-    /// whose count is known. With a 5-hour window the week takes that place.
+    /// Resets card, the Overview, both trays): a weekly-only plan whose count
+    /// is known, Codex's credits or Claude's limit-reset grants. With a 5-hour
+    /// window the week takes that place; a spend cap has none.
     pub fn shown_resets(&self) -> Option<u32> {
-        self.resets_held.filter(|_| self.codex && self.no_session_limit)
+        self.resets_held.filter(|_| self.no_session_limit && !self.spend)
     }
 
     /// Fable's % for the strip inside the Weekly bar, where the Overview and
@@ -485,6 +491,23 @@ pub fn load_latest_release(paths: &Paths) -> Option<String> {
     fs::read_to_string(latest_release_file(paths)).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
 }
 
+/// Reset credits held, in words, naming their kinds when every one's kind
+/// is known: "1 weekly + 1 Fable resets", "2 weekly resets", "1 Fable
+/// reset", else "3 resets". Short enough for the macOS panel's rows.
+pub fn resets_words(held: u32, kinds: &str) -> String {
+    let s = if held == 1 { "" } else { "s" };
+    if held == 0 || kinds.chars().count() != held as usize {
+        return format!("{held} reset{s}");
+    }
+    let count = |k: char| kinds.chars().filter(|c| *c == k).count();
+    let parts: Vec<String> = [('w', "weekly"), ('f', "Fable"), ('o', "other")]
+        .into_iter()
+        .filter(|(k, _)| count(*k) > 0)
+        .map(|(k, w)| format!("{} {w}", count(k)))
+        .collect();
+    format!("{} reset{s}", parts.join(" + "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,7 +556,7 @@ mod tests {
             week: Some(Window { pct: 20, resets_at: None }),
             session_limit: SessionLimit::Absent,
             provider: Provider::Codex,
-            resets: Some(ResetCredits { held: 3, expiries: vec![day(1), day(5), day(12)] }),
+            resets: Some(ResetCredits { held: 3, expiries: vec![day(1), day(5), day(12)], kinds: vec![] }),
             ..Default::default()
         });
         let snap = StatusSnapshot::from_status(&s, day(1).timestamp() - 60);
@@ -544,9 +567,11 @@ mod tests {
             (later.shown_resets(), later.resets_expiries),
             (Some(2), vec![day(5).timestamp(), day(12).timestamp()])
         );
-        // Only a weekly-only Codex plan with a known count shows them.
+        // Only a weekly-only plan with a known count shows them: Codex's
+        // credits, or Claude's limit-reset grants alike.
         assert_eq!(StatusSnapshot { no_session_limit: false, ..snap.clone() }.shown_resets(), None);
-        assert_eq!(StatusSnapshot { codex: false, ..snap.clone() }.shown_resets(), None);
+        assert_eq!(StatusSnapshot { codex: false, ..snap.clone() }.shown_resets(), Some(3));
+        assert_eq!(StatusSnapshot { spend: true, ..snap.clone() }.shown_resets(), None);
         assert_eq!(StatusSnapshot { resets_held: None, ..snap }.shown_resets(), None);
     }
 

@@ -753,11 +753,12 @@ void ui_init(void) {
     anim_verb_idx = fitting_verb(0);
 }
 
-// A Codex account with its reset credits: the second card is the Resets
-// card. Without them (or with a 5-hour window, which keeps the week there)
-// the Claude layout holds.
-static bool codex_resets_card(const UsageData* d) {
-    return d->codex && d->weekly_only && d->resets_held >= 0;
+// A weekly-only plan with its reset credits held (a Codex plan's credits, or
+// Claude's limit-reset grants): the second card is the Resets card. Without
+// them (or with a 5-hour window, which keeps the week there) the usual layout
+// holds.
+static bool shows_resets_card(const UsageData* d) {
+    return d->weekly_only && d->resets_held >= 0;
 }
 
 // The first of `texts` that fits `w` in `font`, else the last.
@@ -831,7 +832,31 @@ static void draw_resets_card(const UsageData* d) {
         lv_obj_add_flag(resets_note, LV_OBJ_FLAG_HIDDEN);
     }
 
-    const int cols = L.resets_cols, gap = L.resets_gap;
+    // Claude's grants come with what each resets (`rf`): a chip then says so,
+    // "Weekly Dec 10" or "Fable Mar 9", and the chips spread over the grid's
+    // rows and across the card to make room for it.
+    const bool kinded = shown > 0 && (int)strlen(d->resets_kind) >= shown;
+    const int items = shown + (more ? 1 : 0);
+    const int cols = !kinded ? L.resets_cols
+                   : items <= L.resets_cols ? items
+                   : (items + L.resets_rows - 1) / L.resets_rows;
+    const int gap = L.resets_gap;
+    // One wording for the whole card: the kind's word ("Weekly Dec 10"),
+    // its letter ("W Dec 10"), or none, the first that fits every chip.
+    static const char* const KIND_WORDS[2][2] = { { "Weekly", "Fable" }, { "W", "F" } };
+    const int cell_w = (inner_w + gap) / cols - gap - 1;
+    int level = kinded ? 0 : 2;
+    for (; level < 2; level++) {
+        bool fits = true;
+        for (int i = 0; i < shown && fits; i++) {
+            const char k = d->resets_kind[i];
+            if (k != 'w' && k != 'f') continue;
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%s %s", KIND_WORDS[level][k == 'f'], d->resets_expiry[i]);
+            fits = layout_text_width(L.resets_font, buf) + L.resets_chip_h / 2 <= cell_w;
+        }
+        if (fits) break;
+    }
     for (int i = 0; i < MAX_RESET_CHIPS; i++) {
         lv_obj_t* c = resets_chip[i];
         lv_obj_t* label = resets_chip_text[i];
@@ -847,11 +872,25 @@ static void draw_resets_card(const UsageData* d) {
         lv_obj_set_size(c, x1 - x0, L.resets_chip_h);
         ThemeColor bg = TH_BAR_BG, text = TH_TEXT;
         bool mono_pill = false;
+        bool fable_chip = false;
+        // The soonest chip that isn't Fable-only gets the highlight (the
+        // first, when the kinds aren't known: Codex's credits).
+        int soonest = 0;
+        while (soonest < shown && soonest < (int)strlen(d->resets_kind) && d->resets_kind[soonest] == 'f') soonest++;
+        const bool first_other = i == soonest;
         if (i < shown) {
-            lv_label_set_text(label, d->resets_expiry[i]);
-            // The soonest, inverted. Paper text on ink prints broken in 1 bit,
-            // so a mono panel gives it the pill's grey instead (make_pill).
-            if (i == 0) {
+            const char kind = kinded ? d->resets_kind[i] : 0;
+            if (level < 2 && (kind == 'w' || kind == 'f'))
+                lv_label_set_text_fmt(label, "%s %s", KIND_WORDS[level][kind == 'f'], d->resets_expiry[i]);
+            else
+                lv_label_set_text(label, d->resets_expiry[i]);
+            // A Claude grant that resets only Fable's limit wears Fable's
+            // violet (`rf` 'f', the overlay's `fc`); else the soonest,
+            // inverted. Paper text on ink prints broken in 1 bit, so a mono
+            // panel gives it the pill's grey instead (make_pill).
+            if (!mono && i < (int)strlen(d->resets_kind) && d->resets_kind[i] == 'f') {
+                fable_chip = true;
+            } else if (first_other) {
                 if (mono) { mono_pill = true; text = TH_BG; }
                 else      { bg = TH_TEXT; text = TH_PANEL; }
             }
@@ -863,8 +902,8 @@ static void draw_resets_card(const UsageData* d) {
             lv_label_set_text(label, buf);
             text = TH_DIM;
         }
-        lv_obj_set_style_bg_color(c, mono_pill ? THEME_MONO_PILL : theme_color(bg), 0);
-        lv_obj_set_style_text_color(label, theme_color(text), 0);
+        lv_obj_set_style_bg_color(c, fable_chip ? lv_color_hex(theme_fable_hex()) : mono_pill ? THEME_MONO_PILL : theme_color(bg), 0);
+        lv_obj_set_style_text_color(label, fable_chip ? lv_color_hex(0xFFFFFF) : theme_color(text), 0);
         lv_obj_center(label);
         lv_obj_clear_flag(c, LV_OBJ_FLAG_HIDDEN);
     }
@@ -949,7 +988,7 @@ void ui_apply_theme(void) {
     apply_pair_text();   // its last line follows the hold state
     if (have_last_data) {
         apply_bar_colors(&last_data);
-        if (codex_resets_card(&last_data)) draw_resets_card(&last_data);
+        if (shows_resets_card(&last_data)) draw_resets_card(&last_data);
         if (last_data.enterprise) apply_period_colors(&last_data);
     }
 }
@@ -977,7 +1016,7 @@ void ui_update(const UsageData* data) {
     }
 
     int s_pct = (int)(data->session_pct + 0.5f);
-    const bool resets_card = codex_resets_card(data);
+    const bool resets_card = shows_resets_card(data);
     // No 5-hour limit: the one card left sits in the middle of the space the
     // two cards take, unless a Codex account's Resets card takes the second.
     const bool lone = data->weekly_only && !resets_card;

@@ -46,13 +46,19 @@ pub struct Payload {
     /// draws its Codex screen); absent for Claude.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pv: Option<String>,
-    /// Codex reset credits held. Absent when unknown: no Resets card.
+    /// Reset credits held: Codex's, or Claude's limit-reset grants. Absent
+    /// when unknown: no Resets card.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rc: Option<u32>,
     /// Each held reset credit's expiry date, host-local like `rd` ("Dec 1"),
     /// soonest first, at most 10. Absent when unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rx: Option<Vec<String>>,
+    /// What each `rx` date resets, one letter each in step with it: `w` the
+    /// weekly limit, `f` only Fable's, `o` other (Claude's grants). Absent
+    /// when they're all alike (Codex's credits).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rf: Option<String>,
     /// Enterprise: % of the billing period elapsed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tp: Option<u32>,
@@ -136,8 +142,8 @@ pub struct Payload {
 
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
-    "s", "sr", "w", "wr", "wf", "st", "acct", "pv", "rc", "rx", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x",
-    "a", "e", "es", "n", "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th", "fc",
+    "s", "sr", "w", "wr", "wf", "st", "acct", "pv", "rc", "rx", "rf", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m",
+    "x", "a", "e", "es", "n", "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th", "fc",
 ];
 
 /// The fast-clock keys added in v0.4 (old firmware ignores them).
@@ -308,14 +314,18 @@ impl Payload {
         };
         if r.provider == Provider::Codex {
             p.pv = Some("codex".to_owned());
-            if let Some(c) = r.resets.as_ref().map(|c| c.at(now)) {
-                p.rc = Some(c.held);
-                if !c.expiries.is_empty() {
-                    let day = |t: &DateTime<Utc>| {
-                        let l = t.with_timezone(tz);
-                        format!("{} {}", l.format("%b"), l.day())
-                    };
-                    p.rx = Some(c.expiries.iter().take(ResetCredits::MAX_EXPIRIES).map(day).collect());
+        }
+        // Reset credits: Codex's, or Claude's limit-reset grants (`grants`).
+        if let Some(c) = r.resets.as_ref().map(|c| c.at(now)) {
+            p.rc = Some(c.held);
+            if !c.expiries.is_empty() {
+                let day = |t: &DateTime<Utc>| {
+                    let l = t.with_timezone(tz);
+                    format!("{} {}", l.format("%b"), l.day())
+                };
+                p.rx = Some(c.expiries.iter().take(ResetCredits::MAX_EXPIRIES).map(day).collect());
+                if c.kinds.len() == c.expiries.len() {
+                    p.rf = Some(c.kinds.iter().take(ResetCredits::MAX_EXPIRIES).map(|k| k.code()).collect());
                 }
             }
         }
@@ -594,6 +604,7 @@ mod tests {
             resets: Some(ResetCredits {
                 held: 3,
                 expiries: vec![at("2026-11-27T09:00:00Z"), at("2026-12-10T18:30:00Z"), at("2026-12-31T23:30:00Z")],
+                kinds: vec![],
             }),
             ..Default::default()
         };
@@ -629,10 +640,12 @@ mod tests {
         // Fable is Claude's: never `wf` with `pv`, whatever the reading holds.
         let with_fable = UsageReading { models: vec![("fable".into(), week.clone())], ..r.clone() };
         assert_eq!(Payload::from_reading(&with_fable, now).wf, None);
-        // A Claude reading never carries them.
+        // A Claude reading carries its grants the same way, without `pv`.
         let claude = UsageReading { provider: Provider::Claude, ..r };
         let j = Payload::from_reading(&claude, now).to_json();
-        assert!(!j.contains("pv") && !j.contains("\"rc\""), "{j}");
+        assert!(!j.contains("pv") && j.contains("\"rc\""), "{j}");
+        let none = UsageReading { resets: None, ..claude };
+        assert!(!Payload::from_reading(&none, now).to_json().contains("\"rc\""), "unknown: no rc");
     }
 
     /// Every field at its widest, the longest alert line and three
@@ -640,7 +653,9 @@ mod tests {
     #[test]
     fn widest_payload_fits() {
         let chord = 0x1_1F73; // hold, all four modifiers, F24
-        let pl = Payload {
+                              // Every field a write can carry, at its widest; the shapes below take
+                              // away what can't come together.
+        let all = Payload {
             s: Some(100),
             sr: Some(300),
             w: Some(100),
@@ -651,6 +666,7 @@ mod tests {
             pv: Some("codex".into()),
             rc: Some(999),
             rx: Some(vec!["Sep 30".into(); ResetCredits::MAX_EXPIRIES]),
+            rf: Some("w".repeat(ResetCredits::MAX_EXPIRIES)),
             tp: Some(100),
             pd: Some(31),
             rd: Some("Sep 30".into()),
@@ -675,9 +691,19 @@ mod tests {
             th: Some(Palette::default()),
             fc: Some(Palette::default().fable()),
         };
-        let json = pl.to_json();
-        assert!(json.len() < 500, "{} bytes: {json}", json.len());
-        assert_eq!(pl.encode(500), json.into_bytes());
+        // A Codex account never carries Fable (`wf`, `fc`) or kinds (`rf`); a
+        // Claude one never `pv`; a spend cap (`ent`) has its period and no
+        // reset credits.
+        let shapes = [
+            ("codex week", Payload { wf: None, fc: None, rf: None, tp: None, pd: None, rd: None, ..all.clone() }),
+            ("claude week with grants", Payload { pv: None, tp: None, pd: None, rd: None, ..all.clone() }),
+            ("spend cap", Payload { pv: None, rc: None, rx: None, rf: None, acct: Some("ent".into()), ..all.clone() }),
+        ];
+        for (what, pl) in shapes {
+            let json = pl.to_json();
+            assert!(json.len() < 500, "{what}: {} bytes: {json}", json.len());
+            assert_eq!(pl.encode(500), json.into_bytes(), "{what}: nothing trimmed");
+        }
     }
 
     #[test]
@@ -693,6 +719,7 @@ mod tests {
             pv: Some("codex".into()),
             rc: Some(3),
             rx: Some(vec!["Dec 1".into()]),
+            rf: Some("f".into()),
             tp: Some(1),
             pd: Some(30),
             rd: Some("Oct 1".into()),

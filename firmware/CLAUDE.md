@@ -40,7 +40,9 @@ pins and hardware gotchas, which loads when you work in that folder.
   and a `test_layout` panel (`docs/porting/adding-a-board.md`).
 - **Codex (a trial)**: a `pv:"codex"` payload draws the Codex screen in
   `ui.cpp` (white bars, "Codex" pill); the Resets card is all in
-  `draw_resets_card()`, its grid sized by `layout.cpp` `fit_resets()`. `signals` treats its numbers as a replay, so Clawd
+  `draw_resets_card()`, its grid sized by `layout.cpp` `fit_resets()`. It
+  shows for any weekly-only plan with `rc` (`shows_resets_card`): Codex's
+  credits or Claude's limit-reset grants. `signals` treats its numbers as a replay, so Clawd
   never reacts to them.
 - **Sound**: `ding.cpp` synthesizes the one sound (a C#5 ding, mirrored by
   the desktop's `chime.rs`); `chime.cpp` streams it through the ES8311, or

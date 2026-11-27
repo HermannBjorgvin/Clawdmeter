@@ -455,7 +455,7 @@ impl CodexCache {
                 e
             }
         };
-        ResetCredits { held, expiries: ahead(&entry.expiries, now) }
+        ResetCredits { held, expiries: ahead(&entry.expiries, now), kinds: vec![] }
     }
 
     /// What the last good poll said, for a session-log reading (which has
@@ -466,7 +466,7 @@ impl CodexCache {
         let e = self.details(dir, now)?;
         let since = self.endpoint_ok.get(dir).map_or(e.fetched_at, |t| t.timestamp());
         let gone = e.expiries.iter().filter(|t| t.timestamp() > since && t.timestamp() <= now).count() as u32;
-        Some(ResetCredits { held: e.held.saturating_sub(gone), expiries: ahead(&e.expiries, now) })
+        Some(ResetCredits { held: e.held.saturating_sub(gone), expiries: ahead(&e.expiries, now), kinds: vec![] })
     }
 }
 
@@ -609,7 +609,7 @@ mod tests {
         assert_eq!(r.week, Some(Window { pct: 0, resets_at: epoch(1_795_303_084) }));
         assert_eq!(r.session_limit, SessionLimit::Absent);
         assert!(r.no_session_limit());
-        assert_eq!(r.resets, Some(ResetCredits { held: 2, expiries: vec![] }));
+        assert_eq!(r.resets, Some(ResetCredits { held: 2, ..Default::default() }));
     }
 
     // A plan with both windows, and a Spark bucket at 0 % beside it: the
@@ -783,7 +783,11 @@ mod tests {
         let resets = p.result.unwrap().resets.unwrap();
         assert_eq!(
             resets,
-            ResetCredits { held: 2, expiries: vec![at("2026-11-27T09:00:00Z"), at("2026-12-10T18:30:00Z")] }
+            ResetCredits {
+                held: 2,
+                expiries: vec![at("2026-11-27T09:00:00Z"), at("2026-12-10T18:30:00Z")],
+                kinds: vec![],
+            }
         );
         // Within the hour, same count: only the usage call.
         let p = poll_with(&dir, now + chrono::Duration::minutes(5), &mut cache, &mut ok, &mut no_logs);
@@ -873,7 +877,10 @@ mod tests {
             Some(reading(None, Some(Window { pct: 40, resets_at: None }), None))
         };
         let r1 = poll_with(&dir, t1, &mut cache, &mut throttled, &mut logs).result.unwrap();
-        assert_eq!(r1.resets, Some(ResetCredits { held: 1, expiries: vec![at("2026-12-10T18:30:00Z")] }));
+        assert_eq!(
+            r1.resets,
+            Some(ResetCredits { held: 1, expiries: vec![at("2026-12-10T18:30:00Z")], kinds: vec![] })
+        );
         // And the device is sent one credit, not the endpoint's old two.
         let p = crate::Payload::from_reading_in(&r1, at("2026-11-27T09:15:00Z"), &Utc);
         assert_eq!((p.rc, p.rx), (Some(1), Some(vec!["Dec 10".to_owned()])));

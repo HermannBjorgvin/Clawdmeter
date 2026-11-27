@@ -6,6 +6,7 @@
 //! * [`usage`]: run and parse `claude --output-format json -p /usage`.
 //! * [`oauth`]: usage from Claude's usage endpoint with Claude Code's stored sign-in.
 //! * [`codex`]: OpenAI Codex usage (a trial), an account like a Claude config dir.
+//! * [`grants`]: Claude's limit-reset grants, read once a day when switched on.
 //! * [`probe`]: usage from one message's rate-limit headers, and when that is allowed.
 //! * [`events`]: the hook events log (fast clock) and the activity tracker.
 //! * [`attention`]: the attention hook's alert / clear files (written by
@@ -31,6 +32,7 @@ pub mod codex;
 pub mod config;
 pub mod engine;
 pub mod events;
+pub mod grants;
 pub mod launch;
 pub mod oauth;
 pub mod paths;
