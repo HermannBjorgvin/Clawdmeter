@@ -42,6 +42,7 @@ struct BoardCaps {
                              // invert the pills and don't dim stale data,
                              // leaving "Stale" in the status line (ui.cpp).
                              // Set with minimal_ui.
+    bool    pwr_button_is_boot; // PWR-role key is labelled BOOT on the board
 };
 
 const BoardCaps& board_caps(void);

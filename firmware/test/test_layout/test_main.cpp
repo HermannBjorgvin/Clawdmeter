@@ -185,7 +185,7 @@ static void check_panel(const Panel& p) {
 
     // Pairing hint: every variant's lines on the glass, apart, under the
     // header and over the status line.
-    static const char* const* const SETS[] = { PAIR_TEXT_PWR, PAIR_TEXT_TOUCH, PAIR_TEXT_CLEARED };
+    static const char* const* const SETS[] = { PAIR_TEXT_PWR, PAIR_TEXT_BOOT, PAIR_TEXT_TOUCH, PAIR_TEXT_CLEARED };
     const Box status = status_box(STATUS_TEXT_REQUIRED[0]);
     for (const char* const* set : SETS) {
         Box prev = { 0, 0, 0, 0 };

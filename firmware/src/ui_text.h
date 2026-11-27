@@ -7,6 +7,7 @@
 // Pairing hint: heading, two steps, and a note line, per board kind / state
 // (ui.cpp apply_pair_text).
 static const char* const PAIR_TEXT_PWR[3]     = { "To pair", "hold the power button", "for 3 seconds, then release" };
+static const char* const PAIR_TEXT_BOOT[3]    = { "To pair", "hold the BOOT button", "for 3 seconds, then release" };
 static const char* const PAIR_TEXT_TOUCH[3]   = { "To pair", "touch and hold here", "for 5 seconds" };
 static const char* const PAIR_TEXT_CLEARED[3] = { "Ready to pair", "choose Clawdmeter", "on your computer" };
 static const char* const PAIR_TEXT_HOLDING    = "keep holding...";

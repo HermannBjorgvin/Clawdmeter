@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="88" viewBox="0 0 120 88">
+<title>Waveshare ESP32-C6-LCD-1.47</title>
+<ellipse cx="60" cy="79" rx="53" ry="5" fill="#000" opacity=".14"/>
+<path d="M10 12 98 20 111 15 23 7Z" fill="#b5c3c5" stroke="#647778"/>
+<path d="M10 12 10 65 98 74 98 20Z" fill="#303434" stroke="#121818"/>
+<path d="M98 20 111 15 111 68 98 74Z" fill="#a2b5b6" stroke="#647778"/>
+<path d="M105 34 111 32 111 48 105 50Z" fill="#b9bfc2" stroke="#62696a"/>
+<path d="M15 17 93 24 93 68 15 60Z" fill="#090b0b" stroke="#555"/>
+<path d="M23 22 86 28 86 62 23 56Z" fill="#151514"/>
+<path d="M45 32h20v10H45z" fill="#d97757"/>
+<path d="M40 47 77 50M40 52 70 55" stroke="#788c5d" stroke-width="2"/>
+<circle cx="19" cy="14" r="1.5" fill="#cad4d4"/><circle cx="96" cy="21" r="1.5" fill="#cad4d4"/>
+</svg>
