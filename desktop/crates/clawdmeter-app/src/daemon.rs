@@ -125,6 +125,16 @@ fn reload_settings(paths: &Paths, engine: &mut Engine, claude: &mut Option<PathB
     }
     engine.update_settings(s);
     engine.set_claude_found(claude.is_some());
+    note_missing_folders(paths, engine);
+}
+
+/// Tell the engine which listed folders don't exist, so it plans the idle
+/// source for them (the probe would create them). Checked with the settings,
+/// every few seconds.
+fn note_missing_folders(paths: &Paths, engine: &mut Engine) {
+    let missing =
+        engine.settings().config_dirs.iter().filter(|d| probe::cli_may_run(d, &paths.home).is_err()).cloned().collect();
+    engine.set_missing_folders(missing);
 }
 
 type PollResults = Vec<(PathBuf, probe::Polled)>;
@@ -197,6 +207,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         ),
     }
     engine.set_claude_found(claude.is_some());
+    note_missing_folders(&paths, &mut engine);
 
     let mut link: Option<DeviceLink> = None;
     let mut device_events: Option<DeviceEvents> = None;
