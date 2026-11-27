@@ -9,14 +9,14 @@ use clawdmeter_flash::release::release_tag;
 use std::path::PathBuf;
 
 use gpui::{
-    div, prelude::*, px, relative, rgb, AnyElement, Context, Corner, EventEmitter, FocusHandle, Rgba, SharedString,
-    Window,
+    div, prelude::*, px, relative, rgb, AnyElement, Context, Corner, Entity, EventEmitter, FocusHandle, Rgba,
+    SharedString, Window,
 };
 
 use super::theme::{Theme, FONT_BODY, FONT_DISPLAY, FONT_MONO, R_M, R_PILL};
 use super::widgets::{
-    button, clawd, dot, field, icon, icon_button, menu_button, menu_row, notice, popover_menu, toggle, tone_color,
-    usage_tone, ButtonKind, Tone,
+    button, clawd, dot, icon, icon_button, menu_button, menu_row, notice, one_line, popover_menu, toggle, tone_color,
+    tooltip, usage_tone, ButtonKind, Dots, Tone,
 };
 use super::{command, live_status, not_running_text, Navigate, REFRESH};
 use crate::art::TrayState;
@@ -40,12 +40,14 @@ pub struct OverviewView {
     /// has the drop-down that picks the one the device shows.
     accounts: Vec<(PathBuf, bool)>,
     /// The account chosen for the device ([`Settings::chosen_account`]);
-    /// `None`: the latest active one.
+    /// `None`: the most recent one.
     device_account: Option<PathBuf>,
     /// The account drop-down is open.
     account_menu_open: bool,
     /// The open drop-down's focus, for Escape.
     account_menu_focus: FocusHandle,
+    /// The dots after "Searching" in the header.
+    dots: Entity<Dots>,
 }
 
 impl EventEmitter<Navigate> for OverviewView {}
@@ -71,6 +73,7 @@ impl OverviewView {
             device_account: None,
             account_menu_open: false,
             account_menu_focus: cx.focus_handle(),
+            dots: cx.new(Dots::new),
         };
         v.reload(clawdmeter_core::unix_now());
         v
@@ -201,6 +204,13 @@ pub fn state_tone(state: TrayState) -> Tone {
         TrayState::AuthError => Tone::Bad,
         TrayState::Attention => Tone::Accent,
     }
+}
+
+/// The app is looking for the board (Bluetooth works): the Overview's
+/// header reads "Searching" with [`Dots`] rather than [`state_title`]'s
+/// longer headline, which the account drop-down would cut short.
+pub fn searching(s: &StatusSnapshot) -> bool {
+    s.link != "no_adapter" && s.tray_state() == TrayState::Searching
 }
 
 /// One headline for the link and data state.
@@ -468,6 +478,15 @@ impl Render for OverviewView {
                 (state_tone(s.tray_state()), state_title(s), sub)
             }
         };
+        let is_searching = self.snap.as_ref().is_some_and(searching);
+        // The title's own width, with every dot: the header gives the
+        // controls' side less room before it cuts the title.
+        let title_w = text_width(window, if is_searching { "Searching..." } else { title }, FONT_DISPLAY, 24.);
+        let title = if is_searching {
+            div().child(div().flex().child("Searching").child(self.dots.clone()).debug_selector(|| "searching".into()))
+        } else {
+            div().child(title)
+        };
         let refresh = self.snap.as_ref().map(|s| self.refresh_control(&t, s, now, cx));
         let several = self.accounts.len() > 1;
         // The top right: the refresh button, its note before it. With
@@ -475,13 +494,24 @@ impl Render for OverviewView {
         // goes under them both; that side gives way (the drop-down's label
         // truncates) before the title does.
         let mute = t.mute;
-        let note_el = move |n: SharedString| div().text_size(px(12.5)).text_color(mute).truncate().child(n);
+        let note_el = move |n: SharedString| {
+            one_line(second_line(div()).debug_selector(|| "header-note".into()).text_color(mute)).child(n)
+        };
         let controls = match (several, refresh) {
-            (false, refresh) => {
-                div().flex().flex_shrink_0().items_center().gap(px(8.)).children(refresh.map(|(note, button)| {
-                    div().flex().items_center().gap(px(8.)).children(note.map(note_el)).child(button)
-                }))
-            }
+            // The note gives way (an ellipsis) before the title does; the
+            // button stays at the right edge.
+            (false, refresh) => div().flex().min_w_0().h(px(HEADER_ROW_H)).items_center().justify_end().children(
+                refresh.map(|(note, button)| {
+                    div()
+                        .flex()
+                        .min_w_0()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(8.))
+                        .children(note.map(note_el))
+                        .child(button)
+                }),
+            ),
             (true, refresh) => {
                 let (note, button) = refresh.map_or((None, None), |(n, b)| (n, Some(b)));
                 // Rows stretched to the column's width and their contents
@@ -495,6 +525,7 @@ impl Render for OverviewView {
                     .child(
                         div()
                             .flex()
+                            .h(px(HEADER_ROW_H))
                             .items_center()
                             .justify_end()
                             .gap(px(8.))
@@ -502,52 +533,66 @@ impl Render for OverviewView {
                             .child(self.account_control(&t, window, cx))
                             .children(button),
                     )
-                    .children(note.map(|n| div().flex().justify_end().min_w_0().child(note_el(n))))
+                    .children(note.map(|n| note_el(n).text_right()))
             }
         };
+        // The page column's width inside its padding. Short of room for the
+        // title, the drop-down and the refresh button side by side, the
+        // header draws Clawd smaller and closes up its gaps.
+        let page_w = (f32::from(window.viewport_size().width) - super::SIDEBAR_W).min(super::PAGE_MAX_W)
+            - 2. * super::PAGE_PAD_X;
+        let compact = page_w < HEADER_FULL_W;
+        let (cell, gap) = if compact { (3., 12.) } else { (4., 20.) };
+        // The title column never narrower than the title (its dot and gap
+        // included), unless that would leave the controls less than the
+        // refresh button and, with several accounts, the drop-down's icon
+        // and an ellipsis. The rest of its room is what the controls leave.
+        let controls_min = if several { HEADER_CONTROLS_MIN_SEVERAL } else { HEADER_CONTROLS_MIN };
+        let room = page_w - cell * crate::art::IDLE_W as f32 - 2. * gap;
+        let title_min = (title_w + 18.).ceil().min(room - controls_min).max(0.);
         let header = div()
             .flex()
             .items_start()
-            .gap(px(20.))
-            .child(clawd(4.))
+            .gap(px(gap))
+            .child(div().debug_selector(|| "header-clawd".into()).child(clawd(cell)))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .min_w_0()
-                    .when(several, |d| d.min_w(px(150.)))
+                    .min_w(px(title_min))
                     .gap(px(6.))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .child(dot(&t, tone))
-                            .child(div().font_family(FONT_DISPLAY).text_size(px(24.)).child(title)),
+                        div().flex().h(px(HEADER_ROW_H)).items_center().gap(px(10.)).child(dot(&t, tone)).child(
+                            one_line(title)
+                                .debug_selector(|| "header-title".into())
+                                .font_family(FONT_DISPLAY)
+                                .text_size(px(24.))
+                                .line_height(px(HEADER_ROW_H))
+                                .min_w_0()
+                                .overflow_hidden(),
+                        ),
                     )
-                    .child(div().text_size(px(13.)).text_color(t.mute).truncate().child(sub)),
+                    .child(
+                        one_line(second_line(div()))
+                            .debug_selector(|| "header-sub".into())
+                            .text_color(t.mute)
+                            .child(sub),
+                    ),
             )
             .child(controls);
-        // The setup guide link sits at the foot of the page, bottom right.
-        let text = t.text;
-        let setup = div().flex_1().flex().items_end().justify_end().pt(px(16.)).child(
-            div()
-                .id("run-setup")
-                .debug_selector(|| "run-setup".into())
-                .text_size(px(13.))
-                .text_color(t.dim)
-                .cursor_pointer()
-                .hover(move |s| s.text_color(text))
-                .on_click(cx.listener(|_, _, _, cx| cx.emit(Navigate(Page::Setup))))
-                .child("Run setup guide again"),
-        );
+        // The page's foot: the chime on this computer (bell and switch, the
+        // heading as their tooltip) at the left, the setup guide link at the
+        // right.
         let on = self.desktop_chime;
-        let chime = field(
-            &t,
-            "Play a chime on this computer when Claude needs you",
-            "Follows the alert types on the Hooks page. The tray menu switches it too.",
-            toggle(
+        let chime = div()
+            .id("desktop-chime-tip")
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .tooltip(tooltip(CHIME_TIP))
+            .child(icon("bell", 16., t.dim))
+            .child(toggle(
                 &t,
                 "desktop-chime",
                 on,
@@ -559,11 +604,27 @@ impl Render for OverviewView {
                     }
                     cx.notify();
                 }),
-            ),
-        );
+            ));
+        let text = t.text;
+        let setup = div()
+            .id("run-setup")
+            .debug_selector(|| "run-setup".into())
+            .text_size(px(13.))
+            .text_color(t.dim)
+            .cursor_pointer()
+            .hover(move |s| s.text_color(text))
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(Navigate(Page::Setup))))
+            .child("Run setup guide again");
+        let foot = div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .justify_end()
+            .pt(px(16.))
+            .child(div().flex().items_center().justify_between().gap(px(16.)).child(chime).child(setup));
         let mut page = div().flex_1().flex().flex_col().gap(px(20.)).child(header);
         let Some(s) = self.snap.clone() else {
-            return page.child(chime).child(setup);
+            return page.child(foot);
         };
 
         if s.codex {
@@ -573,8 +634,7 @@ impl Render for OverviewView {
             // reset credits.
             let meters = div().flex().flex_col().gap(px(12.));
             // The cards' width: the page column beside the sidebar, inside its padding.
-            let card_w = (f32::from(window.viewport_size().width) - super::SIDEBAR_W).min(super::PAGE_MAX_W)
-                - 2. * super::PAGE_PAD_X;
+            let card_w = page_w;
             let session_reset = reset_text(s.session_resets_at, now, "Not started");
             let week_reset = reset_text(s.week_resets_at, now, "---");
             page = page.child(if s.no_session_limit {
@@ -632,7 +692,7 @@ impl Render for OverviewView {
                 page = page.child(notice(&t, Tone::Bad, "Couldn't save that to the config file."));
             }
         }
-        page.child(chime).child(setup)
+        page.child(foot)
     }
 }
 
@@ -672,13 +732,13 @@ impl OverviewView {
         (note, button.into_any_element())
     }
 
-    /// The drop-down that picks the account the device shows: the latest
-    /// active one (the default) or one of them (`device_account`). Its menu
+    /// The drop-down that picks the account the device shows: the most
+    /// recent one (the default) or one of them (`device_account`). Its menu
     /// hangs under it, right edges lined up.
     fn account_control(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let label = match &self.device_account {
             Some(d) => tilde(&d.to_string_lossy(), &self.paths.home),
-            None => LATEST_ACCOUNT.to_owned(),
+            None => MOST_RECENT.to_owned(),
         };
         let trigger = menu_button(
             t,
@@ -702,8 +762,8 @@ impl OverviewView {
         })
     }
 
-    /// The drop-down's choices, the chosen one ticked. The latest active
-    /// account names the one it shows now; Codex folders say so.
+    /// The drop-down's choices, the chosen one ticked. Most recent names the
+    /// one it shows now; Codex folders say so.
     fn account_menu(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> [AnyElement; 2] {
         let home = &self.paths.home;
         let row = |id: String,
@@ -734,7 +794,7 @@ impl OverviewView {
             (None, Some(a)) => tilde(a, home),
             _ => String::new(),
         };
-        let mut rows = vec![row("device-account-auto".into(), LATEST_ACCOUNT.into(), false, shown, None, cx)];
+        let mut rows = vec![row("device-account-auto".into(), MOST_RECENT.into(), false, shown, None, cx)];
         for (i, (d, codex)) in self.accounts.iter().enumerate() {
             let label = tilde(&d.to_string_lossy(), home);
             let hint = if *codex { "Codex" } else { "" }.to_owned();
@@ -759,7 +819,7 @@ impl OverviewView {
         cx.notify();
     }
 
-    /// Save the account the device shows (`None`: the latest active one).
+    /// Save the account the device shows (`None`: the most recent one).
     /// The tray hands it to the daemon at once.
     fn choose_account(&mut self, choice: Option<PathBuf>, cx: &mut Context<Self>) {
         self.account_menu_open = false;
@@ -783,7 +843,46 @@ impl OverviewView {
 }
 
 /// The drop-down's default: the account whose usage rose most recently.
-pub(crate) const LATEST_ACCOUNT: &str = "Latest active account";
+pub(crate) const MOST_RECENT: &str = "Most recent";
+
+/// The page width (inside its padding) below which the header goes compact
+/// (Clawd at 3 px cells, 12 px gaps), so that in the narrowest window (440
+/// px) "● Searching...", "Most recent" and the refresh button still fit
+/// side by side: 72 + 2 × 12 + about 152 + about 183.
+const HEADER_FULL_W: f32 = 480.;
+
+/// The least the header's controls keep beside a long title: the refresh
+/// button; with several accounts also the drop-down's icon and an ellipsis.
+const HEADER_CONTROLS_MIN: f32 = 30.;
+const HEADER_CONTROLS_MIN_SEVERAL: f32 = 30. + 8. + 64.;
+
+/// How wide `text` is on one line in `family` at `size` px.
+pub(crate) fn text_width(window: &Window, text: &str, family: &'static str, size: f32) -> f32 {
+    let run = gpui::TextRun {
+        len: text.len(),
+        font: gpui::font(family),
+        color: gpui::black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window.text_system().shape_line(SharedString::from(text.to_owned()), px(size), &[run], None);
+    f32::from(line.width)
+}
+
+/// The header's first row (the title, and beside it the drop-down and the
+/// refresh button), the same height on both sides so the lines under them
+/// share a baseline.
+const HEADER_ROW_H: f32 = 32.;
+
+/// The header's second lines (the account and its age, the refresh note):
+/// one size and line height, so they sit on one baseline.
+fn second_line(d: gpui::Div) -> gpui::Div {
+    d.text_size(px(13.)).line_height(px(18.))
+}
+
+/// The chime switch's tooltip: what it does.
+const CHIME_TIP: &str = "Play a chime on this computer when Claude needs you";
 
 #[cfg(test)]
 mod tests {
@@ -882,6 +981,17 @@ mod tests {
         assert_eq!(reset_text(Some(59 * 60 + 30), 0, "---"), "Resets in 1h 0m", "rounded, like the payload's minutes");
         assert_eq!(reset_text(Some(177 * 60), 0, "---"), "Resets in 2h 57m");
         assert_eq!(reset_text(Some(5 * 1440 * 60 + 11 * 3600), 0, "---"), "Resets in 5d 11h");
+    }
+
+    #[test]
+    fn searching_needs_bluetooth() {
+        let snap =
+            |link: &str, tray: &str| StatusSnapshot { link: link.into(), tray: tray.into(), ..Default::default() };
+        assert!(searching(&snap("searching", "Searching")));
+        assert!(searching(&snap("connecting", "Searching")));
+        assert!(!searching(&snap("no_adapter", "Searching")), "Bluetooth unavailable says so");
+        assert!(!searching(&snap("connected", "Connected")));
+        assert!(!searching(&snap("connected", "Stale")));
     }
 
     #[test]

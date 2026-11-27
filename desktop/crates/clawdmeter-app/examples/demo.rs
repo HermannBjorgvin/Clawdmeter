@@ -11,7 +11,7 @@
 //!   [--app-update download|downloading|ready|failed|none|linux|linux-menu]
 //!   [--advanced] [--session idle|week] [--buttons custom] [--edit primary|secondary|pwr] [--record]
 //!   [--firmware-skipped] [--codex week|5h|listed] [--resets N] [--fable PCT] [--week PCT]
-//!   [--account-menu] [--width PX] [--height PX]
+//!   [--account-menu] [--link searching] [--width PX] [--height PX]
 //! ```
 //!
 //! `--codex` adds a Codex account (`~/.codex` with an `auth.json`, found as
@@ -36,6 +36,9 @@
 //!
 //! `--account-menu` opens the Overview's drop-down that picks the account
 //! the device shows (it needs two or more accounts, e.g. `--codex week`).
+//!
+//! `--link searching` has the app looking for the board over Bluetooth
+//! (the Overview's "Searching" and the Device page's pill).
 //!
 //! `--accounts retrying` adds a second account that is being rate-limited;
 //! `--refresh` shows the Overview's refresh button waiting out the
@@ -144,10 +147,12 @@ struct FakeUsage {
     resets: u32,
     fable: Option<u32>,
     week_pct: Option<u32>,
+    /// `--link searching`: no board connected over Bluetooth.
+    searching: bool,
 }
 
 fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, usage: FakeUsage) {
-    let FakeUsage { session, codex, resets, fable, week_pct } = usage;
+    let FakeUsage { session, codex, resets, fable, week_pct, searching } = usage;
     // `idle`: session not started; `week`: no 5-hour limit (verified Ultra).
     let idle = session.as_deref() == Some("idle");
     let week = session.as_deref() == Some("week");
@@ -175,7 +180,7 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, usage: Fa
         };
         let mut snap = StatusSnapshot {
             updated_at: now,
-            link: "connected".into(),
+            link: if searching { "searching" } else { "connected" }.into(),
             device_key: Some("AA:BB:CC:DD:EE:FF".into()),
             device_name: Some("Clawdmeter".into()),
             account: Some(paths.home.join(".claude").display().to_string()),
@@ -192,7 +197,7 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, usage: Fa
             last_write_at: Some(now - 5),
             latest_firmware: Some(VERSION.into()),
             device_firmware: Some(OLD_VERSION.into()),
-            tray: "Connected".into(),
+            tray: if searching { "Searching" } else { "Connected" }.into(),
             errors,
             refresh_at: (refresh.as_deref() == Some("wait")).then_some(started + 100),
             polling: refresh.as_deref() == Some("checking"),
@@ -263,6 +268,7 @@ fn main() {
                 resets: arg(&args, "--resets").and_then(|n| n.parse().ok()).unwrap_or(3),
                 fable: arg(&args, "--fable").and_then(|p| p.parse().ok()),
                 week_pct: arg(&args, "--week").and_then(|p| p.parse().ok()),
+                searching: arg(&args, "--link").as_deref() == Some("searching"),
             },
         );
         let _ = ipc::save_firmware_record(&paths, &FirmwareRecord { env: ENV.into(), ver: OLD_VERSION.into() });

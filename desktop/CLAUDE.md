@@ -117,7 +117,7 @@ is faked behind `FlashHardware`.
   `device_account` (the account the device shows, from the Overview's
   drop-down, `ui/overview.rs` `account_control`, or the tray's "Show on
   device" submenu; both list `Settings::accounts` and show with two or
-  more; absent or `auto` = the selector's pick, "Latest active account".
+  more; absent or `auto` = the selector's pick, "Most recent".
   Removing the account on the Accounts page clears it. `Engine::shown_choice` uses it while it's a listed folder with a
   reading (a dead Codex sign-in drops it) whose last 3 polls didn't all
   miss, else the selector's pick (which

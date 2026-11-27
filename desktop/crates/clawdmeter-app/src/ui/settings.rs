@@ -31,7 +31,7 @@ use super::theme::{Theme, FONT_DISPLAY, FONT_MONO, R_ITEM, R_M, R_S};
 use super::update::UpdateView;
 use super::widgets::{
     button, caption, card, checkbox, field, field_stacked, heading, icon, notice, para, pill, segmented,
-    stepped_slider, subheading, toggle, update_pill, ButtonKind, Tone,
+    stepped_slider, subheading, toggle, update_pill, ButtonKind, Dots, Tone,
 };
 use super::{command, live_status, not_running_text, run_blocking, Navigate, REFRESH};
 use crate::boards::{self, BoardInfo};
@@ -143,6 +143,8 @@ pub struct SettingsView {
     /// The Update page's view: a newer app release shows as a pill beside
     /// the Settings heading.
     update: Option<Entity<UpdateView>>,
+    /// The dots after the Device page's "Searching".
+    dots: Entity<Dots>,
 }
 
 impl EventEmitter<Navigate> for SettingsView {}
@@ -210,6 +212,7 @@ impl SettingsView {
             follow_os: false,
             ticks: 0,
             update: None,
+            dots: cx.new(Dots::new),
         };
         v.reload();
         v.show(page, false, cx);
@@ -580,15 +583,18 @@ impl SettingsView {
             (None, false) => None,
         };
         let update = snap.as_ref().and_then(|s| s.update_available().map(str::to_owned));
-        let (link_tone, link): (Tone, SharedString) = match snap.as_ref() {
-            None => (Tone::Plain, "Clawdmeter isn't running".into()),
+        // Looking for the board: "Searching" counts up its dots, as on the
+        // Overview.
+        let (link_tone, link, searching): (Tone, SharedString, bool) = match snap.as_ref() {
+            None => (Tone::Plain, "Clawdmeter isn't running".into(), false),
             Some(s) => match s.link.as_str() {
-                "connected" => (Tone::Ok, "Bluetooth connected".into()),
-                "no_adapter" => (Tone::Bad, "Bluetooth unavailable".into()),
-                "connecting" => (Tone::Accent, "Connecting…".into()),
-                _ => (Tone::Plain, "Looking for Clawdmeter".into()),
+                "connected" => (Tone::Ok, "Bluetooth connected".into(), false),
+                "no_adapter" => (Tone::Bad, "Bluetooth unavailable".into(), false),
+                "connecting" => (Tone::Accent, "Connecting…".into(), false),
+                _ => (Tone::Plain, "Searching".into(), true),
             },
         };
+        let link = div().flex().child(link).when(searching, |d| d.child(self.dots.clone()));
         let usb: SharedString = match (&self.device.port, self.device.probing) {
             (_, true) => "Checking USB…".into(),
             (Some(p), _) => format!("USB: {p}").into(),

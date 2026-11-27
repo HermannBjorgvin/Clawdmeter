@@ -383,6 +383,8 @@ mod tests {
 
     use super::*;
     use crate::ui::flasher::tests::FakeBoard;
+    use crate::ui::overview::text_width;
+    use crate::ui::theme::FONT_DISPLAY;
 
     fn click(cx: &mut VisualTestContext, selector: &'static str) {
         cx.run_until_parked();
@@ -537,7 +539,7 @@ mod tests {
     }
 
     // With two or more accounts, the Overview's drop-down picks the one the
-    // device shows: a folder, or back to the latest active one. Escape or a
+    // device shows: a folder, or back to Most recent. Escape or a
     // click outside closes it.
     #[gpui::test]
     fn the_overview_picks_the_device_account(cx: &mut TestAppContext) {
@@ -573,8 +575,9 @@ mod tests {
     }
 
     // In the narrowest window, with a long folder chosen, the drop-down's
-    // label gives way: the title keeps its room (Clawd, then at least 150
-    // px) and the refresh button stays in the window.
+    // label gives way: the compact header (Clawd at 3 px cells) keeps the
+    // whole title, the drop-down starts after it and the refresh button
+    // stays in the window.
     #[gpui::test]
     fn a_long_choice_truncates_in_a_narrow_window(cx: &mut TestAppContext) {
         let root = std::env::temp_dir().join(format!("cm-app-narrow-{}", std::process::id()));
@@ -590,9 +593,112 @@ mod tests {
         cx.run_until_parked();
         let menu = cx.debug_bounds("device-account").expect("the drop-down");
         let refresh = cx.debug_bounds("refresh").expect("the refresh button");
-        let page_left = cx.debug_bounds("nav-overview").expect("the sidebar").right() + px(32.);
-        assert!(menu.left() >= page_left + px(96. + 20. + 150.), "{menu:?} runs into the title");
-        assert!(refresh.right() <= px(720.), "{refresh:?}");
+        let title = cx.debug_bounds("header-title").expect("the title");
+        let whole = cx.update(|window, _| text_width(window, "Searching...", FONT_DISPLAY, 24.));
+        assert!(f32::from(title.size.width) >= whole, "{title:?} cuts \"Searching...\" ({whole} px)");
+        assert!(menu.left() >= title.right(), "{menu:?} runs into the title {title:?}");
+        assert!(refresh.right() <= px(720. - 32.), "{refresh:?}");
+        let clawd = cx.debug_bounds("header-clawd").expect("Clawd");
+        assert_eq!(clawd.size.width, px(72.), "compact below 760 px");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // With one account, a long headline beside a long refresh note: the
+    // note gives way (it's cut short) before the title does, and the
+    // refresh button stays at the page's right edge.
+    #[gpui::test]
+    fn the_note_gives_way_before_the_title(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("cm-app-long-title-{}", std::process::id()));
+        let claude = root.join("acct");
+        let config = format!("config_dirs = {}\ncodex_dirs =\n", claude.display());
+        let (paths, _view, _overview, cx) = overview_window(cx, &root, &config, &claude);
+        let now = clawdmeter_core::unix_now();
+        let snap = ipc::StatusSnapshot {
+            updated_at: now,
+            account: Some(claude.display().to_string()),
+            link: "connected".into(),
+            tray: "Stale".into(),
+            read_at: Some(now - 120),
+            paused_until: Some(now + 3_600),
+            ..Default::default()
+        };
+        ipc::write_status(&paths, &snap).unwrap();
+        cx.executor().advance_clock(REFRESH);
+        cx.run_until_parked();
+        for width in [880., 720.] {
+            cx.simulate_resize(gpui::size(px(width), px(640.)));
+            cx.run_until_parked();
+            let title = cx.debug_bounds("header-title").expect("the title");
+            let whole = cx.update(|window, _| text_width(window, "Usage out of date", FONT_DISPLAY, 24.));
+            assert!(f32::from(title.size.width) >= whole, "{title:?} cuts the title ({whole} px) at {width} px");
+            let note = cx.debug_bounds("header-note").expect("the pause note");
+            assert!(note.left() >= title.right(), "{note:?} runs into the title at {width} px");
+            let refresh = cx.debug_bounds("refresh").expect("the refresh button");
+            assert_eq!(refresh.right(), px(width - 32.), "at {width} px");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Looking for the board, the header reads "Searching" and its dots
+    // (`widgets::Dots`) count up without changing its width. On either side
+    // of the compact header's switch (760 px) and in the narrowest window,
+    // the lines under the title and under the drop-down share a baseline.
+    #[gpui::test]
+    fn the_overview_header_searches_and_lines_up(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("cm-app-searching-{}", std::process::id()));
+        let (claude, work) = (root.join("acct"), root.join("work"));
+        let config = format!("config_dirs = {}, {}\ncodex_dirs =\n", claude.display(), work.display());
+        let (paths, _view, _overview, cx) = overview_window(cx, &root, &config, &claude);
+        let now = clawdmeter_core::unix_now();
+        let snap = ipc::StatusSnapshot {
+            updated_at: now,
+            account: Some(claude.display().to_string()),
+            link: "searching".into(),
+            read_at: Some(now - 60),
+            refresh_at: Some(now + 600),
+            ..Default::default()
+        };
+        ipc::write_status(&paths, &snap).unwrap();
+        cx.executor().advance_clock(REFRESH);
+        cx.run_until_parked();
+        let title = cx.debug_bounds("searching").expect("Searching");
+        for _ in 0..3 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(400));
+            cx.run_until_parked();
+            assert_eq!(cx.debug_bounds("searching"), Some(title), "the same width");
+        }
+        for width in [880., 760., 759., 720.] {
+            cx.simulate_resize(gpui::size(px(width), px(640.)));
+            cx.run_until_parked();
+            let sub = cx.debug_bounds("header-sub").expect("the account line");
+            let note = cx.debug_bounds("header-note").expect("the refresh note");
+            assert_eq!((sub.top(), sub.size.height), (note.top(), note.size.height), "at {width} px");
+            let clawd = cx.debug_bounds("header-clawd").expect("Clawd").size.width;
+            assert_eq!(clawd, px(if width < 760. { 72. } else { 96. }), "Clawd at {width} px");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // The chime on this computer: a bell and a switch at the page's foot,
+    // the heading as their tooltip; the switch saves `desktop_chime`.
+    #[gpui::test]
+    fn the_overview_switches_the_desktop_chime(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("cm-app-chime-{}", std::process::id()));
+        let claude = root.join("acct");
+        let config = format!("config_dirs = {}\ncodex_dirs =\n", claude.display());
+        let (paths, _view, _overview, cx) = overview_window(cx, &root, &config, &claude);
+        cx.run_until_parked();
+        let switch = cx.debug_bounds("desktop-chime").expect("the switch");
+        cx.simulate_mouse_move(switch.center(), None, Modifiers::none());
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tooltip").is_some(), "hovering the switch names it");
+        let on = || clawdmeter_core::Settings::load(&paths).unwrap().desktop_chime;
+        let before = on();
+        click(cx, "desktop-chime");
+        assert_eq!(on(), !before);
+        click(cx, "desktop-chime");
+        assert_eq!(on(), before);
         let _ = std::fs::remove_dir_all(&root);
     }
 

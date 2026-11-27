@@ -33,7 +33,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use crate::art::{tray_icon_rgba, TrayState};
 use crate::daemon::{self, Command, DaemonHandle};
 use crate::ipc::{self, AppCommand, StatusSnapshot};
-use crate::ui::overview::{refresh_settled, refresh_state, LATEST_ACCOUNT};
+use crate::ui::overview::{refresh_settled, refresh_state, MOST_RECENT};
 use crate::Page;
 
 /// Status file refresh even when nothing changed (windows use it as a
@@ -118,7 +118,7 @@ fn device_accounts(settings: &Settings) -> usize {
 }
 
 /// The "Show on device" submenu's items on every platform, as `(id, label,
-/// ticked)`: the latest active account (the default), then each account
+/// ticked)`: Most recent (the default), then each account
 /// ([`Settings::accounts`]), Codex ones marked; the Overview's drop-down
 /// lists the same. Empty with fewer than two accounts. The ids are fixed
 /// (`device-auto`, `device-<index>`, read back by [`device_pick`]), so a
@@ -128,7 +128,7 @@ fn device_choices(settings: &Settings, home: &Path) -> Vec<(String, String, bool
         return Vec::new();
     }
     let chosen = settings.chosen_account();
-    let mut choices = vec![("device-auto".to_owned(), LATEST_ACCOUNT.to_owned(), chosen.is_none())];
+    let mut choices = vec![("device-auto".to_owned(), MOST_RECENT.to_owned(), chosen.is_none())];
     choices.extend(settings.accounts().enumerate().map(|(i, (d, codex))| {
         let path = crate::tilde(&d.to_string_lossy(), home);
         let label = if codex { format!("{path} (Codex)") } else { path };
@@ -137,8 +137,8 @@ fn device_choices(settings: &Settings, home: &Path) -> Vec<(String, String, bool
     choices
 }
 
-/// The account a "Show on device" item picks: `Some(None)` for the latest
-/// active one, `Some(Some(i))` for the `i`th of [`Settings::accounts`].
+/// The account a "Show on device" item picks: `Some(None)` for the most
+/// recent one, `Some(Some(i))` for the `i`th of [`Settings::accounts`].
 fn device_pick(id: &str) -> Option<Option<usize>> {
     match id.strip_prefix("device-")? {
         "auto" => Some(None),
@@ -146,9 +146,9 @@ fn device_pick(id: &str) -> Option<Option<usize>> {
     }
 }
 
-/// The "Show on device" submenu with `count` accounts and the latest active
-/// one, its labels and ticks set by [`set_device_items`]. `None` when there
-/// is nothing to pick.
+/// The "Show on device" submenu with `count` accounts and Most recent, its
+/// labels and ticks set by [`set_device_items`]. `None` when there is
+/// nothing to pick.
 fn device_menu(count: usize) -> Option<(Submenu, Vec<CheckMenuItem>)> {
     if count < 2 {
         return None;
@@ -619,7 +619,7 @@ impl TrayApp {
         self.menu_at = 0;
     }
 
-    /// Show `pick` on the device (`None`: the latest active account; else the
+    /// Show `pick` on the device (`None`: the most recent account; else the
     /// `i`th account the menu listed), as the Overview's drop-down does:
     /// saved, so the daemon takes it at once.
     fn choose_device_account(&mut self, pick: Option<usize>) {
@@ -1157,7 +1157,7 @@ mod tests {
         assert_eq!(Items::command(&id("12"), Page::Flash), None);
     }
 
-    // "Show on device": the latest active account, then every account,
+    // "Show on device": Most recent, then every account,
     // Codex ones marked, the saved choice ticked; nothing with one account.
     #[test]
     fn show_on_device_lists_every_account() {
@@ -1170,7 +1170,7 @@ mod tests {
         assert_eq!(
             device_choices(&settings(two), home),
             vec![
-                ("device-auto".into(), LATEST_ACCOUNT.into(), true),
+                ("device-auto".into(), MOST_RECENT.into(), true),
                 ("device-0".into(), "~/.claude".into(), false),
                 ("device-1".into(), "~/.codex (Codex)".into(), false),
             ]
@@ -1178,8 +1178,8 @@ mod tests {
         let chosen = device_choices(&settings(&format!("{two}device_account = ~/.codex/\n")), home);
         assert_eq!(chosen.iter().map(|c| c.2).collect::<Vec<_>>(), vec![false, false, true]);
         let elsewhere = device_choices(&settings(&format!("{two}device_account = ~/gone\n")), home);
-        assert!(elsewhere[0].2, "a folder that isn't listed is the latest active account");
-        assert_eq!(device_title(&device_choices(&settings(two), home)), "Show on device: Latest active account");
+        assert!(elsewhere[0].2, "a folder that isn't listed is Most recent");
+        assert_eq!(device_title(&device_choices(&settings(two), home)), "Show on device: Most recent");
         assert_eq!(device_title(&chosen), "Show on device: ~/.codex (Codex)", "the choice shows with the menu closed");
         assert_eq!(device_accounts(&settings(two)), 2);
         assert_eq!(device_pick("device-auto"), Some(None));

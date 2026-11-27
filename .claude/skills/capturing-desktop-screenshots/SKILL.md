@@ -40,6 +40,7 @@ frames.
 | `--session idle\|week` | Session not started / no 5-hour limit (weekly meter only) |
 | `--codex week\|5h\|listed` | A Codex account (`~/.codex`): shown weekly-only with reset credits / shown with a 5-hour window / listed while Claude is shown |
 | `--account-menu` | The Overview's account drop-down open (needs two or more accounts, e.g. `--codex week`) |
+| `--link searching` | No board over Bluetooth: the Overview's "Searching" header and the Device page's pill |
 | `--resets N` | How many reset credits the `--codex week` account holds (default 3; past ten, the rest have no date) |
 | `--fable PCT` | A Fable weekly window at PCT % of its limit: the purple strip in the Overview's weekly meter (half the bar at 100) |
 | `--week PCT` | The weekly meter at PCT % (default 62) |

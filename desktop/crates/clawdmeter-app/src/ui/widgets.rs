@@ -192,7 +192,7 @@ fn button_with(
         // A menu button's label (a choice, which can be long) truncates
         // when its row is short of room; other buttons keep their size.
         .map(|el| match menu {
-            Some(_) => el.flex_shrink().min_w_0().child(div().min_w_0().truncate().child(label.into())),
+            Some(_) => el.flex_shrink().min_w_0().child(one_line(div().min_w_0()).child(label.into())),
             None => el.child(label.into()),
         })
         .when(menu.is_some(), |el| el.child(icon("chevron-down", 15., fg).flex_shrink_0().ml(px(6.)).mr(px(-4.))));
@@ -218,6 +218,7 @@ impl Render for Tip {
     fn render(&mut self, window: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
         let t = Theme::for_appearance(window.appearance());
         div()
+            .debug_selector(|| "tooltip".into())
             .px(px(8.))
             .py(px(4.))
             .rounded(px(R_S))
@@ -357,7 +358,7 @@ fn tint(c: Rgba, alpha: f32) -> Hsla {
 }
 
 /// A small status chip.
-pub fn pill(t: &Theme, text: impl Into<SharedString>, tone: Tone) -> impl IntoElement {
+pub fn pill(t: &Theme, text: impl IntoElement, tone: Tone) -> impl IntoElement {
     let c = tone_color(t, tone);
     div()
         .flex()
@@ -372,7 +373,60 @@ pub fn pill(t: &Theme, text: impl Into<SharedString>, tone: Tone) -> impl IntoEl
         .text_size(px(12.))
         .whitespace_nowrap()
         .child(div().size(px(6.)).rounded(px(R_PILL)).bg(c))
-        .child(text.into())
+        .child(text)
+}
+
+/// One line of text that ends in an ellipsis when its box is short of room.
+/// Not `truncate()`: GPUI 0.2.2 measures nowrap text once and keeps that
+/// size, so text shrunk by its flex row afterwards is clipped mid-word with
+/// no ellipsis. Wrapping text is measured again at its final width, and
+/// `line_clamp(1)` holds it to one line, cut with the ellipsis.
+pub fn one_line<E: Styled>(el: E) -> E {
+    el.whitespace_normal().line_clamp(1).text_ellipsis()
+}
+
+/// How long each step of [`Dots`] shows.
+const DOTS_STEP: Duration = Duration::from_millis(400);
+
+/// Dots after a word while something is under way ("Searching"): `.`,
+/// `..`, `...`, round again. Always as wide as three dots (the ones not
+/// yet shown are drawn clear), so nothing beside them moves. In the text
+/// style it's placed in; its own timer redraws it.
+pub struct Dots {
+    shown: usize,
+}
+
+impl Dots {
+    /// One dot, then a step every [`DOTS_STEP`] while the view lives.
+    pub fn new(cx: &mut gpui::Context<Self>) -> Self {
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(DOTS_STEP).await;
+            let step = |d: &mut Dots, cx: &mut gpui::Context<Dots>| {
+                d.shown = next_dots(d.shown);
+                cx.notify();
+            };
+            if this.update(cx, step).is_err() {
+                break;
+            }
+        })
+        .detach();
+        Dots { shown: 1 }
+    }
+}
+
+/// The step after showing `shown` dots: 1, 2, 3, then 1 again.
+fn next_dots(shown: usize) -> usize {
+    shown % 3 + 1
+}
+
+impl Render for Dots {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        let shown = self.shown;
+        div()
+            .flex()
+            .flex_shrink_0()
+            .children((0..3).map(|i| div().when(i >= shown, |d| d.text_color(gpui::transparent_black())).child(".")))
+    }
 }
 
 /// A round status dot.
@@ -781,5 +835,18 @@ mod tests {
         assert_eq!(usage_tone(79), Tone::Accent);
         assert_eq!(usage_tone(80), Tone::Bad);
         assert_eq!(usage_tone(100), Tone::Bad);
+    }
+
+    #[gpui::test]
+    fn dots_count_up_and_round_again(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let dots = cx.new(Dots::new);
+        let shown = |cx: &mut gpui::TestAppContext| dots.read_with(cx, |d, _| d.shown);
+        assert_eq!(shown(cx), 1);
+        for want in [2, 3, 1, 2] {
+            cx.executor().advance_clock(DOTS_STEP);
+            cx.run_until_parked();
+            assert_eq!(shown(cx), want);
+        }
     }
 }
