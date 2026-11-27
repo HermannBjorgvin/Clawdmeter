@@ -9,7 +9,8 @@
 //!
 //! The chosen device's address is cached in `ble-address` in the state dir
 //! (`~/.config/clawdmeter`); a failed connect drops the cache so the next
-//! attempt re-derives it.
+//! attempt re-derives it, except on macOS, where only a stale bond does (the
+//! cached CoreBluetooth identifier is how a board the system let go is found).
 //!
 //! Per-OS recovery:
 //!
@@ -436,7 +437,7 @@ impl std::fmt::Debug for DeviceLink {
 impl DeviceLink {
     /// Find, connect, discover and subscribe on `bluetooth`'s adapter. On a
     /// failed connect the address cache is dropped (if it pointed at that
-    /// device).
+    /// device); on macOS only when the bond is stale.
     pub async fn open(
         bluetooth: &Bluetooth,
         cache: &AddressCache,
@@ -492,10 +493,14 @@ impl DeviceLink {
                         log::warn!("encryption failed: likely a stale macOS bond; trying to unpair it");
                         let _ = tokio::task::spawn_blocking(macos_unpair_stale_bond).await;
                     }
-                    // The identifier names the bonded board, so a transient
-                    // failure (edge of range, a reboot) doesn't make it wrong;
-                    // dropping it would leave nothing to retry with.
-                    if !reaching || stale_bond {
+                    // On macOS the identifier names the bonded board, so a
+                    // transient failure (edge of range, a reboot, a service
+                    // discovery that times out while the system still holds
+                    // the link) doesn't make it wrong. Dropping it would leave
+                    // the by-identifier retry nothing to try once the system
+                    // lets the link go, and the board was never found again.
+                    // Only a stale bond makes it wrong there.
+                    if !cfg!(target_os = "macos") || stale_bond {
                         cache.invalidate(&cand.key);
                     }
                     last_err = e;
