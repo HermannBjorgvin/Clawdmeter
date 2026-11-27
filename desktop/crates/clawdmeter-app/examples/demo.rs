@@ -6,7 +6,7 @@
 //! ```text
 //! HOME=/tmp/cm XDG_CACHE_HOME=/tmp/cm/.cache \
 //!   cargo run -p clawdmeter-app --example demo -- [--page PAGE] [--status connected|off]
-//!   [--board none|fresh|current|old] [--setup welcome|board|flash|pair|hooks|done] [--hooks-preview]
+//!   [--board none|fresh|current|old] [--env ENV] [--setup welcome|board|flash|pair|hooks|done] [--hooks-preview]
 //!   [--flash-to identify|firmware|flash|done] [--shop] [--accounts retrying] [--refresh wait|checking]
 //!   [--app-update download|downloading|ready|failed|none|linux|linux-menu]
 //!   [--advanced] [--session idle|week] [--buttons custom] [--edit primary|secondary|pwr] [--record]
@@ -65,6 +65,8 @@ const ENV: &str = "waveshare_amoled_216";
 /// A board on a fake port that takes its time.
 struct FakeBoard {
     kind: String,
+    /// The env a `current`/`old` board's firmware reports (`--env`).
+    env: String,
 }
 
 impl FlashHardware for FakeBoard {
@@ -82,7 +84,7 @@ impl FlashHardware for FakeBoard {
             "old" => OLD_VERSION,
             _ => return None,
         };
-        Some(FirmwareInfo { env: ENV.into(), ver: ver.into(), rev: String::new(), link: String::new() })
+        Some(FirmwareInfo { env: self.env.clone(), ver: ver.into(), rev: String::new(), link: String::new() })
     }
     fn probe_chip(&self, _port: &str) -> Result<ChipInfo, DeviceError> {
         std::thread::sleep(Duration::from_millis(600));
@@ -304,7 +306,8 @@ fn main() {
 
     clawdmeter_app::ui::open_with_size(width, height, move |window, cx| {
         let p = paths.clone();
-        let hw: Arc<dyn FlashHardware> = Arc::new(FakeBoard { kind: board });
+        let env = arg(&args, "--env").unwrap_or_else(|| ENV.into());
+        let hw: Arc<dyn FlashHardware> = Arc::new(FakeBoard { kind: board, env });
         let overview = cx.new(|cx| OverviewView::new(p.clone(), cx));
         let settings = cx.new(|cx| SettingsView::with_usb(p.clone(), Page::Device, false, cx));
         let flasher = cx.new(|cx| FlasherView::with_hardware(p.clone(), Some(manifest), hw, cx));

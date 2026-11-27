@@ -191,6 +191,11 @@ pub struct FlasherView {
     error: Option<String>,
     connected: bool,
     ticks: u32,
+    /// How many of `candidates` show before "Show more": the identified board
+    /// and its siblings, or every chip match when nothing named itself.
+    shown: usize,
+    /// The rest of `candidates` is unfolded.
+    show_all: bool,
 }
 
 impl EventEmitter<Navigate> for FlasherView {}
@@ -284,6 +289,8 @@ impl FlasherView {
             error: None,
             connected: false,
             ticks: 0,
+            shown: 0,
+            show_all: false,
         };
         if let Some(m) = manifest {
             v.source = Some(load_local(&m));
@@ -342,6 +349,19 @@ impl FlasherView {
         &self.candidates
     }
 
+    /// How many candidates the Identify page shows, whether the fold is open,
+    /// and whether it has to be because the pick is past it.
+    fn fold(&self) -> (usize, bool, bool) {
+        let past_fold = self
+            .pick
+            .as_ref()
+            .and_then(|p| self.candidates.iter().position(|c| c == p))
+            .is_some_and(|i| i >= self.shown);
+        let unfolded = self.show_all || past_fold;
+        let visible = if unfolded { self.candidates.len() } else { self.shown.min(self.candidates.len()) };
+        (visible, unfolded, past_fold)
+    }
+
     /// Writing to the board right now (don't walk away).
     pub fn flashing(&self) -> bool {
         self.flashing
@@ -355,6 +375,11 @@ impl FlasherView {
     /// The board on USB already runs this release (or newer).
     pub fn up_to_date(&self) -> bool {
         let (Some(info), Some(Ok(source))) = (&self.info, &self.source) else { return false };
+        // Picking another board than the one the firmware named is a change,
+        // whatever version it runs.
+        if self.pick.as_deref().is_some_and(|p| p != info.env) {
+            return false;
+        }
         info.ver.trim_start_matches(['v', 'V']).starts_with(|c: char| c.is_ascii_digit())
             && !clawdmeter_flash::manifest::is_newer(&source.manifest().version, &info.ver)
     }
@@ -438,6 +463,8 @@ impl FlasherView {
         self.probing = true;
         self.error = None;
         self.candidates.clear();
+        self.shown = 0;
+        self.show_all = false;
         self.pick = None;
         self.info = None;
         self.chip = None;
@@ -473,14 +500,23 @@ impl FlasherView {
                         v.info = info;
                         match id {
                             Identification::Firmware(i) => {
-                                v.candidates = vec![i.env.clone()];
+                                let (candidates, shown) = match &v.source {
+                                    Some(Ok(source)) => firmware_candidates(source.manifest(), &i.env),
+                                    _ => (vec![i.env.clone()], 1),
+                                };
+                                v.candidates = candidates;
+                                v.shown = shown;
                                 v.pick = Some(i.env);
                             }
                             Identification::Unique(env) => {
                                 v.candidates = vec![env.clone()];
+                                v.shown = 1;
                                 v.pick = Some(env);
                             }
-                            Identification::Choose(envs) => v.candidates = envs,
+                            Identification::Choose(envs) => {
+                                v.shown = envs.len();
+                                v.candidates = envs;
+                            }
                             Identification::Unsupported(c) => {
                                 v.error = Some(format!(
                                     "This board has an {}{}. None of the boards in this release match it.",
@@ -642,6 +678,8 @@ impl FlasherView {
         self.info = None;
         self.chip = None;
         self.candidates.clear();
+        self.shown = 0;
+        self.show_all = false;
         self.pick = None;
         self.image = None;
         self.error = None;
@@ -793,7 +831,10 @@ impl FlasherView {
             (Some(_), _) if up_to_date => {
                 format!("Firmware is up to date ({latest}). Continue, or reinstall if needed.")
             }
-            (Some(_), _) => "Board identified from its Clawdmeter firmware.".to_string(),
+            (Some(i), _) if self.pick.as_deref() == Some(i.env.as_str()) => {
+                "Identified from its Clawdmeter firmware. Wrong board? Pick the one on your desk.".to_string()
+            }
+            (Some(_), _) => "It gets the firmware you picked, not the one it runs now.".to_string(),
             (None, 1) => "One board in this release matches the detected chip.".to_string(),
             (None, n) if n > 1 => format!("{n} boards match this chip. Select the model on your desk."),
             _ => String::new(),
@@ -804,7 +845,8 @@ impl FlasherView {
         let manifest = self.source.as_ref().and_then(|s| s.as_ref().ok()).map(|s| s.manifest().clone());
         // Four even columns fit both the page and the wizard; more wrap.
         let mut grid = div().grid().grid_cols(4).gap(px(10.));
-        for (i, env) in self.candidates.clone().into_iter().enumerate() {
+        let (visible, unfolded, past_fold) = self.fold();
+        for (i, env) in self.candidates.clone().into_iter().take(visible).enumerate() {
             let info = boards::board(&env);
             // Our short names read better side by side than the manifest's
             // full ones; unknown envs fall back to the manifest.
@@ -852,6 +894,32 @@ impl FlasherView {
             );
         }
         d = d.child(grid);
+        // The rest of the boards with this chip, folded: a board that reports
+        // the wrong env can still get the right firmware.
+        let more = self.candidates.len().saturating_sub(self.shown);
+        if more > 0 && !(unfolded && past_fold) {
+            let label = if unfolded {
+                "Show fewer boards".to_string()
+            } else if more == 1 {
+                "Not this board? Show 1 more for this chip".to_string()
+            } else {
+                format!("Not this board? Show {more} more for this chip")
+            };
+            d = d.child(
+                div()
+                    .id("show-all")
+                    .debug_selector(|| "show-all".into())
+                    .text_size(px(13.))
+                    .text_color(t.accent)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(t.focus))
+                    .on_click(cx.listener(|v, _, _, cx| {
+                        v.show_all = !v.show_all;
+                        cx.notify();
+                    }))
+                    .child(label),
+            );
+        }
         let (me1, me2) = (cx.entity().downgrade(), cx.entity().downgrade());
         // In setup, an up-to-date board moves straight on; flashing it again
         // stays possible.
@@ -1149,6 +1217,32 @@ impl Render for FlasherView {
     }
 }
 
+/// What to offer when the firmware named `env`: that board, then the boards
+/// built from the same firmware folder (`boards::firmware_folder`: the
+/// portrait/landscape and LCD-2.1/2.8C mix-ups), then every other image for
+/// the same chip and flash size. Returns the list and how many come before the
+/// "Show more" fold (the board and its siblings).
+fn firmware_candidates(manifest: &Manifest, env: &str) -> (Vec<String>, usize) {
+    let family = boards::firmware_folder(env);
+    let mut out = vec![env.to_owned()];
+    out.extend(
+        manifest
+            .boards
+            .iter()
+            .filter(|b| b.env != env && boards::firmware_folder(&b.env) == family)
+            .map(|b| b.env.clone()),
+    );
+    let shown = out.len();
+    if let Some(me) = manifest.board(env) {
+        for b in manifest.candidates(&me.chip, me.flash_mb()) {
+            if !out.contains(&b.env) {
+                out.push(b.env.clone());
+            }
+        }
+    }
+    (out, shown)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::sync::Mutex;
@@ -1162,6 +1256,8 @@ pub(crate) mod tests {
     #[derive(Default)]
     pub(crate) struct FakeBoard {
         flashed: Mutex<Option<(String, usize, String)>>,
+        /// What `info` answers; `None` is a board without Clawdmeter.
+        reports: Mutex<Option<FirmwareInfo>>,
     }
 
     impl FlashHardware for FakeBoard {
@@ -1169,7 +1265,7 @@ pub(crate) mod tests {
             vec!["/dev/fake0".into()]
         }
         fn probe_info(&self, _port: &str) -> Option<FirmwareInfo> {
-            None
+            self.reports.lock().unwrap().clone()
         }
         fn probe_chip(&self, _port: &str) -> Result<ChipInfo, DeviceError> {
             Ok(ChipInfo { chip: "esp32s3".into(), flash_mb: Some(16), mac: None, features: vec![] })
@@ -1286,5 +1382,152 @@ pub(crate) mod tests {
         click(cx, "flash");
         view.read_with(cx, |v, _| assert!(v.step == Step::Firmware, "disabled Flash does nothing"));
         let _ = std::fs::remove_dir_all(&paths.home);
+    }
+
+    fn family_manifest() -> Manifest {
+        Manifest::parse(
+            r#"{"version":"2.7.0","boards":[
+              {"env":"waveshare_lcd_4","chip":"esp32s3","flash_size":"16MB","display_name":"LCD 4","file":"a.bin","sha256":"00"},
+              {"env":"waveshare_lcd_21","chip":"esp32s3","flash_size":"16MB","display_name":"LCD 2.1","file":"b.bin","sha256":"00"},
+              {"env":"waveshare_amoled_132","chip":"esp32s3","flash_size":"8MB","display_name":"1.32","file":"c.bin","sha256":"00"},
+              {"env":"waveshare_lcd_28c","chip":"esp32s3","flash_size":"16MB","display_name":"LCD 2.8C","file":"d.bin","sha256":"00"},
+              {"env":"waveshare_amoled_206","chip":"esp32s3","flash_size":"32MB","display_name":"2.06","file":"e.bin","sha256":"00"},
+              {"env":"esp32_2432s024c","chip":"esp32","flash_size":"4MB","display_name":"CYD 2.4","file":"f.bin","sha256":"00"},
+              {"env":"esp32_2432s024c_landscape","chip":"esp32","flash_size":"4MB","display_name":"CYD 2.4 L","file":"g.bin","sha256":"00"},
+              {"env":"esp32_2432s028r","chip":"esp32","flash_size":"4MB","display_name":"CYD 2.8","file":"h.bin","sha256":"00"}]}"#,
+        )
+        .unwrap()
+    }
+
+    /// The identified board, then its siblings (same firmware folder), then
+    /// the rest for that chip and flash size, smaller images included.
+    #[test]
+    fn firmware_candidates_put_siblings_before_the_fold() {
+        let m = family_manifest();
+        assert_eq!(
+            firmware_candidates(&m, "waveshare_lcd_21"),
+            (
+                vec![
+                    "waveshare_lcd_21".into(),
+                    "waveshare_lcd_28c".into(),
+                    "waveshare_lcd_4".into(),
+                    "waveshare_amoled_132".into()
+                ],
+                2
+            )
+        );
+        assert_eq!(
+            firmware_candidates(&m, "waveshare_lcd_28c"),
+            (
+                vec![
+                    "waveshare_lcd_28c".into(),
+                    "waveshare_lcd_21".into(),
+                    "waveshare_lcd_4".into(),
+                    "waveshare_amoled_132".into()
+                ],
+                2
+            )
+        );
+        assert_eq!(
+            firmware_candidates(&m, "esp32_2432s024c"),
+            (vec!["esp32_2432s024c".into(), "esp32_2432s024c_landscape".into(), "esp32_2432s028r".into()], 2)
+        );
+        // No sibling: the board alone above the fold.
+        assert_eq!(
+            firmware_candidates(&m, "waveshare_lcd_4"),
+            (
+                vec![
+                    "waveshare_lcd_4".into(),
+                    "waveshare_lcd_21".into(),
+                    "waveshare_lcd_28c".into(),
+                    "waveshare_amoled_132".into()
+                ],
+                1
+            )
+        );
+        // An env this release doesn't list keeps just itself.
+        assert_eq!(firmware_candidates(&m, "unknown_board"), (vec!["unknown_board".into()], 1));
+    }
+
+    /// A board whose firmware names the LCD-2.1 is offered the 2.8C beside it,
+    /// and the rest of its chip behind "Show more"; picking another board is
+    /// never "up to date".
+    #[gpui::test]
+    fn identified_board_can_be_overridden(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("cm-flasher-override-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let rel = root.join("release");
+        std::fs::create_dir_all(&rel).unwrap();
+        let image = vec![0xA5u8; 4096];
+        let sha = release::sha256_hex(&image);
+        for env in ["waveshare_lcd_21", "waveshare_lcd_28c", "waveshare_lcd_4"] {
+            std::fs::write(rel.join(format!("{env}-v2.7.0.bin")), &image).unwrap();
+        }
+        let entry = |env: &str| {
+            format!(
+                r#"{{"env":"{env}","chip":"esp32s3","flash_size":"16MB","display_name":"{env}","file":"{env}-v2.7.0.bin","sha256":"{sha}"}}"#
+            )
+        };
+        std::fs::write(
+            rel.join("manifest.json"),
+            format!(
+                r#"{{"version":"2.7.0","boards":[{},{},{}]}}"#,
+                entry("waveshare_lcd_4"),
+                entry("waveshare_lcd_21"),
+                entry("waveshare_lcd_28c")
+            ),
+        )
+        .unwrap();
+        let paths = Paths::under(&root);
+        let manifest = rel.join("manifest.json");
+
+        let hw = Arc::new(FakeBoard::default());
+        *hw.reports.lock().unwrap() = Some(FirmwareInfo {
+            env: "waveshare_lcd_21".into(),
+            ver: "2.7.0".into(),
+            rev: String::new(),
+            link: "ble".into(),
+        });
+        let hw2: Arc<dyn FlashHardware> = hw.clone();
+        let p = paths.clone();
+        let (view, cx) = cx.add_window_view(move |_, cx| {
+            let mut v = FlasherView::with_hardware(p, Some(manifest.clone()), hw2, cx);
+            v.set_active(true, cx);
+            v
+        });
+        cx.executor().advance_clock(REFRESH * 3);
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            assert!(v.step == Step::Identify);
+            assert_eq!(v.candidates, ["waveshare_lcd_21", "waveshare_lcd_28c", "waveshare_lcd_4"]);
+            assert_eq!(v.pick.as_deref(), Some("waveshare_lcd_21"));
+            assert!(v.up_to_date(), "same version, same board");
+        });
+        // The 2.1 and the 2.8C show; the LCD-4 waits behind "Show more".
+        assert!(cx.debug_bounds("board-0").is_some() && cx.debug_bounds("board-1").is_some());
+        assert!(cx.debug_bounds("board-2").is_none());
+        view.read_with(cx, |v, _| assert_eq!(v.fold().0, 2));
+        click(cx, "show-all");
+        assert!(cx.debug_bounds("board-2").is_some());
+        view.read_with(cx, |v, _| assert_eq!(v.fold().0, 3));
+        click(cx, "show-all");
+        view.read_with(cx, |v, _| assert_eq!(v.fold().0, 2, "Show fewer folds it again"));
+        // A pick past the fold keeps it open.
+        view.update(cx, |v, _| v.pick = Some("waveshare_lcd_4".into()));
+        view.read_with(cx, |v, _| assert_eq!(v.fold(), (3, true, true)));
+        view.update(cx, |v, _| v.pick = Some("waveshare_lcd_21".into()));
+
+        // Picking the 2.8C: not "up to date" any more, and Continue fetches its image.
+        click(cx, "board-1");
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.pick.as_deref(), Some("waveshare_lcd_28c"));
+            assert!(!v.up_to_date(), "another board's firmware is a change");
+        });
+        click(cx, "continue");
+        view.read_with(cx, |v, _| {
+            assert!(v.step == Step::Firmware);
+            assert_eq!(v.board_image().map(|b| b.env), Some("waveshare_lcd_28c".into()));
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
