@@ -200,14 +200,22 @@ one whose usage increased most recently (weekly usage, on an account with no
 5-hour limit). To keep one account on the device, pick it in the drop-down
 at the top right of the Overview, or under **Show on device** in the tray
 menu (its title names the current choice); the device switches within a couple of seconds and stays on it. Pick
-**Latest active account** to go back. With a single account neither shows. While the
+**Latest active account** to go back. With a single account neither shows. A
+board button set to **Next account** (see Buttons) steps through the same
+choices as the drop-down: **Latest active account**, then each account,
+round again (an account that can't be read is passed over). When the account
+on the device changes, the board names it on its status line for a few
+seconds, as `Auto: ~/.claude` for the latest active account, and every now
+and then it shows the name there instead of one of its words, so a glance
+tells you whose numbers they are. Boards with the minimal display don't, and
+with a single account nothing changes. While the
 chosen account can't be read (not checked yet, its last three checks
 failed, or a Codex account's sign-in has ended), the device shows the automatic choice
-instead, and goes back to the chosen account once it reads. The board can't
-tell two Claude accounts apart yet: after a switch between them it may take
-a drop in usage for a reset (the reset chime, if it's on, and Clawd's
-reaction) and a rise for heavy use. Automatic switching between Claude
-accounts does the same.
+instead, and goes back to the chosen account once it reads. A switch
+between Claude accounts doesn't read as a reset or as heavy use on the
+board. Firmware older than this change can still take the drop for a reset
+and play the reset chime, and so can a board told about two folders whose
+names end in the same 22 characters.
 
 **Codex accounts (a trial).** With the Codex CLI signed in to ChatGPT, its
 folder (`~/.codex`, or `$CODEX_HOME`) is picked up as an account on its own;
@@ -276,8 +284,11 @@ Click one to change it:
 - **Media**: Play/Pause, Previous, Next, Volume down, Volume up or Mute.
   Volume repeats while you hold the button.
 - **Other**: **Brightness** cycles the screen brightness, so a board without
-  a PWR button can have one; **Nothing** leaves the button to wake the
-  screen.
+  a PWR button can have one; **Next account** picks the next choice in the
+  Overview's drop-down (with two or more accounts; the board names it for a
+  moment); **Nothing** leaves the button to wake the
+  screen. Next account needs firmware with it: older firmware ignores it and
+  the button keeps what it did before.
 - **Shortcut**: a keyboard shortcut of your own. Click the shortcut field
   (or Record) and press the keys, such as Ctrl+Shift+M or Cmd+Shift+M for
   Teams mute, Alt+A for Zoom, or Win+Alt+K for the Windows 11 microphone.

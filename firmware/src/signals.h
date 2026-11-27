@@ -19,8 +19,12 @@ struct SignalsUpdate {
     bool     session_reset;   // a real sample dropped > 5 points (chime trigger);
                               // never when the meter's kind changed (usage_meter_kind)
     bool     meter_kind_changed; // a real sample measures something else than the
-                              // last (session, week, spend): its % is a new
-                              // baseline, not a rise or a reset
+                              // last (session, week, spend), or another
+                              // account's (`an`): its % is a new baseline,
+                              // not a rise or a reset
+    bool     account_switched;// the payload names another account than the
+                              // last one that named one, or the same one picked
+                              // another way (`al`); never the first
     bool     replay;          // usage numbers repeat the last poll (rp=1), or
                               // are a Codex account's (pv): not Claude's to
                               // react to

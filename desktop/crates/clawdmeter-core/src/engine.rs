@@ -144,12 +144,18 @@ pub struct Engine {
     /// a reconnect resends an account the device never had as a poll: the
     /// next write sends them as a replay.
     shown_changed: bool,
+    /// The shown account is the latest active one (`al`), as last worked
+    /// out: a change goes out like a switch, so the device shows it at once.
+    shown_auto: bool,
     /// The account whose numbers last went out as a poll, so in the
     /// device's rate math.
     polled_account: Option<PathBuf>,
     rate: RateTracker,
     /// The Claude account whose readings are in `rate`.
     rate_account: Option<PathBuf>,
+    /// The user's home, so the device's account name reads `~/.codex`
+    /// ([`Engine::set_home`]).
+    home: Option<PathBuf>,
     hooks_installed: bool,
     fresh_poll: bool,
     logged_out: bool,
@@ -211,9 +217,11 @@ impl Engine {
             active: None,
             auto_active: None,
             shown_changed: false,
+            shown_auto: false,
             polled_account: None,
             rate: RateTracker::default(),
             rate_account: None,
+            home: None,
             hooks_installed: false,
             fresh_poll: false,
             logged_out: false,
@@ -235,6 +243,12 @@ impl Engine {
             missing_folders: Vec::new(),
             desktop_chime_due: false,
         }
+    }
+
+    /// The user's home folder: account names on the device (`an`) are
+    /// written under it as `~/…`, as the app writes them.
+    pub fn set_home(&mut self, home: PathBuf) {
+        self.home = Some(home);
     }
 
     /// Current settings.
@@ -275,13 +289,19 @@ impl Engine {
         // shows at once with the numbers already read for that account. They
         // go out as a replay: they aren't a new reading.
         let shown = self.shown_choice();
+        let auto = self.shows_auto_named();
         if shown != self.active {
             if let Some(a) = &shown {
                 log::info!("active plan: {}", a.display());
             }
+        }
+        // The same account picked another way (`al`: the latest active one,
+        // then chosen) goes out at once too, so the device names it.
+        if shown != self.active || auto != self.shown_auto {
             self.shown_changed |= shown.is_some();
             self.active = shown;
         }
+        self.shown_auto = auto;
     }
 
     /// Whether events.log exists.
@@ -641,9 +661,13 @@ impl Engine {
         // A switch to numbers read earlier (the shown account dropped out,
         // or the chosen one can't be shown) still goes out at once, as a
         // replay.
-        if self.active.is_some() && self.active != prev_active && !active_fresh {
+        // So does the same account picked another way (`al`: a chosen
+        // account that can't be read hands over to the latest active one).
+        let auto = self.shows_auto_named();
+        if self.active.is_some() && (self.active != prev_active || auto != self.shown_auto) && !active_fresh {
             self.shown_changed = true;
         }
+        self.shown_auto = auto;
         if self.active.is_some() {
             self.codex_gone = false;
         }
@@ -689,10 +713,56 @@ impl Engine {
     /// automatic choice: each move between accounts is a jump in the
     /// device's rate math.
     fn shown_choice(&self) -> Option<PathBuf> {
-        let s = &self.settings;
-        let readable =
-            |d: &PathBuf| self.accounts.get(d).is_some_and(|a| a.last.is_some() && a.misses < STALE_AFTER_MISSES);
-        s.chosen_account().filter(|d| readable(d)).cloned().or_else(|| self.auto_active.clone())
+        self.shows(self.settings.chosen_account())
+    }
+
+    /// What `choice` (a listed account, or `None` for the latest active one)
+    /// would put on the device: the account while it's readable, else the
+    /// selector's pick ([`Engine::shown_choice`]).
+    fn shows(&self, choice: Option<&PathBuf>) -> Option<PathBuf> {
+        choice.filter(|d| self.readable(d)).cloned().or_else(|| self.auto_active.clone())
+    }
+
+    /// Whether `choice` would show the latest active account: it is that
+    /// choice (`None`), or a chosen account that can't be read.
+    fn shows_auto(&self, choice: Option<&PathBuf>) -> bool {
+        choice.is_none_or(|d| !self.readable(d))
+    }
+
+    /// `al` as the device gets it: whether the shown account is the latest
+    /// active one, with two or more accounts (with one nothing is named, so
+    /// a change there is nothing to send).
+    fn shows_auto_named(&self) -> bool {
+        self.settings.accounts().nth(1).is_some() && self.shows_auto(self.settings.chosen_account())
+    }
+
+    /// An account with a reading whose last [`STALE_AFTER_MISSES`] polls
+    /// didn't all miss.
+    fn readable(&self, d: &PathBuf) -> bool {
+        self.accounts.get(d).is_some_and(|a| a.last.is_some() && a.misses < STALE_AFTER_MISSES)
+    }
+
+    /// The choice the board's "Next account" button saves: the next one after
+    /// the current choice in the order the Overview's drop-down lists them,
+    /// the latest active account (`None`) then each account in
+    /// [`Settings::accounts`] order, round again. A choice the device would
+    /// show just as it shows now (the same account, picked the same way:
+    /// `al`) is passed over, and so is an account that can't be read, so
+    /// every press shows a change. `None` when none would.
+    pub fn next_device_account(&self) -> Option<Option<PathBuf>> {
+        let accounts: Vec<&PathBuf> = self.settings.accounts().map(|(d, _)| d).collect();
+        if accounts.len() < 2 {
+            return None;
+        }
+        let choices: Vec<Option<&PathBuf>> = std::iter::once(None).chain(accounts.into_iter().map(Some)).collect();
+        let current = self.settings.chosen_account();
+        let start = choices.iter().position(|c| *c == current).unwrap_or(0);
+        let looks = |c: Option<&PathBuf>| (self.shows(c), self.shows_auto(c));
+        let now = looks(current);
+        (1..choices.len())
+            .map(|i| choices[(start + i) % choices.len()])
+            .find(|&c| c.is_none_or(|d| self.readable(d)) && looks(c) != now)
+            .map(|c| c.cloned())
     }
 
     fn active_state(&self) -> Option<&AccountState> {
@@ -763,6 +833,13 @@ impl Engine {
                 return None;
             };
             let mut p = Payload::from_reading(&reading, utc(now));
+            // Which account, with two or more: the device names it when it
+            // changes (and now and then), "Auto:" for the latest active one,
+            // and starts its rate math over on another account's numbers.
+            if self.settings.accounts().nth(1).is_some() {
+                p.an = self.active.as_ref().map(|a| crate::payload::account_name(a, self.home.as_deref()));
+                p.al = p.an.as_ref().and(self.shows_auto_named().then_some(1));
+            }
             if self.settings.reset_chime {
                 p.c = Some(1);
             }
@@ -1782,6 +1859,11 @@ mod tests {
             (WriteKind::Event, Some(1), None, Some(10)),
             "Claude's last numbers, as a replay"
         );
+        assert_eq!(
+            (w.payload.an.as_deref(), w.payload.al),
+            (Some("/h/.claude"), None),
+            "named (chosen, so no \"Auto:\"), so the board shows and tells it apart"
+        );
         assert!(write(&mut e, T0 + 602).is_none(), "once");
 
         // Codex keeps rising: Claude stays, and only Claude's own poll is
@@ -1797,6 +1879,7 @@ mod tests {
         assert_eq!(e.status(T0 + 1301).active_account, Some(cx.clone()), "Codex rose last");
         let w = write(&mut e, T0 + 1301).unwrap();
         assert_eq!((w.kind, w.payload.rp, w.payload.pv.as_deref()), (WriteKind::Event, Some(1), Some("codex")));
+        assert_eq!((w.payload.an.as_deref(), w.payload.al), (Some("/h/.codex"), Some(1)), "the latest active one");
     }
 
     // A chosen account that can't be read (not yet, signed out, failing,
@@ -1963,6 +2046,89 @@ mod tests {
         assert_eq!(write(&mut e, T0 + 200).unwrap().kind, WriteKind::Poll);
         e.on_connected();
         assert_eq!(write(&mut e, T0 + 201).unwrap().kind, WriteKind::Poll);
+    }
+
+    // With one account nothing is named, so a chosen account going stale
+    // sends nothing: the device shows stale as ever.
+    #[test]
+    fn one_account_going_stale_sends_nothing() {
+        let claude = PathBuf::from("/h/.claude");
+        let mut e = Engine::new(settings("device_account = ~/.claude\n"));
+        e.on_poll_results(T0, vec![(claude.clone(), Ok(reading(10)))]);
+        let w = write(&mut e, T0).unwrap();
+        assert_eq!((w.payload.an, w.payload.al), (None, None), "one account: no name");
+        for i in 1..=3 {
+            e.on_poll_results(T0 + i, vec![(claude.clone(), Err(UsageError::Timeout))]);
+        }
+        assert!(e.stale(T0 + 10));
+        assert!(write(&mut e, T0 + 10).is_none());
+        assert_eq!(e.next_device_account(), None, "the button does nothing");
+    }
+
+    // Choosing the account the latest active one already shows changes only
+    // `al`: that goes out at once as a replay, so the device names it, and
+    // so does going back.
+    #[test]
+    fn a_change_of_mode_alone_goes_out_at_once() {
+        let (claude, cx) = (PathBuf::from("/h/.claude"), PathBuf::from("/h/.codex"));
+        let auto = "codex_dirs = ~/.codex\n";
+        let mut e = Engine::new(settings(auto));
+        e.on_poll_results(T0, vec![(claude.clone(), Ok(reading(10)))]);
+        e.on_codex_results(T0, vec![(cx, codex_ok(30))]);
+        let w = write(&mut e, T0).unwrap();
+        assert_eq!((w.payload.an.as_deref(), w.payload.al), (Some("/h/.claude"), Some(1)));
+        e.update_settings(settings("codex_dirs = ~/.codex\ndevice_account = ~/.claude\n"));
+        let w = write(&mut e, T0 + 1).expect("a write at once");
+        assert_eq!(
+            (w.kind, w.payload.rp, w.payload.an.as_deref(), w.payload.al),
+            (WriteKind::Event, Some(1), Some("/h/.claude"), None)
+        );
+        assert!(write(&mut e, T0 + 2).is_none(), "once");
+        e.update_settings(settings(auto));
+        let w = write(&mut e, T0 + 3).expect("and back");
+        assert_eq!((w.payload.an.as_deref(), w.payload.al), (Some("/h/.claude"), Some(1)));
+        // A chosen account that stops reading hands over to the latest
+        // active one: the same account, now "Auto:".
+        e.update_settings(settings("codex_dirs = ~/.codex\ndevice_account = ~/.claude\n"));
+        write(&mut e, T0 + 4).unwrap();
+        for i in 1..=3 {
+            e.on_poll_results(T0 + 4 + i, vec![(claude.clone(), Err(UsageError::Timeout))]);
+        }
+        let w = write(&mut e, T0 + 10).expect("the hand-over goes out");
+        assert_eq!((w.payload.an.as_deref(), w.payload.al), (Some("/h/.claude"), Some(1)));
+    }
+
+    // The board's "Next account" button: the latest active account, then
+    // each account, round again. Choosing the account the latest active one
+    // shows still counts (the board drops "Auto:"); an account that can't be
+    // read is passed over. With nothing else to show it does nothing.
+    #[test]
+    fn next_account_cycles_through_every_choice() {
+        let (claude, cx) = (PathBuf::from("/h/.claude"), PathBuf::from("/h/.codex"));
+        let auto = "codex_dirs = ~/.codex\n";
+        let mut e = Engine::new(settings(auto));
+        e.on_poll_results(T0, vec![(claude.clone(), Ok(reading(10)))]);
+        e.on_codex_results(T0, vec![(cx.clone(), codex_ok(30))]);
+        assert_eq!(e.status(T0).active_account, Some(claude.clone()), "Claude first, Codex hasn't risen");
+        assert_eq!(e.next_device_account(), Some(Some(claude.clone())), "Auto: ~/.claude -> ~/.claude");
+        e.update_settings(settings("codex_dirs = ~/.codex\ndevice_account = ~/.claude\n"));
+        assert_eq!(e.next_device_account(), Some(Some(cx.clone())));
+        e.update_settings(settings("codex_dirs = ~/.codex\ndevice_account = ~/.codex\n"));
+        assert_eq!(e.next_device_account(), Some(None), "round to the latest active account");
+        // Codex signed out: Auto and ~/.claude alternate.
+        e.update_settings(settings("codex_dirs = ~/.codex\ndevice_account = ~/.claude\n"));
+        e.on_codex_results(T0 + 300, vec![(cx, Err::<UsageReading, _>(UsageError::TokenExpired).into())]);
+        assert_eq!(e.next_device_account(), Some(None), "~/.codex passed over");
+        // ~/.claude can't be read either: nothing else to show.
+        for i in 1..=3 {
+            e.on_poll_results(T0 + 300 + i, vec![(claude.clone(), Err(UsageError::Timeout))]);
+        }
+        e.update_settings(settings(auto));
+        assert_eq!(e.next_device_account(), None);
+        // One account: nothing to choose.
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(claude, Ok(reading(10)))]);
+        assert_eq!(e.next_device_account(), None);
     }
 
     // Another Claude account's numbers start the mood over, as on the

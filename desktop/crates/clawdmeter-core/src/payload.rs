@@ -46,6 +46,16 @@ pub struct Payload {
     /// draws its Codex screen); absent for Claude.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pv: Option<String>,
+    /// The shown account's name ([`account_name`], `~/.codex`): the device
+    /// names it for a moment when it changes (and now and then as a
+    /// reminder), and starts its rate math over on another account's
+    /// numbers. Sent with two or more accounts; absent with one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub an: Option<String>,
+    /// 1 = that account is the latest active one (the app picks it), not a
+    /// chosen one: the device shows "Auto: <name>". Only with `an`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub al: Option<u8>,
     /// Codex reset credits held. Absent when unknown: no Resets card.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rc: Option<u32>,
@@ -136,12 +146,33 @@ pub struct Payload {
 
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
-    "s", "sr", "w", "wr", "wf", "st", "acct", "pv", "rc", "rx", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x",
-    "a", "e", "es", "n", "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th", "fc",
+    "s", "sr", "w", "wr", "wf", "st", "acct", "pv", "an", "al", "rc", "rx", "tp", "pd", "rd", "t", "tf", "c", "ok",
+    "b", "m", "x", "a", "e", "es", "n", "rp", "lv", "aa", "pm", "k1", "k2", "k3", "th", "fc",
 ];
 
 /// The fast-clock keys added in v0.4 (old firmware ignores them).
 pub const ADDITIVE_KEYS: &[&str] = &["a", "e", "es", "n", "rp"];
+
+/// The longest account name the device gets (`an`; its buffer holds 24).
+pub const ACCOUNT_NAME_MAX: usize = 24;
+
+/// An account's name for the device (`an`): its folder as the app writes it
+/// (`~/.codex` under `home`, else the whole path, with `/`), printable
+/// ASCII (anything else `?`, as the device's status font has those), at
+/// most [`ACCOUNT_NAME_MAX`] bytes: a longer one keeps its end after `..`.
+pub fn account_name(dir: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    let name = match home.and_then(|h| dir.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~/{}", rest.to_string_lossy().replace('\\', "/")),
+        None => dir.to_string_lossy().replace('\\', "/"),
+    };
+    let ascii: String = name.chars().map(|c| if (' '..='~').contains(&c) { c } else { '?' }).collect();
+    if ascii.len() <= ACCOUNT_NAME_MAX {
+        ascii
+    } else {
+        format!("..{}", &ascii[ascii.len() - (ACCOUNT_NAME_MAX - 2)..])
+    }
+}
 
 fn minutes_until(at: DateTime<Utc>, now: DateTime<Utc>) -> i64 {
     minutes_left((at - now).num_seconds())
@@ -635,8 +666,30 @@ mod tests {
         assert!(!j.contains("pv") && !j.contains("\"rc\""), "{j}");
     }
 
+    // The device's account name: the folder as the app writes it, ASCII,
+    // at most 24 bytes with the end kept.
+    #[test]
+    fn account_names() {
+        use std::path::Path;
+        let home = Some(Path::new("/home/u"));
+        assert_eq!(account_name(Path::new("/home/u/.codex"), home), "~/.codex");
+        assert_eq!(account_name(Path::new("/home/u"), home), "~");
+        assert_eq!(account_name(Path::new("/srv/claude"), home), "/srv/claude");
+        assert_eq!(account_name(Path::new("/home/u/.codex"), None), "/home/u/.codex");
+        assert_eq!(account_name(Path::new("/home/u/caf\u{e9}"), home), "~/caf?");
+        // A Windows-style separator reads as `/`, as the app writes folders.
+        assert_eq!(account_name(Path::new("/srv/a\\b"), None), "/srv/a/b");
+        let long = account_name(Path::new("/home/u/.claude-work-account-with-a-long-name"), home);
+        assert_eq!(long, "..count-with-a-long-name");
+        assert_eq!(long.len(), ACCOUNT_NAME_MAX);
+    }
+
     /// Every field at its widest, the longest alert line and three
-    /// shortcuts still fit the app's 500-byte write without trimming `m`.
+    /// shortcuts still fit the app's 500-byte write without trimming `m`,
+    /// for each kind of payload: no payload carries them all, as a Codex one
+    /// has no Fable (`wf`, `fc`) or billing period (`tp`/`pd`/`rd`, spend-
+    /// capped accounts only), and a spend-capped one no Codex fields or Fable
+    /// strip.
     #[test]
     fn widest_payload_fits() {
         let chord = 0x1_1F73; // hold, all four modifiers, F24
@@ -649,6 +702,8 @@ mod tests {
             st: Some("overage".into()),
             acct: Some("week".into()),
             pv: Some("codex".into()),
+            an: Some("x".repeat(ACCOUNT_NAME_MAX)),
+            al: Some(1),
             rc: Some(999),
             rx: Some(vec!["Sep 30".into(); ResetCredits::MAX_EXPIRIES]),
             tp: Some(100),
@@ -675,9 +730,14 @@ mod tests {
             th: Some(Palette::default()),
             fc: Some(Palette::default().fable()),
         };
-        let json = pl.to_json();
-        assert!(json.len() < 500, "{} bytes: {json}", json.len());
-        assert_eq!(pl.encode(500), json.into_bytes());
+        let codex = Payload { wf: None, fc: None, tp: None, pd: None, rd: None, ..pl.clone() };
+        let claude = Payload { pv: None, rc: None, rx: None, tp: None, pd: None, rd: None, ..pl.clone() };
+        let ent = Payload { pv: None, rc: None, rx: None, wf: None, ..pl };
+        for p in [codex, claude, ent] {
+            let json = p.to_json();
+            assert!(json.len() < 500, "{} bytes: {json}", json.len());
+            assert_eq!(p.encode(500), json.into_bytes());
+        }
     }
 
     #[test]
@@ -691,6 +751,8 @@ mod tests {
             st: Some("allowed".into()),
             acct: Some("pro".into()),
             pv: Some("codex".into()),
+            an: Some("~/.codex".into()),
+            al: Some(1),
             rc: Some(3),
             rx: Some(vec!["Dec 1".into()]),
             tp: Some(1),

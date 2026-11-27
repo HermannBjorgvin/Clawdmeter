@@ -12,6 +12,15 @@ static void copy_str(char* dst, size_t cap, const char* src) {
     dst[n] = '\0';
 }
 
+// `copy_str`, with anything outside printable ASCII as '?': the status
+// font's glyphs (a multi-byte character becomes several).
+static void copy_ascii(char* dst, size_t cap, const char* src) {
+    copy_str(dst, cap, src);
+    for (char* c = dst; *c; c++) {
+        if ((unsigned char)*c < 0x20 || (unsigned char)*c > 0x7E) *c = '?';
+    }
+}
+
 // A button action (`k1`..`k3`): -1 when absent, not an integer, or a code
 // this firmware doesn't know (a newer app), so the stored action stays
 // rather than the default being saved over it.
@@ -63,6 +72,8 @@ bool payload_parse(const char* json, UsageData* out, const char** err) {
     // absent (unknown, never 0).
     d.codex = strcmp(doc["pv"] | "", "codex") == 0;
     if (d.codex) d.fable_pct = -1;   // Fable is Claude's: never a strip on the Codex screen
+    copy_ascii(d.account, sizeof(d.account), doc["an"] | "");
+    d.account_auto = d.account[0] && doc["al"].as<bool>();
     d.resets_held = clamp_count(doc["rc"]);
     JsonVariant rx = doc["rx"];
     d.resets_expiry_n = -1;

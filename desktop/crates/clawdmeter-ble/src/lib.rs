@@ -67,7 +67,8 @@ pub use clawdmeter_core::DEVICE_NAME;
 pub const SERVICE_UUID: Uuid = Uuid::from_u128(0x4c41555a_4465_7669_6365_000000000001);
 /// Host writes JSON here.
 pub const RX_UUID: Uuid = Uuid::from_u128(0x4c41555a_4465_7669_6365_000000000002);
-/// Device ack/nack notifications (unused by the daemon).
+/// Device notifications: write acks (`{"ack":true}` / `{"err":true}`,
+/// unused), and the [`DeviceEvent`]s an alert's end or a button sends.
 pub const TX_UUID: Uuid = Uuid::from_u128(0x4c41555a_4465_7669_6365_000000000003);
 /// Device-initiated refresh request (notify `0x01`).
 pub const REQ_UUID: Uuid = Uuid::from_u128(0x4c41555a_4465_7669_6365_000000000004);
@@ -395,6 +396,8 @@ pub enum DeviceEvent {
     /// TX `{"dismiss":true}`: the alert ended on the device (a tap, or its
     /// own timeout).
     Dismissed,
+    /// TX `{"next":true}`: a button set to "Next account" was pressed.
+    NextAccount,
 }
 
 /// The device's events, in order.
@@ -410,7 +413,11 @@ pub fn device_event(uuid: Uuid, value: &[u8]) -> Option<DeviceEvent> {
         return None;
     }
     let text: String = std::str::from_utf8(value).ok()?.chars().filter(|c| !c.is_whitespace()).collect();
-    text.contains("\"dismiss\":true").then_some(DeviceEvent::Dismissed)
+    if text.contains("\"dismiss\":true") {
+        Some(DeviceEvent::Dismissed)
+    } else {
+        text.contains("\"next\":true").then_some(DeviceEvent::NextAccount)
+    }
 }
 
 /// An open GATT link.
@@ -538,7 +545,7 @@ impl DeviceLink {
             }
         }
         for c in &notifying {
-            let what = if c.uuid == REQ_UUID { "refresh" } else { "dismiss" };
+            let what = if c.uuid == REQ_UUID { "refresh" } else { "device event" };
             match tokio::time::timeout(opts.subscribe_timeout, p.subscribe(c)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => log::warn!("{what} subscription unavailable: {e}"),
@@ -862,6 +869,7 @@ mod tests {
         assert_eq!(device_event(REQ_UUID, &[1]), Some(DeviceEvent::Refresh));
         assert_eq!(device_event(TX_UUID, br#"{"dismiss":true}"#), Some(DeviceEvent::Dismissed));
         assert_eq!(device_event(TX_UUID, br#"{ "dismiss": true }"#), Some(DeviceEvent::Dismissed));
+        assert_eq!(device_event(TX_UUID, br#"{"next":true}"#), Some(DeviceEvent::NextAccount));
         assert_eq!(device_event(TX_UUID, br#"{"ack":true}"#), None);
         assert_eq!(device_event(TX_UUID, br#"{"err":true}"#), None);
         assert_eq!(device_event(TX_UUID, &[0xff, 0xfe]), None);
@@ -872,6 +880,7 @@ mod tests {
         )
         .unwrap();
         assert!(src.contains(r#"tx_char->setValue("{\"dismiss\":true}");"#));
+        assert!(src.contains(r#"tx_char->setValue("{\"next\":true}");"#));
     }
 
     #[test]
