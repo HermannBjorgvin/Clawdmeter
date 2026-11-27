@@ -17,6 +17,9 @@ Linux build deps: `.github/actions/linux-desktop-deps/action.yml`.
 
 **Tests must never run a real `systemctl`, `launchctl` or `reg`** against the
 developer's machine: use the injectable `autostart::disable_legacy_with`.
+The same goes for the computer's power settings (`powercfg`, `pmset`,
+`systemd-inhibit`, the power-plan and IOKit calls): `keep_awake` tests run
+over the fakes of its `Backend`, `plan::Plan` and `clamshell::Lid` traits.
 GPUI UI tests use `gpui`'s `test-support` (`#[gpui::test]`); flashing hardware
 is faked behind `FlashHardware`.
 
@@ -32,7 +35,24 @@ is faked behind `FlashHardware`.
   their config spelling and `k1`–`k3` codes), `rate`, `engine` (I/O-free state
   machine: `next_write` / `mark_written`), `autostart` (systemd / XDG /
   LaunchAgent / Run key, legacy-daemon detection + `disable_legacy`),
-  `launch`, `platform`.
+  `launch`, `platform`, `keep_awake` (the tray's "Keep awake with the lid
+  closed": `Mode` is the choice, `off`/`1h`/`3h`/`7h`/`claude`/`on`, and
+  `Keeper::run` decides when to hold from what it asks (`Wish`), the
+  clocks and the battery, floor 20 %, resume 25 %; a timer's deadline or
+  30 minutes with no newer `EngineStatus::claude_work_at` ends in
+  `Status::Ended`, for good until the wish changes; a `Backend` per OS does the holding; `plan` is
+  the Windows power-plan edit and `clamshell` the macOS lid flag, both
+  recorded in `<state>/keep-awake-restore.json` before the change and
+  healed on the next start; `heal` is skipped when the first tick holds,
+  because clearing the macOS flag with the lid shut sleeps the Mac; a
+  release that fails is retried on every tick. `Backend::check` answers
+  `Standing`, `Lost` or `Unknown`: only `Lost` releases and re-takes, and
+  a check that failed keeps the hold, for the same reason. A lid action
+  someone else changed is theirs: never written back, shown as the
+  backend's `caveat`. Retry waits run on `Instant`, not the wall clock.
+  A power reading that fails is `None` and goes through `Readings`: the
+  last good one stands in for `PATIENCE` polls, then it counts as on
+  battery with no charge, which pauses).
 - `clawdmeter-ble`: btleplug link. The manager and adapter come from one
   `Bluetooth` handle per runtime (`bluetooth.rs`), kept for good: on Linux
   every btleplug `Manager` is a D-Bus connection that is never closed, on
@@ -84,7 +104,22 @@ is faked behind `FlashHardware`.
   `Settings::accounts`, title "Show on device: <choice>") is on every
   platform with two or more accounts (`MenuShape::device_accounts` on
   Linux/Windows); a pick saves `device_account` through `write_settings`,
-  like the chime.
+  like the chime. "Keep awake with the lid closed" (id `keep-awake`) is a
+  native submenu built the same way on every platform (on macOS the second
+  native part, after that one): one check item per `keep_awake::Mode`,
+  ids `keep-awake-<config value>`. A pick saves `keep_awake`, and for a
+  timed choice `keep_awake_until`, the same way. Its title is the choice
+  plus `Status::note` and `Left::note` ("…: For 3 hours (paused, battery
+  at 18%, 2 h 41 min left)"). `sync_keep_awake` runs every tick: it hands
+  the thread `EngineStatus::claude_work_at` (the newest sign of Claude
+  working: now while a turn runs, else the last prompt or tool event or
+  usage rise; any change of it is work, and a point of a rise for each
+  probe since the last reading is the probe's own, `UsageMark`), and saves `off` once the thread reports
+  `Ended`. A pick of the choice already on starts it over
+  (`Handle::pick`). The
+  engine is only read: keep awake adds no poll or probe and moves no
+  cadence (`a_keep_awake_change_polls_nothing`). A choice that can't be
+  saved still stands for the run (`keep_awake_after_reload`).
   `StatusSnapshot::spend` marks a spend-capped account, drawn as one Spend
   meter in the panel, the rows and the Overview),
   window (`ui/`), `daemon.rs` (drives the engine on its own thread: 0.5 s
@@ -92,7 +127,24 @@ is faked behind `FlashHardware`.
   `hooks/` (`clawdmeter hook alert|clear|event` and the settings.json
   installer), `ipc.rs` (single-instance lock, status file, command queues,
   window lock), `onboarding.rs`, `boards.rs` (names, buy links,
-  illustrations), `chime.rs`.
+  illustrations), `chime.rs`, `keep_awake/` (the thread that runs the core
+  `Keeper`, owned by the tray, so `--daemon` has none; one backend per OS
+  behind `cfg`: `linux.rs` a logind `handle-lid-switch` lock plus the
+  desktop's suspend inhibitor, `windows.rs` the power plan through powrprof,
+  a power request and a hidden window that restores on `WM_ENDSESSION`,
+  `macos.rs` the root domain's `kPMSetClamshellSleepState`, an idle
+  assertion and an `atexit` hook for AppKit's own exit. On Windows and
+  macOS each hold also starts a guard, `clawdmeter keep-awake-guard <run>`:
+  a child in its own process group that waits on a stdin pipe and restores
+  when the app dies without dismissing it, if the restore record still
+  names that run (`Backend::heal_for`: the owner is read with the record
+  it acts on). The app's heal, hold and release and a guard's restore
+  each run under `<state>/keep-awake-restore.lock` (a bounded wait, so a
+  stuck holder can't hang quit); the macOS renew re-saving its own run's
+  marker doesn't need it. The Windows and macOS halves can't be run from Linux, so
+  check them on hardware when changing them; the macOS half can at least be
+  clippy-checked from Linux in a scratch crate that copies the `keep_awake`
+  modules, since only ring's C build stops the real cross-check).
 
 ## Running
 
@@ -138,7 +190,10 @@ is faked behind `FlashHardware`.
   `poll_interval`, `heartbeat_interval`,
   `reset_chime` and `alert_chime` (device chimes; the old `chime` / `beep`
   keys are read when these are absent), `desktop_chime` (the same ding on
-  this computer via rodio, ALSA on Linux), `clock`, `liveliness` (1–5,
+  this computer via rodio, ALSA on Linux), `keep_awake` (`off`/`1h`/`3h`/`7h`/`claude`/`on`,
+  default off: the tray's submenu, read by the tray only; `on` is Forever)
+  and `keep_awake_until` (a timed choice's end, unix seconds, written with
+  it and removed under any other choice), `clock`, `liveliness` (1–5,
   default 3: the Device page's Animation silliness slider, sent as `lv`),
   `attention_anim` (`off`/`10s`/`30s`/`2m`, default `2m`, sent as `aa`
   seconds), `pace_marker` (default off, sent as `pm`), `menu_bar_usage`

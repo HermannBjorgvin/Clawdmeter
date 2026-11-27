@@ -17,6 +17,7 @@ pub mod diff;
 pub mod errors;
 pub mod hooks;
 pub mod ipc;
+pub mod keep_awake;
 pub mod logger;
 pub mod onboarding;
 pub mod tray;

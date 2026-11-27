@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use std::path::Path;
 
+use clawdmeter_core::keep_awake::{Left, Mode as KeepAwake};
 use clawdmeter_core::{unix_now, Paths, Settings};
 #[cfg(not(target_os = "macos"))]
 use tray_icon::menu::MenuItem;
@@ -164,6 +165,22 @@ fn device_menu(count: usize) -> Option<(Submenu, Vec<CheckMenuItem>)> {
     Some((menu, items))
 }
 
+impl Items {
+    /// Title and tick the keep-awake submenu (the same native items on every
+    /// platform) from the saved choice and what its thread is doing. muda
+    /// ticks a clicked item by itself; this puts the saved choice back.
+    fn set_keep_awake(&self, settings: &Settings, report: &crate::keep_awake::Report) {
+        let (menu, items) = &self.keep_awake;
+        let title = keep_awake_title(settings.keep_awake, report);
+        if menu.text() != title {
+            menu.set_text(title);
+        }
+        for (item, mode) in items.iter().zip(KeepAwake::ALL) {
+            item.set_checked(mode == settings.keep_awake);
+        }
+    }
+}
+
 /// Title, label and tick the submenu ([`device_choices`]): its title names
 /// the choice, so the menu shows it closed. muda ticks a clicked item by
 /// itself; this puts the saved choice back.
@@ -182,6 +199,73 @@ fn device_title(choices: &[(String, String, bool)]) -> String {
         Some((_, label, _)) => format!("Show on device: {label}"),
         None => "Show on device".to_owned(),
     }
+}
+
+/// The keep-awake submenu's name on every platform (`keep_awake`).
+const KEEP_AWAKE: &str = "Keep awake with the lid closed";
+
+/// The id of the submenu's item for `mode`: `keep-awake-` and the config
+/// value (`keep-awake-3h`), fixed, so a click still matches after a rebuild.
+fn keep_awake_id(mode: KeepAwake) -> String {
+    format!("keep-awake-{}", mode.as_str())
+}
+
+/// The choice a keep-awake item picks.
+fn keep_awake_pick(id: &str) -> Option<KeepAwake> {
+    let value = id.strip_prefix("keep-awake-")?;
+    KeepAwake::ALL.into_iter().find(|mode| mode.as_str() == value)
+}
+
+/// The submenu's title: its name and the choice, so the menu shows it
+/// closed, and while a choice is on, what its thread has to say: why
+/// nothing holds, and what is left ("Keep awake with the lid closed: For 3
+/// hours (paused, battery at 18%, 2 h 41 min left)").
+fn keep_awake_title(mode: KeepAwake, report: &crate::keep_awake::Report) -> String {
+    let mut title = format!("{KEEP_AWAKE}: {}", mode.label());
+    if mode != KeepAwake::Off {
+        let notes: Vec<String> =
+            [report.status.note(), report.left.and_then(Left::note)].into_iter().flatten().collect();
+        if !notes.is_empty() {
+            title = format!("{title} ({})", notes.join(", "));
+        }
+    }
+    title
+}
+
+/// `keep_awake` and `keep_awake_until`: the choice and a timed one's deadline.
+type KeepAwakeChoice = (KeepAwake, Option<i64>);
+
+/// The keep-awake choice to go by after a re-read of the config, which said
+/// `last_file` the time before: the file's when it changed (a hand edit, or
+/// our own save), else `ours`. So a choice that couldn't be saved (a config
+/// that can't be written) stands for this run, and one that ended stays
+/// ended: the file still naming it doesn't start it again.
+fn keep_awake_after_reload(
+    file: KeepAwakeChoice,
+    last_file: KeepAwakeChoice,
+    ours: KeepAwakeChoice,
+) -> KeepAwakeChoice {
+    if file == last_file {
+        ours
+    } else {
+        file
+    }
+}
+
+/// The submenu and its items, one per choice in [`KeepAwake::ALL`]'s order,
+/// unticked until the first update ([`Items::set_keep_awake`]).
+fn keep_awake_menu() -> (Submenu, Vec<CheckMenuItem>) {
+    let menu = Submenu::with_id("keep-awake", KEEP_AWAKE, true);
+    let items: Vec<CheckMenuItem> = KeepAwake::ALL
+        .into_iter()
+        .map(|mode| CheckMenuItem::with_id(keep_awake_id(mode), mode.label(), true, false, None))
+        .collect();
+    for item in &items {
+        if let Err(e) = menu.append(item) {
+            log::warn!("tray menu: {e}");
+        }
+    }
+    (menu, items)
 }
 
 /// A newer release the tray offers. Every release tag ships the app and the
@@ -225,6 +309,9 @@ enum Click {
     /// Switch the chime on this computer (`desktop_chime`), as the
     /// Overview's switch does.
     Chime,
+    /// Keep the computer awake with the lid closed for this long
+    /// (`keep_awake`, [`keep_awake_pick`]).
+    KeepAwake(KeepAwake),
     /// Show this account on the device ([`device_pick`]).
     DeviceAccount(Option<usize>),
 }
@@ -244,11 +331,12 @@ fn update_offer(snap: &StatusSnapshot, settings: &Settings, release_build: bool,
 }
 
 /// The macOS menu: the drawn panel (`mac_menu`), whose footer holds the
-/// actions, and with two or more accounts a native "Show on device"
-/// submenu between the panel's body and its footer. muda only appends the
-/// native items, before the panel goes in around them, and never inserts or
-/// removes one (it counts positions without the panel): a change in the
-/// accounts builds the menu again.
+/// actions, and the native items between the panel's body and its footer:
+/// with two or more accounts a "Show on device" submenu, then the
+/// keep-awake submenu. muda only appends the native items, before the
+/// panel goes in around them, and never inserts or removes one (it counts
+/// positions without the panel): a change in the accounts builds the menu
+/// again.
 #[cfg(target_os = "macos")]
 struct Items {
     menu: Menu,
@@ -257,6 +345,8 @@ struct Items {
     device: Option<(Submenu, Vec<CheckMenuItem>)>,
     /// The accounts it was built with ([`device_accounts`]).
     device_accounts: usize,
+    /// Keep awake with the lid closed (`keep_awake`): [`keep_awake_menu`].
+    keep_awake: (Submenu, Vec<CheckMenuItem>),
 }
 
 #[cfg(target_os = "macos")]
@@ -264,13 +354,18 @@ impl Items {
     fn new(device_accounts: usize) -> Self {
         let menu = Menu::new();
         let device = device_menu(device_accounts);
+        let keep_awake = keep_awake_menu();
+        let separator = PredefinedMenuItem::separator();
+        let mut list: Vec<&dyn tray_icon::menu::IsMenuItem> = vec![&separator];
         if let Some((submenu, _)) = &device {
-            if let Err(e) = menu.append_items(&[&PredefinedMenuItem::separator(), submenu]) {
-                log::warn!("tray menu: {e}");
-            }
+            list.push(submenu);
+        }
+        list.push(&keep_awake.0);
+        if let Err(e) = menu.append_items(&list) {
+            log::warn!("tray menu: {e}");
         }
         let header = std::cell::RefCell::new(mac_menu::MenuHeader::install(&menu));
-        Items { menu, header, device, device_accounts }
+        Items { menu, header, device, device_accounts, keep_awake }
     }
 
     /// `pressed`: a refresh asked for and not yet served (the panel shows it
@@ -309,6 +404,8 @@ struct Items {
     refresh: MenuItem,
     /// The chime on this computer (`desktop_chime`): the Overview's switch.
     chime: CheckMenuItem,
+    /// Keep awake with the lid closed (`keep_awake`): [`keep_awake_menu`].
+    keep_awake: (Submenu, Vec<CheckMenuItem>),
     update: MenuItem,
     /// "Show on device", with two or more accounts ([`device_menu`]).
     device: Option<(Submenu, Vec<CheckMenuItem>)>,
@@ -330,6 +427,7 @@ impl Items {
             resets: MenuItem::with_id("resets", "Resets  –", true, None),
             refresh: MenuItem::with_id("refresh", "Refresh usage", true, None),
             chime: CheckMenuItem::with_id("chime", "Chime on this computer", true, false, None),
+            keep_awake: keep_awake_menu(),
             update: MenuItem::with_id("update", "Update firmware…", true, None),
             device: device_menu(shape.device_accounts),
         };
@@ -352,7 +450,15 @@ impl Items {
         if shape.resets {
             list.push(&it.resets);
         }
-        list.extend([&sep2 as &dyn tray_icon::menu::IsMenuItem, &it.refresh, &it.chime, &sep3, &open, &settings]);
+        list.extend([
+            &sep2 as &dyn tray_icon::menu::IsMenuItem,
+            &it.refresh,
+            &it.chime,
+            &it.keep_awake.0,
+            &sep3,
+            &open,
+            &settings,
+        ]);
         if shape.update {
             list.push(&it.update);
         }
@@ -431,7 +537,11 @@ impl Items {
             "chime" => Click::Chime,
             "update" => open(update_page),
             "quit" => Click::App(AppCommand::Quit),
-            other => return device_pick(other).map(Click::DeviceAccount),
+            other => {
+                return keep_awake_pick(other)
+                    .map(Click::KeepAwake)
+                    .or_else(|| device_pick(other).map(Click::DeviceAccount))
+            }
         })
     }
 }
@@ -582,6 +692,12 @@ struct TrayApp {
     /// The accounts the "Show on device" items were last labelled with, so a
     /// click picks the account it named even if the list changed since.
     device_paths: Vec<std::path::PathBuf>,
+    /// The thread that keeps the computer awake with the lid closed while
+    /// `keep_awake` is on.
+    keep_awake: crate::keep_awake::Handle,
+    /// What the config file last said of `keep_awake` and its deadline
+    /// ([`keep_awake_after_reload`]).
+    keep_awake_file: KeepAwakeChoice,
 }
 
 impl TrayApp {
@@ -617,6 +733,55 @@ impl TrayApp {
         }
         // Show the new state at once.
         self.menu_at = 0;
+    }
+
+    /// Keep the computer awake with the lid closed for `mode` (`keep_awake`):
+    /// saved like the chime, a timed choice with its deadline
+    /// (`keep_awake_until`, so a restart carries on), and handed to its
+    /// thread at once, so a closed lid a second later is already covered (or
+    /// no longer is).
+    fn choose_keep_awake(&mut self, mode: KeepAwake, now: i64) {
+        let until = mode.secs().map(|secs| now + secs);
+        let saved = crate::ui::settings::write_settings(&self.paths, |s, _| {
+            s.keep_awake = mode;
+            s.keep_awake_until = until;
+        });
+        match saved {
+            Ok(()) => self.keep_awake_file = (mode, until),
+            // The choice stands for this run all the same
+            // ([`keep_awake_after_reload`]).
+            Err(e) => log::warn!("couldn't save keep_awake: {e}"),
+        }
+        self.settings.keep_awake = mode;
+        self.settings.keep_awake_until = until;
+        // A pick of what is already on starts it over.
+        self.keep_awake.pick(mode.wish(until));
+        // Put the tick where the setting is (muda moved it already).
+        self.menu_at = 0;
+    }
+
+    /// Keep the keep-awake thread in step with the setting, and the setting
+    /// with the thread: a choice whose time is up goes back to off, so
+    /// nothing holds again by itself.
+    fn sync_keep_awake(&mut self, now: i64) {
+        self.keep_awake.note_work(self.daemon.as_ref().and_then(|d| d.status.borrow().engine.claude_work_at));
+        let (mode, until) = (self.settings.keep_awake, self.settings.keep_awake_until);
+        if mode.deadline(until, now) != until {
+            // A timed choice with no deadline, or one too far off, starts
+            // now ([`KeepAwake::deadline`]). A deadline left under a choice
+            // with no timer (a hand edit of `keep_awake` alone) is saved
+            // away, so it can't end a timed choice picked later.
+            self.choose_keep_awake(mode, now);
+            return;
+        }
+        // A hand edit of `keep_awake`, like a click. It goes to the thread
+        // before the thread is asked whether the choice ended, so the end
+        // of the choice before it doesn't switch the new one off.
+        self.keep_awake.set(mode.wish(until));
+        if self.keep_awake.ended() {
+            log::info!("keep awake: \"{}\" is over; switching it off", mode.label());
+            self.choose_keep_awake(KeepAwake::Off, now);
+        }
     }
 
     /// Show `pick` on the device (`None`: the latest active account; else the
@@ -736,7 +901,7 @@ impl TrayApp {
         }
 
         // Menu clicks (Linux, Windows; on macOS only the "Show on device"
-        // submenu is native).
+        // and keep-awake submenus are native).
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             #[cfg(not(target_os = "macos"))]
             match Items::command(&ev.id, self.offer_page()) {
@@ -746,11 +911,14 @@ impl TrayApp {
                     }
                 }
                 Some(Click::Chime) => self.toggle_desktop_chime(),
+                Some(Click::KeepAwake(mode)) => self.choose_keep_awake(mode, now),
                 Some(Click::DeviceAccount(pick)) => self.choose_device_account(pick),
                 None => {}
             }
             #[cfg(target_os = "macos")]
-            if let Some(pick) = device_pick(&ev.id.0) {
+            if let Some(mode) = keep_awake_pick(&ev.id.0) {
+                self.choose_keep_awake(mode, now);
+            } else if let Some(pick) = device_pick(&ev.id.0) {
                 self.choose_device_account(pick);
             }
         }
@@ -789,9 +957,15 @@ impl TrayApp {
         if now - self.settings_at >= 5 {
             self.settings_at = now;
             if let Ok(s) = Settings::load(&self.paths) {
+                let file = (s.keep_awake, s.keep_awake_until);
+                let ours = (self.settings.keep_awake, self.settings.keep_awake_until);
                 self.settings = s;
+                (self.settings.keep_awake, self.settings.keep_awake_until) =
+                    keep_awake_after_reload(file, self.keep_awake_file, ours);
+                self.keep_awake_file = file;
             }
         }
+        self.sync_keep_awake(now);
 
         // Status out: tray + file.
         let snap = self.snapshot(now);
@@ -861,6 +1035,7 @@ impl TrayApp {
                     self.offer.as_ref(),
                     now,
                 );
+                items.set_keep_awake(&self.settings, &self.keep_awake.report());
             }
             if let Some(t) = &self.tray {
                 let _ = t.set_tooltip(Some(tooltip(&snap)));
@@ -912,6 +1087,8 @@ impl TrayApp {
     }
 
     fn shutdown(mut self) {
+        // First: nothing below may keep the computer awake a moment longer.
+        self.keep_awake.shutdown();
         if let Some(d) = self.daemon.take() {
             d.shutdown();
         }
@@ -1046,6 +1223,15 @@ fn run_locked(paths: Paths, _lock: Option<std::fs::File>) -> i32 {
     spawn_update_checker(paths.clone(), latest.clone(), check_now.clone());
     let settings = Settings::load(&paths).unwrap_or_else(|_| Settings::from_config(&Default::default(), &paths, None));
     let mut app = TrayApp {
+        // A timed choice typed into the config holds from the thread's first
+        // tick, like any other: a tick with nothing to hold would first undo
+        // what a crashed run left, which on macOS sleeps a Mac whose lid is
+        // shut. The first `sync_keep_awake` saves its deadline.
+        keep_awake: crate::keep_awake::Handle::spawn(
+            &paths,
+            settings.keep_awake.wish(settings.keep_awake.deadline(settings.keep_awake_until, unix_now())),
+        ),
+        keep_awake_file: (settings.keep_awake, settings.keep_awake_until),
         daemon: Some(daemon::spawn(paths.clone())),
         paths,
         items: None,
@@ -1151,6 +1337,12 @@ mod tests {
         assert_eq!(Items::command(&id("settings"), Page::Flash), open(Page::Settings));
         assert_eq!(Items::command(&id("update"), Page::Update), open(Page::Update));
         assert_eq!(Items::command(&id("chime"), Page::Flash), Some(Click::Chime), "the Overview's switch");
+        for mode in KeepAwake::ALL {
+            assert_eq!(Items::command(&id(&keep_awake_id(mode)), Page::Flash), Some(Click::KeepAwake(mode)));
+        }
+        assert_eq!(Items::command(&id("keep-awake-3h"), Page::Flash), Some(Click::KeepAwake(KeepAwake::Hours3)));
+        assert_eq!(Items::command(&id("keep-awake-2h"), Page::Flash), None);
+        assert_eq!(Items::command(&id("keep-awake"), Page::Flash), None, "the submenu itself");
         assert_eq!(Items::command(&id("quit"), Page::Flash), Some(Click::App(AppCommand::Quit)));
         assert_eq!(Items::command(&id("device-auto"), Page::Flash), Some(Click::DeviceAccount(None)));
         assert_eq!(Items::command(&id("device-1"), Page::Flash), Some(Click::DeviceAccount(Some(1))));
@@ -1185,6 +1377,65 @@ mod tests {
         assert_eq!(device_pick("device-auto"), Some(None));
         assert_eq!(device_pick("device-12"), Some(Some(12)));
         assert_eq!((device_pick("device-x"), device_pick("chime")), (None, None));
+    }
+
+    #[test]
+    fn the_keep_awake_title_shows_the_choice_and_what_is_left() {
+        use crate::keep_awake::Report;
+        use clawdmeter_core::keep_awake::{Pause, Status};
+        const NAME: &str = "Keep awake with the lid closed";
+        let report = |status: Status, left: Option<Left>| Report::of(status, left);
+        let title = |mode, status, left| keep_awake_title(mode, &report(status, left));
+        assert_eq!(title(KeepAwake::Off, Status::Off, None), format!("{NAME}: Off"));
+        assert_eq!(title(KeepAwake::Forever, Status::Holding, None), format!("{NAME}: Forever"));
+        assert_eq!(
+            title(KeepAwake::Hours3, Status::Holding, Some(Left::Time(2 * 3600 + 41 * 60))),
+            format!("{NAME}: For 3 hours (2 h 41 min left)")
+        );
+        assert_eq!(
+            title(KeepAwake::Claude, Status::Holding, Some(Left::ClaudeIdle(12 * 60))),
+            format!("{NAME}: Until Claude stops working (Claude idle 12 min)")
+        );
+        assert_eq!(
+            title(KeepAwake::Claude, Status::Holding, Some(Left::ClaudeIdle(5))),
+            format!("{NAME}: Until Claude stops working")
+        );
+        // Why nothing holds comes first, then what is left.
+        assert_eq!(
+            title(KeepAwake::Hour1, Status::Paused(Pause::BatteryLow(18)), Some(Left::Time(600))),
+            format!("{NAME}: For 1 hour (paused, battery at 18%, 10 min left)")
+        );
+        assert_eq!(
+            title(KeepAwake::Forever, Status::Failed("logind refused".into()), None),
+            format!("{NAME}: Forever (unavailable)")
+        );
+        assert_eq!(
+            title(KeepAwake::Forever, Status::Limited("on Plasma, also set the lid to Do nothing".into()), None),
+            format!("{NAME}: Forever (on Plasma, also set the lid to Do nothing)")
+        );
+        // Off has nothing to explain, whatever the thread last said.
+        assert_eq!(title(KeepAwake::Off, Status::Paused(Pause::BatteryUnknown), None), format!("{NAME}: Off"));
+        for mode in KeepAwake::ALL {
+            assert_eq!(keep_awake_pick(&keep_awake_id(mode)), Some(mode));
+            assert_eq!(device_pick(&keep_awake_id(mode)), None, "not a Show on device pick");
+        }
+        assert_eq!(keep_awake_pick("device-auto"), None);
+    }
+
+    #[test]
+    fn a_keep_awake_choice_that_couldnt_be_saved_stands_until_the_file_changes() {
+        let (claude, off) = ((KeepAwake::Claude, None), (KeepAwake::Off, None));
+        let timed = (KeepAwake::Hours3, Some(1_790_000_000));
+        // Saved: the file and ours agree.
+        assert_eq!(keep_awake_after_reload(timed, off, timed), timed);
+        // It ended and "off" couldn't be saved: the file still says
+        // `claude`, as it did before, and that starts nothing.
+        assert_eq!(keep_awake_after_reload(claude, claude, off), off);
+        // A click that couldn't be saved stands for this run.
+        assert_eq!(keep_awake_after_reload(off, off, timed), timed);
+        // A hand edit wins.
+        assert_eq!(keep_awake_after_reload(claude, off, timed), claude);
+        assert_eq!(keep_awake_after_reload(off, claude, claude), off);
     }
 
     #[test]

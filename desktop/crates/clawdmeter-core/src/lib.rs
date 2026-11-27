@@ -19,6 +19,8 @@
 //! * [`engine`]: all of the above as one I/O-free state machine.
 //! * [`autostart`], [`launch`], [`platform`]: start-at-login, the path to
 //!   launch the app by, and host queries.
+//! * [`keep_awake`]: when the app keeps the computer awake with the lid
+//!   closed, and what it puts back.
 
 #![warn(missing_docs)]
 
@@ -31,6 +33,7 @@ pub mod codex;
 pub mod config;
 pub mod engine;
 pub mod events;
+pub mod keep_awake;
 pub mod launch;
 pub mod oauth;
 pub mod paths;

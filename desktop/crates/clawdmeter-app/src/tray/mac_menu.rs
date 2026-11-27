@@ -8,13 +8,14 @@
 //! or the board is behind the latest release, `tray::update_offer`), the chime on this computer (the Overview's switch),
 //! Settings, and Quit as icons, Quit at the far end and red only under the
 //! pointer. The panel is the macOS menu, bar the native items muda put in
-//! (a "Show on device" submenu with two or more accounts), which sit
-//! between its body and its footer; Linux and Windows keep the native list.
+//! (a "Show on device" submenu with two or more accounts, and the "Keep
+//! awake with the lid closed" submenu), which sit between its body and its
+//! footer; Linux and Windows keep the native list.
 //!
 //! muda has no API for an item with a view, so the panel goes into muda's
 //! NSMenu (`ContextMenu::ns_menu`) directly as two items: the body at index
-//! 0 and the footer at the end. With no native items they meet and read as
-//! one. Clicks set flags the tray's tick takes ([`take_actions`]).
+//! 0 and the footer at the end, the native items between them. Clicks set
+//! flags the tray's tick takes ([`take_actions`]).
 //!
 //! Text uses the system label colours, so it follows light and dark mode and
 //! the menu's vibrancy by itself; the bar fills are the Overview's (the

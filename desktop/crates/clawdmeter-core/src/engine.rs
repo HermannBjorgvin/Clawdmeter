@@ -118,6 +118,45 @@ pub struct EngineStatus {
     pub paused_until: Option<i64>,
     /// The shown account is being polled.
     pub polling: bool,
+    /// The newest sign of Claude working on any Claude account, as unix
+    /// seconds: now, while a Claude Code turn is running by the hook events
+    /// ([`Activity::working`]); else the latest prompt or tool hook event
+    /// or rise in an account's usage on a real poll ([`UsageMark`], the
+    /// only sign without the hooks). `None`: none seen. A replay, a failed
+    /// poll, a reading with nothing to compare and a Codex account's usage
+    /// are no sign. A reader takes any change of the value as work (the
+    /// order of two values means nothing after a step of the clock). Read
+    /// by the tray for `keep_awake = claude`; nothing is polled for it.
+    pub claude_work_at: Option<i64>,
+}
+
+/// Where a Claude account's main meter stood at its last answer, and how
+/// many probe messages have gone out since, to tell the next rise
+/// ([`UsageMark::rose`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UsageMark {
+    pct: u32,
+    /// Probe messages sent since `pct` was read (a probe that missed
+    /// counts: its message may have gone out).
+    probes: u32,
+}
+
+impl UsageMark {
+    /// Take a new reading of the meter (`probed`: a probe message was sent
+    /// for it). True when usage rose since the last reading by more than
+    /// the probes sent in between explain. The mark follows the meter
+    /// either way, so what the probes added never adds up.
+    ///
+    /// The allowance is one point for each probe: its messages are tiny,
+    /// but they are usage, and an idle account's meter ticks over on them
+    /// alone. Without it, or with one point in all, those ticks would read
+    /// as work for as long as the 5-hour window runs.
+    fn rose(&mut self, pct: u32, probed: bool) -> bool {
+        let probes = self.probes + u32::from(probed);
+        let rose = pct > self.pct.saturating_add(probes);
+        *self = UsageMark { pct, probes: 0 };
+        rose
+    }
 }
 
 /// The daemon state machine.
@@ -173,6 +212,11 @@ pub struct Engine {
     /// The clock's hour format the device last got (`tf`; 0 = no clock).
     sent_tf: Option<u8>,
     last_event_ts: Option<i64>,
+    /// When a Claude account's usage last rose on a real poll
+    /// ([`EngineStatus::claude_work_at`]).
+    claude_rise_at: Option<i64>,
+    /// Each Claude account's meter at its last sign of work.
+    usage_marks: BTreeMap<PathBuf, UsageMark>,
     /// Latest prompt or tool activity that names no configured account.
     unattributed_activity: Option<i64>,
     /// A `claude` binary was found, so the probe can run.
@@ -230,6 +274,8 @@ impl Engine {
             appearance: Appearance::default(),
             sent_tf: None,
             last_event_ts: None,
+            claude_rise_at: None,
+            usage_marks: BTreeMap::new(),
             unattributed_activity: None,
             claude_found: true,
             missing_folders: Vec::new(),
@@ -264,6 +310,7 @@ impl Engine {
             settings.config_dirs != self.settings.config_dirs || settings.codex_dirs != self.settings.codex_dirs;
         if accounts_changed {
             self.accounts.retain(|k, _| settings.config_dirs.contains(k) || settings.codex_dirs.contains(k));
+            self.usage_marks.retain(|k, _| settings.config_dirs.contains(k));
         }
         self.settings = settings;
         // A removed account leaves the automatic choice now, not at the next
@@ -597,9 +644,31 @@ impl Engine {
                 st.last_attempt_at = Some(now);
             }
             let kind = st.last.as_ref().map(UsageReading::meter_kind);
+            let (answered, probed) = (r.result.is_ok(), r.probe != probe::ProbeRun::NotRun);
             st.record_polled(now, r);
-            if kind.is_some_and(|k| st.last.as_ref().is_some_and(|l| l.meter_kind() != k)) {
+            let rekind = kind.is_some_and(|k| st.last.as_ref().is_some_and(|l| l.meter_kind() != k));
+            if rekind {
                 rekinded.push(dir.clone());
+            }
+            // A Claude account's usage that rose since its mark is Claude
+            // at work. A first reading, and a meter that now measures
+            // something else, only set the mark.
+            match st.last.as_ref().filter(|l| l.provider == Provider::Claude).map(UsageReading::session_pct) {
+                Some(pct) if answered && !rekind => {
+                    let mark = self.usage_marks.entry(dir.clone()).or_insert(UsageMark { pct, probes: 0 });
+                    if mark.rose(pct, probed) {
+                        self.claude_rise_at = Some(now);
+                    }
+                }
+                Some(pct) if answered => {
+                    self.usage_marks.insert(dir.clone(), UsageMark { pct, probes: 0 });
+                }
+                // A miss: the probe's message may still have been sent.
+                _ => {
+                    if let Some(mark) = self.usage_marks.get_mut(&dir) {
+                        mark.probes += u32::from(probed);
+                    }
+                }
             }
             if let (Some(left), Some(e)) = (st.backoff.remaining(now), &st.last_error) {
                 log::info!("{}: {e}; not polling it for {left}s", dir.display());
@@ -885,6 +954,11 @@ impl Engine {
             sessions: self.activity.sessions_active(now),
             hooks: self.activity.hooks_seen,
             mood: st.and_then(|a| a.last.as_ref()).map(|_| self.rate.mood(self.activity.level(now))),
+            claude_work_at: if self.activity.working(now) {
+                Some(now)
+            } else {
+                self.activity.last_prompt_ts.max(self.activity.last_tool_ts).max(self.claude_rise_at)
+            },
             next_poll_at: self
                 .next_due(now)
                 .map(|(t, _)| t)
@@ -1292,6 +1366,20 @@ mod tests {
         e.update_settings(settings("config_dirs = ~/.claude, ~/.w\n"));
         assert_eq!(e.poll_due(T0 + 1), Some(PollReason::Startup));
         assert_eq!(e.begin_poll(T0 + 1).unwrap().accounts, vec![PathBuf::from("/h/.w")], "only the new account");
+    }
+
+    // Keep awake reads what the engine has and asks for nothing: picking
+    // or ending a choice makes no poll due and moves none.
+    #[test]
+    fn a_keep_awake_change_polls_nothing() {
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        let due = e.status(T0 + 1).next_poll_at;
+        assert!(due.is_some_and(|at| at > T0 + 1), "{due:?}");
+        for text in ["keep_awake = claude\n", "keep_awake = 3h\nkeep_awake_until = 1760010800\n", ""] {
+            e.update_settings(settings(text));
+            assert_eq!(e.status(T0 + 1).next_poll_at, due, "{text}");
+        }
     }
 
     fn poll(e: &mut Engine, now: i64, answer: impl Fn(&Path) -> Result<UsageReading, UsageError>) -> Vec<PathBuf> {
@@ -1703,6 +1791,102 @@ mod tests {
 
     fn codex_ok(pct: u32) -> probe::Polled {
         Ok::<_, UsageError>(codex(pct)).into()
+    }
+
+    // What `keep_awake = claude` goes by: hook events, a running turn, and
+    // a Claude account's usage rising on a real poll. A replay, a failed
+    // poll, a reset and Codex usage are no sign of Claude working.
+    #[test]
+    fn signs_of_claude_working() {
+        let mut e = Engine::new(settings("codex_dirs = ~/.codex\n"));
+        let (claude, cx) = (PathBuf::from("/h/.claude"), PathBuf::from("/h/.codex"));
+        let work = |e: &Engine, now| e.status(now).claude_work_at;
+        assert_eq!(work(&e, T0), None, "nothing seen yet");
+
+        // Without hooks: usage is the only sign. A first reading has nothing
+        // to compare with.
+        e.on_poll_results(T0, vec![(claude.clone(), Ok(reading(10)))]);
+        assert_eq!(work(&e, T0), None);
+        e.on_poll_results(T0 + 300, vec![(claude.clone(), Ok(reading(10)))]);
+        assert_eq!(work(&e, T0 + 300), None, "the same number is no work");
+        e.on_poll_results(T0 + 600, vec![(claude.clone(), Ok(reading(12)))]);
+        assert_eq!(work(&e, T0 + 600), Some(T0 + 600), "a rise on a real poll");
+        // A failed poll, and the heartbeat replays between polls.
+        e.on_poll_results(T0 + 900, vec![(claude.clone(), Err(UsageError::Timeout))]);
+        assert_eq!(write(&mut e, T0 + 960).unwrap().payload.rp, Some(1));
+        assert_eq!(work(&e, T0 + 960), Some(T0 + 600), "neither moves it");
+        // A reset is a drop; usage after it is a rise again.
+        e.on_poll_results(T0 + 1200, vec![(claude.clone(), Ok(reading(0)))]);
+        assert_eq!(work(&e, T0 + 1200), Some(T0 + 600));
+        e.on_poll_results(T0 + 1500, vec![(claude.clone(), Ok(reading(1)))]);
+        assert_eq!(work(&e, T0 + 1500), Some(T0 + 1500));
+        // Codex usage isn't Claude's.
+        e.on_codex_results(T0 + 1600, vec![(cx.clone(), codex_ok(30))]);
+        e.on_codex_results(T0 + 2200, vec![(cx, codex_ok(40))]);
+        assert_eq!(work(&e, T0 + 2200), Some(T0 + 1500));
+
+        // With hooks: a prompt, then tools, then a Stop. A running turn is
+        // work as of now, so the value moves for as long as it runs.
+        e.on_hook_event(&ev(T0 + 3000, "UserPromptSubmit"), T0 + 3000);
+        assert_eq!(work(&e, T0 + 3001), Some(T0 + 3001), "a turn is running");
+        e.on_hook_event(&ev(T0 + 3100, "PostToolUse"), T0 + 3100);
+        assert_eq!(work(&e, T0 + 3400), Some(T0 + 3400), "a long tool call is still a running turn");
+        let quiet = T0 + 3100 + crate::events::BACK_AFTER_SECS;
+        assert_eq!(work(&e, quiet), Some(T0 + 3100), "until the engine's own rule says it isn't");
+        e.on_hook_event(&ev(T0 + 3500, "Stop"), T0 + 3500);
+        assert_eq!(work(&e, T0 + 3600), Some(T0 + 3100), "stopped: the last prompt or tool event stands");
+    }
+
+    // The probe's own messages are usage too: a point of a rise for each
+    // probe sent since the last reading may be theirs, so an idle account's
+    // meter ticking over on probes alone isn't taken for work, however long
+    // it goes on. A meter that now measures something else is no rise
+    // either.
+    #[test]
+    fn a_rise_the_probes_explain_is_no_sign_of_work() {
+        use crate::usage::SessionLimit;
+        let a = PathBuf::from("/h/.claude");
+        let probed = |result: Result<UsageReading, UsageError>| {
+            let run = if result.is_ok() { probe::ProbeRun::Answered } else { probe::ProbeRun::Missed };
+            probe::Polled { result, idle: false, probe: run, idle_miss: None }
+        };
+        let work = |e: &Engine, now| e.status(now).claude_work_at;
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(a.clone(), Ok(reading(10)))]);
+        // Idle for the whole 5-hour window, probed every 5 minutes, and
+        // every probe ticks the meter over: 60 points, and no work.
+        for i in 1..=60 {
+            let now = T0 + 300 * i64::from(i);
+            e.on_poll_results(now, vec![(a.clone(), probed(Ok(reading(10 + i))))]);
+            assert_eq!(work(&e, now), None, "after {i} probes");
+        }
+        // Two points between two probes is more than one probe's.
+        e.on_poll_results(T0 + 20_000, vec![(a.clone(), probed(Ok(reading(72))))]);
+        assert_eq!(work(&e, T0 + 20_000), Some(T0 + 20_000));
+        // A probe that missed sent its message too: with the next one that
+        // is two points allowed, and a third is work.
+        e.on_poll_results(T0 + 20_300, vec![(a.clone(), probed(Err(UsageError::Timeout)))]);
+        e.on_poll_results(T0 + 20_600, vec![(a.clone(), probed(Ok(reading(74))))]);
+        assert_eq!(work(&e, T0 + 20_600), Some(T0 + 20_000));
+        e.on_poll_results(T0 + 20_900, vec![(a.clone(), probed(Err(UsageError::Timeout)))]);
+        e.on_poll_results(T0 + 21_200, vec![(a.clone(), probed(Ok(reading(77))))]);
+        assert_eq!(work(&e, T0 + 21_200), Some(T0 + 21_200));
+        // With no probe in between (the idle source answered), one point
+        // is work.
+        e.on_poll_results(T0 + 21_500, vec![(a.clone(), Ok(reading(78)))]);
+        assert_eq!(work(&e, T0 + 21_500), Some(T0 + 21_500));
+
+        // A meter that now measures the week (the account turned out to
+        // have no 5-hour limit): the session's 0 → the week's 48 is no rise,
+        // 48 → 49 is.
+        let week = |pct| UsageReading { week: Some(Window { pct, resets_at: None }), ..Default::default() };
+        let ultra = |pct| UsageReading { session_limit: SessionLimit::Absent, ..week(pct) };
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(a.clone(), Ok(week(48)))]);
+        e.on_poll_results(T0 + 300, vec![(a.clone(), Ok(ultra(48)))]);
+        assert_eq!(work(&e, T0 + 300), None);
+        e.on_poll_results(T0 + 600, vec![(a.clone(), Ok(ultra(49)))]);
+        assert_eq!(work(&e, T0 + 600), Some(T0 + 600));
     }
 
     // A Codex account polls on its own track (never in the Claude plan),
