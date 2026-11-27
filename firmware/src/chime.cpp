@@ -24,11 +24,11 @@
 // resort for chips with an FPU; without one (the C6) it can't keep up, so a
 // ding with no buffer is skipped and logged.
 //
-// A board with no amp-enable line (amp_enable null) keeps the codec's DAC
-// muted between dings instead, so its always-on amp doesn't hiss. A board
-// with no codec (es8311_addr 0, a plain I2S amp) scales the samples by its
-// volume instead; with no amp_enable either, its amp stays on and the I2S
-// driver's auto-clear feeds it silence between dings.
+// A codec board mutes its DAC between dings: an always-on amp (amp_enable
+// null) doesn't hiss, and a switched amp never powers up or down into a live
+// signal, which pops. A board with no codec (es8311_addr 0, a plain I2S amp)
+// scales the samples by its volume instead; with no amp_enable either, its
+// amp stays on and the I2S driver's auto-clear feeds it silence between dings.
 
 // Share of the ding's own level (it peaks just under full scale): headroom
 // for the codec and the small amp. ChimeConfig.volume sets the loudness.
@@ -76,7 +76,7 @@ static bool es8311_setup(void) {
     es8311_sample_frequency_config(es, clk.mclk_frequency, clk.sample_frequency);
     es8311_microphone_config(es, false);
     es8311_voice_volume_set(es, cfg.volume, NULL);
-    if (!cfg.amp_enable) es8311_voice_mute(es, true);   // until a ding plays
+    es8311_voice_mute(es, true);   // until a ding plays (output_on)
     return true;
 }
 
@@ -173,10 +173,22 @@ static void stream_live(void) {
     }
 }
 
-// Amp on (or, without an amp line, the DAC unmuted) only while a ding plays.
+// Amp and DAC are on only while a ding plays: amp up before the DAC unmutes,
+// DAC muted before the amp goes down.
 static void output_on(bool on) {
-    if (cfg.amp_enable) cfg.amp_enable(on);
-    else if (es) es8311_voice_mute(es, !on);
+    if (on) {
+        if (cfg.amp_enable) {
+            cfg.amp_enable(true);
+            delay(2);  // let the amp leave shutdown before unmuting
+        }
+        if (es) es8311_voice_mute(es, false);
+    } else {
+        if (es) es8311_voice_mute(es, true);
+        if (cfg.amp_enable) {
+            if (es) delay(2);  // let the muted output settle before the amp goes off
+            cfg.amp_enable(false);
+        }
+    }
 }
 
 static void chime_task(void* arg) {
@@ -219,16 +231,20 @@ bool chime_init(const ChimeConfig& c) {
     cfg = c;
     if (cfg.amp_enable) cfg.amp_enable(false);   // amp off until we play
 
-    i2s.setPins(cfg.bclk, cfg.ws, cfg.dout, cfg.din, cfg.mclk);
-    if (!i2s.begin(I2S_MODE_STD, cfg.sample_rate, I2S_DATA_BIT_WIDTH_16BIT,
-                   I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) {
-        Serial.println("chime: I2S init failed");
-        return false;
-    }
+    // The codec is set up before I2S starts its MCLK: rewriting its clock
+    // tree while MCLK runs made it NACK about one boot in three on the
+    // LCD-3.5-C (ESP_ERR_INVALID_STATE in es8311_clock_config), leaving the
+    // board silent. Its registers don't need MCLK to be written.
     if (cfg.es8311_addr == 0) {
         sample_vol = (cfg.volume > 100 ? 100 : cfg.volume) / 100.0f;
     } else if (!es8311_setup()) {
         Serial.println("chime: ES8311 init failed");
+        return false;
+    }
+    i2s.setPins(cfg.bclk, cfg.ws, cfg.dout, cfg.din, cfg.mclk);
+    if (!i2s.begin(I2S_MODE_STD, cfg.sample_rate, I2S_DATA_BIT_WIDTH_16BIT,
+                   I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) {
+        Serial.println("chime: I2S init failed");
         return false;
     }
     ready = true;

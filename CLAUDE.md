@@ -39,6 +39,7 @@ Nested `CLAUDE.md` files load when you read or edit a file in their folder.
 | `waveshare_lcd_28c` | Waveshare ESP32-S3-Touch-LCD-2.8C | ST7701S RGB 480×480 round, GT911 touch, TCA9554, one button |
 | `lilygo_t4s3` | LILYGO T4-S3 | RM690B0 AMOLED 450×600, CST226SE touch, SY6970 charger |
 | `waveshare_lcd_183` | Waveshare ESP32-S3-Touch-LCD-1.83 | ST7789P SPI 240×284, CST816 touch, AXP2101 |
+| `waveshare_lcd_35_c` | Waveshare ESP32-S3-Touch-LCD-3.5-C | ST7796 SPI 320×480, FT6336 touch, AXP2101, QMI8658, ES8311 |
 | `esp32_s3_4848s040` | Guition-style ESP32-S3 4848S040 | ST7701S RGB 480×480, GT911 touch, no buttons readable |
 | `waveshare_amoled_143` | Waveshare ESP32-S3-Touch-AMOLED-1.43 | CO5300/SH8601 466×466 round, two revisions detected at boot, no PWR button |
 | `waveshare_amoled_132` | Waveshare ESP32-S3-Touch-AMOLED-1.32 | CO5300 466×466 round, CST820 touch, BOOT rotates the UI |

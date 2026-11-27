@@ -10,8 +10,9 @@
 // the ES8311 table has works; 16-bit stereo out.
 //
 // amp_enable is the only part that differs structurally between boards: the
-// 2.16 toggles a GPIO, the 1.8 drives an XCA9554 expander line. May be null
-// (an amp with no enable line): the codec's DAC is then muted between dings.
+// 2.16 toggles a GPIO, the 1.8 and the LCD-3.5-C drive an XCA9554/TCA9554
+// expander line. May be null (an amp with no enable line). A codec's DAC is
+// muted between dings either way.
 //
 // es8311_addr 0 is an I2S amplifier that needs no setup (the M5Stack Core2's
 // NS4168): no codec is driven and `volume` scales the rendered samples.

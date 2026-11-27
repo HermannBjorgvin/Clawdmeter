@@ -29,6 +29,7 @@ static const Panel PANELS[] = {
     { "LCD-2.1 / 2.8C",       480, 480, true  },
     { "ePaper 1.54",          200, 200, false },
     { "LCD-1.83",             240, 284, false },
+    { "LCD-3.5-C",            320, 480, false },
     { "Xingzhi Cube",         284, 240, false },
 };
 

@@ -208,6 +208,18 @@ pub const BOARDS: [BoardInfo; 32] = [
         buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "PWR")],
     },
     BoardInfo {
+        env: "waveshare_lcd_35_c",
+        name: "LCD 3.5-C",
+        product: "Waveshare ESP32-S3-Touch-LCD-3.5-C",
+        width: 320,
+        height: 480,
+        buy_url: "https://www.waveshare.com/esp32-s3-touch-lcd-3.5.htm?&aff_id=149786",
+        summary: "320×480 · SPI TFT · audio",
+        chip: "ESP32-S3",
+        pwr_button: true,
+        buttons: &[(Button::Primary, "BOOT"), (Button::Pwr, "PWR")],
+    },
+    BoardInfo {
         env: "esp32_s3_4848s040",
         name: "4848S040",
         product: "Guition ESP32-S3-4848S040 (4-inch 480×480)",
