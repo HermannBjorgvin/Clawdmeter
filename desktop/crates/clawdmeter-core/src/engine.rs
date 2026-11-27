@@ -164,6 +164,10 @@ pub struct Engine {
     sent_aa: Option<u16>,
     /// The pace marker the device last got (`pm`).
     sent_pm: Option<u8>,
+    /// The screensaver minutes the device last got (`ss`).
+    sent_ss: Option<u8>,
+    /// Face on tap as the device last got it (`pk`).
+    sent_pk: Option<u8>,
     /// The button actions the device last got (`k1`, `k2`, `k3`).
     sent_k: Option<[u32; 3]>,
     /// Last `th` sent.
@@ -225,6 +229,8 @@ impl Engine {
             sent_lv: None,
             sent_aa: None,
             sent_pm: None,
+            sent_ss: None,
+            sent_pk: None,
             sent_k: None,
             sent_th: None,
             appearance: Appearance::default(),
@@ -356,6 +362,8 @@ impl Engine {
         self.sent_lv = None;
         self.sent_aa = None;
         self.sent_pm = None;
+        self.sent_ss = None;
+        self.sent_pk = None;
         self.sent_k = None;
         self.sent_th = None;
         self.sent_tf = None;
@@ -723,6 +731,8 @@ impl Engine {
         // A changed device setting goes out right away, like an event.
         let aa = self.settings.attention_anim.seconds();
         let pm = u8::from(self.settings.pace_marker);
+        let ss = self.settings.screensaver.minutes();
+        let pk = u8::from(self.settings.tap_face);
         let k = self.settings.buttons.map(ButtonAction::code);
         let th = self.colors();
         let clock = clock_fields(self.settings.clock, utc(now), host.utc_offset_secs, host.prefers_12h);
@@ -730,6 +740,8 @@ impl Engine {
         let prefs_changed = self.sent_lv != Some(self.settings.liveliness)
             || self.sent_aa != Some(aa)
             || self.sent_pm != Some(pm)
+            || self.sent_ss != Some(ss)
+            || self.sent_pk != Some(pk)
             || self.sent_k != Some(k)
             || self.sent_th != Some(th)
             || self.sent_tf != Some(tf);
@@ -776,6 +788,8 @@ impl Engine {
             p.lv = Some(self.settings.liveliness);
             p.aa = Some(aa);
             p.pm = Some(pm);
+            p.ss = Some(ss);
+            p.pk = Some(pk);
             [p.k1, p.k2, p.k3] = k.map(Some);
             p.th = Some(th);
             // The Fable overlay's colour goes with Claude's numbers only; the
@@ -834,6 +848,12 @@ impl Engine {
         }
         if let Some(pm) = w.payload.pm {
             self.sent_pm = Some(pm);
+        }
+        if let Some(ss) = w.payload.ss {
+            self.sent_ss = Some(ss);
+        }
+        if let Some(pk) = w.payload.pk {
+            self.sent_pk = Some(pk);
         }
         if let (Some(k1), Some(k2), Some(k3)) = (w.payload.k1, w.payload.k2, w.payload.k3) {
             self.sent_k = Some([k1, k2, k3]);
@@ -965,7 +985,7 @@ mod tests {
         assert_eq!(w.kind, WriteKind::Poll);
         assert_eq!(
             w.payload.to_json(),
-            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7"}"#
+            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0,"ss":10,"pk":1,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7"}"#
         );
         assert!(write(&mut e, T0 + 1).is_none());
     }
@@ -987,7 +1007,7 @@ mod tests {
         let w = write(&mut e, T0).unwrap();
         assert_eq!(
             w.payload.to_json(),
-            r#"{"s":0,"sr":-1,"w":48,"wr":1440,"st":"allowed","acct":"week","ok":true,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7"}"#
+            r#"{"s":0,"sr":-1,"w":48,"wr":1440,"st":"allowed","acct":"week","ok":true,"lv":3,"aa":120,"pm":0,"ss":10,"pk":1,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7"}"#
         );
         // An account with the limit still wakes at its session reset.
         e.on_poll_results(T0 + 200, vec![(dir.clone(), Ok(reading(5)))]);
@@ -1006,7 +1026,7 @@ mod tests {
         assert_eq!(hb.kind, WriteKind::Heartbeat);
         assert_eq!(
             hb.payload.to_json(),
-            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120,"pm":0,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7"}"#
+            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120,"pm":0,"ss":10,"pk":1,"k1":1,"k2":2,"k3":6,"th":"0000001f1f1efaf9f5b0aea5d97757788c5dd97757c0392b2a2a28d97757141413","fc":"9775c7"}"#
         );
         // Three misses: stale, heartbeats stop so the device's freshness lapses.
         for i in 1..=3 {
@@ -1587,6 +1607,24 @@ mod tests {
         assert!(write(&mut e, T0 + 3).is_none());
         e.on_connected();
         assert_eq!(write(&mut e, T0 + 4).unwrap().payload.pm, Some(1), "resent on a reconnect");
+    }
+
+    #[test]
+    fn screensaver_and_tap_face_go_out_with_the_data_and_when_they_change() {
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        let p = write(&mut e, T0).unwrap().payload;
+        assert_eq!((p.ss, p.pk), (Some(10), Some(1)), "10 minutes and on by default");
+        e.update_settings(settings("screensaver = 2m\n"));
+        let w = write(&mut e, T0 + 2).expect("a new setting is sent right away");
+        assert_eq!((w.kind, w.payload.ss), (WriteKind::Event, Some(2)));
+        assert!(write(&mut e, T0 + 3).is_none());
+        e.update_settings(settings("screensaver = 2m\ntap_face = off\n"));
+        let w = write(&mut e, T0 + 4).expect("a new setting is sent right away");
+        assert_eq!((w.kind, w.payload.pk), (WriteKind::Event, Some(0)));
+        e.on_connected();
+        let p = write(&mut e, T0 + 5).unwrap().payload;
+        assert_eq!((p.ss, p.pk), (Some(2), Some(0)), "resent on a reconnect");
     }
 
     #[test]

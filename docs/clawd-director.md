@@ -96,7 +96,7 @@ passed. Beat changes always print; every step prints too after
 | `home` | default | Corner autonomy on: jittered idle gaps (±40 % of 10 / 7 / 5 / 3.5 s by mood), mood-picked acts, never the same act twice running, and lurk trips (PSRAM). Also checks the gates below. |
 | `corner` | notice, wave, joy, or after a transition | Waits for the commanded corner act or walk to finish, then `home`. |
 | `show` | `a == 3` held for 5 min; at most one per 15 min; hooks seen; meters live | Points at the bar (or, if he's out on a lurk trip, heads straight out), walks off left at 1.5×, walks back on full size at 1.5×, one scene (loop held 16 s, so about 20 s), waves, walks off left, and the corner Clawd walks back in to his seat. Without the performer (no PSRAM): points, then dances twice (jumps for joy twice when usage is Heavy) and waves, all in his seat. |
-| `screensaver` | 10 min with no engagement; needs hooks seen or a window that hasn't started (spend-capped and `week` accounts have no window, so they need hooks); meters live | Walks off through the nearest edge (a lurk trip finishes its peek first), face rises and rests (blinks every 2–6 s, about one in five a double, glances where the far eye travels 1.5×). Every 3–5 min, a calm dip: the face drops onto the meters, he walks on, plays one calm scene (magnifier or walking, alternating) and walks off, then the face rises and he rests again. Without the performer the corner Clawd walks back to his seat, sits for the scene's length and walks off again. |
+| `screensaver` | 10 min with no engagement (the Screensaver setting, below); needs hooks seen or a window that hasn't started (spend-capped and `week` accounts have no window, so they need hooks); meters live | Walks off through the nearest edge (a lurk trip finishes its peek first), face rises and rests (blinks every 2–6 s, about one in five a double, glances where the far eye travels 1.5×). Every 3–5 min, a calm dip: the face drops onto the meters, he walks on, plays one calm scene (magnifier or walking, alternating) and walks off, then the face rises and he rests again. Without the performer the corner Clawd walks back to his seat, sits for the scene's length and walks off again. |
 | `face-home` | tap, prompt, button or attention while the screensaver face is up; a tap, attention or the end of its curiosity while the peek face is up | If woken by a prompt or tapped during a peek, he blinks first (noticing), then the face drops into the meters, and the corner hurries home at 1.5×. |
 | `run-home` | tap or attention during a performance; a tap, prompt, button or usage moving during a calm dip | The scene releases to the idle pose on the spot, holds 200 ms, and he runs off left, ramping from 1.5× to 3× over 400 ms. Once he's gone, the corner walks home at 1.5×. |
 | `peek` | any tap on the meters (`home` or `corner`), live or stale (below) | Seated: a startled hop (`jumping` from its crouch, 2×), then he ducks out through the nearest edge at 4×; already moving or out: straight out at 4×. The face rises, eyes glance toward the tap's x and hold 1.6–2.4 s, a blink (30 % double), the look comes back to you, and the face stays up, curious, for 5 min: resting like the screensaver face (blinks every 2–6 s, some double), its glances going back toward the tap most of the time. Then it goes back on its own; a tap sends it back right away (with the acknowledging blink). Both go through `face-home`: the drop, and he walks back to his seat at 1.5×. (below: what else happens while it's up) |
@@ -195,7 +195,9 @@ counted from when it starts to rise; `peek_hold`):
 - **The screensaver can't start under it.** The tap that raised it is
   engagement, and the curiosity (5 min) runs out well before the screensaver's
   10 quiet minutes, so the face always goes back first; the screensaver can
-  come 5 min later, from the meters, as usual.
+  come 5 min later, from the meters, as usual. A Screensaver setting of 5 min
+  or less halves the curiosity to half its quiet time, so the meters still
+  show between the two.
 - **Attention** interrupts it like anything else (`face-home` without the
   blink, then the big Clawd). When the alert ends it's the meters, not the
   face: the peek started from the meters (`ATTN_FROM_HOME`), and putting a
@@ -205,7 +207,8 @@ counted from when it starts to rise; `peek_hold`):
 
 Unchanged: a tap during attention dismisses it, and a tap during a
 performance or on the screensaver face still means "show me the meters". In minimal mode the tap
-does nothing (he stays on the still frame). On the C6 it all works: the face
+does nothing (he stays on the still frame), and with Face on tap off (below)
+it does nothing either. On the C6 it all works: the face
 is LVGL rectangles and the corner sprite has its internal-RAM buffer. A tap
 that wakes a dark panel is swallowed by `idle_consume_wake_press` (it never
 reaches LVGL), so the waking tap only wakes the panel. Every tap counts as
@@ -397,19 +400,47 @@ change at once (a show or screensaver the new level rules out goes home).
 
 | Level | What changes |
 |---|---|
-| 1 No-nonsense | No shows, screensaver, idle acts or lurk trips, and no reactions (noticing, long-turn wave, fresh-window joy). The status line's verb changes once a minute and the spinner holds still, so with no taps or alerts only the clock and that word redraw. A tap still gets the peek, an alert still gets the attention walk-on. |
+| 1 No-nonsense | No shows, screensaver, idle acts or lurk trips, and no reactions (noticing, long-turn wave, fresh-window joy). The status line's verb changes once a minute and the spinner holds still, so with no taps or alerts only the clock and that word redraw. A tap still gets the peek (unless Face on tap is off), an alert still gets the attention walk-on. |
 | 2 | Rate-like timings ÷ 0.6: show after ~8.3 min, cooldown 25 min, calm dips every 5–8.3 min, corner still time ×1.67, wave after a 3.3-min turn. |
 | 3 Some-nonsense | The base timings above. |
 | 4 | ÷ 1.8: show after ~2.8 min, cooldown ~8.3 min, calm dips every ~1.7–2.8 min, still time ×0.56, wave after ~67 s. |
 | 5 All-nonsense | ÷ 3: show after 100 s of activity **2** or more (not just 3), cooldown 5 min, calm dips every 1–1.7 min, still time ×0.33 (never under 1.5 s), wave after a 40-s turn. |
 
-The quiet time before the screensaver (10 min) doesn't scale: it measures
+The quiet time before the screensaver (10 min by default) doesn't scale: it measures
 you being away, not him. Levels 2 and 4 sit between their neighbours on a
 log scale (0.6 / 1 / 1.8 / 3). Native tests: `test_clawd_policy` (the
 scaling), `test_director` (No-nonsense sits still through activity, prompts,
 stops, usage and a reset but still peeks on a tap; turning it down mid-show
 ends the show; the one-Clawd fuzz at every level). In the sim:
 `SIM_CMDS="300:liveliness 1"`, or `"lv":1` in a scenario line.
+
+## Screensaver and Face on tap
+
+Two settings on the app's Device page hold at every liveliness level:
+
+- **Screensaver** (config `screensaver`: `off`, `2m`, `5m`, `10m` default,
+  `30m`; payload `ss`, minutes, 0 = never) sets the quiet time before the
+  face comes up. The minutes are a share of the base tuning's `quiet_ms`
+  (`clawd_screensaver_quiet_ms()`; the default 10 is all of it, so
+  `SIM_FAST`'s 15 s stays proportional). 0 clears
+  `ClawdTuning::screensaver`. No-nonsense still rules the screensaver out
+  whatever the minutes. On battery the panel sleeps after 30 min of no
+  activity, so longer times would never show.
+- **Face on tap** (config `tap_face`, payload `pk`, default on). Off clears
+  `ClawdTuning::peek`: a tap on the meters is absorbed, still counting as
+  engagement.
+
+Both apply after the liveliness scaling (`clawd_set_screensaver()`,
+`clawd_set_tap_face()`), so a later level change keeps them, and
+`director_set_screensaver()` / `director_set_tap_face()` send a showing
+screensaver or peek face home at once, the way a level that rules it out
+does; a peek still hopping turns around, and an alert that interrupted the
+screensaver doesn't bring back one that's been switched off. The device
+keeps them in NVS (`clawd_prefs.cpp`, keys `ss_min`, `tap_face`); the app
+sends them with every data payload, like `lv`. Serial QA: `screensaver [minutes]`,
+`tap_face [0|1]`. Native tests: `test_clawd_policy`, and `test_director`
+(the fuzz changes both; off mid-hop, off while an alert interrupts the
+screensaver, a longer quiet time, Face on tap off with the screensaver on).
 
 ## Attention animation
 

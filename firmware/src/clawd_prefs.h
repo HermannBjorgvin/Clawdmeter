@@ -5,6 +5,8 @@
 //   liveliness       `lv`  1 No-nonsense .. 5 All-nonsense (clawd_policy.h)
 //   attention anim   `aa`  seconds he points and waves for an alert; 0 = off
 //   pace marker      `pm`  1 = pace marker on the usage bars (pace.h)
+//   screensaver      `ss`  minutes of quiet before Clawd's face comes up, 0 = never
+//   tap face         `pk`  0 = a tap on the meters doesn't raise the face
 //   button actions   `k1` / `k2` / `k3`  what the primary, secondary and PWR
 //                    buttons do (button_action.h)
 //   palette          `th`  the UI colours (theme_palette.h)
@@ -20,6 +22,10 @@ void attn_anim_set(int seconds);      // apply; saved only when it changes
 int  attn_anim_get(void);
 void pace_marker_set(bool on);      // apply; saved only when it changes
 bool pace_marker_get(void);
+void screensaver_set(int minutes);  // apply; saved only when it changes
+int  screensaver_get(void);
+void tap_face_set(bool on);         // apply; saved only when it changes
+bool tap_face_get(void);
 enum ButtonSlot { BTN_SLOT_PRIMARY, BTN_SLOT_SECONDARY, BTN_SLOT_PWR, BTN_SLOT_COUNT };
 void    button_action_set(ButtonSlot slot, int32_t action);   // apply; saved only when it changes
 int32_t button_action_get(ButtonSlot slot);

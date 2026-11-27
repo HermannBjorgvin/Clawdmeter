@@ -32,9 +32,11 @@ struct ClawdTuning {
     uint8_t  peek_toward_pct;    // chance a curious resting glance goes back toward the tap
 
     // What he does on his own at all, and how often (set by liveliness,
-    // clawd_tuning_scaled). Taps and alerts always get their reaction.
+    // clawd_tuning_scaled). Alerts always get their reaction, and taps do
+    // unless Face on tap is off (clawd_set_tap_face).
     bool     shows;              // earned shows happen
     bool     screensaver;        // the face comes up when you're away
+    bool     peek;               // a tap on the meters brings the face up
     bool     idle_acts;          // corner autonomy: idle acts and lurk trips
     bool     reactions;          // noticing a prompt, the long-turn wave, fresh-window joy
     uint8_t  show_min_activity;  // activity level (0-3) whose stretch earns a show
@@ -72,6 +74,19 @@ int  clawd_liveliness_clamp(int level);   // out of range → nearest end
 void clawd_tuning_scaled(const ClawdTuning* base, int level, ClawdTuning* out);
 void clawd_tuning_set_base(const ClawdTuning* base);
 void clawd_set_liveliness(int level);
+// The screensaver's quiet time in minutes, 0 = never, at every liveliness
+// level. It is a share of the base tuning's quiet_ms (the default is all of
+// it), so SIM_FAST keeps its short timers.
+#define CLAWD_SCREENSAVER_DEFAULT_MIN 10
+#define CLAWD_SCREENSAVER_MAX_MIN     60
+int      clawd_screensaver_clamp(int minutes);   // 0..60
+uint32_t clawd_screensaver_quiet_ms(int minutes, uint32_t base_quiet_ms);
+void     clawd_set_screensaver(int minutes);
+int      clawd_screensaver(void);
+// Off: a tap on the meters doesn't raise the face (ClawdTuning::peek), at
+// every liveliness level.
+void clawd_set_tap_face(bool on);
+bool clawd_tap_face(void);
 int  clawd_liveliness(void);
 
 // ─── Attention animation ─────────────────────────────────────────────────────
@@ -190,7 +205,7 @@ int corner_seat_feet(int feet_y, int tallest_px, int max_feet, int top_margin);
 // act, a walk, a lurk trip) he just heads out. Either way the face follows.
 // The meters being stale or pairing doesn't stop it: you asked.
 enum TapReact {
-    TAP_NONE,       // minimal mode, or not on the meters (the tap means something else)
+    TAP_NONE,       // minimal mode, Face on tap off, or not on the meters
     TAP_PEEK_HOP,   // seated or idling: startled hop, duck out, the face
     TAP_PEEK,       // already moving or out: straight out through an edge, the face
 };
@@ -203,6 +218,7 @@ struct TapInput {
     bool        on_meters;     // the director is home or in a corner beat (nothing staged, no face)
     bool        minimal;       // minimal mode: Clawd stays still
     CornerState corner;
+    bool        peek;          // ClawdTuning::peek
 };
 TapReact clawd_tap_react(const TapInput* in);
 
@@ -215,7 +231,9 @@ TapReact clawd_tap_react(const TapInput* in);
 // corner reaction (he's up at the glass); they still count as engagement.
 // Attention interrupts it like anything else and ends on the meters
 // (ATTN_FROM_HOME). The screensaver can't start under it: the tap that
-// raised it is engagement, and peek_curious_ms < quiet_ms.
+// raised it is engagement, and peek_curious_ms < quiet_ms (a short
+// screensaver caps the curiosity at half its quiet time, so the meters show
+// between the two).
 enum PeekHold {
     PEEK_HOLD_KEEP,   // stay up, resting, curious
     PEEK_HOLD_DONE,   // curiosity's over: drop and walk home

@@ -27,6 +27,7 @@ void clawd_tuning_defaults(ClawdTuning* t) {
     t->peek_toward_pct  = 60;
     t->shows             = true;
     t->screensaver       = true;
+    t->peek              = true;
     t->idle_acts         = true;
     t->reactions         = true;
     t->show_min_activity = 3;
@@ -88,11 +89,21 @@ void clawd_tuning_scaled(const ClawdTuning* base, int level, ClawdTuning* out) {
 static ClawdTuning tuning_base, tuning_now;
 static int  liveliness = CLAWD_LIVELINESS_DEFAULT;
 static bool tuning_init = false;
+static int  screensaver_min = CLAWD_SCREENSAVER_DEFAULT_MIN;
+static bool tap_face = true;
+
+static void rescale(void) {
+    clawd_tuning_scaled(&tuning_base, liveliness, &tuning_now);
+    if (screensaver_min == 0) tuning_now.screensaver = false;
+    tuning_now.quiet_ms = clawd_screensaver_quiet_ms(screensaver_min, tuning_base.quiet_ms);
+    if (tuning_now.peek_curious_ms >= tuning_now.quiet_ms) tuning_now.peek_curious_ms = tuning_now.quiet_ms / 2;
+    if (!tap_face) tuning_now.peek = false;
+}
 
 static void tuning_ready(void) {
     if (tuning_init) return;
     clawd_tuning_defaults(&tuning_base);
-    clawd_tuning_scaled(&tuning_base, liveliness, &tuning_now);
+    rescale();
     tuning_init = true;
 }
 
@@ -104,14 +115,41 @@ ClawdTuning& clawd_tuning(void) {
 void clawd_tuning_set_base(const ClawdTuning* base) {
     tuning_ready();
     tuning_base = *base;
-    clawd_tuning_scaled(&tuning_base, liveliness, &tuning_now);
+    rescale();
 }
 
 void clawd_set_liveliness(int level) {
     tuning_ready();
     liveliness = clawd_liveliness_clamp(level);
-    clawd_tuning_scaled(&tuning_base, liveliness, &tuning_now);
+    rescale();
 }
+
+int clawd_screensaver_clamp(int minutes) {
+    if (minutes < 0) return 0;
+    if (minutes > CLAWD_SCREENSAVER_MAX_MIN) return CLAWD_SCREENSAVER_MAX_MIN;
+    return minutes;
+}
+
+uint32_t clawd_screensaver_quiet_ms(int minutes, uint32_t base_quiet_ms) {
+    if (minutes <= 0) return base_quiet_ms;
+    return (uint32_t)((uint64_t)base_quiet_ms * clawd_screensaver_clamp(minutes) / CLAWD_SCREENSAVER_DEFAULT_MIN);
+}
+
+void clawd_set_screensaver(int minutes) {
+    tuning_ready();
+    screensaver_min = clawd_screensaver_clamp(minutes);
+    rescale();
+}
+
+int clawd_screensaver(void) { return screensaver_min; }
+
+void clawd_set_tap_face(bool on) {
+    tuning_ready();
+    tap_face = on;
+    rescale();
+}
+
+bool clawd_tap_face(void) { return tap_face; }
 
 int clawd_liveliness(void) { return liveliness; }
 
@@ -244,7 +282,7 @@ bool reaction_still_due(uint32_t queued_at, uint32_t now, const ClawdTuning* t) 
 
 // ─── A tap on the meters ─────────────────────────────────────────────────────
 TapReact clawd_tap_react(const TapInput* in) {
-    if (in->minimal || !in->on_meters) return TAP_NONE;
+    if (in->minimal || !in->peek || !in->on_meters) return TAP_NONE;
     return in->corner == CORNER_FREE ? TAP_PEEK_HOP : TAP_PEEK;
 }
 

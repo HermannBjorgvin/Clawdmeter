@@ -118,6 +118,15 @@ bool payload_parse(const char* json, UsageData* out, const char** err) {
 
     JsonVariant pm = doc["pm"];
     d.pace_marker = pm.isNull() ? -1 : (int8_t)((pm | 0) ? 1 : 0);
+    JsonVariant ss = doc["ss"];
+    if (ss.isNull()) {
+        d.screensaver = -1;
+    } else {
+        int v = ss | 10;
+        d.screensaver = (int16_t)(v < 0 ? 0 : v > 60 ? 60 : v);
+    }
+    JsonVariant pk = doc["pk"];
+    d.tap_face = pk.isNull() ? -1 : (int8_t)((pk | 1) ? 1 : 0);
     d.btn_primary   = button_field(doc["k1"]);
     d.btn_secondary = button_field(doc["k2"]);
     d.btn_pwr       = button_field(doc["k3"]);

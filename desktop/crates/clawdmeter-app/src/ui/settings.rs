@@ -16,7 +16,7 @@ use clawdmeter_core::autostart::{self, LaunchMode};
 use clawdmeter_core::buttons::{KeyChord, LabelStyle, MediaKey, Unmappable, MOD_ALT, MOD_CTRL, MOD_GUI, MOD_SHIFT};
 use clawdmeter_core::config::{
     parse_rgb, AlertOn, AttentionAnim, Button, ButtonAction, ClockMode, ColorToken, ConfigFile, DeviceTheme, Palette,
-    LIVELINESS_MAX,
+    ScreensaverAfter, LIVELINESS_MAX,
 };
 use clawdmeter_core::platform::{Appearance, AppearanceWatch};
 use clawdmeter_core::themes::{FollowTheme, FOLLOWING, PRESETS};
@@ -721,6 +721,38 @@ impl SettingsView {
                     });
                 },
             ),
+        ));
+        let me = cx.entity().downgrade();
+        pane = pane.child(field(
+            t,
+            "Screensaver",
+            "How long the device sits quiet before Clawd's face covers the meters. Off keeps the meters up.",
+            segmented(
+                t,
+                "screensaver",
+                &ScreensaverAfter::ALL.map(|a| (a, screensaver_label(a))),
+                &self.settings.screensaver,
+                true,
+                move |a, _, cx| {
+                    let _ = me.update(cx, |v, cx| {
+                        v.save(|s, _| s.screensaver = a);
+                        cx.notify();
+                    });
+                },
+            ),
+        ));
+        let me = cx.entity().downgrade();
+        let tap = self.settings.tap_face;
+        pane = pane.child(field(
+            t,
+            "Face on tap",
+            "Tapping the meters brings Clawd's face up for a few minutes. Off, a tap leaves the meters as they are.",
+            toggle(t, "tap-face", tap, true, move |_, _, cx| {
+                let _ = me.update(cx, |v, cx| {
+                    v.save(|s, _| s.tap_face = !tap);
+                    cx.notify();
+                });
+            }),
         ));
         let me = cx.entity().downgrade();
         let pace = self.settings.pace_marker;
@@ -2433,6 +2465,16 @@ fn liveliness_info(level: u8) -> &'static str {
     }
 }
 
+fn screensaver_label(a: ScreensaverAfter) -> &'static str {
+    match a {
+        ScreensaverAfter::Off => "Off",
+        ScreensaverAfter::Min2 => "2m",
+        ScreensaverAfter::Min5 => "5m",
+        ScreensaverAfter::Min10 => "10m",
+        ScreensaverAfter::Min30 => "30m",
+    }
+}
+
 fn attention_anim_label(a: AttentionAnim) -> &'static str {
     match a {
         AttentionAnim::Min2 => "2m",
@@ -2578,6 +2620,13 @@ mod tests {
         click(cx, "theme-custom");
         let text = config();
         assert!(text.contains("color_bg = 000000") && !text.contains("21222c"), "{text}");
+
+        click(cx, "screensaver-0"); // Off
+        assert!(config().contains("screensaver = off"));
+        click(cx, "screensaver-4"); // 30 min
+        assert!(config().contains("screensaver = 30m"));
+        click(cx, "tap-face");
+        assert!(config().contains("tap_face = off"));
 
         view.update(cx, |v, cx| v.show(Page::Settings, false, cx));
         click(cx, "poll-2"); // While working: 5 min
