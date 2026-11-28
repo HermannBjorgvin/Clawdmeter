@@ -116,9 +116,9 @@ saves it; the window edits it in place, keeping comments and unknown keys.
 | Never scan by name | All | Only OS-known devices: custom service, or HID service plus exact name (`known_devices`, `accept`) | A filtered scan exists for first-time setup (`LinkOptions::allow_scan`), off by default. |
 | Linux: paired/connected only | `bluetoothctl devices Paired/Connected` | BlueZ `Device1.Paired` check | |
 | Linux: `bluetoothctl trust` before connect | L | `Device1.Trusted = true` after connect (`bluez::trust`) | |
-| Connect failure | L: drop cached MAC, never unpair · M: skip that handle once · W: 3 attempts, 2 s apart | Drop the cache if it named that device and try every other candidate; never unpair on Linux | |
+| Connect failure | L: drop cached MAC, never unpair · M: skip that handle once · W: 3 attempts, 2 s apart | Drop the cache if it named that device and try every other candidate; never unpair on Linux. macOS keeps the cache unless the bond is stale | The cached identifier is how macOS finds a board the system let go. |
 | Address cache `ble-address` | L: MAC · M: MAC or CoreBluetooth UUID; malformed discarded | Same (`AddressCache`) | |
-| macOS: device held by the OS as a keyboard | `retrieveConnectedPeripheralsWithServices` (custom service, then HID + name) | btleplug `retrieve_peripherals` with the same two services | |
+| macOS: device held by the OS as a keyboard | `retrieveConnectedPeripheralsWithServices` (custom service, then HID + name) | btleplug `retrieve_peripherals` with the same two services; when it holds none, the cached CoreBluetooth identifier (`bonded_by_address`) | A pending connect to the identifier completes once the board advertises. |
 | macOS: connect / subscribe timeouts | 20 s / 10 s | 20 s / 10 s (`LinkOptions`) | Discovery is bounded at 15 s too. |
 | macOS: stale bond (CBError 15, "failed to encrypt") | `blueutil --paired` + `--unpair`, 8 s timeout, permission hint | Same (`macos_unpair_stale_bond`) | blueutil stays optional; without it the log says how to forget the device. |
 | Windows: bonded device not connected right now | PnP `BTHLE\DEV_<mac>` lookup, connect by address | `CLAWDMETER_BLE_ADDRESS`, cache, then the same PnP lookup → `add_peripheral` (`bonded_by_address`) | |
