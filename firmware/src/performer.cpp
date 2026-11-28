@@ -10,17 +10,23 @@
 #include <esp_heap_caps.h>
 
 // ─── Geometry ────────────────────────────────────────────────────────────────
-// 60x60-cell grid; cell = min(W,H)/60 (8 px on 480, 6 on 368, 4 on 240). The
-// official 55x37 art stage sits at a fixed anchor on the grid and every
-// animation is placed at its authored offset, so the shared idle pose never
-// jumps between animations. The grid is shifted vertically so his feet stand
-// on the floor the meters give him.
-#define GRID      SPLASH_GRID
-#define ANCHOR_X  ((GRID - CLAWD_ART_W) / 2)
+// 60-row grid; cell = min(W,H)/60 (8 px on 480, 6 on 368, 4 on 240). It is
+// 60 columns plus `margin` more on each side, so on a landscape panel it spans
+// the full width (80 columns on 320x240) and he walks off at the real edge.
+// The official 55x37 art stage sits at a fixed anchor in the middle 60
+// columns and every animation is placed at its authored offset, so the shared
+// idle pose never jumps between animations. The grid is shifted vertically so
+// his feet stand on the floor the meters give him.
+#define GRID      SPLASH_GRID                  // rows
 #define ANCHOR_Y  ((GRID - CLAWD_ART_H) / 2)
 
 static int       cell = 8;
-static int       dim = GRID * 8;               // the buffer is dim x dim px
+static int       margin = 0;                   // extra columns each side
+static bool      round_panel = false;
+static int       cols = GRID;                  // GRID + 2 * margin
+static int       anchor_x = (GRID - CLAWD_ART_W) / 2;
+static int       buf_w = GRID * 8;             // the buffer is buf_w x dim px
+static int       dim = GRID * 8;
 static lv_obj_t* img = NULL;
 static uint8_t*  buf = NULL;                   // planar RGB565A8: colour plane, then alpha
 static lv_image_dsc_t dsc;
@@ -70,20 +76,24 @@ static uint8_t  choreo_phase = 0;
 static uint32_t choreo_since = 0;
 static bool     leg_active = false;
 
-static uint8_t         stage_cells[GRID * GRID];
-static uint8_t         drawn_cells[GRID * GRID];   // what buf shows
+static uint8_t*        stage_cells = NULL;         // GRID x cols, PSRAM
+static uint8_t*        drawn_cells = NULL;         // what buf shows
 static const uint16_t* drawn_palette = NULL;
 static bool            cells_any = false;          // the last composed frame shows any art
 
-static int home_ax(const ClawdAnim* a) { return ANCHOR_X + a->ox; }
+static int home_ax(const ClawdAnim* a) { return anchor_x + a->ox; }
 
 // The grid cells that are on the glass on his floor row: all of them on a
 // rectangular panel, the circle's chord on a round one. He walks on and off
 // at these edges.
-static int stage_c0 = 0, stage_c1 = GRID;
+static int stage_c0 = 0, stage_c1 = GRID;           // set by performer_init
+// The cells that show any of that row, partly visible edge cells included:
+// he is off stage only once he is past these.
+static int off_c0 = 0, off_c1 = GRID;
 
 static const uint8_t* compose(const ClawdAnim* a, uint16_t f, int ax, bool mirror) {
-    memset(stage_cells, 0, sizeof(stage_cells));
+    if (!stage_cells) return NULL;              // no PSRAM: nothing to draw on
+    memset(stage_cells, 0, (size_t)GRID * cols);
     if (!a) return stage_cells;
     const int ay = ANCHOR_Y + a->oy;
     const uint8_t* src = clawd_frame(a, f);
@@ -92,13 +102,13 @@ static const uint8_t* compose(const ClawdAnim* a, uint16_t f, int ax, bool mirro
         if (dy < 0 || dy >= GRID) continue;
         int c0 = 0, c1 = a->w;
         if (ax + c0 < 0)    c0 = -ax;
-        if (ax + c1 > GRID) c1 = GRID - ax;
+        if (ax + c1 > cols) c1 = cols - ax;
         if (c0 >= c1) continue;
         if (mirror) {
             for (int c = c0; c < c1; c++)
-                stage_cells[dy * GRID + ax + c] = src[r * a->w + (a->w - 1 - c)];
+                stage_cells[dy * cols + ax + c] = src[r * a->w + (a->w - 1 - c)];
         } else {
-            memcpy(&stage_cells[dy * GRID + ax + c0], &src[r * a->w + c0], c1 - c0);
+            memcpy(&stage_cells[dy * cols + ax + c0], &src[r * a->w + c0], c1 - c0);
         }
     }
     return stage_cells;
@@ -117,16 +127,16 @@ static void set_hidden(void* on) {
 static void render_cells(const uint8_t* cells, const uint16_t* palette) {
     if (!buf || !img) return;
     bool any = false;
-    for (int i = 0; i < GRID * GRID; i++) if (cells[i]) { any = true; break; }
+    for (int i = 0; i < GRID * cols; i++) if (cells[i]) { any = true; break; }
 
     const bool repaint_all = palette != drawn_palette;
-    int gx0 = GRID, gy0 = GRID, gx1 = -1, gy1 = -1;
+    int gx0 = cols, gy0 = GRID, gx1 = -1, gy1 = -1;
     uint16_t* color = (uint16_t*)buf;
-    uint8_t*  alpha = buf + (size_t)dim * dim * 2;
+    uint8_t*  alpha = buf + (size_t)buf_w * dim * 2;
     for (int gy = 0; gy < GRID; gy++) {
-        for (int gx = 0; gx < GRID; gx++) {
-            const uint8_t code = cells[gy * GRID + gx];
-            const uint8_t was  = drawn_cells[gy * GRID + gx];
+        for (int gx = 0; gx < cols; gx++) {
+            const uint8_t code = cells[gy * cols + gx];
+            const uint8_t was  = drawn_cells[gy * cols + gx];
             if (code == was && !(repaint_all && code)) continue;
             if (gx < gx0) gx0 = gx;
             if (gx > gx1) gx1 = gx;
@@ -135,13 +145,13 @@ static void render_cells(const uint8_t* cells, const uint16_t* palette) {
             const uint16_t c = (code && palette && code < CLAWD_PALETTE_SIZE) ? palette[code] : 0;
             const uint8_t  a = code ? 255 : 0;
             for (int d = 0; d < cell; d++) {
-                const size_t row = (size_t)(gy * cell + d) * dim + gx * cell;
+                const size_t row = (size_t)(gy * cell + d) * buf_w + gx * cell;
                 for (int i = 0; i < cell; i++) color[row + i] = c;
                 memset(&alpha[row], a, cell);
             }
         }
     }
-    memcpy(drawn_cells, cells, sizeof(drawn_cells));
+    memcpy(drawn_cells, cells, (size_t)GRID * cols);
     drawn_palette = palette;
     cells_any = any;
 
@@ -172,9 +182,13 @@ static void redraw(void) {
     int ax = home_ax(cur) + dx;
     if (pst == P_SCENE && dx == 0) {
         // Edge snap: art touching its canvas's left/right edge was designed to
-        // hang off that edge, so it goes to the true screen edge.
-        if (cur->ox == 0)                     ax = 0;
-        if (cur->ox + cur->w == CLAWD_ART_W)  ax = GRID - cur->w;
+        // hang off that edge, so it goes to the true screen edge: the grid's
+        // edge on a rectangular panel. On a round one that is outside the
+        // glass, so it stays at the middle 60 columns' edge, as it always was.
+        const int lo = round_panel ? margin : 0;
+        const int hi = round_panel ? margin + GRID : cols;
+        if (cur->ox == 0)                     ax = lo;
+        if (cur->ox + cur->w == CLAWD_ART_W)  ax = hi - cur->w;
     }
     render_cells(compose(cur, frame, ax, facing < 0), cur->palette);
 }
@@ -189,8 +203,8 @@ static void stand(void) {
 
 // Off stage: the whole walking frame past that edge.
 static int offstage_dx(int side) {
-    if (!stand_anim) return side * GRID;
-    return side > 0 ? stage_c1 - home_ax(stand_anim) : stage_c0 - (home_ax(stand_anim) + stand_anim->w);
+    if (!stand_anim) return side * cols;
+    return side > 0 ? off_c1 - home_ax(stand_anim) : off_c0 - (home_ax(stand_anim) + stand_anim->w);
 }
 static bool is_offstage(void) { return dx >= offstage_dx(+1) || dx <= offstage_dx(-1); }
 
@@ -283,30 +297,46 @@ void performer_init(lv_obj_t* parent, int feet_y) {
     const SplashGeometry geo = splash_compute_geometry(c.width, c.height, true);
     cell = geo.cell;
     dim = geo.canvas_dim;
-    const size_t bytes = (size_t)dim * dim * 3;
+    margin = splash_side_cells(c.width, cell);
+    round_panel = c.round_panel;
+    cols = GRID + 2 * margin;
+    anchor_x = margin + (GRID - CLAWD_ART_W) / 2;
+    buf_w = cols * cell;
+    const size_t bytes = (size_t)buf_w * dim * 3;
+    const size_t ncells = (size_t)GRID * cols;
     // PSRAM only: without it there's no room for a screen-sized sprite, and
     // the director plays performances as corner acts.
     buf = (uint8_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
-    if (!buf) { Serial.println("performer: no PSRAM, corner acts only"); return; }
+    stage_cells = (uint8_t*)heap_caps_malloc(ncells, MALLOC_CAP_SPIRAM);
+    drawn_cells = (uint8_t*)heap_caps_malloc(ncells, MALLOC_CAP_SPIRAM);
+    if (!buf || !stage_cells || !drawn_cells) {
+        heap_caps_free(buf); heap_caps_free(stage_cells); heap_caps_free(drawn_cells);
+        buf = stage_cells = drawn_cells = NULL;
+        Serial.println("performer: no PSRAM, corner acts only");
+        return;
+    }
     memset(buf, 0, bytes);
-    memset(drawn_cells, 0, sizeof(drawn_cells));
+    memset(drawn_cells, 0, ncells);
 
-    dsc.header.w = dim;
+    dsc.header.w = buf_w;
     dsc.header.h = dim;
     dsc.header.cf = LV_COLOR_FORMAT_RGB565A8;
-    dsc.header.stride = dim * 2;
+    dsc.header.stride = buf_w * 2;
     dsc.data = buf;
     dsc.data_size = bytes;
 
     img = lv_image_create(parent);
     lv_image_set_src(img, &dsc);
     lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);
-    // His feet (art row 37) on the floor; centred across. The grid may hang
-    // past the bottom edge; nothing is drawn there.
-    lv_obj_set_pos(img, (c.width - dim) / 2, feet_y - (ANCHOR_Y + CLAWD_ART_H) * cell);
+    // His feet (art row 37) on the floor; the middle 60 columns centred
+    // across, the margins reaching (just past) the panel's sides. The grid
+    // may hang past the bottom edge; nothing is drawn there.
+    const int grid_x = (c.width - dim) / 2 - margin * cell;
+    lv_obj_set_pos(img, grid_x, feet_y - (ANCHOR_Y + CLAWD_ART_H) * cell);
     int x0, x1;
     panel_row_span(c.width, c.height, c.round_panel, feet_y, &x0, &x1);
-    span_to_cells((c.width - dim) / 2, cell, GRID, x0, x1, &stage_c0, &stage_c1);
+    span_to_cells(grid_x, cell, cols, x0, x1, &stage_c0, &stage_c1);
+    span_to_touched_cells(grid_x, cell, cols, x0, x1, &off_c0, &off_c1);
     lv_obj_add_flag(img, LV_OBJ_FLAG_HIDDEN);
     shown = false;
     pst = P_OFF;
@@ -392,7 +422,7 @@ static int right_edge_dx(const ClawdAnim* a) {
     return dx_r > 0 ? dx_r : 0;
 }
 static int left_edge_dx(const ClawdAnim* a) {
-    const int dx_l = stage_c0 - a->w - home_ax(a);
+    const int dx_l = off_c0 - a->w - home_ax(a);
     return dx_l < -1 ? dx_l : -1;
 }
 

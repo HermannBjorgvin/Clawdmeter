@@ -51,10 +51,14 @@ is faked behind `FlashHardware`.
   holds a match rule, capped at 512 per connection). Windows clears the
   adapter's peripherals before each attempt; macOS never does (its clear
   cancels every tracked connection). Connects only to OS-known
-  devices (custom service, or HID + exact name); address cache, REQ
-  subscription, zombie-write breaker (a zombie link is disconnected before
-  it's dropped), BlueZ trust, macOS stale-bond unpair via `blueutil`,
-  Windows bonded-address fallback (PnP / `CLAWDMETER_BLE_ADDRESS`).
+  devices (custom service, or HID + exact name), or on macOS and Windows
+  to the bonded board named by the cache; address cache (a failed connect
+  drops it, except on macOS, where only a stale bond does: the app's Forget
+  clears it there), REQ subscription, zombie-write breaker (a zombie link is
+  disconnected before it's dropped), BlueZ trust, macOS stale-bond unpair
+  via `blueutil`, bonded fallbacks (macOS: the cached CoreBluetooth
+  identifier, a pending connect that completes once the board advertises;
+  Windows: PnP / `CLAWDMETER_BLE_ADDRESS`).
 - `clawdmeter-flash`: downloads the release `manifest.json`, matches boards by
   chip + flash size, writes with espflash.
 - `clawdmeter-app`: the `clawdmeter` binary. Tray (`tray/`, ksni on Linux;

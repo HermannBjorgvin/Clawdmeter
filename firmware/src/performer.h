@@ -3,9 +3,9 @@
 #include <stdbool.h>
 #include <lvgl.h>
 
-// Clawd performing on the meters: the official scenes at full size (the
-// 60x60-cell grid, 8 px cells on a 480 panel), walking on and off through
-// the screen edges. The director (clawd_director.cpp) decides when he
+// Clawd performing on the meters: the official scenes at full size (a
+// 60-row grid as wide as the panel, 8 px cells on a 480 panel), walking on
+// and off through the screen edges. The director (clawd_director.cpp) decides when he
 // performs and what he does; nothing here starts on its own.
 //
 // He's drawn in front of the meters, fully opaque, like the attention

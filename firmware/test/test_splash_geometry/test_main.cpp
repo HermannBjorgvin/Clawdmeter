@@ -41,6 +41,25 @@ static void should_clamp_cell_to_at_least_one_on_tiny_panel() {
     CHECK(g.canvas_dim == 60);
 }
 
+static void performer_grid_spans_the_panel_width() {
+    // { width, cell, margin columns each side }
+    const int cases[][3] = {
+        { 480, 8, 0 },    // square: the 60 columns already fill it
+        { 368, 6, 1 },    // portrait 368: 60 x 6 = 360 leaves 4 px each side
+        { 320, 4, 10 },   // 320x240 (Core2, FIRE, CYD): 80 columns
+        { 320, 2, 50 },   // 320x172
+        { 284, 4, 6 },    // 284x240: one cell's slack past the glass
+        { 466, 7, 4 },    // round 466: 60 x 7 = 420 leaves 23 px each side
+    };
+    for (const auto& k : cases) {
+        const int w = k[0], cell = k[1], m = splash_side_cells(w, cell);
+        TEST_ASSERT_EQUAL_INT(k[2], m);
+        const int grid_x = (w - SPLASH_GRID * cell) / 2 - m * cell;   // as performer_init
+        CHECK(grid_x <= 0 && grid_x > -cell);                         // reaches the left edge
+        CHECK(grid_x + (SPLASH_GRID + 2 * m) * cell >= w);            // and the right
+    }
+}
+
 static void rectangular_panel_is_visible_edge_to_edge() {
     int x0, x1;
     panel_row_span(480, 480, /*round=*/false, 0, &x0, &x1);
@@ -89,6 +108,14 @@ static void span_in_grid_cells() {
     CHECK(c0 == 0 && c1 == 60);
     span_to_cells(23, 7, 60, 300, 100, &c0, &c1); // empty span: no cells
     CHECK(c1 == c0);
+    // Off stage means past every cell that shows any of it: 368 px panel, a
+    // 62-column grid of 6 px cells from x = -2 (cells 0 and 61 half on glass).
+    span_to_cells(-2, 6, 62, 0, 368, &c0, &c1);
+    CHECK(c0 == 1 && c1 == 61);
+    span_to_touched_cells(-2, 6, 62, 0, 368, &c0, &c1);
+    CHECK(c0 == 0 && c1 == 62);
+    span_to_touched_cells(23, 7, 60, 79, 387, &c0, &c1);   // round: 79 is in cell 8, 386 in 51
+    CHECK(c0 == 8 && c1 == 52);
 }
 
 int main() {
@@ -97,6 +124,7 @@ int main() {
     RUN_TEST(should_render_tiny_buffer_and_scale_up_when_no_psram);
     RUN_TEST(should_size_from_smaller_dimension_on_portrait_panel);
     RUN_TEST(should_clamp_cell_to_at_least_one_on_tiny_panel);
+    RUN_TEST(performer_grid_spans_the_panel_width);
     RUN_TEST(rectangular_panel_is_visible_edge_to_edge);
     RUN_TEST(round_panel_is_visible_along_the_chord);
     RUN_TEST(sprites_walk_on_and_off_at_the_circle_not_the_bounding_box);

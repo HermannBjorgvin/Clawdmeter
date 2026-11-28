@@ -119,8 +119,8 @@ The meters layout comes from `BoardCaps.width`, `height` and `round_panel`
 (`layout.cpp`, described in [Add a board](adding-a-board.md#the-meters-layout)).
 Add the panel's size to `test_layout` to check that every label fits.
 
-Clawd's full-size performances use a 60×60-cell coordinate system, with cell size derived from
-`min(width, height) / 60`. Corner Clawd has a separate seat and scale.
+Clawd's full-size performances use a grid of 60 rows, and as many columns as span the width
+(60 on a square panel), with cell size derived from `min(width, height) / 60`. Corner Clawd has a separate seat and scale.
 Check meters, spend-only accounts, pairing, stale data, attention, the
 face, and minimal display on the new panel. Use `perf` to inspect redraw
 costs and [the simulator guide](../simulator.md) for scripted captures.

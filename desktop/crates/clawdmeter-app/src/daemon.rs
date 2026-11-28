@@ -30,6 +30,9 @@ const TICK: Duration = Duration::from_millis(500);
 const SETTINGS_EVERY: i64 = 5;
 /// Connection check interval (s).
 const LINK_CHECK_EVERY: i64 = 5;
+/// While the device stays missing, say so in the log this often (s); the
+/// retries in between are quiet.
+const NOT_FOUND_LOG_EVERY: i64 = 300;
 
 /// Requests from the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +222,8 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let mut credits = Some(CodexCache::default());
     let mut link_state = LinkState::Starting;
     let mut reconnect = Reconnect::default();
+    let mut not_found_since: Option<i64> = None;
+    let mut not_found_logged_at = 0;
     let bt = Bluetooth::default();
     let mut wakeups = clawdmeter_ble::spawn_watcher(bt.clone());
     let mut last_settings = unix_now();
@@ -380,6 +385,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     link = Some(l);
                     device_events = Some(rx);
                     reconnect.connected();
+                    not_found_since = None;
                     inbox.reset();
                     engine.on_connected();
                 }
@@ -389,8 +395,18 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                         _ => LinkState::Searching,
                     };
                     let wait = reconnect.failed(now, e.reached_device());
-                    if !matches!(e, LinkError::NotFound) || wait == 1 {
+                    let since = matches!(e, LinkError::NotFound).then(|| *not_found_since.get_or_insert(now));
+                    if since.is_none() {
                         log::info!("{e}; retrying in {wait}s");
+                    } else if let Some(since) =
+                        since.filter(|_| wait == 1 || now - not_found_logged_at >= NOT_FOUND_LOG_EVERY)
+                    {
+                        if now - since >= 60 {
+                            log::info!("{e} for {} min; still retrying", (now - since) / 60);
+                        } else {
+                            log::info!("{e}; retrying in {wait}s");
+                        }
+                        not_found_logged_at = now;
                     }
                 }
                 Err(e) => log::error!("connect task failed: {e}"),
